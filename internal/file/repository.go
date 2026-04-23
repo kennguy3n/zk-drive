@@ -24,6 +24,7 @@ type Repository interface {
 	ListFilesByFolder(ctx context.Context, workspaceID, folderID uuid.UUID) ([]*File, error)
 
 	CreateFileVersion(ctx context.Context, workspaceID uuid.UUID, v *FileVersion) error
+	CreateVersionAndSetCurrent(ctx context.Context, workspaceID uuid.UUID, v *FileVersion) error
 	ListVersions(ctx context.Context, workspaceID, fileID uuid.UUID) ([]*FileVersion, error)
 	SetCurrentVersion(ctx context.Context, workspaceID, fileID, versionID uuid.UUID) error
 }
@@ -141,34 +142,68 @@ func (r *PostgresRepository) ListFilesByFolder(ctx context.Context, workspaceID,
 	return out, rows.Err()
 }
 
-// CreateFileVersion inserts a new version row. The caller must ensure the
-// file belongs to the given workspace.
+// CreateFileVersion inserts a new version row. Ownership check and
+// version-number computation run inside a single transaction, and the
+// INSERT ... SELECT statement atomically picks the next version number so
+// concurrent callers cannot collide on the (file_id, version_number)
+// unique constraint.
 func (r *PostgresRepository) CreateFileVersion(ctx context.Context, workspaceID uuid.UUID, v *FileVersion) error {
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin create version: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if err := insertVersionTx(ctx, tx, workspaceID, v); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
+}
+
+// CreateVersionAndSetCurrent inserts a new version and points the file's
+// current_version_id at it, all within a single transaction so partial
+// failures cannot leave the file with an orphan version or a stale
+// current_version_id.
+func (r *PostgresRepository) CreateVersionAndSetCurrent(ctx context.Context, workspaceID uuid.UUID, v *FileVersion) error {
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin create+set version: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if err := insertVersionTx(ctx, tx, workspaceID, v); err != nil {
+		return err
+	}
+	const setQ = `
+UPDATE files SET current_version_id = $3, updated_at = now()
+WHERE workspace_id = $1 AND id = $2 AND deleted_at IS NULL`
+	tag, err := tx.Exec(ctx, setQ, workspaceID, v.FileID, v.ID)
+	if err != nil {
+		return fmt.Errorf("set current version: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	return tx.Commit(ctx)
+}
+
+// insertVersionTx verifies file ownership and inserts a new version row,
+// atomically computing the next version number via INSERT ... SELECT.
+func insertVersionTx(ctx context.Context, tx pgx.Tx, workspaceID uuid.UUID, v *FileVersion) error {
 	if v.ID == uuid.Nil {
 		v.ID = uuid.New()
 	}
-	// Verify workspace ownership and compute next version number atomically.
 	var existing int
-	if err := r.pool.QueryRow(ctx, `SELECT 1 FROM files WHERE workspace_id = $1 AND id = $2 AND deleted_at IS NULL`, workspaceID, v.FileID).Scan(&existing); err != nil {
+	if err := tx.QueryRow(ctx, `SELECT 1 FROM files WHERE workspace_id = $1 AND id = $2 AND deleted_at IS NULL`, workspaceID, v.FileID).Scan(&existing); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return ErrNotFound
 		}
 		return fmt.Errorf("verify file ownership: %w", err)
 	}
-
-	if v.VersionNumber == 0 {
-		row := r.pool.QueryRow(ctx, `SELECT COALESCE(MAX(version_number), 0) + 1 FROM file_versions WHERE file_id = $1`, v.FileID)
-		if err := row.Scan(&v.VersionNumber); err != nil {
-			return fmt.Errorf("next version number: %w", err)
-		}
-	}
-
 	const q = `
 INSERT INTO file_versions (id, file_id, version_number, object_key, size_bytes, checksum, created_by)
-VALUES ($1, $2, $3, $4, $5, $6, $7)
-RETURNING created_at`
-	if err := r.pool.QueryRow(ctx, q, v.ID, v.FileID, v.VersionNumber, v.ObjectKey, v.SizeBytes, v.Checksum, v.CreatedBy).
-		Scan(&v.CreatedAt); err != nil {
+SELECT $1, $2, COALESCE(MAX(version_number), 0) + 1, $3, $4, $5, $6 FROM file_versions WHERE file_id = $2
+RETURNING version_number, created_at`
+	if err := tx.QueryRow(ctx, q, v.ID, v.FileID, v.ObjectKey, v.SizeBytes, v.Checksum, v.CreatedBy).
+		Scan(&v.VersionNumber, &v.CreatedAt); err != nil {
 		return fmt.Errorf("insert file version: %w", err)
 	}
 	return nil

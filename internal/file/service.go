@@ -82,13 +82,10 @@ func (s *Service) ListByFolder(ctx context.Context, workspaceID, folderID uuid.U
 }
 
 // CreateVersion inserts a file version row and updates the file's current
-// version pointer. Intended for use by the upload-confirmation endpoint once
-// the S3 integration lands in Phase 1b.
+// version pointer atomically. Intended for use by the upload-confirmation
+// endpoint once the S3 integration lands in Phase 1b.
 func (s *Service) CreateVersion(ctx context.Context, workspaceID uuid.UUID, v *FileVersion) error {
-	if err := s.repo.CreateFileVersion(ctx, workspaceID, v); err != nil {
-		return err
-	}
-	return s.repo.SetCurrentVersion(ctx, workspaceID, v.FileID, v.ID)
+	return s.repo.CreateVersionAndSetCurrent(ctx, workspaceID, v)
 }
 
 // ListVersions returns all versions of a file.

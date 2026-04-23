@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -103,6 +104,16 @@ WHERE workspace_id = $1 AND id = $2 AND deleted_at IS NULL`
 	return nil
 }
 
+// escapeLikePattern escapes backslash, underscore, and percent so the
+// resulting string can be used as a literal prefix in a SQL LIKE pattern
+// under `ESCAPE '\'`.
+func escapeLikePattern(s string) string {
+	s = strings.ReplaceAll(s, `\`, `\\`)
+	s = strings.ReplaceAll(s, `%`, `\%`)
+	s = strings.ReplaceAll(s, `_`, `\_`)
+	return s
+}
+
 // RenameWithDescendants renames folderID and rewrites every non-deleted
 // descendant's path by substituting the oldPath prefix with newPath, all
 // inside a single transaction.
@@ -124,10 +135,13 @@ WHERE workspace_id = $1 AND id = $2 AND deleted_at IS NULL`
 		return ErrNotFound
 	}
 
+	// $2 is the raw oldPath (used for the substr length calculation);
+	// $5 is the wildcard-escaped prefix so folder names containing '_' or
+	// '%' don't widen the match.
 	const descQ = `
 UPDATE folders SET path = $3 || substr(path, length($2) + 1), updated_at = now()
-WHERE workspace_id = $1 AND deleted_at IS NULL AND id <> $4 AND path LIKE $2 || '%'`
-	if _, err := tx.Exec(ctx, descQ, workspaceID, oldPath, newPath, folderID); err != nil {
+WHERE workspace_id = $1 AND deleted_at IS NULL AND id <> $4 AND path LIKE $5 || '%' ESCAPE '\'`
+	if _, err := tx.Exec(ctx, descQ, workspaceID, oldPath, newPath, folderID, escapeLikePattern(oldPath)); err != nil {
 		return fmt.Errorf("rewrite descendant paths: %w", err)
 	}
 	return tx.Commit(ctx)
@@ -155,8 +169,8 @@ WHERE workspace_id = $1 AND id = $2 AND deleted_at IS NULL`
 
 	const descQ = `
 UPDATE folders SET path = $3 || substr(path, length($2) + 1), updated_at = now()
-WHERE workspace_id = $1 AND deleted_at IS NULL AND id <> $4 AND path LIKE $2 || '%'`
-	if _, err := tx.Exec(ctx, descQ, workspaceID, oldPath, newPath, folderID); err != nil {
+WHERE workspace_id = $1 AND deleted_at IS NULL AND id <> $4 AND path LIKE $5 || '%' ESCAPE '\'`
+	if _, err := tx.Exec(ctx, descQ, workspaceID, oldPath, newPath, folderID, escapeLikePattern(oldPath)); err != nil {
 		return fmt.Errorf("rewrite descendant paths: %w", err)
 	}
 	return tx.Commit(ctx)
