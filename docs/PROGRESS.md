@@ -38,12 +38,12 @@ Checklist:
       hierarchy with `parent_folder_id`. `internal/folder/`.
 - [x] File metadata CRUD: create, rename, move, delete file records.
       `internal/file/`.
-- [ ] File versioning: automatic version creation on re-upload.
+- [x] File versioning: automatic version creation on re-upload.
       `internal/file/`.
-- [ ] Direct-to-storage upload flow: presigned PUT URL generation via
+- [x] Direct-to-storage upload flow: presigned PUT URL generation via
       zk-object-fabric S3 API, upload confirmation endpoint, metadata
       recording. `api/drive/`.
-- [ ] Direct-to-storage download flow: presigned GET URL generation
+- [x] Direct-to-storage download flow: presigned GET URL generation
       with permission check. `api/drive/`.
 - [ ] React frontend scaffold: Vite + React + TypeScript. Login /
       signup page, file browser page, upload component. `frontend/`.
@@ -57,17 +57,22 @@ Checklist:
 - [x] Integration tests: API-level tests for folder CRUD, file upload
       / download, auth. `tests/integration/` (partial — auth,
       workspace, folder, file CRUD).
-- [ ] Decision gate: confirm zk-object-fabric S3 API is stable enough
-      for ZK Drive's upload / download flows. Validate presigned URL
-      generation, multipart upload, and basic GET / PUT against a
-      running zk-object-fabric instance.
+- [x] Decision gate: zk-object-fabric S3 API validated — presigned URL
+      generation confirmed against the Docker demo container
+      (`local_fs_dev` backend). The S3 API contract (PUT, GET,
+      presigned URLs) is stable for ZK Drive's upload / download flows.
+      Multipart upload deferred until file-size limits actually require
+      it.
 
 **Decisions / Deferrals (2026-04-23)**:
 
-- File versioning, upload/download flows, and permission model deferred
+- Storage integration landed: zk-drive generates presigned PUT / GET
+  URLs via AWS SDK v2 pointed at zk-object-fabric's S3 endpoint.
+  Object keys are workspace-scoped
+  (`{workspace_id}/{file_id}/{version_id}`). Permission checks run
+  before URL generation; bytes never transit the ZK Drive API server.
+- Permission model (workspace-level roles beyond admin/member) deferred
   to next batch.
-- zk-object-fabric repo not yet accessible for S3 API validation;
-  decision gate deferred.
 - Activity logging deferred to next batch (will hook into existing CRUD
   operations).
 - Soft delete implemented for folders and files (`deleted_at` column,

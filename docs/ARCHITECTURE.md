@@ -2,7 +2,7 @@
 
 **License**: Proprietary — All Rights Reserved.
 
-> Status: Phase 1 — Foundation (not started). This document describes
+> Status: Phase 1 — Foundation (in progress). This document describes
 > the target architecture. See [PROGRESS.md](PROGRESS.md) for build
 > status and [PROPOSAL.md](PROPOSAL.md) for product strategy.
 

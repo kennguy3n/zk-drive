@@ -84,6 +84,16 @@ func (s *Service) CreateVersion(ctx context.Context, workspaceID uuid.UUID, v *F
 	return s.repo.CreateVersionAndSetCurrent(ctx, workspaceID, v)
 }
 
+// UpdateSize records a new byte-size on the file row. Called by the
+// upload-confirmation endpoint so listings reflect the latest version's
+// size without a join.
+func (s *Service) UpdateSize(ctx context.Context, workspaceID, fileID uuid.UUID, sizeBytes int64) error {
+	if sizeBytes < 0 {
+		return errors.New("size_bytes must be non-negative")
+	}
+	return s.repo.UpdateFileSize(ctx, workspaceID, fileID, sizeBytes)
+}
+
 // ListVersions returns all versions of a file.
 func (s *Service) ListVersions(ctx context.Context, workspaceID, fileID uuid.UUID) ([]*FileVersion, error) {
 	return s.repo.ListVersions(ctx, workspaceID, fileID)

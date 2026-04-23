@@ -23,6 +23,7 @@ import (
 	"github.com/kennguy3n/zk-drive/internal/database"
 	"github.com/kennguy3n/zk-drive/internal/file"
 	"github.com/kennguy3n/zk-drive/internal/folder"
+	"github.com/kennguy3n/zk-drive/internal/storage"
 	"github.com/kennguy3n/zk-drive/internal/user"
 	"github.com/kennguy3n/zk-drive/internal/workspace"
 )
@@ -35,9 +36,10 @@ const testJWTSecret = "integration-test-secret"
 // httptest server, the pgx pool, and the initialised services. Callers use
 // testEnv.ResetTables between tests.
 type testEnv struct {
-	t      *testing.T
-	pool   *pgxpool.Pool
-	server *httptest.Server
+	t       *testing.T
+	pool    *pgxpool.Pool
+	server  *httptest.Server
+	storage *storage.Client
 }
 
 // setupEnv connects to Postgres, runs migrations, wires the API, and starts
@@ -69,8 +71,10 @@ func setupEnv(t *testing.T) *testEnv {
 	folderSvc := folder.NewService(folder.NewPostgresRepository(pool))
 	fileSvc := file.NewService(file.NewPostgresRepository(pool))
 
+	storageClient := buildTestStorageClient(t)
+
 	authHandler := auth.NewHandler(pool, userSvc, wsSvc, testJWTSecret)
-	driveHandler := drive.NewHandler(pool, wsSvc, folderSvc, fileSvc, userSvc)
+	driveHandler := drive.NewHandler(pool, wsSvc, folderSvc, fileSvc, userSvc, storageClient)
 
 	r := chi.NewRouter()
 	r.Use(chimw.Recoverer)
@@ -102,16 +106,19 @@ func setupEnv(t *testing.T) *testEnv {
 			r.Post("/folders/{id}/move", driveHandler.MoveFolder)
 
 			r.Post("/files", driveHandler.CreateFile)
+			r.Post("/files/upload-url", driveHandler.UploadURL)
+			r.Post("/files/confirm-upload", driveHandler.ConfirmUpload)
 			r.Get("/files/{id}", driveHandler.GetFile)
 			r.Put("/files/{id}", driveHandler.UpdateFile)
 			r.Delete("/files/{id}", driveHandler.DeleteFile)
 			r.Post("/files/{id}/move", driveHandler.MoveFile)
 			r.Get("/files/{id}/versions", driveHandler.ListFileVersions)
+			r.Get("/files/{id}/download-url", driveHandler.DownloadURL)
 		})
 	})
 
 	srv := httptest.NewServer(r)
-	env := &testEnv{t: t, pool: pool, server: srv}
+	env := &testEnv{t: t, pool: pool, server: srv, storage: storageClient}
 	t.Cleanup(func() {
 		srv.Close()
 		pool.Close()
@@ -136,6 +143,39 @@ func (e *testEnv) ResetTables() {
 			e.t.Fatalf("reset tables (%q): %v", s, err)
 		}
 	}
+}
+
+// buildTestStorageClient returns a presign client pointed at S3_ENDPOINT
+// when that variable is set (letting the upload round-trip test run against
+// a real zk-object-fabric). When S3_ENDPOINT is unset, tests that only
+// exercise URL generation use a stub endpoint so the SDK can still sign —
+// no network traffic leaves the test unless a caller actually uses the URL.
+func buildTestStorageClient(t *testing.T) *storage.Client {
+	t.Helper()
+	endpoint := os.Getenv("S3_ENDPOINT")
+	bucket := getEnvDefault("S3_BUCKET", "zk-drive-test")
+	accessKey := getEnvDefault("S3_ACCESS_KEY", "demo-access-key")
+	secretKey := getEnvDefault("S3_SECRET_KEY", "demo-secret-key")
+	if endpoint == "" {
+		endpoint = "http://localhost:65535" // unused stub; signing only needs a parseable URL
+	}
+	client, err := storage.NewClient(storage.Config{
+		Endpoint:  endpoint,
+		Bucket:    bucket,
+		AccessKey: accessKey,
+		SecretKey: secretKey,
+	})
+	if err != nil {
+		t.Fatalf("storage client: %v", err)
+	}
+	return client
+}
+
+func getEnvDefault(key, def string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return def
 }
 
 // findMigrationsDir walks up from this test file looking for the migrations

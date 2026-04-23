@@ -22,6 +22,7 @@ type Repository interface {
 	RenameFile(ctx context.Context, workspaceID, fileID uuid.UUID, name string) error
 	DeleteFile(ctx context.Context, workspaceID, fileID uuid.UUID) error
 	MoveFile(ctx context.Context, workspaceID, fileID, folderID uuid.UUID) error
+	UpdateFileSize(ctx context.Context, workspaceID, fileID uuid.UUID, sizeBytes int64) error
 	ListFilesByFolder(ctx context.Context, workspaceID, folderID uuid.UUID) ([]*File, error)
 
 	CreateFileVersion(ctx context.Context, workspaceID uuid.UUID, v *FileVersion) error
@@ -133,6 +134,22 @@ WHERE workspace_id = $1 AND id = $2 AND deleted_at IS NULL`
 	tag, err := r.pool.Exec(ctx, q, workspaceID, fileID, folderID)
 	if err != nil {
 		return fmt.Errorf("move file: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// UpdateFileSize records the byte-size of a file's current version on the
+// file row so listings can show size without joining file_versions.
+func (r *PostgresRepository) UpdateFileSize(ctx context.Context, workspaceID, fileID uuid.UUID, sizeBytes int64) error {
+	const q = `
+UPDATE files SET size_bytes = $3, updated_at = now()
+WHERE workspace_id = $1 AND id = $2 AND deleted_at IS NULL`
+	tag, err := r.pool.Exec(ctx, q, workspaceID, fileID, sizeBytes)
+	if err != nil {
+		return fmt.Errorf("update file size: %w", err)
 	}
 	if tag.RowsAffected() == 0 {
 		return ErrNotFound
