@@ -84,6 +84,17 @@ func (s *Service) CreateVersion(ctx context.Context, workspaceID uuid.UUID, v *F
 	return s.repo.CreateVersionAndSetCurrent(ctx, workspaceID, v)
 }
 
+// ConfirmVersion inserts a file version, advances current_version_id, and
+// updates the file's size_bytes atomically. Used by the upload-confirm
+// endpoint so a retry after a partial failure cannot produce duplicate
+// versions or a stale size_bytes.
+func (s *Service) ConfirmVersion(ctx context.Context, workspaceID uuid.UUID, v *FileVersion) error {
+	if v.SizeBytes < 0 {
+		return errors.New("size_bytes must be non-negative")
+	}
+	return s.repo.ConfirmVersion(ctx, workspaceID, v)
+}
+
 // UpdateSize records a new byte-size on the file row. Called by the
 // upload-confirmation endpoint so listings reflect the latest version's
 // size without a join.

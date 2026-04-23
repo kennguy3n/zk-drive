@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"strings"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
@@ -627,6 +628,16 @@ func (h *Handler) ConfirmUpload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// The object_key is client-supplied; bind it to the caller's workspace
+	// and file so a malicious client cannot confirm against a key it did
+	// not legitimately receive from UploadURL (cross-tenant read via
+	// DownloadURL).
+	expectedPrefix := workspaceID.String() + "/" + f.ID.String() + "/"
+	if !strings.HasPrefix(req.ObjectKey, expectedPrefix) {
+		http.Error(w, "object_key does not belong to this file", http.StatusForbidden)
+		return
+	}
+
 	v := &file.FileVersion{
 		FileID:    f.ID,
 		ObjectKey: req.ObjectKey,
@@ -634,11 +645,7 @@ func (h *Handler) ConfirmUpload(w http.ResponseWriter, r *http.Request) {
 		Checksum:  req.Checksum,
 		CreatedBy: userID,
 	}
-	if err := h.files.CreateVersion(r.Context(), workspaceID, v); err != nil {
-		writeServiceError(w, err)
-		return
-	}
-	if err := h.files.UpdateSize(r.Context(), workspaceID, f.ID, req.SizeBytes); err != nil {
+	if err := h.files.ConfirmVersion(r.Context(), workspaceID, v); err != nil {
 		writeServiceError(w, err)
 		return
 	}
