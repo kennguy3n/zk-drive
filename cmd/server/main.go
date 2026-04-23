@@ -61,8 +61,8 @@ func run() error {
 	fileRepo := file.NewPostgresRepository(pool)
 	fileSvc := file.NewService(fileRepo)
 
-	authHandler := auth.NewHandler(userSvc, wsSvc, cfg.JWTSecret)
-	driveHandler := drive.NewHandler(wsSvc, folderSvc, fileSvc, userSvc)
+	authHandler := auth.NewHandler(pool, userSvc, wsSvc, cfg.JWTSecret)
+	driveHandler := drive.NewHandler(pool, wsSvc, folderSvc, fileSvc, userSvc)
 
 	r := chi.NewRouter()
 	r.Use(chimw.RequestID)

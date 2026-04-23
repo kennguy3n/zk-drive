@@ -69,8 +69,8 @@ func setupEnv(t *testing.T) *testEnv {
 	folderSvc := folder.NewService(folder.NewPostgresRepository(pool))
 	fileSvc := file.NewService(file.NewPostgresRepository(pool))
 
-	authHandler := auth.NewHandler(userSvc, wsSvc, testJWTSecret)
-	driveHandler := drive.NewHandler(wsSvc, folderSvc, fileSvc, userSvc)
+	authHandler := auth.NewHandler(pool, userSvc, wsSvc, testJWTSecret)
+	driveHandler := drive.NewHandler(pool, wsSvc, folderSvc, fileSvc, userSvc)
 
 	r := chi.NewRouter()
 	r.Use(chimw.Recoverer)

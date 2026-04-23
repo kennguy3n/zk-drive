@@ -32,7 +32,7 @@ func NewService(repo Repository) *Service {
 // folder in the same workspace. The path is computed relative to the parent.
 func (s *Service) Create(ctx context.Context, workspaceID uuid.UUID, parentID *uuid.UUID, name string, createdBy uuid.UUID) (*Folder, error) {
 	name = strings.TrimSpace(name)
-	if name == "" {
+	if !isValidFolderName(name) {
 		return nil, ErrInvalidName
 	}
 	var path string
@@ -69,7 +69,7 @@ func (s *Service) GetByID(ctx context.Context, workspaceID, folderID uuid.UUID) 
 // Rename updates the folder's name and path (plus its descendants' paths).
 func (s *Service) Rename(ctx context.Context, workspaceID, folderID uuid.UUID, newName string) (*Folder, error) {
 	newName = strings.TrimSpace(newName)
-	if newName == "" {
+	if !isValidFolderName(newName) {
 		return nil, ErrInvalidName
 	}
 	f, err := s.repo.GetByID(ctx, workspaceID, folderID)
@@ -139,4 +139,10 @@ func (s *Service) Delete(ctx context.Context, workspaceID, folderID uuid.UUID) e
 // ListChildren returns direct child folders of the given parent (or root).
 func (s *Service) ListChildren(ctx context.Context, workspaceID uuid.UUID, parentID *uuid.UUID) ([]*Folder, error) {
 	return s.repo.ListChildren(ctx, workspaceID, parentID)
+}
+
+// isValidFolderName rejects names that would corrupt the materialized path.
+// '/' is the path separator; empty names are disallowed on write.
+func isValidFolderName(name string) bool {
+	return name != "" && !strings.Contains(name, "/")
 }

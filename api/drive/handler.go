@@ -1,12 +1,14 @@
 package drive
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/kennguy3n/zk-drive/api/middleware"
 	"github.com/kennguy3n/zk-drive/internal/file"
@@ -17,15 +19,17 @@ import (
 
 // Handler serves workspace / folder / file HTTP endpoints.
 type Handler struct {
+	pool       *pgxpool.Pool
 	workspaces *workspace.Service
 	folders    *folder.Service
 	files      *file.Service
 	users      *user.Service
 }
 
-// NewHandler constructs a Handler from the underlying services.
-func NewHandler(ws *workspace.Service, fs *folder.Service, fl *file.Service, us *user.Service) *Handler {
-	return &Handler{workspaces: ws, folders: fs, files: fl, users: us}
+// NewHandler constructs a Handler from the underlying services. The pool is
+// used to run multi-step writes (e.g. CreateWorkspace) atomically.
+func NewHandler(pool *pgxpool.Pool, ws *workspace.Service, fs *folder.Service, fl *file.Service, us *user.Service) *Handler {
+	return &Handler{pool: pool, workspaces: ws, folders: fs, files: fl, users: us}
 }
 
 // Workspace DTOs -------------------------------------------------------------
@@ -116,10 +120,27 @@ func (h *Handler) CreateWorkspace(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	ws, err := h.workspaces.Create(r.Context(), req.Name)
+	ws, err := h.createWorkspaceTx(r.Context(), req.Name, current)
 	if err != nil {
 		http.Error(w, "create workspace: "+err.Error(), http.StatusInternalServerError)
 		return
+	}
+	writeJSON(w, http.StatusCreated, ws)
+}
+
+// createWorkspaceTx creates the workspace, adds the current user as its
+// admin member, and sets workspace.owner_user_id — all inside a single
+// transaction so partial failures don't leave orphaned rows.
+func (h *Handler) createWorkspaceTx(ctx context.Context, name string, current *user.User) (*workspace.Workspace, error) {
+	tx, err := h.pool.Begin(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	ws, err := h.workspaces.CreateTx(ctx, tx, name)
+	if err != nil {
+		return nil, err
 	}
 	newUser := &user.User{
 		WorkspaceID:  ws.ID,
@@ -128,15 +149,16 @@ func (h *Handler) CreateWorkspace(w http.ResponseWriter, r *http.Request) {
 		PasswordHash: current.PasswordHash,
 		Role:         user.RoleAdmin,
 	}
-	if err := h.users.CreatePreservingHash(r.Context(), newUser); err != nil {
-		http.Error(w, "add user to workspace: "+err.Error(), http.StatusInternalServerError)
-		return
+	if err := h.users.CreatePreservingHashTx(ctx, tx, newUser); err != nil {
+		return nil, err
 	}
-	if err := h.workspaces.SetOwner(r.Context(), ws.ID, newUser.ID); err != nil {
-		http.Error(w, "set owner: "+err.Error(), http.StatusInternalServerError)
-		return
+	if err := h.workspaces.SetOwnerTx(ctx, tx, ws.ID, newUser.ID); err != nil {
+		return nil, err
 	}
-	writeJSON(w, http.StatusCreated, ws)
+	if err := tx.Commit(ctx); err != nil {
+		return nil, err
+	}
+	return ws, nil
 }
 
 // GetWorkspace returns workspace details. The authenticated session must be

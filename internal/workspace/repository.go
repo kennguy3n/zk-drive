@@ -7,6 +7,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -16,10 +17,12 @@ var ErrNotFound = errors.New("workspace not found")
 // Repository defines persistence operations for workspaces.
 type Repository interface {
 	Create(ctx context.Context, w *Workspace) error
+	CreateTx(ctx context.Context, tx pgx.Tx, w *Workspace) error
 	GetByID(ctx context.Context, id uuid.UUID) (*Workspace, error)
 	Update(ctx context.Context, w *Workspace) error
 	ListForUser(ctx context.Context, userID uuid.UUID) ([]*Workspace, error)
 	SetOwner(ctx context.Context, workspaceID, ownerUserID uuid.UUID) error
+	SetOwnerTx(ctx context.Context, tx pgx.Tx, workspaceID, ownerUserID uuid.UUID) error
 }
 
 // PostgresRepository implements Repository against Postgres.
@@ -48,6 +51,21 @@ func scanWorkspace(row pgx.Row) (*Workspace, error) {
 // Create inserts a workspace. Sensible defaults are applied when caller omits
 // them.
 func (r *PostgresRepository) Create(ctx context.Context, w *Workspace) error {
+	return insertWorkspace(ctx, r.pool, w)
+}
+
+// CreateTx is the tx-aware equivalent of Create, used by multi-step flows
+// that need atomicity (e.g. signup).
+func (r *PostgresRepository) CreateTx(ctx context.Context, tx pgx.Tx, w *Workspace) error {
+	return insertWorkspace(ctx, tx, w)
+}
+
+type workspaceQuerier interface {
+	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
+	Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error)
+}
+
+func insertWorkspace(ctx context.Context, q workspaceQuerier, w *Workspace) error {
 	if w.ID == uuid.Nil {
 		w.ID = uuid.New()
 	}
@@ -57,11 +75,11 @@ func (r *PostgresRepository) Create(ctx context.Context, w *Workspace) error {
 	if w.Tier == "" {
 		w.Tier = TierFree
 	}
-	const q = `
+	const stmt = `
 INSERT INTO workspaces (id, name, owner_user_id, storage_quota_bytes, storage_used_bytes, tier)
 VALUES ($1, $2, $3, $4, $5, $6)
 RETURNING created_at, updated_at`
-	if err := r.pool.QueryRow(ctx, q, w.ID, w.Name, w.OwnerUserID, w.StorageQuotaBytes, w.StorageUsedBytes, w.Tier).
+	if err := q.QueryRow(ctx, stmt, w.ID, w.Name, w.OwnerUserID, w.StorageQuotaBytes, w.StorageUsedBytes, w.Tier).
 		Scan(&w.CreatedAt, &w.UpdatedAt); err != nil {
 		return fmt.Errorf("insert workspace: %w", err)
 	}
@@ -93,7 +111,16 @@ RETURNING updated_at`
 
 // SetOwner sets the owner_user_id after the first admin user is created.
 func (r *PostgresRepository) SetOwner(ctx context.Context, workspaceID, ownerUserID uuid.UUID) error {
-	tag, err := r.pool.Exec(ctx, `UPDATE workspaces SET owner_user_id = $2, updated_at = now() WHERE id = $1`, workspaceID, ownerUserID)
+	return setOwner(ctx, r.pool, workspaceID, ownerUserID)
+}
+
+// SetOwnerTx is the tx-aware equivalent of SetOwner.
+func (r *PostgresRepository) SetOwnerTx(ctx context.Context, tx pgx.Tx, workspaceID, ownerUserID uuid.UUID) error {
+	return setOwner(ctx, tx, workspaceID, ownerUserID)
+}
+
+func setOwner(ctx context.Context, q workspaceQuerier, workspaceID, ownerUserID uuid.UUID) error {
+	tag, err := q.Exec(ctx, `UPDATE workspaces SET owner_user_id = $2, updated_at = now() WHERE id = $1`, workspaceID, ownerUserID)
 	if err != nil {
 		return fmt.Errorf("set owner: %w", err)
 	}

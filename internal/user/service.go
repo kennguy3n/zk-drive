@@ -4,6 +4,7 @@ import (
 	"context"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"golang.org/x/crypto/bcrypt"
 )
 
@@ -26,23 +27,48 @@ func (s *Service) CreatePreservingHash(ctx context.Context, u *User) error {
 	return s.repo.Create(ctx, u)
 }
 
+// CreatePreservingHashTx is the tx-aware equivalent of CreatePreservingHash.
+func (s *Service) CreatePreservingHashTx(ctx context.Context, tx pgx.Tx, u *User) error {
+	return s.repo.CreateTx(ctx, tx, u)
+}
+
 // Create persists a user and hashes the supplied password with bcrypt.
 func (s *Service) Create(ctx context.Context, workspaceID uuid.UUID, email, name, password, role string) (*User, error) {
-	hash, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
+	u, err := buildUser(workspaceID, email, name, password, role)
 	if err != nil {
 		return nil, err
-	}
-	u := &User{
-		WorkspaceID:  workspaceID,
-		Email:        email,
-		Name:         name,
-		PasswordHash: string(hash),
-		Role:         role,
 	}
 	if err := s.repo.Create(ctx, u); err != nil {
 		return nil, err
 	}
 	return u, nil
+}
+
+// CreateTx is the tx-aware equivalent of Create, used by signup-style flows
+// that need to create a workspace and its first admin user atomically.
+func (s *Service) CreateTx(ctx context.Context, tx pgx.Tx, workspaceID uuid.UUID, email, name, password, role string) (*User, error) {
+	u, err := buildUser(workspaceID, email, name, password, role)
+	if err != nil {
+		return nil, err
+	}
+	if err := s.repo.CreateTx(ctx, tx, u); err != nil {
+		return nil, err
+	}
+	return u, nil
+}
+
+func buildUser(workspaceID uuid.UUID, email, name, password, role string) (*User, error) {
+	hash, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
+	if err != nil {
+		return nil, err
+	}
+	return &User{
+		WorkspaceID:  workspaceID,
+		Email:        email,
+		Name:         name,
+		PasswordHash: string(hash),
+		Role:         role,
+	}, nil
 }
 
 // VerifyPassword returns nil when the supplied password matches the stored

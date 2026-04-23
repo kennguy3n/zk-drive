@@ -17,6 +17,7 @@ var ErrNotFound = errors.New("user not found")
 // to a workspace id to enforce tenant isolation at the data layer.
 type Repository interface {
 	Create(ctx context.Context, u *User) error
+	CreateTx(ctx context.Context, tx pgx.Tx, u *User) error
 	GetByID(ctx context.Context, workspaceID, userID uuid.UUID) (*User, error)
 	GetByEmail(ctx context.Context, workspaceID uuid.UUID, email string) (*User, error)
 	GetByEmailAnyWorkspace(ctx context.Context, email string) (*User, error)
@@ -48,17 +49,31 @@ func scanUser(row pgx.Row) (*User, error) {
 
 // Create inserts a new user row. The user's ID is populated in-place.
 func (r *PostgresRepository) Create(ctx context.Context, u *User) error {
+	return insertUser(ctx, r.pool, u)
+}
+
+// CreateTx is the tx-aware equivalent of Create, used by multi-step flows
+// (signup, add-user-to-workspace) that need atomicity.
+func (r *PostgresRepository) CreateTx(ctx context.Context, tx pgx.Tx, u *User) error {
+	return insertUser(ctx, tx, u)
+}
+
+type userQuerier interface {
+	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
+}
+
+func insertUser(ctx context.Context, q userQuerier, u *User) error {
 	if u.ID == uuid.Nil {
 		u.ID = uuid.New()
 	}
 	if u.Role == "" {
 		u.Role = RoleMember
 	}
-	const q = `
+	const stmt = `
 INSERT INTO users (id, workspace_id, email, name, password_hash, role)
 VALUES ($1, $2, $3, $4, $5, $6)
 RETURNING created_at, updated_at`
-	if err := r.pool.QueryRow(ctx, q, u.ID, u.WorkspaceID, u.Email, u.Name, u.PasswordHash, u.Role).
+	if err := q.QueryRow(ctx, stmt, u.ID, u.WorkspaceID, u.Email, u.Name, u.PasswordHash, u.Role).
 		Scan(&u.CreatedAt, &u.UpdatedAt); err != nil {
 		return fmt.Errorf("insert user: %w", err)
 	}

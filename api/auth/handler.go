@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -8,6 +9,8 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/kennguy3n/zk-drive/api/middleware"
 	"github.com/kennguy3n/zk-drive/internal/user"
@@ -16,14 +19,16 @@ import (
 
 // Handler serves authentication HTTP endpoints.
 type Handler struct {
+	pool       *pgxpool.Pool
 	users      *user.Service
 	workspaces *workspace.Service
 	jwtSecret  string
 }
 
-// NewHandler constructs a Handler from the user and workspace services.
-func NewHandler(users *user.Service, workspaces *workspace.Service, jwtSecret string) *Handler {
-	return &Handler{users: users, workspaces: workspaces, jwtSecret: jwtSecret}
+// NewHandler constructs a Handler from the user and workspace services. The
+// pool is used to run multi-step writes (signup) atomically.
+func NewHandler(pool *pgxpool.Pool, users *user.Service, workspaces *workspace.Service, jwtSecret string) *Handler {
+	return &Handler{pool: pool, users: users, workspaces: workspaces, jwtSecret: jwtSecret}
 }
 
 type signupRequest struct {
@@ -62,23 +67,48 @@ func (h *Handler) Signup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	ctx := r.Context()
-	ws, err := h.workspaces.Create(ctx, req.WorkspaceName)
+	ws, u, err := h.runSignupTx(r.Context(), req)
 	if err != nil {
-		http.Error(w, "create workspace: "+err.Error(), http.StatusInternalServerError)
-		return
-	}
-	u, err := h.users.Create(ctx, ws.ID, req.Email, req.Name, req.Password, user.RoleAdmin)
-	if err != nil {
-		http.Error(w, "create user: "+err.Error(), http.StatusInternalServerError)
-		return
-	}
-	if err := h.workspaces.SetOwner(ctx, ws.ID, u.ID); err != nil {
-		http.Error(w, "set workspace owner: "+err.Error(), http.StatusInternalServerError)
+		http.Error(w, "signup: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
 
 	writeToken(w, h.jwtSecret, u.ID, ws.ID, u.Role)
+}
+
+// runSignupTx performs the workspace+user+owner writes in a single
+// transaction so a partial failure never leaves an orphaned workspace or
+// owner-less row behind.
+func (h *Handler) runSignupTx(ctx context.Context, req signupRequest) (*workspace.Workspace, *user.User, error) {
+	tx, err := h.pool.Begin(ctx)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	ws, u, err := signupInTx(ctx, tx, h.workspaces, h.users, req)
+	if err != nil {
+		return nil, nil, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, nil, err
+	}
+	return ws, u, nil
+}
+
+func signupInTx(ctx context.Context, tx pgx.Tx, workspaces *workspace.Service, users *user.Service, req signupRequest) (*workspace.Workspace, *user.User, error) {
+	ws, err := workspaces.CreateTx(ctx, tx, req.WorkspaceName)
+	if err != nil {
+		return nil, nil, err
+	}
+	u, err := users.CreateTx(ctx, tx, ws.ID, req.Email, req.Name, req.Password, user.RoleAdmin)
+	if err != nil {
+		return nil, nil, err
+	}
+	if err := workspaces.SetOwnerTx(ctx, tx, ws.ID, u.ID); err != nil {
+		return nil, nil, err
+	}
+	return ws, u, nil
 }
 
 // Login validates credentials and returns a JWT.
