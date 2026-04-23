@@ -2,7 +2,7 @@
 
 - **Project**: ZK Drive
 - **License**: Proprietary — All Rights Reserved.
-- **Status**: Phase 1 — Foundation (not started)
+- **Status**: Phase 1 — Foundation (in progress)
 - **Last updated**: 2026-04-23
 
 This document is a phase-gated tracker. Each phase has an explicit
@@ -16,7 +16,7 @@ architecture, see [ARCHITECTURE.md](ARCHITECTURE.md).
 
 ## Phase 1: Foundation (Weeks 1–4)
 
-**Status**: `NOT STARTED`
+**Status**: `IN PROGRESS`
 
 **Goal**: stand up the core application layer — Go backend, Postgres
 schema, React frontend scaffold, basic folder / file CRUD,
@@ -25,18 +25,18 @@ user authentication. No sharing, no previews, no async jobs yet.
 
 Checklist:
 
-- [ ] Initialize Go project structure (`cmd/server/`, `cmd/worker/`,
+- [x] Initialize Go project structure (`cmd/server/`, `cmd/worker/`,
       `api/`, `internal/`).
-- [ ] Postgres schema: `workspaces`, `users`, `folders`, `files`,
+- [x] Postgres schema: `workspaces`, `users`, `folders`, `files`,
       `file_versions`, `permissions`, `activity_log`. Migrations in
       `migrations/`.
-- [ ] User authentication: email / password signup, login, session
+- [x] User authentication: email / password signup, login, session
       management (JWT or session tokens). `api/auth/`.
-- [ ] Workspace CRUD: create, read, update workspace.
+- [x] Workspace CRUD: create, read, update workspace.
       `internal/workspace/`.
-- [ ] Folder CRUD: create, rename, move, delete folders. Nested
+- [x] Folder CRUD: create, rename, move, delete folders. Nested
       hierarchy with `parent_folder_id`. `internal/folder/`.
-- [ ] File metadata CRUD: create, rename, move, delete file records.
+- [x] File metadata CRUD: create, rename, move, delete file records.
       `internal/file/`.
 - [ ] File versioning: automatic version creation on re-upload.
       `internal/file/`.
@@ -51,15 +51,28 @@ Checklist:
       `internal/permission/`.
 - [ ] Activity logging: record file / folder operations in
       `activity_log` table. `internal/workspace/`.
-- [ ] Soft delete (trash): deleted files / folders marked with
+- [x] Soft delete (trash): deleted files / folders marked with
       `deleted_at`, recoverable for 30 days. `internal/file/`,
       `internal/folder/`.
-- [ ] Integration tests: API-level tests for folder CRUD, file upload
-      / download, auth. `tests/integration/`.
+- [x] Integration tests: API-level tests for folder CRUD, file upload
+      / download, auth. `tests/integration/` (partial — auth,
+      workspace, folder, file CRUD).
 - [ ] Decision gate: confirm zk-object-fabric S3 API is stable enough
       for ZK Drive's upload / download flows. Validate presigned URL
       generation, multipart upload, and basic GET / PUT against a
       running zk-object-fabric instance.
+
+**Decisions / Deferrals (2026-04-23)**:
+
+- File versioning, upload/download flows, and permission model deferred
+  to next batch.
+- zk-object-fabric repo not yet accessible for S3 API validation;
+  decision gate deferred.
+- Activity logging deferred to next batch (will hook into existing CRUD
+  operations).
+- Soft delete implemented for folders and files (`deleted_at` column,
+  excluded from listings).
+- React frontend scaffold deferred to next batch.
 
 ---
 
