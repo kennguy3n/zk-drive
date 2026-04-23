@@ -20,9 +20,11 @@ import (
 	"github.com/kennguy3n/zk-drive/api/auth"
 	"github.com/kennguy3n/zk-drive/api/drive"
 	"github.com/kennguy3n/zk-drive/api/middleware"
+	"github.com/kennguy3n/zk-drive/internal/activity"
 	"github.com/kennguy3n/zk-drive/internal/database"
 	"github.com/kennguy3n/zk-drive/internal/file"
 	"github.com/kennguy3n/zk-drive/internal/folder"
+	"github.com/kennguy3n/zk-drive/internal/permission"
 	"github.com/kennguy3n/zk-drive/internal/storage"
 	"github.com/kennguy3n/zk-drive/internal/user"
 	"github.com/kennguy3n/zk-drive/internal/workspace"
@@ -73,8 +75,11 @@ func setupEnv(t *testing.T) *testEnv {
 
 	storageClient := buildTestStorageClient(t)
 
+	permissionSvc := permission.NewService(permission.NewPostgresRepository(pool))
+	activitySvc := activity.NewService(activity.NewPostgresRepository(pool))
+
 	authHandler := auth.NewHandler(pool, userSvc, wsSvc, testJWTSecret)
-	driveHandler := drive.NewHandler(pool, wsSvc, folderSvc, fileSvc, userSvc, storageClient)
+	driveHandler := drive.NewHandler(pool, wsSvc, folderSvc, fileSvc, userSvc, storageClient, permissionSvc, activitySvc)
 
 	r := chi.NewRouter()
 	r.Use(chimw.Recoverer)
@@ -114,6 +119,12 @@ func setupEnv(t *testing.T) *testEnv {
 			r.Post("/files/{id}/move", driveHandler.MoveFile)
 			r.Get("/files/{id}/versions", driveHandler.ListFileVersions)
 			r.Get("/files/{id}/download-url", driveHandler.DownloadURL)
+
+			r.Get("/permissions", driveHandler.ListPermissions)
+			r.Post("/permissions", driveHandler.GrantPermission)
+			r.Delete("/permissions/{id}", driveHandler.RevokePermission)
+
+			r.Get("/activity", driveHandler.ListActivity)
 		})
 	})
 

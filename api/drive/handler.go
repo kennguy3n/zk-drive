@@ -5,15 +5,19 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/kennguy3n/zk-drive/api/middleware"
+	"github.com/kennguy3n/zk-drive/internal/activity"
 	"github.com/kennguy3n/zk-drive/internal/file"
 	"github.com/kennguy3n/zk-drive/internal/folder"
+	"github.com/kennguy3n/zk-drive/internal/permission"
 	"github.com/kennguy3n/zk-drive/internal/storage"
 	"github.com/kennguy3n/zk-drive/internal/user"
 	"github.com/kennguy3n/zk-drive/internal/workspace"
@@ -26,20 +30,54 @@ import (
 // can still serve metadata-only APIs without a zk-object-fabric gateway
 // configured.
 type Handler struct {
-	pool       *pgxpool.Pool
-	workspaces *workspace.Service
-	folders    *folder.Service
-	files      *file.Service
-	users      *user.Service
-	storage    *storage.Client
+	pool        *pgxpool.Pool
+	workspaces  *workspace.Service
+	folders     *folder.Service
+	files       *file.Service
+	users       *user.Service
+	storage     *storage.Client
+	permissions *permission.Service
+	activity    *activity.Service
 }
 
 // NewHandler constructs a Handler from the underlying services. The pool is
 // used to run multi-step writes (e.g. CreateWorkspace) atomically. Pass a
 // non-nil storage client to enable presigned URL generation against a
-// zk-object-fabric gateway; pass nil to run in metadata-only mode.
-func NewHandler(pool *pgxpool.Pool, ws *workspace.Service, fs *folder.Service, fl *file.Service, us *user.Service, st *storage.Client) *Handler {
-	return &Handler{pool: pool, workspaces: ws, folders: fs, files: fl, users: us, storage: st}
+// zk-object-fabric gateway; pass nil to run in metadata-only mode. The
+// permission and activity services are optional: when nil the corresponding
+// endpoints are disabled and activity events are silently dropped, which
+// lets legacy tests wire only the metadata plane.
+func NewHandler(
+	pool *pgxpool.Pool,
+	ws *workspace.Service,
+	fs *folder.Service,
+	fl *file.Service,
+	us *user.Service,
+	st *storage.Client,
+	perms *permission.Service,
+	act *activity.Service,
+) *Handler {
+	return &Handler{
+		pool:        pool,
+		workspaces:  ws,
+		folders:     fs,
+		files:       fl,
+		users:       us,
+		storage:     st,
+		permissions: perms,
+		activity:    act,
+	}
+}
+
+// logActivity is a nil-safe wrapper so callers don't need to null-check
+// every call-site. metadata may be nil.
+func (h *Handler) logActivity(ctx context.Context, action, resourceType string, resourceID uuid.UUID, metadata map[string]any) {
+	if h.activity == nil {
+		return
+	}
+	workspaceID, _ := middleware.WorkspaceIDFromContext(ctx)
+	userID, _ := middleware.UserIDFromContext(ctx)
+	h.activity.LogAction(ctx, workspaceID, userID, action, resourceType, resourceID, metadata)
 }
 
 // Workspace DTOs -------------------------------------------------------------
@@ -278,6 +316,10 @@ func (h *Handler) CreateFolder(w http.ResponseWriter, r *http.Request) {
 		writeServiceError(w, err)
 		return
 	}
+	h.logActivity(r.Context(), activity.ActionFolderCreate, permission.ResourceFolder, f.ID, map[string]any{
+		"name":             f.Name,
+		"parent_folder_id": f.ParentFolderID,
+	})
 	writeJSON(w, http.StatusCreated, f)
 }
 
@@ -358,6 +400,9 @@ func (h *Handler) RenameFolder(w http.ResponseWriter, r *http.Request) {
 		writeServiceError(w, err)
 		return
 	}
+	h.logActivity(r.Context(), activity.ActionFolderRename, permission.ResourceFolder, f.ID, map[string]any{
+		"name": f.Name,
+	})
 	writeJSON(w, http.StatusOK, f)
 }
 
@@ -373,6 +418,7 @@ func (h *Handler) DeleteFolder(w http.ResponseWriter, r *http.Request) {
 		writeServiceError(w, err)
 		return
 	}
+	h.logActivity(r.Context(), activity.ActionFolderDelete, permission.ResourceFolder, id, nil)
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -403,6 +449,9 @@ func (h *Handler) MoveFolder(w http.ResponseWriter, r *http.Request) {
 		writeServiceError(w, err)
 		return
 	}
+	h.logActivity(r.Context(), activity.ActionFolderMove, permission.ResourceFolder, f.ID, map[string]any{
+		"new_parent_folder_id": f.ParentFolderID,
+	})
 	writeJSON(w, http.StatusOK, f)
 }
 
@@ -431,6 +480,10 @@ func (h *Handler) CreateFile(w http.ResponseWriter, r *http.Request) {
 		writeServiceError(w, err)
 		return
 	}
+	h.logActivity(r.Context(), activity.ActionFileCreate, permission.ResourceFile, f.ID, map[string]any{
+		"name":      f.Name,
+		"folder_id": f.FolderID,
+	})
 	writeJSON(w, http.StatusCreated, f)
 }
 
@@ -468,6 +521,9 @@ func (h *Handler) UpdateFile(w http.ResponseWriter, r *http.Request) {
 		writeServiceError(w, err)
 		return
 	}
+	h.logActivity(r.Context(), activity.ActionFileRename, permission.ResourceFile, f.ID, map[string]any{
+		"name": f.Name,
+	})
 	writeJSON(w, http.StatusOK, f)
 }
 
@@ -483,6 +539,7 @@ func (h *Handler) DeleteFile(w http.ResponseWriter, r *http.Request) {
 		writeServiceError(w, err)
 		return
 	}
+	h.logActivity(r.Context(), activity.ActionFileDelete, permission.ResourceFile, id, nil)
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -513,6 +570,9 @@ func (h *Handler) MoveFile(w http.ResponseWriter, r *http.Request) {
 		writeServiceError(w, err)
 		return
 	}
+	h.logActivity(r.Context(), activity.ActionFileMove, permission.ResourceFile, f.ID, map[string]any{
+		"folder_id": f.FolderID,
+	})
 	writeJSON(w, http.StatusOK, f)
 }
 
@@ -655,6 +715,10 @@ func (h *Handler) ConfirmUpload(w http.ResponseWriter, r *http.Request) {
 		writeServiceError(w, err)
 		return
 	}
+	h.logActivity(r.Context(), activity.ActionFileUpload, permission.ResourceFile, f.ID, map[string]any{
+		"version_id": v.ID,
+		"size_bytes": v.SizeBytes,
+	})
 	writeJSON(w, http.StatusOK, map[string]any{
 		"file":    updated,
 		"version": v,
@@ -703,10 +767,255 @@ func (h *Handler) DownloadURL(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "generate download url: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
+	h.logActivity(r.Context(), activity.ActionFileDownload, permission.ResourceFile, f.ID, map[string]any{
+		"version_id": current.ID,
+	})
 	writeJSON(w, http.StatusOK, downloadURLResponse{
 		DownloadURL: url,
 		ObjectKey:   current.ObjectKey,
 	})
+}
+
+// Permission handlers ------------------------------------------------------
+
+type grantPermissionRequest struct {
+	ResourceType string  `json:"resource_type"`
+	ResourceID   string  `json:"resource_id"`
+	GranteeType  string  `json:"grantee_type"`
+	GranteeID    string  `json:"grantee_id"`
+	Role         string  `json:"role"`
+	ExpiresAt    *string `json:"expires_at,omitempty"`
+}
+
+// ListPermissions returns every grant on a resource. Callers must supply
+// resource_type and resource_id query params. Scoped to the authenticated
+// workspace so one tenant never sees another's grants.
+func (h *Handler) ListPermissions(w http.ResponseWriter, r *http.Request) {
+	if h.permissions == nil {
+		http.Error(w, "permissions not configured", http.StatusNotImplemented)
+		return
+	}
+	workspaceID, _ := middleware.WorkspaceIDFromContext(r.Context())
+
+	resourceType := r.URL.Query().Get("resource_type")
+	resourceIDParam := r.URL.Query().Get("resource_id")
+	if resourceType == "" || resourceIDParam == "" {
+		http.Error(w, "resource_type and resource_id are required", http.StatusBadRequest)
+		return
+	}
+	resourceID, err := uuid.Parse(resourceIDParam)
+	if err != nil {
+		http.Error(w, "invalid resource_id", http.StatusBadRequest)
+		return
+	}
+	if err := h.assertResourceInWorkspace(r.Context(), workspaceID, resourceType, resourceID); err != nil {
+		writeServiceError(w, err)
+		return
+	}
+	list, err := h.permissions.ListForResource(r.Context(), workspaceID, resourceType, resourceID)
+	if err != nil {
+		writeServiceError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"permissions": list})
+}
+
+// GrantPermission creates a new permission. Admin-only in Phase 1.
+func (h *Handler) GrantPermission(w http.ResponseWriter, r *http.Request) {
+	if h.permissions == nil {
+		http.Error(w, "permissions not configured", http.StatusNotImplemented)
+		return
+	}
+	role, _ := middleware.RoleFromContext(r.Context())
+	if role != user.RoleAdmin {
+		http.Error(w, "admin role required", http.StatusForbidden)
+		return
+	}
+	workspaceID, _ := middleware.WorkspaceIDFromContext(r.Context())
+
+	var req grantPermissionRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid json body", http.StatusBadRequest)
+		return
+	}
+	resourceID, err := uuid.Parse(req.ResourceID)
+	if err != nil {
+		http.Error(w, "invalid resource_id", http.StatusBadRequest)
+		return
+	}
+	granteeID, err := uuid.Parse(req.GranteeID)
+	if err != nil {
+		http.Error(w, "invalid grantee_id", http.StatusBadRequest)
+		return
+	}
+
+	// Resources must live in the same workspace — otherwise an admin in
+	// workspace A could grant access to a resource in workspace B by
+	// guessing its UUID. This is the core tenant-isolation check for the
+	// permissions API.
+	if err := h.assertResourceInWorkspace(r.Context(), workspaceID, req.ResourceType, resourceID); err != nil {
+		writeServiceError(w, err)
+		return
+	}
+	if req.GranteeType == permission.GranteeUser {
+		if err := h.assertUserInWorkspace(r.Context(), workspaceID, granteeID); err != nil {
+			writeServiceError(w, err)
+			return
+		}
+	}
+
+	var expiresAt *time.Time
+	if req.ExpiresAt != nil && *req.ExpiresAt != "" {
+		t, terr := time.Parse(time.RFC3339, *req.ExpiresAt)
+		if terr != nil {
+			http.Error(w, "invalid expires_at (expected RFC3339)", http.StatusBadRequest)
+			return
+		}
+		expiresAt = &t
+	}
+
+	p, err := h.permissions.Grant(r.Context(), workspaceID, req.ResourceType, resourceID, req.GranteeType, granteeID, req.Role, expiresAt)
+	if err != nil {
+		writePermissionError(w, err)
+		return
+	}
+	h.logActivity(r.Context(), activity.ActionPermGrant, req.ResourceType, resourceID, map[string]any{
+		"permission_id": p.ID,
+		"grantee_type":  p.GranteeType,
+		"grantee_id":    p.GranteeID,
+		"role":          p.Role,
+	})
+	writeJSON(w, http.StatusCreated, p)
+}
+
+// RevokePermission deletes a grant. Admin-only.
+func (h *Handler) RevokePermission(w http.ResponseWriter, r *http.Request) {
+	if h.permissions == nil {
+		http.Error(w, "permissions not configured", http.StatusNotImplemented)
+		return
+	}
+	role, _ := middleware.RoleFromContext(r.Context())
+	if role != user.RoleAdmin {
+		http.Error(w, "admin role required", http.StatusForbidden)
+		return
+	}
+	workspaceID, _ := middleware.WorkspaceIDFromContext(r.Context())
+	id, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		http.Error(w, "invalid id", http.StatusBadRequest)
+		return
+	}
+	// Fetch first so we can log the resource context on revoke.
+	p, err := h.permissions.GetByID(r.Context(), workspaceID, id)
+	if err != nil {
+		writeServiceError(w, err)
+		return
+	}
+	if err := h.permissions.Revoke(r.Context(), workspaceID, id); err != nil {
+		writeServiceError(w, err)
+		return
+	}
+	h.logActivity(r.Context(), activity.ActionPermRevoke, p.ResourceType, p.ResourceID, map[string]any{
+		"permission_id": p.ID,
+		"grantee_type":  p.GranteeType,
+		"grantee_id":    p.GranteeID,
+		"role":          p.Role,
+	})
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// assertResourceInWorkspace verifies that the given resource belongs to the
+// workspace. Used by every permission endpoint to prevent cross-tenant
+// grants.
+func (h *Handler) assertResourceInWorkspace(ctx context.Context, workspaceID uuid.UUID, resourceType string, resourceID uuid.UUID) error {
+	switch resourceType {
+	case permission.ResourceFolder:
+		_, err := h.folders.GetByID(ctx, workspaceID, resourceID)
+		return err
+	case permission.ResourceFile:
+		_, err := h.files.GetByID(ctx, workspaceID, resourceID)
+		return err
+	default:
+		return badRequestErr{"invalid resource_type"}
+	}
+}
+
+// assertUserInWorkspace verifies that granteeID corresponds to a user in
+// this workspace. (Guest grantees are opaque UUIDs; they don't require a
+// users-table lookup.)
+func (h *Handler) assertUserInWorkspace(ctx context.Context, workspaceID, userID uuid.UUID) error {
+	_, err := h.users.GetByID(ctx, workspaceID, userID)
+	return err
+}
+
+func writePermissionError(w http.ResponseWriter, err error) {
+	switch {
+	case errors.Is(err, permission.ErrInvalidRole),
+		errors.Is(err, permission.ErrInvalidResourceType),
+		errors.Is(err, permission.ErrInvalidGranteeType):
+		http.Error(w, err.Error(), http.StatusBadRequest)
+	default:
+		writeServiceError(w, err)
+	}
+}
+
+// Activity handlers --------------------------------------------------------
+
+// ListActivity returns paginated activity_log entries for the authenticated
+// workspace. If workspace_id query param is provided it must match the
+// tenant bound to the session.
+func (h *Handler) ListActivity(w http.ResponseWriter, r *http.Request) {
+	if h.activity == nil {
+		http.Error(w, "activity not configured", http.StatusNotImplemented)
+		return
+	}
+	workspaceID, _ := middleware.WorkspaceIDFromContext(r.Context())
+	if wsParam := r.URL.Query().Get("workspace_id"); wsParam != "" {
+		wsID, err := uuid.Parse(wsParam)
+		if err != nil || wsID != workspaceID {
+			http.Error(w, "workspace_id mismatch", http.StatusForbidden)
+			return
+		}
+	}
+	limit := parseIntParam(r.URL.Query().Get("limit"), 50)
+	offset := parseIntParam(r.URL.Query().Get("offset"), 0)
+
+	var (
+		list []*activity.LogEntry
+		err  error
+	)
+	if rt, rid := r.URL.Query().Get("resource_type"), r.URL.Query().Get("resource_id"); rt != "" && rid != "" {
+		resourceID, perr := uuid.Parse(rid)
+		if perr != nil {
+			http.Error(w, "invalid resource_id", http.StatusBadRequest)
+			return
+		}
+		list, err = h.activity.ListByResource(r.Context(), workspaceID, rt, resourceID, limit, offset)
+	} else {
+		list, err = h.activity.List(r.Context(), workspaceID, limit, offset)
+	}
+	if err != nil {
+		http.Error(w, "list activity: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"entries": list,
+		"limit":   limit,
+		"offset":  offset,
+	})
+}
+
+// parseIntParam parses a query-string int with a default. Negative values
+// fall back to def so a malicious "?limit=-1" can't break the SQL.
+func parseIntParam(raw string, def int) int {
+	if raw == "" {
+		return def
+	}
+	n, err := strconv.Atoi(raw)
+	if err != nil || n < 0 {
+		return def
+	}
+	return n
 }
 
 // Shared helpers ------------------------------------------------------------
