@@ -198,10 +198,60 @@ zk-drive/
 
 ## Project status
 
-- **Current phase**: Phase 1 — Foundation (not started).
+- **Current phase**: Phase 1 — Foundation (in progress).
 - **Tracker**: [docs/PROGRESS.md](docs/PROGRESS.md).
 - **Technical proposal**: [docs/PROPOSAL.md](docs/PROPOSAL.md).
 - **Architecture**: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
+
+## Configuration
+
+ZK Drive is configured entirely via environment variables. The server
+reads them at startup from `internal/config`.
+
+Required:
+
+| Variable       | Purpose                                                  |
+| -------------- | -------------------------------------------------------- |
+| `DATABASE_URL` | Postgres DSN (pgx-style).                                |
+| `JWT_SECRET`   | HS256 signing secret for session tokens.                 |
+
+Optional:
+
+| Variable         | Default        | Purpose                                                     |
+| ---------------- | -------------- | ----------------------------------------------------------- |
+| `LISTEN_ADDR`    | `:8080`        | HTTP listen address.                                        |
+| `MIGRATIONS_DIR` | `migrations`   | Path to SQL migrations run at startup.                      |
+
+Storage (zk-object-fabric S3 gateway) — all four are required together:
+
+| Variable         | Purpose                                                  |
+| ---------------- | -------------------------------------------------------- |
+| `S3_ENDPOINT`    | zk-object-fabric gateway base URL (e.g. `http://localhost:8080`). |
+| `S3_BUCKET`      | Bucket to store all file versions under.                 |
+| `S3_ACCESS_KEY`  | Gateway access key.                                      |
+| `S3_SECRET_KEY`  | Gateway secret key.                                      |
+
+If `S3_ENDPOINT` is unset, ZK Drive still boots and serves
+metadata-only endpoints, but `/api/files/upload-url`,
+`/api/files/confirm-upload`, and `/api/files/{id}/download-url` respond
+with `501 Not Implemented`. If `S3_ENDPOINT` is set, the bucket, access
+key, and secret key must also be set; otherwise startup fails.
+
+### Quick start with the zk-object-fabric Docker demo
+
+When running alongside zk-object-fabric's Docker demo, point ZK Drive
+at the local gateway:
+
+```
+export S3_ENDPOINT=http://localhost:8080
+export S3_BUCKET=mybucket
+export S3_ACCESS_KEY=demo-access-key
+export S3_SECRET_KEY=demo-secret-key
+```
+
+ZK Drive then generates presigned PUT / GET URLs that clients use to
+move bytes directly to zk-object-fabric — the ZK Drive API server never
+proxies file content.
 
 ## License
 

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"strings"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
@@ -13,23 +14,32 @@ import (
 	"github.com/kennguy3n/zk-drive/api/middleware"
 	"github.com/kennguy3n/zk-drive/internal/file"
 	"github.com/kennguy3n/zk-drive/internal/folder"
+	"github.com/kennguy3n/zk-drive/internal/storage"
 	"github.com/kennguy3n/zk-drive/internal/user"
 	"github.com/kennguy3n/zk-drive/internal/workspace"
 )
 
 // Handler serves workspace / folder / file HTTP endpoints.
+//
+// storage is optional: when nil, the upload-url / confirm-upload /
+// download-url endpoints respond with 501 Not Implemented so the server
+// can still serve metadata-only APIs without a zk-object-fabric gateway
+// configured.
 type Handler struct {
 	pool       *pgxpool.Pool
 	workspaces *workspace.Service
 	folders    *folder.Service
 	files      *file.Service
 	users      *user.Service
+	storage    *storage.Client
 }
 
 // NewHandler constructs a Handler from the underlying services. The pool is
-// used to run multi-step writes (e.g. CreateWorkspace) atomically.
-func NewHandler(pool *pgxpool.Pool, ws *workspace.Service, fs *folder.Service, fl *file.Service, us *user.Service) *Handler {
-	return &Handler{pool: pool, workspaces: ws, folders: fs, files: fl, users: us}
+// used to run multi-step writes (e.g. CreateWorkspace) atomically. Pass a
+// non-nil storage client to enable presigned URL generation against a
+// zk-object-fabric gateway; pass nil to run in metadata-only mode.
+func NewHandler(pool *pgxpool.Pool, ws *workspace.Service, fs *folder.Service, fl *file.Service, us *user.Service, st *storage.Client) *Handler {
+	return &Handler{pool: pool, workspaces: ws, folders: fs, files: fl, users: us, storage: st}
 }
 
 // Workspace DTOs -------------------------------------------------------------
@@ -74,6 +84,32 @@ type updateFileRequest struct {
 
 type moveFileRequest struct {
 	FolderID string `json:"folder_id"`
+}
+
+// Upload / download DTOs ----------------------------------------------------
+
+type uploadURLRequest struct {
+	FolderID string `json:"folder_id"`
+	Filename string `json:"filename"`
+	MimeType string `json:"mime_type,omitempty"`
+}
+
+type uploadURLResponse struct {
+	UploadURL string    `json:"upload_url"`
+	UploadID  uuid.UUID `json:"upload_id"`
+	ObjectKey string    `json:"object_key"`
+}
+
+type confirmUploadRequest struct {
+	FileID    string `json:"file_id"`
+	ObjectKey string `json:"object_key"`
+	SizeBytes int64  `json:"size_bytes"`
+	Checksum  string `json:"checksum,omitempty"`
+}
+
+type downloadURLResponse struct {
+	DownloadURL string `json:"download_url"`
+	ObjectKey   string `json:"object_key"`
 }
 
 // Workspace handlers --------------------------------------------------------
@@ -494,6 +530,183 @@ func (h *Handler) ListFileVersions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"versions": versions})
+}
+
+// Upload / download handlers -----------------------------------------------
+
+// UploadURL generates a presigned PUT URL that lets the caller upload a
+// single file version directly to zk-object-fabric. It creates the file
+// metadata row up front so the client can reference a stable file ID when
+// it later calls ConfirmUpload. The returned object_key is opaque to the
+// client; it must be echoed back verbatim on confirm so the server records
+// the exact key it signed.
+func (h *Handler) UploadURL(w http.ResponseWriter, r *http.Request) {
+	if h.storage == nil {
+		http.Error(w, "storage not configured", http.StatusNotImplemented)
+		return
+	}
+	workspaceID, ok := middleware.WorkspaceIDFromContext(r.Context())
+	if !ok {
+		http.Error(w, "unauthenticated", http.StatusUnauthorized)
+		return
+	}
+	userID, _ := middleware.UserIDFromContext(r.Context())
+
+	var req uploadURLRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid json body", http.StatusBadRequest)
+		return
+	}
+	folderID, err := uuid.Parse(req.FolderID)
+	if err != nil {
+		http.Error(w, "invalid folder_id", http.StatusBadRequest)
+		return
+	}
+	if _, err := h.folders.GetByID(r.Context(), workspaceID, folderID); err != nil {
+		writeServiceError(w, err)
+		return
+	}
+
+	f, err := h.files.Create(r.Context(), workspaceID, folderID, req.Filename, req.MimeType, userID)
+	if err != nil {
+		writeServiceError(w, err)
+		return
+	}
+
+	versionID := uuid.New()
+	objectKey := storage.NewObjectKey(workspaceID, f.ID, versionID)
+
+	url, err := h.storage.GenerateUploadURL(r.Context(), objectKey, req.MimeType, storage.DefaultPresignExpiry)
+	if err != nil {
+		http.Error(w, "generate upload url: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, http.StatusOK, uploadURLResponse{
+		UploadURL: url,
+		UploadID:  f.ID,
+		ObjectKey: objectKey,
+	})
+}
+
+// ConfirmUpload records a newly uploaded object as a FileVersion and
+// advances the file's current_version pointer. Callers must invoke this
+// after the direct-to-storage PUT succeeds; otherwise the file row exists
+// without a current version and Downloads will 404.
+func (h *Handler) ConfirmUpload(w http.ResponseWriter, r *http.Request) {
+	if h.storage == nil {
+		http.Error(w, "storage not configured", http.StatusNotImplemented)
+		return
+	}
+	workspaceID, ok := middleware.WorkspaceIDFromContext(r.Context())
+	if !ok {
+		http.Error(w, "unauthenticated", http.StatusUnauthorized)
+		return
+	}
+	userID, _ := middleware.UserIDFromContext(r.Context())
+
+	var req confirmUploadRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid json body", http.StatusBadRequest)
+		return
+	}
+	if req.ObjectKey == "" {
+		http.Error(w, "object_key is required", http.StatusBadRequest)
+		return
+	}
+	if req.SizeBytes < 0 {
+		http.Error(w, "size_bytes must be non-negative", http.StatusBadRequest)
+		return
+	}
+	fileID, err := uuid.Parse(req.FileID)
+	if err != nil {
+		http.Error(w, "invalid file_id", http.StatusBadRequest)
+		return
+	}
+	f, err := h.files.GetByID(r.Context(), workspaceID, fileID)
+	if err != nil {
+		writeServiceError(w, err)
+		return
+	}
+
+	// The object_key is client-supplied; bind it to the caller's workspace
+	// and file so a malicious client cannot confirm against a key it did
+	// not legitimately receive from UploadURL (cross-tenant read via
+	// DownloadURL).
+	expectedPrefix := workspaceID.String() + "/" + f.ID.String() + "/"
+	if !strings.HasPrefix(req.ObjectKey, expectedPrefix) {
+		http.Error(w, "object_key does not belong to this file", http.StatusForbidden)
+		return
+	}
+
+	v := &file.FileVersion{
+		FileID:    f.ID,
+		ObjectKey: req.ObjectKey,
+		SizeBytes: req.SizeBytes,
+		Checksum:  req.Checksum,
+		CreatedBy: userID,
+	}
+	if err := h.files.ConfirmVersion(r.Context(), workspaceID, v); err != nil {
+		writeServiceError(w, err)
+		return
+	}
+
+	updated, err := h.files.GetByID(r.Context(), workspaceID, f.ID)
+	if err != nil {
+		writeServiceError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"file":    updated,
+		"version": v,
+	})
+}
+
+// DownloadURL returns a presigned GET URL for the file's current version.
+func (h *Handler) DownloadURL(w http.ResponseWriter, r *http.Request) {
+	if h.storage == nil {
+		http.Error(w, "storage not configured", http.StatusNotImplemented)
+		return
+	}
+	workspaceID, _ := middleware.WorkspaceIDFromContext(r.Context())
+	id, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		http.Error(w, "invalid id", http.StatusBadRequest)
+		return
+	}
+	f, err := h.files.GetByID(r.Context(), workspaceID, id)
+	if err != nil {
+		writeServiceError(w, err)
+		return
+	}
+	if f.CurrentVersionID == nil {
+		http.Error(w, "file has no current version", http.StatusNotFound)
+		return
+	}
+	versions, err := h.files.ListVersions(r.Context(), workspaceID, f.ID)
+	if err != nil {
+		writeServiceError(w, err)
+		return
+	}
+	var current *file.FileVersion
+	for _, v := range versions {
+		if v.ID == *f.CurrentVersionID {
+			current = v
+			break
+		}
+	}
+	if current == nil {
+		http.Error(w, "current version not found", http.StatusNotFound)
+		return
+	}
+	url, err := h.storage.GenerateDownloadURL(r.Context(), current.ObjectKey, storage.DefaultPresignExpiry)
+	if err != nil {
+		http.Error(w, "generate download url: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, http.StatusOK, downloadURLResponse{
+		DownloadURL: url,
+		ObjectKey:   current.ObjectKey,
+	})
 }
 
 // Shared helpers ------------------------------------------------------------

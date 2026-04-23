@@ -20,6 +20,7 @@ import (
 	"github.com/kennguy3n/zk-drive/internal/database"
 	"github.com/kennguy3n/zk-drive/internal/file"
 	"github.com/kennguy3n/zk-drive/internal/folder"
+	"github.com/kennguy3n/zk-drive/internal/storage"
 	"github.com/kennguy3n/zk-drive/internal/user"
 	"github.com/kennguy3n/zk-drive/internal/workspace"
 )
@@ -61,8 +62,24 @@ func run() error {
 	fileRepo := file.NewPostgresRepository(pool)
 	fileSvc := file.NewService(fileRepo)
 
+	var storageClient *storage.Client
+	if cfg.S3Endpoint != "" {
+		storageClient, err = storage.NewClient(storage.Config{
+			Endpoint:  cfg.S3Endpoint,
+			Bucket:    cfg.S3Bucket,
+			AccessKey: cfg.S3AccessKey,
+			SecretKey: cfg.S3SecretKey,
+		})
+		if err != nil {
+			return fmt.Errorf("storage client: %w", err)
+		}
+		log.Printf("storage: presigned-URL client wired to %s (bucket=%s)", cfg.S3Endpoint, cfg.S3Bucket)
+	} else {
+		log.Printf("storage: S3_ENDPOINT not set, upload/download-url endpoints will return 501")
+	}
+
 	authHandler := auth.NewHandler(pool, userSvc, wsSvc, cfg.JWTSecret)
-	driveHandler := drive.NewHandler(pool, wsSvc, folderSvc, fileSvc, userSvc)
+	driveHandler := drive.NewHandler(pool, wsSvc, folderSvc, fileSvc, userSvc, storageClient)
 
 	r := chi.NewRouter()
 	r.Use(chimw.RequestID)
@@ -104,11 +121,14 @@ func run() error {
 			r.Post("/folders/{id}/move", driveHandler.MoveFolder)
 
 			r.Post("/files", driveHandler.CreateFile)
+			r.Post("/files/upload-url", driveHandler.UploadURL)
+			r.Post("/files/confirm-upload", driveHandler.ConfirmUpload)
 			r.Get("/files/{id}", driveHandler.GetFile)
 			r.Put("/files/{id}", driveHandler.UpdateFile)
 			r.Delete("/files/{id}", driveHandler.DeleteFile)
 			r.Post("/files/{id}/move", driveHandler.MoveFile)
 			r.Get("/files/{id}/versions", driveHandler.ListFileVersions)
+			r.Get("/files/{id}/download-url", driveHandler.DownloadURL)
 		})
 	})
 

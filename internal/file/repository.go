@@ -22,10 +22,12 @@ type Repository interface {
 	RenameFile(ctx context.Context, workspaceID, fileID uuid.UUID, name string) error
 	DeleteFile(ctx context.Context, workspaceID, fileID uuid.UUID) error
 	MoveFile(ctx context.Context, workspaceID, fileID, folderID uuid.UUID) error
+	UpdateFileSize(ctx context.Context, workspaceID, fileID uuid.UUID, sizeBytes int64) error
 	ListFilesByFolder(ctx context.Context, workspaceID, folderID uuid.UUID) ([]*File, error)
 
 	CreateFileVersion(ctx context.Context, workspaceID uuid.UUID, v *FileVersion) error
 	CreateVersionAndSetCurrent(ctx context.Context, workspaceID uuid.UUID, v *FileVersion) error
+	ConfirmVersion(ctx context.Context, workspaceID uuid.UUID, v *FileVersion) error
 	ListVersions(ctx context.Context, workspaceID, fileID uuid.UUID) ([]*FileVersion, error)
 	SetCurrentVersion(ctx context.Context, workspaceID, fileID, versionID uuid.UUID) error
 }
@@ -140,6 +142,22 @@ WHERE workspace_id = $1 AND id = $2 AND deleted_at IS NULL`
 	return nil
 }
 
+// UpdateFileSize records the byte-size of a file's current version on the
+// file row so listings can show size without joining file_versions.
+func (r *PostgresRepository) UpdateFileSize(ctx context.Context, workspaceID, fileID uuid.UUID, sizeBytes int64) error {
+	const q = `
+UPDATE files SET size_bytes = $3, updated_at = now()
+WHERE workspace_id = $1 AND id = $2 AND deleted_at IS NULL`
+	tag, err := r.pool.Exec(ctx, q, workspaceID, fileID, sizeBytes)
+	if err != nil {
+		return fmt.Errorf("update file size: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
 // ListFilesByFolder returns non-deleted files inside a folder.
 func (r *PostgresRepository) ListFilesByFolder(ctx context.Context, workspaceID, folderID uuid.UUID) ([]*File, error) {
 	q := "SELECT " + fileColumns + " FROM files WHERE workspace_id = $1 AND folder_id = $2 AND deleted_at IS NULL ORDER BY name ASC"
@@ -195,6 +213,33 @@ WHERE workspace_id = $1 AND id = $2 AND deleted_at IS NULL`
 	tag, err := tx.Exec(ctx, setQ, workspaceID, v.FileID, v.ID)
 	if err != nil {
 		return fmt.Errorf("set current version: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	return tx.Commit(ctx)
+}
+
+// ConfirmVersion inserts a new version, points the file's
+// current_version_id at it, and updates the file's size_bytes, all in a
+// single transaction. Used by the upload-confirm endpoint so a partial
+// failure cannot leave the file pointing at a new version while still
+// reporting the previous version's size.
+func (r *PostgresRepository) ConfirmVersion(ctx context.Context, workspaceID uuid.UUID, v *FileVersion) error {
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin confirm version: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if err := insertVersionTx(ctx, tx, workspaceID, v); err != nil {
+		return err
+	}
+	const setQ = `
+UPDATE files SET current_version_id = $3, size_bytes = $4, updated_at = now()
+WHERE workspace_id = $1 AND id = $2 AND deleted_at IS NULL`
+	tag, err := tx.Exec(ctx, setQ, workspaceID, v.FileID, v.ID, v.SizeBytes)
+	if err != nil {
+		return fmt.Errorf("confirm version: %w", err)
 	}
 	if tag.RowsAffected() == 0 {
 		return ErrNotFound
