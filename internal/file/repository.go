@@ -19,6 +19,7 @@ type Repository interface {
 	CreateFile(ctx context.Context, f *File) error
 	GetFileByID(ctx context.Context, workspaceID, fileID uuid.UUID) (*File, error)
 	UpdateFile(ctx context.Context, workspaceID, fileID uuid.UUID, name string, folderID uuid.UUID) error
+	RenameFile(ctx context.Context, workspaceID, fileID uuid.UUID, name string) error
 	DeleteFile(ctx context.Context, workspaceID, fileID uuid.UUID) error
 	MoveFile(ctx context.Context, workspaceID, fileID, folderID uuid.UUID) error
 	ListFilesByFolder(ctx context.Context, workspaceID, folderID uuid.UUID) ([]*File, error)
@@ -86,6 +87,22 @@ WHERE workspace_id = $1 AND id = $2 AND deleted_at IS NULL`
 	tag, err := r.pool.Exec(ctx, q, workspaceID, fileID, name, folderID)
 	if err != nil {
 		return fmt.Errorf("update file: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// RenameFile updates only the name column so a concurrent MoveFile cannot
+// be clobbered by a stale folder_id write.
+func (r *PostgresRepository) RenameFile(ctx context.Context, workspaceID, fileID uuid.UUID, name string) error {
+	const q = `
+UPDATE files SET name = $3, updated_at = now()
+WHERE workspace_id = $1 AND id = $2 AND deleted_at IS NULL`
+	tag, err := r.pool.Exec(ctx, q, workspaceID, fileID, name)
+	if err != nil {
+		return fmt.Errorf("rename file: %w", err)
 	}
 	if tag.RowsAffected() == 0 {
 		return ErrNotFound

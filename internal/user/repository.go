@@ -77,11 +77,12 @@ func (r *PostgresRepository) GetByEmail(ctx context.Context, workspaceID uuid.UU
 	return scanUser(r.pool.QueryRow(ctx, q, workspaceID, email))
 }
 
-// GetByEmailAnyWorkspace returns the first user with the given email. Used
-// only when a caller does not supply a workspace id (e.g. signup collision
-// checks during workspace creation).
+// GetByEmailAnyWorkspace returns the oldest user row with the given email.
+// Ordering by created_at guarantees the same (email) -> user mapping across
+// logins when a user belongs to multiple workspaces; callers that need a
+// specific workspace should pass workspace_id on the login request.
 func (r *PostgresRepository) GetByEmailAnyWorkspace(ctx context.Context, email string) (*User, error) {
-	q := "SELECT " + userColumns + " FROM users WHERE email = $1 LIMIT 1"
+	q := "SELECT " + userColumns + " FROM users WHERE email = $1 ORDER BY created_at ASC, id ASC LIMIT 1"
 	return scanUser(r.pool.QueryRow(ctx, q, email))
 }
 

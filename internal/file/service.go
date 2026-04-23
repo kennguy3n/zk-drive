@@ -46,21 +46,17 @@ func (s *Service) GetByID(ctx context.Context, workspaceID, fileID uuid.UUID) (*
 	return s.repo.GetFileByID(ctx, workspaceID, fileID)
 }
 
-// Rename updates the file's display name.
+// Rename updates the file's display name. Uses a name-only UPDATE so a
+// concurrent Move cannot be silently reverted.
 func (s *Service) Rename(ctx context.Context, workspaceID, fileID uuid.UUID, newName string) (*File, error) {
 	newName = strings.TrimSpace(newName)
 	if newName == "" {
 		return nil, ErrInvalidName
 	}
-	f, err := s.repo.GetFileByID(ctx, workspaceID, fileID)
-	if err != nil {
+	if err := s.repo.RenameFile(ctx, workspaceID, fileID, newName); err != nil {
 		return nil, err
 	}
-	if err := s.repo.UpdateFile(ctx, workspaceID, fileID, newName, f.FolderID); err != nil {
-		return nil, err
-	}
-	f.Name = newName
-	return f, nil
+	return s.repo.GetFileByID(ctx, workspaceID, fileID)
 }
 
 // Move updates the file's parent folder.
