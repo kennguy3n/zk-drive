@@ -57,12 +57,17 @@ Checklist:
 - [x] Integration tests: API-level tests for folder CRUD, file upload
       / download, auth. `tests/integration/` (partial — auth,
       workspace, folder, file CRUD).
-- [x] Decision gate: zk-object-fabric S3 API validated — presigned URL
-      generation confirmed against the Docker demo container
-      (`local_fs_dev` backend). The S3 API contract (PUT, GET,
-      presigned URLs) is stable for ZK Drive's upload / download flows.
-      Multipart upload deferred until file-size limits actually require
-      it.
+- [~] Decision gate: zk-object-fabric S3 API partially validated —
+      zk-drive's SigV4 presigned URL generation is correct (tests pass;
+      URLs carry `X-Amz-Algorithm` / `X-Amz-Signature` / `X-Amz-Expires`),
+      and direct PUT / GET with an `Authorization` header works against
+      the Docker demo. However, the Phase 2 gateway (`internal/auth/
+      authenticator.go`) only accepts SigV4 via the `Authorization`
+      header and rejects query-string presigned URLs with 403
+      `missing Authorization header`. This is an explicit upstream
+      deferral, not a zk-drive bug. Full round-trip against the demo
+      is blocked until zk-object-fabric lands query-param SigV4
+      validation. Multipart upload still deferred.
 
 **Decisions / Deferrals (2026-04-23)**:
 
