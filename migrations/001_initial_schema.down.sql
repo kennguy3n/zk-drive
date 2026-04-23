@@ -1,0 +1,3 @@
+ALTER TABLE workspaces DROP CONSTRAINT IF EXISTS fk_workspaces_owner;
+DROP TABLE IF EXISTS users;
+DROP TABLE IF EXISTS workspaces;
