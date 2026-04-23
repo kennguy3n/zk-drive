@@ -20,6 +20,8 @@ type Repository interface {
 	GetByID(ctx context.Context, workspaceID, folderID uuid.UUID) (*Folder, error)
 	UpdateNameAndPath(ctx context.Context, workspaceID, folderID uuid.UUID, name, path string) error
 	UpdateParentAndPath(ctx context.Context, workspaceID, folderID uuid.UUID, parentID *uuid.UUID, path string) error
+	RenameWithDescendants(ctx context.Context, workspaceID, folderID uuid.UUID, newName, oldPath, newPath string) error
+	MoveWithDescendants(ctx context.Context, workspaceID, folderID uuid.UUID, newParentID *uuid.UUID, oldPath, newPath string) error
 	SoftDelete(ctx context.Context, workspaceID, folderID uuid.UUID) error
 	SoftDeleteSubtree(ctx context.Context, workspaceID, folderID uuid.UUID) error
 	ListChildren(ctx context.Context, workspaceID uuid.UUID, parentID *uuid.UUID) ([]*Folder, error)
@@ -99,6 +101,65 @@ WHERE workspace_id = $1 AND id = $2 AND deleted_at IS NULL`
 		return ErrNotFound
 	}
 	return nil
+}
+
+// RenameWithDescendants renames folderID and rewrites every non-deleted
+// descendant's path by substituting the oldPath prefix with newPath, all
+// inside a single transaction.
+func (r *PostgresRepository) RenameWithDescendants(ctx context.Context, workspaceID, folderID uuid.UUID, newName, oldPath, newPath string) error {
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin rename: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	const targetQ = `
+UPDATE folders SET name = $3, path = $4, updated_at = now()
+WHERE workspace_id = $1 AND id = $2 AND deleted_at IS NULL`
+	tag, err := tx.Exec(ctx, targetQ, workspaceID, folderID, newName, newPath)
+	if err != nil {
+		return fmt.Errorf("rename folder: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+
+	const descQ = `
+UPDATE folders SET path = $3 || substr(path, length($2) + 1), updated_at = now()
+WHERE workspace_id = $1 AND deleted_at IS NULL AND id <> $4 AND path LIKE $2 || '%'`
+	if _, err := tx.Exec(ctx, descQ, workspaceID, oldPath, newPath, folderID); err != nil {
+		return fmt.Errorf("rewrite descendant paths: %w", err)
+	}
+	return tx.Commit(ctx)
+}
+
+// MoveWithDescendants relocates folderID under newParentID and rewrites
+// descendant paths atomically.
+func (r *PostgresRepository) MoveWithDescendants(ctx context.Context, workspaceID, folderID uuid.UUID, newParentID *uuid.UUID, oldPath, newPath string) error {
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin move: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	const targetQ = `
+UPDATE folders SET parent_folder_id = $3, path = $4, updated_at = now()
+WHERE workspace_id = $1 AND id = $2 AND deleted_at IS NULL`
+	tag, err := tx.Exec(ctx, targetQ, workspaceID, folderID, newParentID, newPath)
+	if err != nil {
+		return fmt.Errorf("move folder: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+
+	const descQ = `
+UPDATE folders SET path = $3 || substr(path, length($2) + 1), updated_at = now()
+WHERE workspace_id = $1 AND deleted_at IS NULL AND id <> $4 AND path LIKE $2 || '%'`
+	if _, err := tx.Exec(ctx, descQ, workspaceID, oldPath, newPath, folderID); err != nil {
+		return fmt.Errorf("rewrite descendant paths: %w", err)
+	}
+	return tx.Commit(ctx)
 }
 
 // SoftDelete marks a single folder as deleted.

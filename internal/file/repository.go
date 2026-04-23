@@ -178,7 +178,7 @@ RETURNING created_at`
 func (r *PostgresRepository) ListVersions(ctx context.Context, workspaceID, fileID uuid.UUID) ([]*FileVersion, error) {
 	// Ownership check: the file must belong to the workspace.
 	var exists int
-	if err := r.pool.QueryRow(ctx, `SELECT 1 FROM files WHERE workspace_id = $1 AND id = $2`, workspaceID, fileID).Scan(&exists); err != nil {
+	if err := r.pool.QueryRow(ctx, `SELECT 1 FROM files WHERE workspace_id = $1 AND id = $2 AND deleted_at IS NULL`, workspaceID, fileID).Scan(&exists); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, ErrNotFound
 		}

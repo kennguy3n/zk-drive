@@ -103,14 +103,16 @@ func (r *PostgresRepository) SetOwner(ctx context.Context, workspaceID, ownerUse
 	return nil
 }
 
-// ListForUser returns every workspace the given user belongs to (via the
-// users table).
+// ListForUser returns every workspace the caller belongs to. Because each
+// workspace has its own users row per identity, we pivot through the
+// caller's email (resolved from the supplied user id) so workspaces joined
+// after signup are also returned.
 func (r *PostgresRepository) ListForUser(ctx context.Context, userID uuid.UUID) ([]*Workspace, error) {
 	q := `
 SELECT w.id, w.name, w.owner_user_id, w.storage_quota_bytes, w.storage_used_bytes, w.tier, w.created_at, w.updated_at
 FROM workspaces w
 JOIN users u ON u.workspace_id = w.id
-WHERE u.id = $1
+WHERE u.email = (SELECT email FROM users WHERE id = $1)
 ORDER BY w.created_at ASC`
 	rows, err := r.pool.Query(ctx, q, userID)
 	if err != nil {

@@ -84,10 +84,7 @@ func (s *Service) Rename(ctx context.Context, workspaceID, folderID uuid.UUID, n
 		}
 	}
 	newPath := parentPath + newName + "/"
-	if err := s.repo.UpdateNameAndPath(ctx, workspaceID, folderID, newName, newPath); err != nil {
-		return nil, err
-	}
-	if err := s.rewriteDescendantPaths(ctx, workspaceID, folderID, oldPath, newPath); err != nil {
+	if err := s.repo.RenameWithDescendants(ctx, workspaceID, folderID, newName, oldPath, newPath); err != nil {
 		return nil, err
 	}
 	f.Name = newName
@@ -126,10 +123,7 @@ func (s *Service) Move(ctx context.Context, workspaceID, folderID uuid.UUID, new
 
 	oldPath := f.Path
 	newPath := newParentPath + f.Name + "/"
-	if err := s.repo.UpdateParentAndPath(ctx, workspaceID, folderID, newParentID, newPath); err != nil {
-		return nil, err
-	}
-	if err := s.rewriteDescendantPaths(ctx, workspaceID, folderID, oldPath, newPath); err != nil {
+	if err := s.repo.MoveWithDescendants(ctx, workspaceID, folderID, newParentID, oldPath, newPath); err != nil {
 		return nil, err
 	}
 	f.ParentFolderID = newParentID
@@ -145,23 +139,4 @@ func (s *Service) Delete(ctx context.Context, workspaceID, folderID uuid.UUID) e
 // ListChildren returns direct child folders of the given parent (or root).
 func (s *Service) ListChildren(ctx context.Context, workspaceID uuid.UUID, parentID *uuid.UUID) ([]*Folder, error) {
 	return s.repo.ListChildren(ctx, workspaceID, parentID)
-}
-
-// rewriteDescendantPaths walks every descendant of folderID and rewrites its
-// materialized path by replacing the oldPath prefix with newPath.
-func (s *Service) rewriteDescendantPaths(ctx context.Context, workspaceID, folderID uuid.UUID, oldPath, newPath string) error {
-	descendants, err := s.repo.ListDescendants(ctx, workspaceID, folderID)
-	if err != nil {
-		return err
-	}
-	for _, d := range descendants {
-		if !strings.HasPrefix(d.Path, oldPath) {
-			continue
-		}
-		updated := newPath + strings.TrimPrefix(d.Path, oldPath)
-		if err := s.repo.UpdateNameAndPath(ctx, workspaceID, d.ID, d.Name, updated); err != nil {
-			return err
-		}
-	}
-	return nil
 }
