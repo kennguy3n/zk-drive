@@ -132,6 +132,10 @@ func setupEnv(t *testing.T) *testEnv {
 	env := &testEnv{t: t, pool: pool, server: srv, storage: storageClient}
 	t.Cleanup(func() {
 		srv.Close()
+		// Close activity before the pool so any final drain writes still
+		// find a live connection; otherwise the worker goroutine leaks
+		// and blocks shutdown of the test binary.
+		activitySvc.Close()
 		pool.Close()
 	})
 	env.ResetTables()

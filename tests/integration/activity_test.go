@@ -68,8 +68,14 @@ func TestActivityLoggedForFileUpload(t *testing.T) {
 	env := setupEnv(t)
 	tok := env.signupAndLogin("Acme", "admin@acme.test", "Alice", "pass")
 
+	// CreateFile requires a folder_id — a missing or empty one 400s
+	// before the activity hook fires. Create a parent folder so the
+	// file create actually succeeds.
+	parent := createFolder(t, env, tok.Token, nil, "Inbox")
+
 	status, body := env.httpRequest(http.MethodPost, "/api/files", tok.Token, map[string]any{
-		"name": "notes.txt",
+		"name":      "notes.txt",
+		"folder_id": parent.ID.String(),
 	})
 	if status != http.StatusCreated {
 		t.Fatalf("create file: status=%d body=%s", status, string(body))
@@ -79,7 +85,9 @@ func TestActivityLoggedForFileUpload(t *testing.T) {
 	}
 	env.decodeJSON(body, &file)
 
-	entries := waitForActivity(t, env, tok.WorkspaceID, tok.Token, 1)
+	// The folder create above also emits an activity entry, so we wait
+	// for at least 2 entries before asserting the file.create is there.
+	entries := waitForActivity(t, env, tok.WorkspaceID, tok.Token, 2)
 	found := false
 	for _, e := range entries {
 		if e.Action == activity.ActionFileCreate && e.ResourceID == file.ID {
