@@ -7,8 +7,7 @@ import {
   createFolder,
   deleteFile,
   deleteFolder,
-  getFolder,
-  listFiles,
+  getFolderContents,
   listFolders,
   renameFile,
   type FileItem,
@@ -34,14 +33,18 @@ export default function FileBrowserPage() {
     setError(null);
     try {
       if (currentFolderID) {
-        const { folder: f, children } = await getFolder(currentFolderID);
+        const { folder: f, children, files: f2 } = await getFolderContents(currentFolderID);
         setFolder(f);
-        setSubfolders(children ?? []);
+        setSubfolders(children);
+        setFiles(f2);
       } else {
         setFolder(null);
         setSubfolders(await listFolders(null));
+        // Root view: backend doesn't expose a file listing for null folder
+        // in Phase 1, so we show an empty table and nudge the user to
+        // open a subfolder.
+        setFiles([]);
       }
-      setFiles(await listFiles(currentFolderID));
     } catch (err) {
       setError(String((err as Error)?.message ?? err));
     }

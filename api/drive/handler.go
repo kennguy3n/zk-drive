@@ -1046,7 +1046,11 @@ func (e forbiddenErr) Error() string { return e.msg }
 
 func writeServiceError(w http.ResponseWriter, err error) {
 	switch {
-	case errors.Is(err, folder.ErrNotFound), errors.Is(err, file.ErrNotFound), errors.Is(err, workspace.ErrNotFound), errors.Is(err, user.ErrNotFound):
+	case errors.Is(err, folder.ErrNotFound),
+		errors.Is(err, file.ErrNotFound),
+		errors.Is(err, workspace.ErrNotFound),
+		errors.Is(err, user.ErrNotFound),
+		errors.Is(err, permission.ErrNotFound):
 		http.Error(w, err.Error(), http.StatusNotFound)
 	case errors.Is(err, folder.ErrInvalidName), errors.Is(err, folder.ErrInvalidParent), errors.Is(err, file.ErrInvalidName):
 		http.Error(w, err.Error(), http.StatusBadRequest)

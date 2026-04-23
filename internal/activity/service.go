@@ -51,6 +51,10 @@ func NewService(repo Repository) *Service {
 // the internal buffer is full, the entry is dropped and a warning is
 // logged. Errors in persistence are logged but never surfaced to the
 // caller, per the fire-and-forget contract.
+//
+// Safe to call concurrently with Close. When Close has already fired the
+// entry is dropped silently; the send on s.entries is guarded by a select
+// on s.closed to avoid a send-on-closed-channel panic.
 func (s *Service) Log(_ context.Context, entry *LogEntry) {
 	if entry == nil {
 		return
@@ -58,9 +62,6 @@ func (s *Service) Log(_ context.Context, entry *LogEntry) {
 	select {
 	case <-s.closed:
 		return
-	default:
-	}
-	select {
 	case s.entries <- entry:
 	default:
 		log.Printf("activity: buffer full, dropping entry action=%s resource=%s/%s",
@@ -101,20 +102,35 @@ func (s *Service) ListByResource(ctx context.Context, workspaceID uuid.UUID, res
 	return s.repo.ListByResource(ctx, workspaceID, resourceType, resourceID, limit, offset)
 }
 
-// Close drains any pending entries and stops the worker. Safe to call more
-// than once.
+// Close drains any pending entries and stops the worker. Safe to call
+// more than once. Close only signals via s.closed; the entries channel is
+// never closed, which lets Log remain safe against a racing Close.
 func (s *Service) Close() {
 	s.once.Do(func() {
 		close(s.closed)
-		close(s.entries)
 	})
 	s.wg.Wait()
 }
 
+// run pulls entries off the buffer and persists them. When Close signals
+// via s.closed the worker drains any remaining buffered entries so they
+// are not lost, then exits.
 func (s *Service) run() {
 	defer s.wg.Done()
-	for entry := range s.entries {
-		s.flush(entry)
+	for {
+		select {
+		case entry := <-s.entries:
+			s.flush(entry)
+		case <-s.closed:
+			for {
+				select {
+				case entry := <-s.entries:
+					s.flush(entry)
+				default:
+					return
+				}
+			}
+		}
 	}
 }
 
