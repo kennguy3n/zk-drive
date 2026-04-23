@@ -79,6 +79,9 @@ func Migrate(ctx context.Context, pool *pgxpool.Pool, dir string) error {
 		applied[v] = struct{}{}
 	}
 	rows.Close()
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("iterate applied migrations: %w", err)
+	}
 
 	for _, name := range upFiles {
 		version := strings.TrimSuffix(name, ".up.sql")

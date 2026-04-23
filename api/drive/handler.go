@@ -158,6 +158,7 @@ func (h *Handler) createWorkspaceTx(ctx context.Context, name string, current *u
 	if err := tx.Commit(ctx); err != nil {
 		return nil, err
 	}
+	ws.OwnerUserID = &newUser.ID
 	return ws, nil
 }
 
