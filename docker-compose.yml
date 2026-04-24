@@ -1,0 +1,57 @@
+# docker-compose for local zk-drive development.
+#
+# Brings up Postgres (required) plus an optional NATS JetStream service
+# for Phase 2 worker development. Uncomment the nats service block when
+# you start wiring preview / scan / index workers.
+#
+# Usage:
+#   docker compose up -d postgres
+#   export DATABASE_URL=postgres://zkdrive:zkdrive@localhost:5432/zk-drive?sslmode=disable
+#   export JWT_SECRET=dev-secret
+#   go run ./cmd/server
+
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: zkdrive
+      POSTGRES_PASSWORD: zkdrive
+      POSTGRES_DB: zk-drive
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U zkdrive -d zk-drive"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # Phase 2 async worker pipeline (preview / scan / index / retention).
+  # Uncomment to start NATS JetStream locally.
+  # nats:
+  #   image: nats:latest
+  #   command: ["-js"]
+  #   ports:
+  #     - "4222:4222"
+  #     - "8222:8222"
+
+  server:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgres://zkdrive:zkdrive@postgres:5432/zk-drive?sslmode=disable
+      JWT_SECRET: ${JWT_SECRET:-dev-secret}
+      MIGRATIONS_DIR: /app/migrations
+      LISTEN_ADDR: :8080
+    ports:
+      - "8080:8080"
+    profiles:
+      - server
+
+volumes:
+  postgres_data:

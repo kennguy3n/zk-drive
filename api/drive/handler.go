@@ -18,6 +18,8 @@ import (
 	"github.com/kennguy3n/zk-drive/internal/file"
 	"github.com/kennguy3n/zk-drive/internal/folder"
 	"github.com/kennguy3n/zk-drive/internal/permission"
+	"github.com/kennguy3n/zk-drive/internal/search"
+	"github.com/kennguy3n/zk-drive/internal/sharing"
 	"github.com/kennguy3n/zk-drive/internal/storage"
 	"github.com/kennguy3n/zk-drive/internal/user"
 	"github.com/kennguy3n/zk-drive/internal/workspace"
@@ -43,6 +45,8 @@ type Handler struct {
 	storage     *storage.Client
 	permissions *permission.Service
 	activity    *activity.Service
+	sharing     *sharing.Service
+	search      *search.Service
 }
 
 // NewHandler constructs a Handler from the underlying services. The pool is
@@ -72,6 +76,22 @@ func NewHandler(
 		permissions: perms,
 		activity:    act,
 	}
+}
+
+// WithSharing attaches a sharing service to the handler, enabling the
+// /api/share-links and /api/guest-invites endpoints. Kept as a separate
+// setter (rather than extending NewHandler) so existing test wiring
+// stays backward compatible.
+func (h *Handler) WithSharing(s *sharing.Service) *Handler {
+	h.sharing = s
+	return h
+}
+
+// WithSearch attaches a search service to the handler, enabling the
+// /api/search endpoint.
+func (h *Handler) WithSearch(s *search.Service) *Handler {
+	h.search = s
+	return h
 }
 
 // logActivity is a nil-safe wrapper so callers don't need to null-check
@@ -1088,4 +1108,286 @@ func writeJSON(w http.ResponseWriter, status int, payload any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(payload)
+}
+
+// Sharing DTOs -------------------------------------------------------------
+
+type createShareLinkRequest struct {
+	ResourceType string  `json:"resource_type"`
+	ResourceID   string  `json:"resource_id"`
+	Password     string  `json:"password,omitempty"`
+	ExpiresAt    *string `json:"expires_at,omitempty"`
+	MaxDownloads *int    `json:"max_downloads,omitempty"`
+}
+
+type resolveShareLinkRequest struct {
+	Password string `json:"password,omitempty"`
+}
+
+type createGuestInviteRequest struct {
+	Email     string  `json:"email"`
+	FolderID  string  `json:"folder_id"`
+	Role      string  `json:"role"`
+	ExpiresAt *string `json:"expires_at,omitempty"`
+}
+
+// CreateShareLink creates a share link on a folder or file owned by the
+// authenticated workspace. Admin-only per ARCHITECTURE.md §7.3 —
+// sharing configuration is a sensitive operation.
+func (h *Handler) CreateShareLink(w http.ResponseWriter, r *http.Request) {
+	if h.sharing == nil {
+		http.Error(w, "sharing not configured", http.StatusNotImplemented)
+		return
+	}
+	role, _ := middleware.RoleFromContext(r.Context())
+	if role != user.RoleAdmin {
+		http.Error(w, "admin role required", http.StatusForbidden)
+		return
+	}
+	workspaceID, _ := middleware.WorkspaceIDFromContext(r.Context())
+	userID, _ := middleware.UserIDFromContext(r.Context())
+
+	var req createShareLinkRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid json body", http.StatusBadRequest)
+		return
+	}
+	if !sharing.IsValidResourceType(req.ResourceType) {
+		http.Error(w, "invalid resource_type", http.StatusBadRequest)
+		return
+	}
+	resourceID, err := uuid.Parse(req.ResourceID)
+	if err != nil {
+		http.Error(w, "invalid resource_id", http.StatusBadRequest)
+		return
+	}
+	if err := h.assertResourceInWorkspace(r.Context(), workspaceID, req.ResourceType, resourceID); err != nil {
+		writeServiceError(w, err)
+		return
+	}
+	var expiresAt *time.Time
+	if req.ExpiresAt != nil && *req.ExpiresAt != "" {
+		t, terr := time.Parse(time.RFC3339, *req.ExpiresAt)
+		if terr != nil {
+			http.Error(w, "invalid expires_at (expected RFC3339)", http.StatusBadRequest)
+			return
+		}
+		expiresAt = &t
+	}
+	link, err := h.sharing.CreateShareLink(r.Context(), workspaceID, req.ResourceType, resourceID, req.Password, expiresAt, req.MaxDownloads, userID)
+	if err != nil {
+		writeSharingError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusCreated, link)
+}
+
+// ResolveShareLink is the public (no-auth) endpoint used by anyone who
+// holds a share-link token. When the link is password-protected the
+// caller should supply the password in the JSON body of a POST; GET
+// without a body is accepted for unprotected links so shares work from
+// a plain browser address bar.
+func (h *Handler) ResolveShareLink(w http.ResponseWriter, r *http.Request) {
+	if h.sharing == nil {
+		http.Error(w, "sharing not configured", http.StatusNotImplemented)
+		return
+	}
+	token := chi.URLParam(r, "token")
+	if token == "" {
+		http.Error(w, "token is required", http.StatusBadRequest)
+		return
+	}
+	var password string
+	if r.Method == http.MethodPost && r.ContentLength > 0 {
+		var req resolveShareLinkRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, "invalid json body", http.StatusBadRequest)
+			return
+		}
+		password = req.Password
+	}
+	link, err := h.sharing.ResolveShareLink(r.Context(), token, password)
+	if err != nil {
+		writeSharingError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, link)
+}
+
+// RevokeShareLink deletes a share link. Admin-only.
+func (h *Handler) RevokeShareLink(w http.ResponseWriter, r *http.Request) {
+	if h.sharing == nil {
+		http.Error(w, "sharing not configured", http.StatusNotImplemented)
+		return
+	}
+	role, _ := middleware.RoleFromContext(r.Context())
+	if role != user.RoleAdmin {
+		http.Error(w, "admin role required", http.StatusForbidden)
+		return
+	}
+	workspaceID, _ := middleware.WorkspaceIDFromContext(r.Context())
+	id, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		http.Error(w, "invalid id", http.StatusBadRequest)
+		return
+	}
+	if err := h.sharing.RevokeShareLink(r.Context(), workspaceID, id); err != nil {
+		writeSharingError(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// CreateGuestInvite creates a guest invite and the matching permission
+// grant on the target folder. Admin-only.
+func (h *Handler) CreateGuestInvite(w http.ResponseWriter, r *http.Request) {
+	if h.sharing == nil {
+		http.Error(w, "sharing not configured", http.StatusNotImplemented)
+		return
+	}
+	role, _ := middleware.RoleFromContext(r.Context())
+	if role != user.RoleAdmin {
+		http.Error(w, "admin role required", http.StatusForbidden)
+		return
+	}
+	workspaceID, _ := middleware.WorkspaceIDFromContext(r.Context())
+	userID, _ := middleware.UserIDFromContext(r.Context())
+
+	var req createGuestInviteRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid json body", http.StatusBadRequest)
+		return
+	}
+	folderID, err := uuid.Parse(req.FolderID)
+	if err != nil {
+		http.Error(w, "invalid folder_id", http.StatusBadRequest)
+		return
+	}
+	if err := h.assertResourceInWorkspace(r.Context(), workspaceID, permission.ResourceFolder, folderID); err != nil {
+		writeServiceError(w, err)
+		return
+	}
+	var expiresAt *time.Time
+	if req.ExpiresAt != nil && *req.ExpiresAt != "" {
+		t, terr := time.Parse(time.RFC3339, *req.ExpiresAt)
+		if terr != nil {
+			http.Error(w, "invalid expires_at (expected RFC3339)", http.StatusBadRequest)
+			return
+		}
+		expiresAt = &t
+	}
+	inv, err := h.sharing.CreateGuestInvite(r.Context(), workspaceID, req.Email, folderID, req.Role, expiresAt, userID)
+	if err != nil {
+		writeSharingError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusCreated, inv)
+}
+
+// AcceptGuestInvite marks an invite accepted. Authenticated endpoint —
+// the caller must already hold a token bound to the invite's workspace
+// (in practice the token is issued by the invite-acceptance flow).
+func (h *Handler) AcceptGuestInvite(w http.ResponseWriter, r *http.Request) {
+	if h.sharing == nil {
+		http.Error(w, "sharing not configured", http.StatusNotImplemented)
+		return
+	}
+	workspaceID, _ := middleware.WorkspaceIDFromContext(r.Context())
+	id, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		http.Error(w, "invalid id", http.StatusBadRequest)
+		return
+	}
+	inv, err := h.sharing.AcceptGuestInvite(r.Context(), workspaceID, id)
+	if err != nil {
+		writeSharingError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, inv)
+}
+
+// RevokeGuestInvite deletes an invite. Admin-only.
+func (h *Handler) RevokeGuestInvite(w http.ResponseWriter, r *http.Request) {
+	if h.sharing == nil {
+		http.Error(w, "sharing not configured", http.StatusNotImplemented)
+		return
+	}
+	role, _ := middleware.RoleFromContext(r.Context())
+	if role != user.RoleAdmin {
+		http.Error(w, "admin role required", http.StatusForbidden)
+		return
+	}
+	workspaceID, _ := middleware.WorkspaceIDFromContext(r.Context())
+	id, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		http.Error(w, "invalid id", http.StatusBadRequest)
+		return
+	}
+	if err := h.sharing.RevokeGuestInvite(r.Context(), workspaceID, id); err != nil {
+		writeSharingError(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// Search handler -----------------------------------------------------------
+
+// Search runs a workspace-scoped FTS query over file + folder names and
+// returns results ranked by ts_rank_cd. q is required; limit defaults
+// to DefaultLimit and is capped at MaxLimit in the service layer.
+func (h *Handler) Search(w http.ResponseWriter, r *http.Request) {
+	if h.search == nil {
+		http.Error(w, "search not configured", http.StatusNotImplemented)
+		return
+	}
+	workspaceID, _ := middleware.WorkspaceIDFromContext(r.Context())
+	query := strings.TrimSpace(r.URL.Query().Get("q"))
+	if query == "" {
+		http.Error(w, "q is required", http.StatusBadRequest)
+		return
+	}
+	limit := parseIntParam(r.URL.Query().Get("limit"), search.DefaultLimit)
+	offset := parseIntParam(r.URL.Query().Get("offset"), 0)
+	results, err := h.search.Search(r.Context(), workspaceID, query, limit, offset)
+	if err != nil {
+		if errors.Is(err, search.ErrInvalidQuery) {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		http.Error(w, "search: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"results": results,
+		"limit":   limit,
+		"offset":  offset,
+	})
+}
+
+// writeSharingError maps sharing-service errors to HTTP responses.
+// ErrNotFound becomes 404, invalid-input errors become 400, expired /
+// exhausted / password-related errors become 410 / 429 / 401 / 403 so
+// clients can distinguish them without parsing the error text.
+func writeSharingError(w http.ResponseWriter, err error) {
+	switch {
+	case errors.Is(err, sharing.ErrNotFound):
+		http.Error(w, err.Error(), http.StatusNotFound)
+	case errors.Is(err, sharing.ErrInvalidResourceType),
+		errors.Is(err, sharing.ErrInvalidRole),
+		errors.Is(err, sharing.ErrInvalidEmail):
+		http.Error(w, err.Error(), http.StatusBadRequest)
+	case errors.Is(err, sharing.ErrLinkExpired),
+		errors.Is(err, sharing.ErrInviteExpired):
+		http.Error(w, err.Error(), http.StatusGone)
+	case errors.Is(err, sharing.ErrLinkExhausted):
+		http.Error(w, err.Error(), http.StatusTooManyRequests)
+	case errors.Is(err, sharing.ErrPasswordRequired):
+		http.Error(w, err.Error(), http.StatusUnauthorized)
+	case errors.Is(err, sharing.ErrPasswordIncorrect):
+		http.Error(w, err.Error(), http.StatusForbidden)
+	case errors.Is(err, sharing.ErrInviteAlreadyUsed):
+		http.Error(w, err.Error(), http.StatusConflict)
+	default:
+		writeServiceError(w, err)
+	}
 }

@@ -12,6 +12,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	chimw "github.com/go-chi/chi/v5/middleware"
+	"github.com/google/uuid"
 
 	"github.com/kennguy3n/zk-drive/api/auth"
 	"github.com/kennguy3n/zk-drive/api/drive"
@@ -22,6 +23,8 @@ import (
 	"github.com/kennguy3n/zk-drive/internal/file"
 	"github.com/kennguy3n/zk-drive/internal/folder"
 	"github.com/kennguy3n/zk-drive/internal/permission"
+	"github.com/kennguy3n/zk-drive/internal/search"
+	"github.com/kennguy3n/zk-drive/internal/sharing"
 	"github.com/kennguy3n/zk-drive/internal/storage"
 	"github.com/kennguy3n/zk-drive/internal/user"
 	"github.com/kennguy3n/zk-drive/internal/workspace"
@@ -84,8 +87,13 @@ func run() error {
 	activitySvc := activity.NewService(activity.NewPostgresRepository(pool))
 	defer activitySvc.Close()
 
+	sharingSvc := sharing.NewService(sharing.NewPostgresRepository(pool), permissionGranterAdapter{permissionSvc})
+	searchSvc := search.NewService(pool)
+
 	authHandler := auth.NewHandler(pool, userSvc, wsSvc, cfg.JWTSecret)
-	driveHandler := drive.NewHandler(pool, wsSvc, folderSvc, fileSvc, userSvc, storageClient, permissionSvc, activitySvc)
+	driveHandler := drive.NewHandler(pool, wsSvc, folderSvc, fileSvc, userSvc, storageClient, permissionSvc, activitySvc).
+		WithSharing(sharingSvc).
+		WithSearch(searchSvc)
 
 	r := chi.NewRouter()
 	r.Use(chimw.RequestID)
@@ -140,8 +148,24 @@ func run() error {
 			r.Post("/permissions", driveHandler.GrantPermission)
 			r.Delete("/permissions/{id}", driveHandler.RevokePermission)
 
+			r.Post("/share-links", driveHandler.CreateShareLink)
+			r.Delete("/share-links/{id}", driveHandler.RevokeShareLink)
+
+			r.Post("/guest-invites", driveHandler.CreateGuestInvite)
+			r.Post("/guest-invites/{id}/accept", driveHandler.AcceptGuestInvite)
+			r.Delete("/guest-invites/{id}", driveHandler.RevokeGuestInvite)
+
+			r.Get("/search", driveHandler.Search)
+
 			r.Get("/activity", driveHandler.ListActivity)
 		})
+
+		// Public share-link resolution — deliberately outside the auth
+		// group so anyone holding a token can resolve the link
+		// (ARCHITECTURE.md §7.3). Password / expiry / download-cap
+		// checks run in the sharing service.
+		r.Get("/share-links/{token}", driveHandler.ResolveShareLink)
+		r.Post("/share-links/{token}", driveHandler.ResolveShareLink)
 	})
 
 	srv := &http.Server{
@@ -173,4 +197,25 @@ func run() error {
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer shutdownCancel()
 	return srv.Shutdown(shutdownCtx)
+}
+
+// permissionGranterAdapter bridges *permission.Service to
+// sharing.PermissionGranter. The sharing package can't import
+// permission directly without creating a dependency loop in future
+// packages that want to use both sides, so we keep the adapter at the
+// cmd/server layer where the full dependency graph is already visible.
+type permissionGranterAdapter struct {
+	svc *permission.Service
+}
+
+func (a permissionGranterAdapter) Grant(ctx context.Context, workspaceID uuid.UUID, resourceType string, resourceID uuid.UUID, granteeType string, granteeID uuid.UUID, role string, expiresAt *time.Time) (sharing.PermissionRef, error) {
+	p, err := a.svc.Grant(ctx, workspaceID, resourceType, resourceID, granteeType, granteeID, role, expiresAt)
+	if err != nil {
+		return sharing.PermissionRef{}, err
+	}
+	return sharing.PermissionRef{ID: p.ID}, nil
+}
+
+func (a permissionGranterAdapter) Revoke(ctx context.Context, workspaceID, permID uuid.UUID) error {
+	return a.svc.Revoke(ctx, workspaceID, permID)
 }
