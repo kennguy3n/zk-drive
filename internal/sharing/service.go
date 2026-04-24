@@ -258,6 +258,13 @@ func (s *Service) ListGuestInvitesByFolder(ctx context.Context, workspaceID, fol
 	return s.repo.ListGuestInvitesByFolder(ctx, workspaceID, folderID)
 }
 
+// ExpireGuestAccess deletes expired guest permission rows. Called by
+// the periodic sweep in the worker binary. Returns the count of
+// permissions revoked so the caller can log useful telemetry.
+func (s *Service) ExpireGuestAccess(ctx context.Context, now time.Time) (int, error) {
+	return s.repo.ExpireGuestPermissions(ctx, now)
+}
+
 // guestGranteeID derives a deterministic UUID v5 for a guest email
 // within a workspace. Using v5 (name-based) means two invites to the
 // same email in the same workspace always reuse the same grantee_id, so

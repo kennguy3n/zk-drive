@@ -33,6 +33,13 @@ type Repository interface {
 	ListGuestInvitesByFolder(ctx context.Context, workspaceID, folderID uuid.UUID) ([]*GuestInvite, error)
 	AcceptGuestInvite(ctx context.Context, workspaceID, id uuid.UUID, acceptedAt time.Time) error
 	DeleteGuestInvite(ctx context.Context, workspaceID, id uuid.UUID) error
+
+	// ExpireGuestPermissions deletes permissions rows with
+	// grantee_type='guest' that have an expires_at in the past, and
+	// the guest_invites that reference them. The sweep runs on a
+	// timer from the worker binary. Returns the count of permissions
+	// revoked.
+	ExpireGuestPermissions(ctx context.Context, now time.Time) (int, error)
 }
 
 // PostgresRepository implements Repository against Postgres using a
@@ -236,4 +243,43 @@ func (r *PostgresRepository) DeleteGuestInvite(ctx context.Context, workspaceID,
 		return ErrNotFound
 	}
 	return nil
+}
+
+// ExpireGuestPermissions deletes expired guest permission rows and the
+// guest_invites that reference them. The delete is executed in a
+// single transaction so we never leave a guest_invite pointing at a
+// missing permission.
+func (r *PostgresRepository) ExpireGuestPermissions(ctx context.Context, now time.Time) (int, error) {
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("expire guests: begin: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	tag, err := tx.Exec(ctx, `
+DELETE FROM guest_invites
+WHERE permission_id IN (
+    SELECT id FROM permissions
+    WHERE grantee_type = 'guest'
+      AND expires_at IS NOT NULL
+      AND expires_at < $1
+)`, now)
+	if err != nil {
+		return 0, fmt.Errorf("expire guests: delete invites: %w", err)
+	}
+	_ = tag
+
+	tag, err = tx.Exec(ctx, `
+DELETE FROM permissions
+WHERE grantee_type = 'guest'
+  AND expires_at IS NOT NULL
+  AND expires_at < $1`, now)
+	if err != nil {
+		return 0, fmt.Errorf("expire guests: delete perms: %w", err)
+	}
+	revoked := int(tag.RowsAffected())
+	if err := tx.Commit(ctx); err != nil {
+		return 0, fmt.Errorf("expire guests: commit: %w", err)
+	}
+	return revoked, nil
 }

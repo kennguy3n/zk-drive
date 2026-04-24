@@ -28,9 +28,11 @@ import (
 // Subject constants. Keep these in sync with cmd/worker/main.go — the
 // worker uses the same strings when declaring JetStream consumers.
 const (
-	SubjectPreview = "drive.preview.generate"
-	SubjectScan    = "drive.scan.virus"
-	SubjectIndex   = "drive.search.index"
+	SubjectPreview  = "drive.preview.generate"
+	SubjectScan     = "drive.scan.virus"
+	SubjectIndex    = "drive.search.index"
+	SubjectArchive  = "drive.archive.cold"
+	SubjectRetention = "drive.retention.evaluate"
 )
 
 // FileJob is the common payload shape for every drive.* subject. We
@@ -73,6 +75,12 @@ func (p *Publisher) PublishScan(ctx context.Context, fileID, versionID uuid.UUID
 // PublishIndex enqueues a search-index job. Safe to call on a nil receiver.
 func (p *Publisher) PublishIndex(ctx context.Context, fileID, versionID uuid.UUID) error {
 	return p.publish(ctx, SubjectIndex, FileJob{FileID: fileID, VersionID: versionID})
+}
+
+// PublishArchive enqueues a cold-archive job for a version. Safe to
+// call on a nil receiver.
+func (p *Publisher) PublishArchive(ctx context.Context, fileID, versionID uuid.UUID) error {
+	return p.publish(ctx, SubjectArchive, FileJob{FileID: fileID, VersionID: versionID})
 }
 
 func (p *Publisher) publish(ctx context.Context, subject string, payload FileJob) error {
