@@ -28,13 +28,19 @@ services:
       retries: 10
 
   # Phase 2 async worker pipeline (preview / scan / index / retention).
-  # Uncomment to start NATS JetStream locally.
-  # nats:
-  #   image: nats:latest
-  #   command: ["-js"]
-  #   ports:
-  #     - "4222:4222"
-  #     - "8222:8222"
+  # The server connects opportunistically (NATS_URL env var); the
+  # worker binary requires this to be running.
+  nats:
+    image: nats:2.10-alpine
+    command: ["-js", "-m", "8222"]
+    ports:
+      - "4222:4222"
+      - "8222:8222"
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8222/healthz"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
 
   server:
     build:

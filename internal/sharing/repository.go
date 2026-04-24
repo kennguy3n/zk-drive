@@ -109,17 +109,40 @@ func (r *PostgresRepository) DeleteShareLink(ctx context.Context, workspaceID, i
 	return nil
 }
 
-// IncrementDownloadCount atomically bumps download_count by 1. Called
-// after a successful token resolution so MaxDownloads can be enforced.
+// IncrementDownloadCount atomically bumps download_count by 1 iff
+// max_downloads is either unset or has not yet been reached. This
+// closes the TOCTOU race window that existed when callers checked
+// link.IsExhausted() on a cached snapshot before incrementing — two
+// concurrent resolutions on a link with max_downloads=1 could both
+// pass the check and both increment, handing out an extra download.
+//
+// The UPDATE uses a boolean guard inside WHERE so the check and the
+// increment happen in a single SQL statement. A zero RowsAffected()
+// result can mean either "row does not exist" or "row exists but cap
+// already reached"; we disambiguate with a follow-up SELECT so the
+// caller can distinguish ErrNotFound from ErrLinkExhausted.
 func (r *PostgresRepository) IncrementDownloadCount(ctx context.Context, id uuid.UUID) error {
-	tag, err := r.pool.Exec(ctx, `UPDATE share_links SET download_count = download_count + 1 WHERE id = $1`, id)
+	tag, err := r.pool.Exec(ctx,
+		`UPDATE share_links SET download_count = download_count + 1
+		 WHERE id = $1 AND (max_downloads IS NULL OR download_count < max_downloads)`,
+		id,
+	)
 	if err != nil {
 		return fmt.Errorf("increment download count: %w", err)
 	}
-	if tag.RowsAffected() == 0 {
+	if tag.RowsAffected() > 0 {
+		return nil
+	}
+	// Disambiguate between missing row and exhausted cap. Any other
+	// error propagates unchanged so the caller sees the true failure.
+	var exists bool
+	if serr := r.pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM share_links WHERE id = $1)`, id).Scan(&exists); serr != nil {
+		return fmt.Errorf("disambiguate increment failure: %w", serr)
+	}
+	if !exists {
 		return ErrNotFound
 	}
-	return nil
+	return ErrLinkExhausted
 }
 
 const guestInviteColumns = "id, workspace_id, email, folder_id, role, expires_at, accepted_at, permission_id, created_by, created_at"

@@ -4,6 +4,9 @@ export interface FileListProps {
   files: FileItem[];
   onRename: (id: string, name: string) => void;
   onDelete: (id: string) => void;
+  // onShare is optional so callers that don't wire ShareDialog yet
+  // keep working unchanged — the Share button is hidden when omitted.
+  onShare?: (file: FileItem) => void;
 }
 
 // formatBytes renders a byte count as a human-friendly string. Kept
@@ -28,7 +31,7 @@ async function handleDownload(id: string): Promise<void> {
   window.open(url, "_blank", "noopener");
 }
 
-export default function FileList({ files, onRename, onDelete }: FileListProps) {
+export default function FileList({ files, onRename, onDelete, onShare }: FileListProps) {
   if (files.length === 0) {
     return (
       <div style={{ padding: 32, color: "#6b7280" }}>No files in this folder.</div>
@@ -67,6 +70,11 @@ export default function FileList({ files, onRename, onDelete }: FileListProps) {
               >
                 Rename
               </button>
+              {onShare ? (
+                <button onClick={() => onShare(f)} style={actionBtn}>
+                  Share
+                </button>
+              ) : null}
               <button
                 onClick={() => {
                   if (confirm(`Delete "${f.name}"?`)) onDelete(f.id);
