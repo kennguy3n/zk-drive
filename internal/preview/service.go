@@ -179,7 +179,17 @@ func (s *Service) downloadObject(ctx context.Context, key string) ([]byte, error
 	if resp.StatusCode/100 != 2 {
 		return nil, fmt.Errorf("get %s: status %d", key, resp.StatusCode)
 	}
-	return io.ReadAll(resp.Body)
+	// Cap the source read so a pathologically large image can't OOM
+	// the worker. +1 byte on the limit lets us detect overflow
+	// distinctly from a file that is exactly MaxSourceBytes long.
+	buf, err := io.ReadAll(io.LimitReader(resp.Body, MaxSourceBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(buf)) > MaxSourceBytes {
+		return nil, fmt.Errorf("source %s exceeds %d bytes", key, MaxSourceBytes)
+	}
+	return buf, nil
 }
 
 func (s *Service) uploadObject(ctx context.Context, key string, body []byte) error {

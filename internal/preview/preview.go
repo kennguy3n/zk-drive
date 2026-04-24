@@ -39,3 +39,10 @@ const ThumbnailSize = 256
 // Pinning to PNG sidesteps JPEG quality knobs and keeps cache keys
 // trivial (extension always .png).
 const PreviewMimeType = "image/png"
+
+// MaxSourceBytes caps the source bytes the preview worker is willing
+// to read for a single job. 100 MiB comfortably fits every image type
+// we render today and prevents a pathologically large upload (e.g. a
+// multi-gigabyte PNG) from OOM'ing the worker. Matches the defensive
+// cap used by the scan service.
+const MaxSourceBytes = 100 * 1024 * 1024

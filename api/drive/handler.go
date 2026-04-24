@@ -1802,9 +1802,18 @@ func (h *Handler) PreviewURL(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "previews not configured", http.StatusNotImplemented)
 		return
 	}
+	workspaceID, _ := middleware.WorkspaceIDFromContext(r.Context())
 	id, err := uuid.Parse(chi.URLParam(r, "id"))
 	if err != nil {
 		http.Error(w, "invalid id", http.StatusBadRequest)
+		return
+	}
+	// Bind the file id to the caller's workspace before any permission
+	// logic runs. Admins bypass assertResourceAccess, so without this
+	// lookup an admin in workspace A could request a file id from
+	// workspace B and get a presigned URL to B's preview.
+	if _, err := h.files.GetByID(r.Context(), workspaceID, id); err != nil {
+		writeServiceError(w, err)
 		return
 	}
 	if err := h.assertResourceAccess(r.Context(), permission.ResourceFile, id, permission.RoleViewer); err != nil {
