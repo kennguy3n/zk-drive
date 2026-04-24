@@ -2,8 +2,8 @@
 
 - **Project**: ZK Drive
 - **License**: Proprietary — All Rights Reserved.
-- **Status**: Phase 1 — Foundation (functionally complete pending upstream presigned URL validation)
-- **Last updated**: 2026-04-23
+- **Status**: Phase 2 — Sharing & Collaboration (kicked off 2026-04-24)
+- **Last updated**: 2026-04-24
 
 This document is a phase-gated tracker. Each phase has an explicit
 checklist and a decision gate. Do not skip to the next phase until
@@ -16,7 +16,7 @@ architecture, see [ARCHITECTURE.md](ARCHITECTURE.md).
 
 ## Phase 1: Foundation (Weeks 1–4)
 
-**Status**: `IN PROGRESS`
+**Status**: `COMPLETE`
 
 **Goal**: stand up the core application layer — Go backend, Postgres
 schema, React frontend scaffold, basic folder / file CRUD,
@@ -58,17 +58,18 @@ Checklist:
 - [x] Integration tests: API-level tests for folder CRUD, file upload
       / download, auth. `tests/integration/` (partial — auth,
       workspace, folder, file CRUD).
-- [~] Decision gate: zk-object-fabric S3 API partially validated —
+- [~] Decision gate: all code-level findings from PRs #2–#4 are
+      resolved; only the upstream presigned URL validation remains.
       zk-drive's SigV4 presigned URL generation is correct (tests pass;
       URLs carry `X-Amz-Algorithm` / `X-Amz-Signature` / `X-Amz-Expires`),
       and direct PUT / GET with an `Authorization` header works against
-      the Docker demo. However, the Phase 2 gateway (`internal/auth/
-      authenticator.go`) only accepts SigV4 via the `Authorization`
-      header and rejects query-string presigned URLs with 403
-      `missing Authorization header`. This is an explicit upstream
-      deferral, not a zk-drive bug. Full round-trip against the demo
-      is blocked until zk-object-fabric lands query-param SigV4
-      validation. Multipart upload still deferred.
+      the Docker demo. However, the zk-object-fabric gateway
+      (`internal/auth/authenticator.go`) only accepts SigV4 via the
+      `Authorization` header and rejects query-string presigned URLs
+      with 403 `missing Authorization header`. This is an explicit
+      upstream deferral, not a zk-drive bug. Full round-trip against
+      the demo is blocked until zk-object-fabric lands query-param
+      SigV4 validation. Multipart upload still deferred.
 
 **Decisions / Deferrals (2026-04-23)**:
 
@@ -105,7 +106,25 @@ the full round-trip can be validated end to end.
 
 ## Phase 2: Sharing & Collaboration (Weeks 5–8)
 
-**Status**: `NOT STARTED`
+**Status**: `IN PROGRESS`
+
+**Decisions / Deferrals (2026-04-24)**:
+
+- Per-resource permission enforcement (`CheckAccess`) on read / write
+  paths was deferred from Phase 1 and will land in Phase 2 together
+  with folder permission inheritance; the flat `HasAccess` API already
+  exists (`internal/permission/service.go`) and Phase 2 adds
+  `HasAccessWithInheritance` + handler-level gating.
+- CI pipeline and Docker Compose for local dev are prerequisites
+  before Phase 2 feature work. CI runs Go build / vet / `go test
+  -short` plus a frontend typecheck and an integration-test job that
+  requires `TEST_DATABASE_URL`. Docker Compose provides Postgres
+  (and an optional NATS service for the worker pipeline).
+- Priority order inside Phase 2: permission inheritance → sharing
+  (share links, guest invites) → client rooms → Postgres FTS search
+  → async workers (preview, virus scan, notifications).
+- No AGPL dependencies — zk-drive is a proprietary product. Every
+  library added in this phase must be MIT or Apache-2.0.
 
 **Goal**: add sharing, guest access, client rooms, search, and the
 async job pipeline for previews and virus scanning. This is the

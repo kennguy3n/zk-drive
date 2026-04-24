@@ -83,6 +83,27 @@ func (s *Service) HasAccess(ctx context.Context, workspaceID uuid.UUID, resource
 	return s.repo.CheckAccess(ctx, workspaceID, resourceType, resourceID, granteeType, granteeID, minRole)
 }
 
+// HasAccessWithInheritance reports whether the grantee has at least
+// minRole on the resource, considering grants inherited from ancestor
+// folders. Resolution semantics are documented on
+// PostgresRepository.CheckAccessWithInheritance; the "most-specific
+// wins" rule (ARCHITECTURE.md §7.2) means an explicit grant on a child
+// can override inherited grants from parents. HasAccess remains the
+// flat, non-inheriting check for callers that know they do not want to
+// walk the folder tree.
+func (s *Service) HasAccessWithInheritance(ctx context.Context, workspaceID uuid.UUID, resourceType string, resourceID uuid.UUID, granteeType string, granteeID uuid.UUID, minRole string) (bool, error) {
+	if !isValidResourceType(resourceType) {
+		return false, fmt.Errorf("%w: %q", ErrInvalidResourceType, resourceType)
+	}
+	if !isValidGranteeType(granteeType) {
+		return false, fmt.Errorf("%w: %q", ErrInvalidGranteeType, granteeType)
+	}
+	if !isValidRole(minRole) {
+		return false, fmt.Errorf("%w: %q", ErrInvalidRole, minRole)
+	}
+	return s.repo.CheckAccessWithInheritance(ctx, workspaceID, resourceType, resourceID, granteeType, granteeID, minRole)
+}
+
 // ListForResource returns every grant on a given resource.
 func (s *Service) ListForResource(ctx context.Context, workspaceID uuid.UUID, resourceType string, resourceID uuid.UUID) ([]*Permission, error) {
 	if !isValidResourceType(resourceType) {

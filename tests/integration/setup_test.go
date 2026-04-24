@@ -25,9 +25,13 @@ import (
 	"github.com/kennguy3n/zk-drive/internal/file"
 	"github.com/kennguy3n/zk-drive/internal/folder"
 	"github.com/kennguy3n/zk-drive/internal/permission"
+	"github.com/kennguy3n/zk-drive/internal/search"
+	"github.com/kennguy3n/zk-drive/internal/sharing"
 	"github.com/kennguy3n/zk-drive/internal/storage"
 	"github.com/kennguy3n/zk-drive/internal/user"
 	"github.com/kennguy3n/zk-drive/internal/workspace"
+
+	"github.com/google/uuid"
 )
 
 // testJWTSecret is the HS256 secret used by every integration test. Shared
@@ -78,8 +82,13 @@ func setupEnv(t *testing.T) *testEnv {
 	permissionSvc := permission.NewService(permission.NewPostgresRepository(pool))
 	activitySvc := activity.NewService(activity.NewPostgresRepository(pool))
 
+	sharingSvc := sharing.NewService(sharing.NewPostgresRepository(pool), testPermissionGranter{svc: permissionSvc})
+	searchSvc := search.NewService(pool)
+
 	authHandler := auth.NewHandler(pool, userSvc, wsSvc, testJWTSecret)
-	driveHandler := drive.NewHandler(pool, wsSvc, folderSvc, fileSvc, userSvc, storageClient, permissionSvc, activitySvc)
+	driveHandler := drive.NewHandler(pool, wsSvc, folderSvc, fileSvc, userSvc, storageClient, permissionSvc, activitySvc).
+		WithSharing(sharingSvc).
+		WithSearch(searchSvc)
 
 	r := chi.NewRouter()
 	r.Use(chimw.Recoverer)
@@ -124,8 +133,20 @@ func setupEnv(t *testing.T) *testEnv {
 			r.Post("/permissions", driveHandler.GrantPermission)
 			r.Delete("/permissions/{id}", driveHandler.RevokePermission)
 
+			r.Post("/share-links", driveHandler.CreateShareLink)
+			r.Delete("/share-links/{id}", driveHandler.RevokeShareLink)
+
+			r.Post("/guest-invites", driveHandler.CreateGuestInvite)
+			r.Post("/guest-invites/{id}/accept", driveHandler.AcceptGuestInvite)
+			r.Delete("/guest-invites/{id}", driveHandler.RevokeGuestInvite)
+
+			r.Get("/search", driveHandler.Search)
+
 			r.Get("/activity", driveHandler.ListActivity)
 		})
+
+		r.Get("/share-links/{token}", driveHandler.ResolveShareLink)
+		r.Post("/share-links/{token}", driveHandler.ResolveShareLink)
 	})
 
 	srv := httptest.NewServer(r)
@@ -150,7 +171,7 @@ func (e *testEnv) ResetTables() {
 	defer cancel()
 	stmts := []string{
 		`ALTER TABLE workspaces DROP CONSTRAINT IF EXISTS fk_workspaces_owner`,
-		`TRUNCATE activity_log, permissions, file_versions, files, folders, users, workspaces RESTART IDENTITY CASCADE`,
+		`TRUNCATE guest_invites, share_links, activity_log, permissions, file_versions, files, folders, users, workspaces RESTART IDENTITY CASCADE`,
 		`ALTER TABLE workspaces ADD CONSTRAINT fk_workspaces_owner FOREIGN KEY (owner_user_id) REFERENCES users(id)`,
 	}
 	for _, s := range stmts {
@@ -279,4 +300,24 @@ type tokenPayload struct {
 	UserID      string `json:"user_id"`
 	WorkspaceID string `json:"workspace_id"`
 	Role        string `json:"role"`
+}
+
+// testPermissionGranter mirrors the production
+// permissionGranterAdapter in cmd/server/main.go so the integration
+// tests exercise the same dependency graph as the live server without
+// pulling in cmd/server's main package.
+type testPermissionGranter struct {
+	svc *permission.Service
+}
+
+func (a testPermissionGranter) Grant(ctx context.Context, workspaceID uuid.UUID, resourceType string, resourceID uuid.UUID, granteeType string, granteeID uuid.UUID, role string, expiresAt *time.Time) (sharing.PermissionRef, error) {
+	p, err := a.svc.Grant(ctx, workspaceID, resourceType, resourceID, granteeType, granteeID, role, expiresAt)
+	if err != nil {
+		return sharing.PermissionRef{}, err
+	}
+	return sharing.PermissionRef{ID: p.ID}, nil
+}
+
+func (a testPermissionGranter) Revoke(ctx context.Context, workspaceID, permID uuid.UUID) error {
+	return a.svc.Revoke(ctx, workspaceID, permID)
 }
