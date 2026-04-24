@@ -3,6 +3,7 @@ package config
 import (
 	"errors"
 	"os"
+	"strconv"
 	"strings"
 )
 
@@ -18,6 +19,26 @@ type Config struct {
 	S3AccessKey   string
 	S3SecretKey   string
 	MigrationsDir string
+	NATSURL       string
+	ClamAVAddress string
+
+	// SSO — optional, Business-tier feature. When the client id is
+	// empty for a provider, the corresponding /api/auth/oauth/{provider}
+	// routes return 501 Not Implemented so the rest of the server still
+	// boots without credentials.
+	GoogleClientID        string
+	GoogleClientSecret    string
+	GoogleRedirectURL     string
+	MicrosoftClientID     string
+	MicrosoftClientSecret string
+	MicrosoftRedirectURL  string
+
+	// Rate limiting — applied per (workspace_id, user_id) via an
+	// in-memory token bucket. Values <= 0 fall back to the defaults
+	// declared alongside the middleware so misconfigured env vars do
+	// not accidentally disable rate limiting entirely.
+	RateLimitPerUser      int
+	RateLimitPerWorkspace int
 }
 
 // Load reads configuration from environment variables and returns a populated
@@ -30,14 +51,24 @@ type Config struct {
 // storage client would only fail at request time.
 func Load() (*Config, error) {
 	cfg := &Config{
-		DatabaseURL:   os.Getenv("DATABASE_URL"),
-		JWTSecret:     os.Getenv("JWT_SECRET"),
-		ListenAddr:    getEnvDefault("LISTEN_ADDR", ":8080"),
-		S3Endpoint:    os.Getenv("S3_ENDPOINT"),
-		S3Bucket:      os.Getenv("S3_BUCKET"),
-		S3AccessKey:   os.Getenv("S3_ACCESS_KEY"),
-		S3SecretKey:   os.Getenv("S3_SECRET_KEY"),
-		MigrationsDir: getEnvDefault("MIGRATIONS_DIR", "migrations"),
+		DatabaseURL:           os.Getenv("DATABASE_URL"),
+		JWTSecret:             os.Getenv("JWT_SECRET"),
+		ListenAddr:            getEnvDefault("LISTEN_ADDR", ":8080"),
+		S3Endpoint:            os.Getenv("S3_ENDPOINT"),
+		S3Bucket:              os.Getenv("S3_BUCKET"),
+		S3AccessKey:           os.Getenv("S3_ACCESS_KEY"),
+		S3SecretKey:           os.Getenv("S3_SECRET_KEY"),
+		MigrationsDir:         getEnvDefault("MIGRATIONS_DIR", "migrations"),
+		NATSURL:               os.Getenv("NATS_URL"),
+		ClamAVAddress:         os.Getenv("CLAMAV_ADDRESS"),
+		GoogleClientID:        os.Getenv("GOOGLE_CLIENT_ID"),
+		GoogleClientSecret:    os.Getenv("GOOGLE_CLIENT_SECRET"),
+		GoogleRedirectURL:     os.Getenv("GOOGLE_REDIRECT_URL"),
+		MicrosoftClientID:     os.Getenv("MICROSOFT_CLIENT_ID"),
+		MicrosoftClientSecret: os.Getenv("MICROSOFT_CLIENT_SECRET"),
+		MicrosoftRedirectURL:  os.Getenv("MICROSOFT_REDIRECT_URL"),
+		RateLimitPerUser:      parseIntDefault(os.Getenv("RATE_LIMIT_PER_USER"), 0),
+		RateLimitPerWorkspace: parseIntDefault(os.Getenv("RATE_LIMIT_PER_WORKSPACE"), 0),
 	}
 
 	var missing []string
@@ -74,4 +105,16 @@ func getEnvDefault(key, def string) string {
 		return v
 	}
 	return def
+}
+
+func parseIntDefault(s string, def int) int {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return def
+	}
+	v, err := strconv.Atoi(s)
+	if err != nil || v <= 0 {
+		return def
+	}
+	return v
 }

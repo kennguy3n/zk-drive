@@ -15,10 +15,12 @@ import (
 	"github.com/google/uuid"
 	"github.com/nats-io/nats.go"
 
+	"github.com/kennguy3n/zk-drive/api/admin"
 	"github.com/kennguy3n/zk-drive/api/auth"
 	"github.com/kennguy3n/zk-drive/api/drive"
 	"github.com/kennguy3n/zk-drive/api/middleware"
 	"github.com/kennguy3n/zk-drive/internal/activity"
+	"github.com/kennguy3n/zk-drive/internal/audit"
 	"github.com/kennguy3n/zk-drive/internal/config"
 	"github.com/kennguy3n/zk-drive/internal/database"
 	"github.com/kennguy3n/zk-drive/internal/file"
@@ -27,6 +29,7 @@ import (
 	"github.com/kennguy3n/zk-drive/internal/notification"
 	"github.com/kennguy3n/zk-drive/internal/permission"
 	"github.com/kennguy3n/zk-drive/internal/preview"
+	"github.com/kennguy3n/zk-drive/internal/retention"
 	"github.com/kennguy3n/zk-drive/internal/search"
 	"github.com/kennguy3n/zk-drive/internal/sharing"
 	"github.com/kennguy3n/zk-drive/internal/storage"
@@ -128,15 +131,28 @@ func run() error {
 
 	notificationSvc := notification.NewService(notification.NewPostgresRepository(pool))
 	previewRepo := preview.NewPostgresRepository(pool)
+	auditSvc := audit.NewService(audit.NewPostgresRepository(pool))
+	defer auditSvc.Close()
+	retentionSvc := retention.NewService(retention.NewPostgresRepository(pool), pool)
 
-	authHandler := auth.NewHandler(pool, userSvc, wsSvc, cfg.JWTSecret)
+	authHandler := auth.NewHandler(pool, userSvc, wsSvc, cfg.JWTSecret).WithAudit(auditSvc)
+	oauthHandler := auth.NewOAuthHandler(authHandler, auth.OAuthConfig{
+		GoogleClientID:        cfg.GoogleClientID,
+		GoogleClientSecret:    cfg.GoogleClientSecret,
+		GoogleRedirectURL:     cfg.GoogleRedirectURL,
+		MicrosoftClientID:     cfg.MicrosoftClientID,
+		MicrosoftClientSecret: cfg.MicrosoftClientSecret,
+		MicrosoftRedirectURL:  cfg.MicrosoftRedirectURL,
+	}).WithAudit(auditSvc)
 	driveHandler := drive.NewHandler(pool, wsSvc, folderSvc, fileSvc, userSvc, storageClient, permissionSvc, activitySvc).
 		WithSharing(sharingSvc).
 		WithSearch(searchSvc).
 		WithClientRooms(clientRoomSvc).
 		WithJobs(jobPublisher).
 		WithNotifications(notificationSvc).
-		WithPreviews(previewRepo)
+		WithPreviews(previewRepo).
+		WithAudit(auditSvc)
+	adminHandler := admin.NewHandler(pool, userSvc, auditSvc, retentionSvc)
 
 	r := chi.NewRouter()
 	r.Use(chimw.RequestID)
@@ -153,10 +169,13 @@ func run() error {
 		r.Route("/auth", func(r chi.Router) {
 			r.Post("/signup", authHandler.Signup)
 			r.Post("/login", authHandler.Login)
-			r.Post("/logout", authHandler.Logout)
+			r.Route("/oauth", func(r chi.Router) {
+				oauthHandler.RegisterRoutes(r)
+			})
 
 			r.Group(func(r chi.Router) {
 				r.Use(middleware.AuthMiddleware(cfg.JWTSecret))
+				r.Post("/logout", authHandler.Logout)
 				r.Post("/refresh", authHandler.Refresh)
 			})
 		})
@@ -164,6 +183,10 @@ func run() error {
 		r.Group(func(r chi.Router) {
 			r.Use(middleware.AuthMiddleware(cfg.JWTSecret))
 			r.Use(middleware.TenantGuard())
+			r.Use(middleware.RateLimiter(middleware.RateLimitConfig{
+				PerUser:      cfg.RateLimitPerUser,
+				PerWorkspace: cfg.RateLimitPerWorkspace,
+			}))
 
 			r.Get("/workspaces", driveHandler.ListWorkspaces)
 			r.Post("/workspaces", driveHandler.CreateWorkspace)
@@ -211,6 +234,17 @@ func run() error {
 			r.Post("/notifications/{id}/read", driveHandler.MarkNotificationRead)
 
 			r.Get("/activity", driveHandler.ListActivity)
+		})
+
+		r.Route("/admin", func(r chi.Router) {
+			r.Use(middleware.AuthMiddleware(cfg.JWTSecret))
+			r.Use(middleware.TenantGuard())
+			r.Use(middleware.AdminOnly())
+			r.Use(middleware.RateLimiter(middleware.RateLimitConfig{
+				PerUser:      cfg.RateLimitPerUser,
+				PerWorkspace: cfg.RateLimitPerWorkspace,
+			}))
+			adminHandler.RegisterRoutes(r)
 		})
 
 		// Public share-link resolution — deliberately outside the auth

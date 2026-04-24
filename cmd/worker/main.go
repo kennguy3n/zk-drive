@@ -25,14 +25,18 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/nats-io/nats.go"
 
 	"github.com/kennguy3n/zk-drive/internal/config"
 	"github.com/kennguy3n/zk-drive/internal/database"
 	"github.com/kennguy3n/zk-drive/internal/jobs"
 	"github.com/kennguy3n/zk-drive/internal/notification"
+	"github.com/kennguy3n/zk-drive/internal/permission"
 	"github.com/kennguy3n/zk-drive/internal/preview"
+	"github.com/kennguy3n/zk-drive/internal/retention"
 	"github.com/kennguy3n/zk-drive/internal/scan"
+	"github.com/kennguy3n/zk-drive/internal/sharing"
 	"github.com/kennguy3n/zk-drive/internal/storage"
 )
 
@@ -87,11 +91,20 @@ func run() error {
 
 	var previewSvc *preview.Service
 	var scanSvc *scan.Service
+	var archiveSvc *retention.ArchiveService
 	if storageClient != nil {
 		previewSvc = preview.NewService(pool, storageClient, preview.NewPostgresRepository(pool))
 		scanSvc = scan.NewService(pool, storageClient, os.Getenv("CLAMAV_ADDRESS"))
 		scanSvc.SetNotifier(notifSvc)
+		archiveSvc = retention.NewArchiveService(pool, storageClient, nil)
 	}
+
+	// Guest expiry sweep runs on a timer inside the worker binary so
+	// the server process doesn't take on extra cron-like
+	// responsibilities. A 5-minute cadence is fine for Phase 3 —
+	// share-link TTLs are generally hours / days.
+	sharingSvc := sharing.NewService(sharing.NewPostgresRepository(pool), permissionGranterAdapter{permission.NewService(permission.NewPostgresRepository(pool))})
+	go runGuestExpirySweep(ctx, sharingSvc, 5*time.Minute)
 
 	natsURL := os.Getenv("NATS_URL")
 	if natsURL == "" {
@@ -117,7 +130,7 @@ func run() error {
 		return fmt.Errorf("ensure stream: %w", err)
 	}
 
-	subs, err := subscribeAll(ctx, js, previewSvc, scanSvc)
+	subs, err := subscribeAll(ctx, js, previewSvc, scanSvc, archiveSvc)
 	if err != nil {
 		return fmt.Errorf("subscribe: %w", err)
 	}
@@ -140,7 +153,7 @@ func run() error {
 func ensureStream(js nats.JetStreamContext) error {
 	cfg := &nats.StreamConfig{
 		Name:      streamName,
-		Subjects:  []string{jobs.SubjectPreview, jobs.SubjectScan, jobs.SubjectIndex},
+		Subjects:  []string{jobs.SubjectPreview, jobs.SubjectScan, jobs.SubjectIndex, jobs.SubjectArchive, jobs.SubjectRetention},
 		Storage:   nats.FileStorage,
 		Retention: nats.WorkQueuePolicy,
 		MaxAge:    7 * 24 * time.Hour,
@@ -159,7 +172,7 @@ func ensureStream(js nats.JetStreamContext) error {
 
 // subscribeAll wires a durable consumer for each subject. Durable
 // names let the worker restart without losing checkpoint state.
-func subscribeAll(ctx context.Context, js nats.JetStreamContext, previewSvc *preview.Service, scanSvc *scan.Service) ([]*nats.Subscription, error) {
+func subscribeAll(ctx context.Context, js nats.JetStreamContext, previewSvc *preview.Service, scanSvc *scan.Service, archiveSvc *retention.ArchiveService) ([]*nats.Subscription, error) {
 	subjects := []struct {
 		subject string
 		durable string
@@ -168,6 +181,7 @@ func subscribeAll(ctx context.Context, js nats.JetStreamContext, previewSvc *pre
 		{jobs.SubjectPreview, "drive-preview", previewHandler(ctx, previewSvc)},
 		{jobs.SubjectScan, "drive-scan", scanHandler(ctx, scanSvc)},
 		{jobs.SubjectIndex, "drive-index", indexHandler()},
+		{jobs.SubjectArchive, "drive-archive", archiveHandler(ctx, archiveSvc)},
 	}
 	var subs []*nats.Subscription
 	for _, s := range subjects {
@@ -256,6 +270,77 @@ func scanHandler(ctx context.Context, svc *scan.Service) nats.MsgHandler {
 		log.Printf("worker: scan %s file=%s version=%s detail=%q", v.Status, job.FileID, job.VersionID, v.Detail)
 		_ = msg.Ack()
 	}
+}
+
+// archiveHandler compresses and uploads a single version's bytes to
+// the cold archive key pattern, then stamps archived_at on the row.
+// Missing storage client -> ack and move on (the same pattern as
+// preview/scan).
+func archiveHandler(ctx context.Context, svc *retention.ArchiveService) nats.MsgHandler {
+	return func(msg *nats.Msg) {
+		var job jobs.FileJob
+		if err := json.Unmarshal(msg.Data, &job); err != nil {
+			log.Printf("worker: malformed archive payload: %v", err)
+			_ = msg.Term()
+			return
+		}
+		if svc == nil {
+			log.Printf("worker: archive skipped (no storage client): file=%s version=%s", job.FileID, job.VersionID)
+			_ = msg.Ack()
+			return
+		}
+		jobCtx, cancel := context.WithTimeout(ctx, 10*time.Minute)
+		defer cancel()
+		if err := svc.ArchiveVersion(jobCtx, job.VersionID); err != nil {
+			log.Printf("worker: archive failed file=%s version=%s: %v", job.FileID, job.VersionID, err)
+			_ = msg.Nak()
+			return
+		}
+		log.Printf("worker: archive ok file=%s version=%s", job.FileID, job.VersionID)
+		_ = msg.Ack()
+	}
+}
+
+// runGuestExpirySweep periodically revokes expired guest permission
+// rows. The first sweep runs 30 seconds after startup so the worker
+// doesn't race the server's migration pass on cold start.
+func runGuestExpirySweep(ctx context.Context, svc *sharing.Service, interval time.Duration) {
+	time.Sleep(30 * time.Second)
+	t := time.NewTicker(interval)
+	defer t.Stop()
+	for {
+		revoked, err := svc.ExpireGuestAccess(ctx, time.Now().UTC())
+		if err != nil {
+			log.Printf("worker: guest expiry sweep failed: %v", err)
+		} else if revoked > 0 {
+			log.Printf("worker: guest expiry sweep revoked %d permissions", revoked)
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+		}
+	}
+}
+
+// permissionGranterAdapter bridges *permission.Service to
+// sharing.PermissionGranter. Duplicated from cmd/server so the worker
+// can stand up its own sharing service without pulling the server's
+// wiring file.
+type permissionGranterAdapter struct {
+	svc *permission.Service
+}
+
+func (a permissionGranterAdapter) Grant(ctx context.Context, workspaceID uuid.UUID, resourceType string, resourceID uuid.UUID, granteeType string, granteeID uuid.UUID, role string, expiresAt *time.Time) (sharing.PermissionRef, error) {
+	p, err := a.svc.Grant(ctx, workspaceID, resourceType, resourceID, granteeType, granteeID, role, expiresAt)
+	if err != nil {
+		return sharing.PermissionRef{}, err
+	}
+	return sharing.PermissionRef{ID: p.ID}, nil
+}
+
+func (a permissionGranterAdapter) Revoke(ctx context.Context, workspaceID, permID uuid.UUID) error {
+	return a.svc.Revoke(ctx, workspaceID, permID)
 }
 
 // indexHandler remains a logging placeholder; search indexing lives

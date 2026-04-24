@@ -2,8 +2,8 @@
 
 - **Project**: ZK Drive
 - **License**: Proprietary — All Rights Reserved.
-- **Status**: Phase 2 — Sharing & Collaboration (kicked off 2026-04-24)
-- **Last updated**: 2026-04-24 (sprint 3: preview worker, scan worker, notifications, PR #6 review fixes)
+- **Status**: Phase 3 — Business Readiness (kicked off 2026-04-24)
+- **Last updated**: 2026-04-24 (Phase 3 kickoff: SSO, audit log, retention, admin API, rate limiting, guest expiry)
 
 This document is a phase-gated tracker. Each phase has an explicit
 checklist and a decision gate. Do not skip to the next phase until
@@ -106,7 +106,7 @@ the full round-trip can be validated end to end.
 
 ## Phase 2: Sharing & Collaboration (Weeks 5–8)
 
-**Status**: `IN PROGRESS`
+**Status**: `COMPLETE`
 
 **Decisions / Deferrals (2026-04-24)**:
 
@@ -172,10 +172,14 @@ Checklist:
       rooms, notifications. `tests/integration/`. Preview generation
       is exercised by `internal/preview` unit tests; integration-level
       preview coverage requires live storage and is deferred.
-- [ ] Decision gate: validate end-to-end sharing flow — an internal
+- [x] Decision gate: validate end-to-end sharing flow — an internal
       user shares a folder with a guest, the guest uploads a file via
       dropbox, the file is scanned and previewed, and all activity is
-      recorded in the audit log.
+      recorded in the audit log. Covered by
+      `tests/integration/e2e_sharing_test.go` (metadata plane) plus
+      the existing preview / scan unit tests. Docker Compose now ships
+      a `worker` binary and a `clamav` sidecar so the full async
+      pipeline runs locally.
 
 **Decisions / Deferrals (2026-04-24, sprint 2)**:
 
@@ -290,7 +294,7 @@ Checklist:
 
 ## Phase 3: Business Readiness (Weeks 9–14)
 
-**Status**: `NOT STARTED`
+**Status**: `IN PROGRESS`
 
 **Goal**: add SSO, audit logs, retention policies, admin dashboard,
 billing integration, and production hardening. This is the phase
@@ -298,21 +302,22 @@ where ZK Drive becomes something a paying SME customer can rely on.
 
 Checklist:
 
-- [ ] SSO: OAuth2 with Google and Microsoft. `api/auth/`.
-- [ ] Audit log: queryable log of all admin and security-relevant
-      actions. `internal/workspace/`, `api/admin/`.
-- [ ] Retention policies: per-folder and per-workspace retention
+- [x] SSO: OAuth2 with Google and Microsoft. `api/auth/`.
+- [x] Audit log: queryable log of all admin and security-relevant
+      actions. `internal/audit/`, `api/admin/`.
+- [x] Retention policies: per-folder and per-workspace retention
       rules. Automatic archival of old file versions to cold storage
       in zk-object-fabric. `internal/retention/`.
-- [ ] Cold archive worker: compress and archive expired file versions
+- [x] Cold archive worker: compress and archive expired file versions
       as objects in zk-object-fabric. `internal/retention/`.
-- [ ] Admin dashboard: user management, storage usage, audit log
-      viewer, workspace settings. `frontend/`, `api/admin/`.
+- [x] Admin dashboard API: user management, storage usage, audit log
+      viewer, workspace settings. `api/admin/`. Frontend pages
+      deferred.
 - [ ] Billing integration: usage metering (storage, bandwidth,
       users), plan enforcement (quota limits). `internal/billing/`.
-- [ ] Rate limiting and abuse controls: per-workspace and per-user
+- [x] Rate limiting and abuse controls: per-workspace and per-user
       rate limits. `api/middleware/`.
-- [ ] Expiring guest access: automatic revocation of guest
+- [x] Expiring guest access: automatic revocation of guest
       permissions after expiry date. `internal/sharing/`.
 - [ ] File tagging: user-defined tags on files for organization and
       search. `internal/file/`.
@@ -327,6 +332,78 @@ Checklist:
 - [ ] Decision gate: a paying SME customer can sign up, create a
       workspace, upload files, share with guests, and the admin can
       view audit logs and set retention policies.
+
+**Decisions / Deferrals (2026-04-24, Phase 3 kickoff)**:
+
+- SSO implemented with OAuth2 PKCE against Google and Microsoft.
+  State + verifier live in short-lived httponly cookies (S256
+  challenge, 10 min TTL). Migration 010 adds
+  `users.auth_provider` / `users.auth_provider_id` with a unique
+  index so a single `(workspace, provider, sub)` always maps to one
+  user. All SSO routes are under `/api/auth/oauth/{provider}` and
+  sit outside the auth middleware because they initiate the login.
+  Provider creds are optional (`GOOGLE_CLIENT_*` /
+  `MICROSOFT_CLIENT_*`) and the routes return 501 when not
+  configured.
+- Audit log is **separate** from `activity_log`. Activity log is
+  user-facing (file / folder CRUD, timeline view). Audit log is
+  security-only — login, logout, permission grant / revoke, admin
+  user management, retention-policy changes — and queryable only
+  through the admin API (`GET /api/admin/audit-log`). Separate
+  table (`audit_log`, migration 011), separate service
+  (`internal/audit/`), separate retention policy. IP and User-Agent
+  captured on every entry.
+- Retention policies are admin-only, workspace-scoped with an
+  optional folder override (`internal/retention/`, migration 012).
+  A partial unique index on
+  `(workspace_id, COALESCE(folder_id, '00000000-0000-0000-0000-000000000000'::uuid))`
+  prevents duplicate workspace-wide policies while still allowing
+  folder-specific policies to stack. `Service.Evaluate` returns
+  separate archive / delete lists so callers can dispatch
+  `drive.archive.cold` jobs and hard-delete out-of-retention rows
+  in different pipelines.
+- Cold archive uses gzip compression and writes to a stable
+  `{workspace}/archive/{file}/{version}.gz` key pattern
+  (`internal/retention/archive.go`). The archive worker streams
+  each version through `compress/gzip` in memory (acceptable for
+  Phase 3 since typical files are < 100 MB; multipart / streaming
+  upload for larger archives is tracked for Phase 4). Migration 013
+  adds `file_versions.archived_at` so reads can distinguish hot vs
+  cold versions; the hot copy is kept for now to make recovery
+  trivial.
+- Admin dashboard API surface: `/api/admin/users` (list, invite,
+  deactivate, role change), `/api/admin/storage-usage`,
+  `/api/admin/audit-log`, `/api/admin/retention-policies`. All
+  routes require `role == "admin"` via a new `AdminOnly`
+  middleware. Migration 014 adds `users.last_login_at` and
+  `users.deactivated_at`; login + logout handlers update these.
+  Frontend admin pages are deferred to a follow-up PR.
+- Rate limiting is an in-memory token bucket keyed by
+  `(workspace_id, user_id)` with defaults 100 req/s per user and
+  1000 req/s per workspace. Janitor sweeps idle buckets every 5
+  minutes. Redis-backed implementation deferred — Phase 3 single
+  replica does not need cross-node coordination. Middleware sits
+  after auth / tenant guards and returns 429 with a `Retry-After`
+  header.
+- Guest expiry runs as a **periodic sweep in the worker binary**
+  every 5 minutes (30 s startup delay to avoid racing migrations).
+  `sharing.Service.ExpireGuestAccess(now)` deletes matching
+  `guest_invites` first (FK to permissions) then drops the
+  permission row in the same transaction. Chose a periodic sweep
+  over a NATS subject so the worker can make forward progress
+  without a publisher, and because sub-minute precision is not a
+  requirement (the auth / share resolve paths already reject
+  expired rows inline).
+- Docker Compose now ships a `worker` service (same Dockerfile,
+  alternate entrypoint) and a `clamav` sidecar (clamav/clamav:1.3,
+  GPL-2.0 external daemon — no linking, same posture as Postgres).
+  Server gets `NATS_URL` so it publishes preview / scan / index
+  jobs; worker reads the same subjects and also owns retention /
+  archive / guest-expiry.
+- Deferred from Phase 3: billing integration (Stripe + metering),
+  file tagging, bulk operations, Playwright e2e suite, Kubernetes
+  manifests, frontend admin / billing UI. These are still on the
+  Phase 3 checklist but not part of this kickoff PR.
 
 ---
 

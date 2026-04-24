@@ -109,3 +109,10 @@ func (s *Service) UpdateSize(ctx context.Context, workspaceID, fileID uuid.UUID,
 func (s *Service) ListVersions(ctx context.Context, workspaceID, fileID uuid.UUID) ([]*FileVersion, error) {
 	return s.repo.ListVersions(ctx, workspaceID, fileID)
 }
+
+// GetVersionByID returns a single version scoped to a workspace. Handlers
+// that hold a file's current_version_id use this instead of ListVersions
+// so they do not pay for a full history fetch.
+func (s *Service) GetVersionByID(ctx context.Context, workspaceID, versionID uuid.UUID) (*FileVersion, error) {
+	return s.repo.GetVersionByID(ctx, workspaceID, versionID)
+}

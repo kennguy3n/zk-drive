@@ -16,6 +16,7 @@ import (
 
 	"github.com/kennguy3n/zk-drive/api/middleware"
 	"github.com/kennguy3n/zk-drive/internal/activity"
+	"github.com/kennguy3n/zk-drive/internal/audit"
 	"github.com/kennguy3n/zk-drive/internal/file"
 	"github.com/kennguy3n/zk-drive/internal/folder"
 	"github.com/kennguy3n/zk-drive/internal/jobs"
@@ -56,6 +57,30 @@ type Handler struct {
 	jobs          *jobs.Publisher
 	notifications *notification.Service
 	previews      preview.Repository
+	audit         *audit.Service
+}
+
+// WithAudit wires an audit service so security-relevant operations
+// (permission grant/revoke, workspace update, admin ops) emit audit
+// entries. A nil service silently drops audit logging while preserving
+// the primary operation.
+func (h *Handler) WithAudit(s *audit.Service) *Handler {
+	h.audit = s
+	return h
+}
+
+// logAudit is a nil-safe wrapper mirroring logActivity.
+func (h *Handler) logAudit(ctx context.Context, r *http.Request, action, resourceType string, resourceID *uuid.UUID, metadata map[string]any) {
+	if h.audit == nil {
+		return
+	}
+	workspaceID, _ := middleware.WorkspaceIDFromContext(ctx)
+	userID, _ := middleware.UserIDFromContext(ctx)
+	var actor *uuid.UUID
+	if userID != uuid.Nil {
+		actor = &userID
+	}
+	h.audit.LogAction(ctx, workspaceID, actor, action, resourceType, resourceID, r, metadata)
 }
 
 // NewHandler constructs a Handler from the underlying services. The pool is
@@ -355,6 +380,11 @@ func (h *Handler) UpdateWorkspace(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "update workspace: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
+	wsID := ws.ID
+	h.logAudit(r.Context(), r, audit.ActionWorkspaceUpdate, "workspace", &wsID, map[string]any{
+		"name": ws.Name,
+		"tier": ws.Tier,
+	})
 	writeJSON(w, http.StatusOK, ws)
 }
 
@@ -906,20 +936,13 @@ func (h *Handler) DownloadURL(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "file has no current version", http.StatusNotFound)
 		return
 	}
-	versions, err := h.files.ListVersions(r.Context(), workspaceID, f.ID)
+	current, err := h.files.GetVersionByID(r.Context(), workspaceID, *f.CurrentVersionID)
 	if err != nil {
-		writeServiceError(w, err)
-		return
-	}
-	var current *file.FileVersion
-	for _, v := range versions {
-		if v.ID == *f.CurrentVersionID {
-			current = v
-			break
+		if errors.Is(err, file.ErrNotFound) {
+			http.Error(w, "current version not found", http.StatusNotFound)
+			return
 		}
-	}
-	if current == nil {
-		http.Error(w, "current version not found", http.StatusNotFound)
+		writeServiceError(w, err)
 		return
 	}
 	// Refuse to mint a presigned URL for a version clamd has already
@@ -1053,6 +1076,13 @@ func (h *Handler) GrantPermission(w http.ResponseWriter, r *http.Request) {
 		"grantee_id":    p.GranteeID,
 		"role":          p.Role,
 	})
+	permID := p.ID
+	h.logAudit(r.Context(), r, audit.ActionPermissionGrant, req.ResourceType, &permID, map[string]any{
+		"resource_id":  resourceID,
+		"grantee_type": p.GranteeType,
+		"grantee_id":   p.GranteeID,
+		"role":         p.Role,
+	})
 	writeJSON(w, http.StatusCreated, p)
 }
 
@@ -1088,6 +1118,13 @@ func (h *Handler) RevokePermission(w http.ResponseWriter, r *http.Request) {
 		"grantee_type":  p.GranteeType,
 		"grantee_id":    p.GranteeID,
 		"role":          p.Role,
+	})
+	permID := p.ID
+	h.logAudit(r.Context(), r, audit.ActionPermissionRevoke, p.ResourceType, &permID, map[string]any{
+		"resource_id":  p.ResourceID,
+		"grantee_type": p.GranteeType,
+		"grantee_id":   p.GranteeID,
+		"role":         p.Role,
 	})
 	w.WriteHeader(http.StatusNoContent)
 }
@@ -1837,17 +1874,13 @@ func (h *Handler) PreviewURL(w http.ResponseWriter, r *http.Request) {
 	// specific version the preview was generated from: GetLatestByFile
 	// returns the newest preview by created_at, which may predate the
 	// current version if the preview worker has not caught up.
-	versions, verr := h.files.ListVersions(r.Context(), workspaceID, f.ID)
-	if verr != nil {
-		writeServiceError(w, verr)
-		return
-	}
-	scanStatusByVersion := make(map[uuid.UUID]string, len(versions))
-	for _, v := range versions {
-		scanStatusByVersion[v.ID] = v.ScanStatus
-	}
 	if f.CurrentVersionID != nil {
-		if scanStatusByVersion[*f.CurrentVersionID] == scan.StatusQuarantined {
+		current, verr := h.files.GetVersionByID(r.Context(), workspaceID, *f.CurrentVersionID)
+		if verr != nil && !errors.Is(verr, file.ErrNotFound) {
+			writeServiceError(w, verr)
+			return
+		}
+		if current != nil && current.ScanStatus == scan.StatusQuarantined {
 			http.Error(w, "file version quarantined by virus scan", http.StatusForbidden)
 			return
 		}
@@ -1861,11 +1894,16 @@ func (h *Handler) PreviewURL(w http.ResponseWriter, r *http.Request) {
 		writeServiceError(w, err)
 		return
 	}
-	if scanStatusByVersion[p.VersionID] == scan.StatusQuarantined {
+	previewVersion, verr := h.files.GetVersionByID(r.Context(), workspaceID, p.VersionID)
+	if verr != nil && !errors.Is(verr, file.ErrNotFound) {
+		writeServiceError(w, verr)
+		return
+	}
+	if previewVersion != nil && previewVersion.ScanStatus == scan.StatusQuarantined {
 		http.Error(w, "file version quarantined by virus scan", http.StatusForbidden)
 		return
 	}
-	url, err := h.storage.GenerateDownloadURL(r.Context(), p.ObjectKey, 0)
+	url, err := h.storage.GenerateDownloadURL(r.Context(), p.ObjectKey, storage.DefaultPresignExpiry)
 	if err != nil {
 		http.Error(w, "preview url: "+err.Error(), http.StatusInternalServerError)
 		return

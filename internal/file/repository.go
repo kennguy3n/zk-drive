@@ -29,6 +29,7 @@ type Repository interface {
 	CreateVersionAndSetCurrent(ctx context.Context, workspaceID uuid.UUID, v *FileVersion) error
 	ConfirmVersion(ctx context.Context, workspaceID uuid.UUID, v *FileVersion) error
 	ListVersions(ctx context.Context, workspaceID, fileID uuid.UUID) ([]*FileVersion, error)
+	GetVersionByID(ctx context.Context, workspaceID, versionID uuid.UUID) (*FileVersion, error)
 	SetCurrentVersion(ctx context.Context, workspaceID, fileID, versionID uuid.UUID) error
 }
 
@@ -299,6 +300,30 @@ FROM file_versions WHERE file_id = $1 ORDER BY version_number DESC`
 		out = append(out, v)
 	}
 	return out, rows.Err()
+}
+
+// GetVersionByID returns a single version row joined against files so the
+// lookup is scoped to a workspace without requiring callers to pass
+// the parent file id. Used by handlers that already hold a file's
+// current_version_id and want to avoid paging ListVersions.
+func (r *PostgresRepository) GetVersionByID(ctx context.Context, workspaceID, versionID uuid.UUID) (*FileVersion, error) {
+	const q = `
+SELECT v.id, v.file_id, v.version_number, v.object_key, v.size_bytes, v.checksum, v.created_by, v.created_at,
+       COALESCE(v.scan_status, ''), COALESCE(v.scan_detail, ''), v.scanned_at
+FROM file_versions v
+JOIN files f ON f.id = v.file_id
+WHERE f.workspace_id = $1 AND v.id = $2 AND f.deleted_at IS NULL`
+	v := &FileVersion{}
+	if err := r.pool.QueryRow(ctx, q, workspaceID, versionID).Scan(
+		&v.ID, &v.FileID, &v.VersionNumber, &v.ObjectKey, &v.SizeBytes, &v.Checksum, &v.CreatedBy, &v.CreatedAt,
+		&v.ScanStatus, &v.ScanDetail, &v.ScannedAt,
+	); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, ErrNotFound
+		}
+		return nil, fmt.Errorf("get version by id: %w", err)
+	}
+	return v, nil
 }
 
 // SetCurrentVersion points a file at one of its existing versions.

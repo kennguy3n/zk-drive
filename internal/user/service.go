@@ -2,6 +2,7 @@ package user
 
 import (
 	"context"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -96,4 +97,33 @@ func (s *Service) GetByEmailAnyWorkspace(ctx context.Context, email string) (*Us
 // List returns users belonging to a workspace.
 func (s *Service) List(ctx context.Context, workspaceID uuid.UUID) ([]*User, error) {
 	return s.repo.List(ctx, workspaceID)
+}
+
+// GetByAuthProvider returns the user matched on (auth_provider,
+// auth_provider_id). Used by the SSO callback.
+func (s *Service) GetByAuthProvider(ctx context.Context, provider, providerID string) (*User, error) {
+	return s.repo.GetByAuthProvider(ctx, provider, providerID)
+}
+
+// UpdateLastLogin stamps the user's last_login_at column. Call after a
+// successful authentication (password or SSO).
+func (s *Service) UpdateLastLogin(ctx context.Context, userID uuid.UUID, at time.Time) error {
+	return s.repo.UpdateLastLogin(ctx, userID, at)
+}
+
+// Deactivate soft-deactivates a user. The row is preserved so audit
+// history still resolves the actor.
+func (s *Service) Deactivate(ctx context.Context, workspaceID, userID uuid.UUID, at time.Time) error {
+	return s.repo.Deactivate(ctx, workspaceID, userID, at)
+}
+
+// UpdateRole changes a user's role within a workspace.
+func (s *Service) UpdateRole(ctx context.Context, workspaceID, userID uuid.UUID, role string) error {
+	return s.repo.UpdateRole(ctx, workspaceID, userID, role)
+}
+
+// LinkAuthProvider stamps an existing user with a (provider,
+// provider_id) pair so subsequent SSO logins resolve by subject id.
+func (s *Service) LinkAuthProvider(ctx context.Context, userID uuid.UUID, provider, providerID string) error {
+	return s.repo.LinkAuthProvider(ctx, userID, provider, providerID)
 }
