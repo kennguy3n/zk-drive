@@ -23,6 +23,11 @@ import (
 	"github.com/kennguy3n/zk-drive/internal/workspace"
 )
 
+// activityMaxPageSize must stay in sync with activity.normalizePaging so
+// the handler can echo the effective limit back to the client without
+// lying about how many rows the repository actually returned.
+const activityMaxPageSize = 200
+
 // Handler serves workspace / folder / file HTTP endpoints.
 //
 // storage is optional: when nil, the upload-url / confirm-upload /
@@ -979,6 +984,16 @@ func (h *Handler) ListActivity(w http.ResponseWriter, r *http.Request) {
 	}
 	limit := parseIntParam(r.URL.Query().Get("limit"), 50)
 	offset := parseIntParam(r.URL.Query().Get("offset"), 0)
+	// Keep in sync with activity.normalizePaging — the handler echoes the
+	// effective limit back to the client, so a client doing
+	// len(entries) < limit to detect end-of-stream stays correct when the
+	// repo silently caps oversized requests.
+	if limit <= 0 {
+		limit = 50
+	}
+	if limit > activityMaxPageSize {
+		limit = activityMaxPageSize
+	}
 
 	var (
 		list []*activity.LogEntry
