@@ -13,6 +13,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	chimw "github.com/go-chi/chi/v5/middleware"
 	"github.com/google/uuid"
+	"github.com/nats-io/nats.go"
 
 	"github.com/kennguy3n/zk-drive/api/auth"
 	"github.com/kennguy3n/zk-drive/api/drive"
@@ -22,6 +23,7 @@ import (
 	"github.com/kennguy3n/zk-drive/internal/database"
 	"github.com/kennguy3n/zk-drive/internal/file"
 	"github.com/kennguy3n/zk-drive/internal/folder"
+	"github.com/kennguy3n/zk-drive/internal/jobs"
 	"github.com/kennguy3n/zk-drive/internal/permission"
 	"github.com/kennguy3n/zk-drive/internal/search"
 	"github.com/kennguy3n/zk-drive/internal/sharing"
@@ -89,11 +91,45 @@ func run() error {
 
 	sharingSvc := sharing.NewService(sharing.NewPostgresRepository(pool), permissionGranterAdapter{permissionSvc})
 	searchSvc := search.NewService(pool)
+	clientRoomSvc := sharing.NewClientRoomService(
+		sharing.NewPostgresClientRoomRepository(pool),
+		folderCreatorAdapter{folderSvc},
+		sharingSvc,
+	)
+
+	// NATS JetStream is optional: when NATS_URL is unset the drive
+	// handler gets a nil publisher and ConfirmUpload's job fan-out
+	// becomes a no-op. Logging a best-effort connect failure (rather
+	// than returning it) keeps the API plane working in local dev
+	// stacks that don't run NATS.
+	var jobPublisher *jobs.Publisher
+	if natsURL := os.Getenv("NATS_URL"); natsURL != "" {
+		nc, nerr := nats.Connect(natsURL,
+			nats.Name("zk-drive-server"),
+			nats.MaxReconnects(-1),
+			nats.ReconnectWait(2*time.Second),
+		)
+		if nerr != nil {
+			log.Printf("nats: connect %s failed, post-upload jobs disabled: %v", natsURL, nerr)
+		} else {
+			js, jerr := nc.JetStream()
+			if jerr != nil {
+				log.Printf("nats: jetstream context failed: %v", jerr)
+				nc.Close()
+			} else {
+				jobPublisher = jobs.NewPublisher(js)
+				log.Printf("nats: connected to %s, post-upload jobs enabled", natsURL)
+				defer nc.Drain() //nolint:errcheck // best-effort drain
+			}
+		}
+	}
 
 	authHandler := auth.NewHandler(pool, userSvc, wsSvc, cfg.JWTSecret)
 	driveHandler := drive.NewHandler(pool, wsSvc, folderSvc, fileSvc, userSvc, storageClient, permissionSvc, activitySvc).
 		WithSharing(sharingSvc).
-		WithSearch(searchSvc)
+		WithSearch(searchSvc).
+		WithClientRooms(clientRoomSvc).
+		WithJobs(jobPublisher)
 
 	r := chi.NewRouter()
 	r.Use(chimw.RequestID)
@@ -154,6 +190,11 @@ func run() error {
 			r.Post("/guest-invites", driveHandler.CreateGuestInvite)
 			r.Post("/guest-invites/{id}/accept", driveHandler.AcceptGuestInvite)
 			r.Delete("/guest-invites/{id}", driveHandler.RevokeGuestInvite)
+
+			r.Get("/client-rooms", driveHandler.ListClientRooms)
+			r.Post("/client-rooms", driveHandler.CreateClientRoom)
+			r.Get("/client-rooms/{id}", driveHandler.GetClientRoom)
+			r.Delete("/client-rooms/{id}", driveHandler.DeleteClientRoom)
 
 			r.Get("/search", driveHandler.Search)
 
@@ -218,4 +259,21 @@ func (a permissionGranterAdapter) Grant(ctx context.Context, workspaceID uuid.UU
 
 func (a permissionGranterAdapter) Revoke(ctx context.Context, workspaceID, permID uuid.UUID) error {
 	return a.svc.Revoke(ctx, workspaceID, permID)
+}
+
+// folderCreatorAdapter bridges *folder.Service to
+// sharing.FolderCreator. Keeping the adapter here (rather than inside
+// the sharing package) avoids an import cycle: sharing's
+// client-room service needs to mint folders, but folder must not
+// depend on sharing.
+type folderCreatorAdapter struct {
+	svc *folder.Service
+}
+
+func (a folderCreatorAdapter) Create(ctx context.Context, workspaceID uuid.UUID, parentID *uuid.UUID, name string, createdBy uuid.UUID) (sharing.FolderRef, error) {
+	f, err := a.svc.Create(ctx, workspaceID, parentID, name, createdBy)
+	if err != nil {
+		return sharing.FolderRef{}, err
+	}
+	return sharing.FolderRef{ID: f.ID}, nil
 }

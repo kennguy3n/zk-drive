@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"log"
 	"net/http"
 	"strconv"
 	"strings"
@@ -17,6 +18,7 @@ import (
 	"github.com/kennguy3n/zk-drive/internal/activity"
 	"github.com/kennguy3n/zk-drive/internal/file"
 	"github.com/kennguy3n/zk-drive/internal/folder"
+	"github.com/kennguy3n/zk-drive/internal/jobs"
 	"github.com/kennguy3n/zk-drive/internal/permission"
 	"github.com/kennguy3n/zk-drive/internal/search"
 	"github.com/kennguy3n/zk-drive/internal/sharing"
@@ -47,6 +49,8 @@ type Handler struct {
 	activity    *activity.Service
 	sharing     *sharing.Service
 	search      *search.Service
+	clientRooms *sharing.ClientRoomService
+	jobs        *jobs.Publisher
 }
 
 // NewHandler constructs a Handler from the underlying services. The pool is
@@ -91,6 +95,21 @@ func (h *Handler) WithSharing(s *sharing.Service) *Handler {
 // /api/search endpoint.
 func (h *Handler) WithSearch(s *search.Service) *Handler {
 	h.search = s
+	return h
+}
+
+// WithClientRooms attaches a client-room service so the /api/client-rooms
+// endpoints stop responding 501 Not Implemented.
+func (h *Handler) WithClientRooms(s *sharing.ClientRoomService) *Handler {
+	h.clientRooms = s
+	return h
+}
+
+// WithJobs attaches a NATS JetStream publisher so ConfirmUpload can
+// enqueue preview / scan / index jobs. A nil publisher disables
+// publishing (calls become no-ops), matching the logActivity pattern.
+func (h *Handler) WithJobs(p *jobs.Publisher) *Handler {
+	h.jobs = p
 	return h
 }
 
@@ -361,6 +380,10 @@ func (h *Handler) GetFolder(w http.ResponseWriter, r *http.Request) {
 		writeServiceError(w, err)
 		return
 	}
+	if err := h.assertResourceAccess(r.Context(), permission.ResourceFolder, f.ID, permission.RoleViewer); err != nil {
+		writeServiceError(w, err)
+		return
+	}
 	children, err := h.folders.ListChildren(r.Context(), workspaceID, &id)
 	if err != nil {
 		http.Error(w, "list children: "+err.Error(), http.StatusInternalServerError)
@@ -420,6 +443,10 @@ func (h *Handler) RenameFolder(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid json body", http.StatusBadRequest)
 		return
 	}
+	if err := h.assertResourceAccess(r.Context(), permission.ResourceFolder, id, permission.RoleEditor); err != nil {
+		writeServiceError(w, err)
+		return
+	}
 	f, err := h.folders.Rename(r.Context(), workspaceID, id, req.Name)
 	if err != nil {
 		writeServiceError(w, err)
@@ -437,6 +464,10 @@ func (h *Handler) DeleteFolder(w http.ResponseWriter, r *http.Request) {
 	id, err := uuid.Parse(chi.URLParam(r, "id"))
 	if err != nil {
 		http.Error(w, "invalid id", http.StatusBadRequest)
+		return
+	}
+	if err := h.assertResourceAccess(r.Context(), permission.ResourceFolder, id, permission.RoleEditor); err != nil {
+		writeServiceError(w, err)
 		return
 	}
 	if err := h.folders.Delete(r.Context(), workspaceID, id); err != nil {
@@ -469,6 +500,16 @@ func (h *Handler) MoveFolder(w http.ResponseWriter, r *http.Request) {
 		}
 		parentID = &pid
 	}
+	if err := h.assertResourceAccess(r.Context(), permission.ResourceFolder, id, permission.RoleEditor); err != nil {
+		writeServiceError(w, err)
+		return
+	}
+	if parentID != nil {
+		if err := h.assertResourceAccess(r.Context(), permission.ResourceFolder, *parentID, permission.RoleEditor); err != nil {
+			writeServiceError(w, err)
+			return
+		}
+	}
 	f, err := h.folders.Move(r.Context(), workspaceID, id, parentID)
 	if err != nil {
 		writeServiceError(w, err)
@@ -500,6 +541,10 @@ func (h *Handler) CreateFile(w http.ResponseWriter, r *http.Request) {
 		writeServiceError(w, err)
 		return
 	}
+	if err := h.assertResourceAccess(r.Context(), permission.ResourceFolder, folderID, permission.RoleEditor); err != nil {
+		writeServiceError(w, err)
+		return
+	}
 	f, err := h.files.Create(r.Context(), workspaceID, folderID, req.Name, req.MimeType, userID)
 	if err != nil {
 		writeServiceError(w, err)
@@ -525,6 +570,10 @@ func (h *Handler) GetFile(w http.ResponseWriter, r *http.Request) {
 		writeServiceError(w, err)
 		return
 	}
+	if err := h.assertResourceAccess(r.Context(), permission.ResourceFile, f.ID, permission.RoleViewer); err != nil {
+		writeServiceError(w, err)
+		return
+	}
 	writeJSON(w, http.StatusOK, f)
 }
 
@@ -539,6 +588,10 @@ func (h *Handler) UpdateFile(w http.ResponseWriter, r *http.Request) {
 	var req updateFileRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "invalid json body", http.StatusBadRequest)
+		return
+	}
+	if err := h.assertResourceAccess(r.Context(), permission.ResourceFile, id, permission.RoleEditor); err != nil {
+		writeServiceError(w, err)
 		return
 	}
 	f, err := h.files.Rename(r.Context(), workspaceID, id, req.Name)
@@ -558,6 +611,10 @@ func (h *Handler) DeleteFile(w http.ResponseWriter, r *http.Request) {
 	id, err := uuid.Parse(chi.URLParam(r, "id"))
 	if err != nil {
 		http.Error(w, "invalid id", http.StatusBadRequest)
+		return
+	}
+	if err := h.assertResourceAccess(r.Context(), permission.ResourceFile, id, permission.RoleEditor); err != nil {
+		writeServiceError(w, err)
 		return
 	}
 	if err := h.files.Delete(r.Context(), workspaceID, id); err != nil {
@@ -587,6 +644,14 @@ func (h *Handler) MoveFile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if _, err := h.folders.GetByID(r.Context(), workspaceID, folderID); err != nil {
+		writeServiceError(w, err)
+		return
+	}
+	if err := h.assertResourceAccess(r.Context(), permission.ResourceFile, id, permission.RoleEditor); err != nil {
+		writeServiceError(w, err)
+		return
+	}
+	if err := h.assertResourceAccess(r.Context(), permission.ResourceFolder, folderID, permission.RoleEditor); err != nil {
 		writeServiceError(w, err)
 		return
 	}
@@ -648,6 +713,10 @@ func (h *Handler) UploadURL(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if _, err := h.folders.GetByID(r.Context(), workspaceID, folderID); err != nil {
+		writeServiceError(w, err)
+		return
+	}
+	if err := h.assertResourceAccess(r.Context(), permission.ResourceFolder, folderID, permission.RoleEditor); err != nil {
 		writeServiceError(w, err)
 		return
 	}
@@ -744,10 +813,34 @@ func (h *Handler) ConfirmUpload(w http.ResponseWriter, r *http.Request) {
 		"version_id": v.ID,
 		"size_bytes": v.SizeBytes,
 	})
+	// Fan out post-upload work (preview, scan, index) via JetStream.
+	// All three publishers are nil-safe so the handler behaves
+	// identically when NATS is not configured locally. Publish errors
+	// are logged and ignored so a flaky broker never fails an
+	// otherwise-successful upload — workers can be re-triggered later.
+	h.publishPostUploadJobs(r.Context(), f.ID, v.ID)
 	writeJSON(w, http.StatusOK, map[string]any{
 		"file":    updated,
 		"version": v,
 	})
+}
+
+// publishPostUploadJobs dispatches preview / scan / index jobs after a
+// successful ConfirmUpload. Factored out so tests can stub it and so
+// future subjects can be added in one place.
+func (h *Handler) publishPostUploadJobs(ctx context.Context, fileID, versionID uuid.UUID) {
+	if h.jobs == nil {
+		return
+	}
+	if err := h.jobs.PublishPreview(ctx, fileID, versionID); err != nil {
+		log.Printf("drive: publish preview job: %v", err)
+	}
+	if err := h.jobs.PublishScan(ctx, fileID, versionID); err != nil {
+		log.Printf("drive: publish scan job: %v", err)
+	}
+	if err := h.jobs.PublishIndex(ctx, fileID, versionID); err != nil {
+		log.Printf("drive: publish index job: %v", err)
+	}
 }
 
 // DownloadURL returns a presigned GET URL for the file's current version.
@@ -764,6 +857,10 @@ func (h *Handler) DownloadURL(w http.ResponseWriter, r *http.Request) {
 	}
 	f, err := h.files.GetByID(r.Context(), workspaceID, id)
 	if err != nil {
+		writeServiceError(w, err)
+		return
+	}
+	if err := h.assertResourceAccess(r.Context(), permission.ResourceFile, f.ID, permission.RoleViewer); err != nil {
 		writeServiceError(w, err)
 		return
 	}
@@ -947,6 +1044,39 @@ func (h *Handler) RevokePermission(w http.ResponseWriter, r *http.Request) {
 		"role":          p.Role,
 	})
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// assertResourceAccess gates a handler operation behind the
+// permission layer using the inheritance-aware check (ARCHITECTURE.md
+// §7.2). Workspace admins always pass; other authenticated users must
+// hold a direct or inherited grant of at least minRole on the
+// resource. When the permissions service is nil (metadata-only test
+// wiring) the check is skipped so callers that opt out of permission
+// enforcement keep working. Returns nil on allow, a forbiddenErr on
+// deny, or the underlying repository error on lookup failure.
+func (h *Handler) assertResourceAccess(ctx context.Context, resourceType string, resourceID uuid.UUID, minRole string) error {
+	if h.permissions == nil {
+		return nil
+	}
+	if role, _ := middleware.RoleFromContext(ctx); role == user.RoleAdmin {
+		return nil
+	}
+	workspaceID, ok := middleware.WorkspaceIDFromContext(ctx)
+	if !ok {
+		return forbiddenErr{"missing workspace context"}
+	}
+	userID, ok := middleware.UserIDFromContext(ctx)
+	if !ok {
+		return forbiddenErr{"missing user context"}
+	}
+	allowed, err := h.permissions.HasAccessWithInheritance(ctx, workspaceID, resourceType, resourceID, permission.GranteeUser, userID, minRole)
+	if err != nil {
+		return err
+	}
+	if !allowed {
+		return forbiddenErr{"insufficient permissions on resource"}
+	}
+	return nil
 }
 
 // assertResourceInWorkspace verifies that the given resource belongs to the
@@ -1330,6 +1460,135 @@ func (h *Handler) RevokeGuestInvite(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
+// Client room handlers ----------------------------------------------------
+
+type createClientRoomRequest struct {
+	Name           string  `json:"name"`
+	Password       string  `json:"password,omitempty"`
+	ExpiresAt      *string `json:"expires_at,omitempty"`
+	DropboxEnabled bool    `json:"dropbox_enabled,omitempty"`
+}
+
+// clientRoomResponse envelopes the room row alongside the share-link
+// token so the client has everything it needs to display the public
+// URL after a single round-trip. We don't inline the entire ShareLink
+// struct — only the token and link id — to keep the client API narrow.
+type clientRoomResponse struct {
+	*sharing.ClientRoom
+	ShareLinkToken string `json:"share_link_token"`
+}
+
+// CreateClientRoom provisions a new client room (folder + share link
+// bundle) owned by the authenticated workspace. Admin-only per the
+// same reasoning as share-link / guest-invite creation: configuring
+// external access is a sensitive operation.
+func (h *Handler) CreateClientRoom(w http.ResponseWriter, r *http.Request) {
+	if h.clientRooms == nil {
+		http.Error(w, "client rooms not configured", http.StatusNotImplemented)
+		return
+	}
+	role, _ := middleware.RoleFromContext(r.Context())
+	if role != user.RoleAdmin {
+		http.Error(w, "admin role required", http.StatusForbidden)
+		return
+	}
+	workspaceID, _ := middleware.WorkspaceIDFromContext(r.Context())
+	userID, _ := middleware.UserIDFromContext(r.Context())
+
+	var req createClientRoomRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid json body", http.StatusBadRequest)
+		return
+	}
+	var expiresAt *time.Time
+	if req.ExpiresAt != nil && *req.ExpiresAt != "" {
+		t, terr := time.Parse(time.RFC3339, *req.ExpiresAt)
+		if terr != nil {
+			http.Error(w, "invalid expires_at (expected RFC3339)", http.StatusBadRequest)
+			return
+		}
+		expiresAt = &t
+	}
+	room, link, err := h.clientRooms.Create(r.Context(), workspaceID, userID, sharing.ClientRoomInput{
+		Name:           req.Name,
+		Password:       req.Password,
+		ExpiresAt:      expiresAt,
+		DropboxEnabled: req.DropboxEnabled,
+	})
+	if err != nil {
+		if errors.Is(err, sharing.ErrInvalidRoomName) {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		writeSharingError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusCreated, clientRoomResponse{ClientRoom: room, ShareLinkToken: link.Token})
+}
+
+// ListClientRooms returns every room in the workspace, newest first.
+// Any authenticated workspace member may list; room contents are still
+// gated by folder-level permissions downstream.
+func (h *Handler) ListClientRooms(w http.ResponseWriter, r *http.Request) {
+	if h.clientRooms == nil {
+		http.Error(w, "client rooms not configured", http.StatusNotImplemented)
+		return
+	}
+	workspaceID, _ := middleware.WorkspaceIDFromContext(r.Context())
+	rooms, err := h.clientRooms.List(r.Context(), workspaceID)
+	if err != nil {
+		writeServiceError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"rooms": rooms})
+}
+
+// GetClientRoom returns a single room. Scoped to workspace.
+func (h *Handler) GetClientRoom(w http.ResponseWriter, r *http.Request) {
+	if h.clientRooms == nil {
+		http.Error(w, "client rooms not configured", http.StatusNotImplemented)
+		return
+	}
+	workspaceID, _ := middleware.WorkspaceIDFromContext(r.Context())
+	id, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		http.Error(w, "invalid id", http.StatusBadRequest)
+		return
+	}
+	room, err := h.clientRooms.Get(r.Context(), workspaceID, id)
+	if err != nil {
+		writeSharingError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, room)
+}
+
+// DeleteClientRoom tears down a room (revoke share link + delete room
+// row). Admin-only. The backing folder is intentionally not deleted;
+// see ClientRoomService.Delete for rationale.
+func (h *Handler) DeleteClientRoom(w http.ResponseWriter, r *http.Request) {
+	if h.clientRooms == nil {
+		http.Error(w, "client rooms not configured", http.StatusNotImplemented)
+		return
+	}
+	role, _ := middleware.RoleFromContext(r.Context())
+	if role != user.RoleAdmin {
+		http.Error(w, "admin role required", http.StatusForbidden)
+		return
+	}
+	workspaceID, _ := middleware.WorkspaceIDFromContext(r.Context())
+	id, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		http.Error(w, "invalid id", http.StatusBadRequest)
+		return
+	}
+	if err := h.clientRooms.Delete(r.Context(), workspaceID, id); err != nil {
+		writeSharingError(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
 // Search handler -----------------------------------------------------------
 
 // Search runs a workspace-scoped FTS query over file + folder names and
@@ -1348,6 +1607,13 @@ func (h *Handler) Search(w http.ResponseWriter, r *http.Request) {
 	}
 	limit := parseIntParam(r.URL.Query().Get("limit"), search.DefaultLimit)
 	offset := parseIntParam(r.URL.Query().Get("offset"), 0)
+	// Cap at the handler layer so the response envelope echoes the
+	// clamped value back to the client. The service also caps
+	// defensively, but echoing the pre-service limit would lie to
+	// clients that paginate on len(results) < limit.
+	if limit > search.MaxLimit {
+		limit = search.MaxLimit
+	}
 	results, err := h.search.Search(r.Context(), workspaceID, query, limit, offset)
 	if err != nil {
 		if errors.Is(err, search.ErrInvalidQuery) {

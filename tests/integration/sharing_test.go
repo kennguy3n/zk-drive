@@ -204,6 +204,62 @@ func TestMaxDownloadsEnforced(t *testing.T) {
 	}
 }
 
+// TestMaxDownloadsSingleUseAtomic pins the TOCTOU fix: a link with
+// max_downloads=1 must allow exactly one resolve and reject every
+// subsequent call with 429 Too Many Requests, even when the handler
+// gets there before the client observes the updated count. Before the
+// atomic UPDATE guard, the service checked link.IsExhausted() on a
+// cached snapshot and a race between two concurrent resolutions could
+// both pass the check. We can't easily drive true concurrency from the
+// integration harness, but we can assert the single-use invariant: the
+// first resolve succeeds, the second fails with 429, and
+// download_count never advances past 1.
+func TestMaxDownloadsSingleUseAtomic(t *testing.T) {
+	env := setupEnv(t)
+	tok := env.signupAndLogin("Acme", "admin@acme.test", "Alice", "pw")
+	f := createFolder(t, env, tok.Token, nil, "OneShot")
+
+	one := 1
+	status, body := env.httpRequest(http.MethodPost, "/api/share-links", tok.Token, createShareLinkPayload{
+		ResourceType: sharing.ResourceFolder,
+		ResourceID:   f.ID.String(),
+		MaxDownloads: &one,
+	})
+	if status != http.StatusCreated {
+		t.Fatalf("create: status=%d body=%s", status, string(body))
+	}
+	var link sharing.ShareLink
+	env.decodeJSON(body, &link)
+
+	status, body = env.httpRequest(http.MethodGet, "/api/share-links/"+link.Token, "", nil)
+	if status != http.StatusOK {
+		t.Fatalf("first resolve: expected 200, got %d body=%s", status, string(body))
+	}
+	var resolved sharing.ShareLink
+	env.decodeJSON(body, &resolved)
+	if resolved.DownloadCount != 1 {
+		t.Errorf("expected download_count=1, got %d", resolved.DownloadCount)
+	}
+
+	status, _ = env.httpRequest(http.MethodGet, "/api/share-links/"+link.Token, "", nil)
+	if status != http.StatusTooManyRequests {
+		t.Errorf("expected 429 on second resolve, got %d", status)
+	}
+
+	// download_count must stay pinned at 1 — the atomic UPDATE guard
+	// rejects increments once the cap is hit, so even repeated failed
+	// resolves cannot nudge the counter upward.
+	var finalCount int
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if err := env.pool.QueryRow(ctx, `SELECT download_count FROM share_links WHERE id = $1`, link.ID).Scan(&finalCount); err != nil {
+		t.Fatalf("read final download_count: %v", err)
+	}
+	if finalCount != 1 {
+		t.Errorf("expected download_count to stay at 1, got %d", finalCount)
+	}
+}
+
 func TestRevokeShareLink(t *testing.T) {
 	env := setupEnv(t)
 	tok := env.signupAndLogin("Acme", "admin@acme.test", "Alice", "pw")

@@ -3,7 +3,7 @@
 - **Project**: ZK Drive
 - **License**: Proprietary — All Rights Reserved.
 - **Status**: Phase 2 — Sharing & Collaboration (kicked off 2026-04-24)
-- **Last updated**: 2026-04-24
+- **Last updated**: 2026-04-24 (sharing, search, client rooms, NATS skeleton)
 
 This document is a phase-gated tracker. Each phase has an explicit
 checklist and a decision gate. Do not skip to the next phase until
@@ -133,37 +133,82 @@ phase that turns ZK Drive from "cloud storage for one team" into
 
 Checklist:
 
-- [ ] Per-file and per-folder sharing with roles (view / edit /
+- [x] Per-file and per-folder sharing with roles (view / edit /
       admin). `internal/sharing/`, `api/sharing/`.
-- [ ] Share links: token-based, optional password, optional expiry,
+- [x] Share links: token-based, optional password, optional expiry,
       optional max downloads. `internal/sharing/`.
-- [ ] Guest invites: invite external users by email with scoped
+- [x] Guest invites: invite external users by email with scoped
       folder access and expiry. `internal/sharing/`.
-- [ ] Client rooms: dedicated shared folders for external clients /
+- [x] Client rooms: dedicated shared folders for external clients /
       partners with dropbox upload capability.
       `internal/sharing/`.
-- [ ] NATS JetStream setup: job dispatch for preview, scan, index,
+- [x] NATS JetStream setup: job dispatch for preview, scan, index,
       retention. `cmd/worker/`.
 - [ ] Preview worker: generate thumbnails / previews for images,
       PDFs, and office documents using LibreOffice / ImageMagick.
       Store previews as derived objects in zk-object-fabric.
-      `internal/preview/`.
+      `internal/preview/`. **Deferred to next Phase 2 sprint.**
 - [ ] Virus scan worker: async ClamAV scan on upload. Quarantine
       infected files. Notify admin. `internal/scan/`.
-- [ ] Search: Postgres FTS over file names, folder names, and tags.
+      **Deferred to next Phase 2 sprint.**
+- [x] Search: Postgres FTS over file names, folder names, and tags.
       `internal/search/`, `api/drive/`.
-- [ ] Folder permission inheritance: child folders / files inherit
+- [x] Folder permission inheritance: child folders / files inherit
       parent permissions unless overridden. `internal/permission/`.
-- [ ] Frontend: sharing dialogs, guest invite UI, file preview
-      display, search bar. `frontend/`.
+- [x] Frontend: sharing dialogs, guest invite UI, file preview
+      display, search bar. `frontend/`. (Preview display waits on the
+      preview worker; dialogs and search bar landed.)
 - [ ] Notification system: in-app notifications for shares, guest
       invites, and scan results. `internal/notification/`.
 - [ ] Integration tests: sharing flows, guest access, search, preview
-      generation. `tests/integration/`.
+      generation. `tests/integration/` (partial — sharing cap and
+      resolve covered; preview generation blocked on worker).
 - [ ] Decision gate: validate end-to-end sharing flow — an internal
       user shares a folder with a guest, the guest uploads a file via
       dropbox, the file is scanned and previewed, and all activity is
       recorded in the audit log.
+
+**Decisions / Deferrals (2026-04-24, sprint 2)**:
+
+- PR #5 TOCTOU race on share-link `max_downloads` fixed. The check is
+  now a single SQL `UPDATE ... WHERE max_downloads IS NULL OR
+  download_count < max_downloads`; the handler surfaces a new
+  `ErrLinkExhausted` sentinel as 429. Removed the pre-check in
+  `ResolveShareLink` so the atomic increment is the only enforcement
+  point. Integration test `TestMaxDownloadsSingleUseAtomic` pins the
+  behaviour.
+- PR #5 search-limit cap fixed at the handler layer. `Search` now
+  clamps `limit` to `search.MaxLimit` before it reaches the service so
+  the response envelope echoes the effective value back to the client,
+  matching the pattern used by `ListActivity`.
+- Permission inheritance wired into handlers. `GetFolder`,
+  `RenameFolder`, `DeleteFolder`, `MoveFolder`, `CreateFile`,
+  `UploadURL`, `GetFile`, `DownloadURL`, `UpdateFile`, `MoveFile`, and
+  `DeleteFile` now call `HasAccessWithInheritance` with the required
+  role (viewer for reads, editor for writes) before mutating. Workspace
+  admins bypass the check, as do requests where the permission service
+  is unwired (test fixtures). `MoveFolder` and `MoveFile` additionally
+  assert editor access on the *target* parent.
+- Client rooms implemented as folder + share-link bundles. A new
+  `client_rooms` table (migration 006) pairs a workspace-scoped folder
+  with a share link so deleting the room cleans up both. Routes live
+  at `POST/GET /api/client-rooms` and `GET/DELETE
+  /api/client-rooms/{id}`.
+- NATS JetStream skeleton wired. `internal/jobs/publisher.go` exposes
+  nil-safe `PublishPreview` / `PublishScan` / `PublishIndex` helpers;
+  `cmd/worker/main.go` declares the `DRIVE_JOBS` stream and
+  placeholder consumers that log + ack. The API server connects
+  opportunistically (`NATS_URL` env); absent NATS, publishes become
+  no-ops so local-dev and CI keep working.
+- Preview worker and virus-scan worker deferred to the next Phase 2
+  sprint. Both require heavyweight third-party tooling (LibreOffice /
+  ImageMagick / ClamAV) that has licensing and packaging implications
+  worth a separate design pass; the publish/subscribe skeleton is in
+  place so swapping in real handlers is a single-function change.
+- Frontend sharing UI and search bar landed. `ShareDialog` covers both
+  share-link and guest-invite flows in one modal; `SearchBar` talks to
+  `/api/search` with 250 ms debouncing and renders file / folder hits
+  with a type badge and path.
 
 ---
 

@@ -128,9 +128,11 @@ func (s *Service) ResolveShareLink(ctx context.Context, token string, password s
 	if link.IsExpired(s.now()) {
 		return nil, ErrLinkExpired
 	}
-	if link.IsExhausted() {
-		return nil, ErrLinkExhausted
-	}
+	// Max-downloads enforcement lives inside IncrementDownloadCount so
+	// the check and the increment happen atomically. Checking
+	// link.IsExhausted() here on a cached snapshot would reintroduce a
+	// TOCTOU race where two concurrent callers on a link with
+	// max_downloads=1 could both pass the check and both succeed.
 	if link.RequiresPassword() {
 		if password == "" {
 			return nil, ErrPasswordRequired

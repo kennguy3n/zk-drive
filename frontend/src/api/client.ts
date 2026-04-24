@@ -218,6 +218,131 @@ export async function renameFile(id: string, name: string): Promise<FileItem> {
   return data;
 }
 
+// --- Sharing -------------------------------------------------------------
+
+// Share links and guest invites are per-resource and role-scoped. These
+// mirror the JSON shapes returned by api/drive/handler.go so the
+// frontend can render them without extra client-side translation.
+
+export interface ShareLink {
+  id: string;
+  workspace_id: string;
+  resource_type: string;
+  resource_id: string;
+  token: string;
+  role: string;
+  password_protected: boolean;
+  expires_at: string | null;
+  max_downloads: number | null;
+  download_count: number;
+  created_by: string;
+  created_at: string;
+  revoked_at: string | null;
+}
+
+export interface GuestInvite {
+  id: string;
+  workspace_id: string;
+  resource_type: string;
+  resource_id: string;
+  email: string;
+  role: string;
+  token: string;
+  expires_at: string | null;
+  accepted_at: string | null;
+  revoked_at: string | null;
+  created_by: string;
+  created_at: string;
+}
+
+export interface CreateShareLinkInput {
+  resource_type: "file" | "folder";
+  resource_id: string;
+  role: "viewer" | "commenter" | "editor";
+  password?: string;
+  expires_at?: string;
+  max_downloads?: number;
+}
+
+export async function createShareLink(input: CreateShareLinkInput): Promise<ShareLink> {
+  const { data } = await client.post<ShareLink>("/share-links", input);
+  return data;
+}
+
+// resolveShareLink hits the public endpoint that validates password /
+// expiry / download cap and returns the backing resource metadata. The
+// token lives in the path (not the body) so the link is copy/pasteable.
+export async function resolveShareLink(
+  token: string,
+  password?: string,
+): Promise<{ link: ShareLink; resource: Folder | FileItem }> {
+  const { data } = await client.post<{ link: ShareLink; resource: Folder | FileItem }>(
+    `/share-links/${encodeURIComponent(token)}`,
+    password ? { password } : {},
+  );
+  return data;
+}
+
+export async function revokeShareLink(id: string): Promise<void> {
+  await client.delete(`/share-links/${id}`);
+}
+
+export interface CreateGuestInviteInput {
+  resource_type: "file" | "folder";
+  resource_id: string;
+  email: string;
+  role: "viewer" | "commenter" | "editor";
+  expires_at?: string;
+}
+
+export async function createGuestInvite(input: CreateGuestInviteInput): Promise<GuestInvite> {
+  const { data } = await client.post<GuestInvite>("/guest-invites", input);
+  return data;
+}
+
+export async function acceptGuestInvite(id: string): Promise<GuestInvite> {
+  const { data } = await client.post<GuestInvite>(`/guest-invites/${id}/accept`);
+  return data;
+}
+
+export async function revokeGuestInvite(id: string): Promise<void> {
+  await client.delete(`/guest-invites/${id}`);
+}
+
+// --- Search --------------------------------------------------------------
+
+export interface SearchHit {
+  type: "file" | "folder";
+  id: string;
+  name: string;
+  path: string;
+  workspace_id: string;
+  folder_id: string | null;
+  updated_at: string;
+}
+
+export interface SearchResponse {
+  query: string;
+  limit: number;
+  offset: number;
+  hits: SearchHit[];
+}
+
+export async function searchFiles(query: string, opts: {
+  limit?: number;
+  offset?: number;
+} = {}): Promise<SearchResponse> {
+  const { data } = await client.get<SearchResponse>("/search", {
+    params: { q: query, limit: opts.limit, offset: opts.offset },
+  });
+  return {
+    query: data.query,
+    limit: data.limit,
+    offset: data.offset,
+    hits: data.hits ?? [],
+  };
+}
+
 // --- Upload orchestration -----------------------------------------------
 
 // uploadFile walks through the presigned-URL dance:

@@ -3,6 +3,8 @@ import { Link, useNavigate, useParams } from "react-router-dom";
 import FolderTree from "../components/FolderTree";
 import FileList from "../components/FileList";
 import UploadButton from "../components/UploadButton";
+import SearchBar from "../components/SearchBar";
+import ShareDialog from "../components/ShareDialog";
 import {
   createFolder,
   deleteFile,
@@ -14,6 +16,13 @@ import {
   type Folder,
 } from "../api/client";
 import { useAuth } from "../hooks/useAuth";
+
+// shareTarget is the resource currently being shared via ShareDialog.
+// Kept discriminated-union so the dialog can render the right noun
+// ("Share folder" vs "Share file") without a second prop.
+type ShareTarget =
+  | { type: "folder"; value: Folder }
+  | { type: "file"; value: FileItem };
 
 // FileBrowserPage is the main "drive" surface: breadcrumb + folder tree +
 // file table + upload/create controls. The selected folder is stored in
@@ -28,6 +37,7 @@ export default function FileBrowserPage() {
   const [subfolders, setSubfolders] = useState<Folder[]>([]);
   const [files, setFiles] = useState<FileItem[]>([]);
   const [error, setError] = useState<string | null>(null);
+  const [shareTarget, setShareTarget] = useState<ShareTarget | null>(null);
 
   const refresh = useCallback(async () => {
     setError(null);
@@ -80,7 +90,8 @@ export default function FileBrowserPage() {
           }}
         >
           <Breadcrumb folder={folder} />
-          <div>
+          <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+            <SearchBar />
             <button onClick={handleCreateFolder} style={btn}>New folder</button>
             <UploadButton folderID={currentFolderID} onUploaded={() => refresh()} />
             <button
@@ -119,9 +130,17 @@ export default function FileBrowserPage() {
                   }}
                 >
                   <Link to={`/drive/folder/${f.id}`}>{f.name}</Link>
-                  <button onClick={() => handleDeleteFolder(f.id)} style={{ ...btn, color: "#b91c1c" }}>
-                    Delete
-                  </button>
+                  <div style={{ display: "flex", gap: 6 }}>
+                    <button
+                      onClick={() => setShareTarget({ type: "folder", value: f })}
+                      style={btn}
+                    >
+                      Share
+                    </button>
+                    <button onClick={() => handleDeleteFolder(f.id)} style={{ ...btn, color: "#b91c1c" }}>
+                      Delete
+                    </button>
+                  </div>
                 </li>
               ))}
             </ul>
@@ -142,9 +161,13 @@ export default function FileBrowserPage() {
               await deleteFile(id);
               refresh();
             }}
+            onShare={(f) => setShareTarget({ type: "file", value: f })}
           />
         </section>
       </main>
+      {shareTarget ? (
+        <ShareDialog resource={shareTarget} onClose={() => setShareTarget(null)} />
+      ) : null}
     </div>
   );
 }
