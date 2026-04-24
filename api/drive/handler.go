@@ -1836,12 +1836,14 @@ func (h *Handler) PreviewURL(w http.ResponseWriter, r *http.Request) {
 	// the UI.
 	if f.CurrentVersionID != nil {
 		versions, verr := h.files.ListVersions(r.Context(), workspaceID, f.ID)
-		if verr == nil {
-			for _, v := range versions {
-				if v.ID == *f.CurrentVersionID && v.ScanStatus == scan.StatusQuarantined {
-					http.Error(w, "file version quarantined by virus scan", http.StatusForbidden)
-					return
-				}
+		if verr != nil {
+			writeServiceError(w, verr)
+			return
+		}
+		for _, v := range versions {
+			if v.ID == *f.CurrentVersionID && v.ScanStatus == scan.StatusQuarantined {
+				http.Error(w, "file version quarantined by virus scan", http.StatusForbidden)
+				return
 			}
 		}
 	}
