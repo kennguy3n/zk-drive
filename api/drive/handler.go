@@ -22,6 +22,7 @@ import (
 	"github.com/kennguy3n/zk-drive/internal/notification"
 	"github.com/kennguy3n/zk-drive/internal/permission"
 	"github.com/kennguy3n/zk-drive/internal/preview"
+	"github.com/kennguy3n/zk-drive/internal/scan"
 	"github.com/kennguy3n/zk-drive/internal/search"
 	"github.com/kennguy3n/zk-drive/internal/sharing"
 	"github.com/kennguy3n/zk-drive/internal/storage"
@@ -921,6 +922,14 @@ func (h *Handler) DownloadURL(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "current version not found", http.StatusNotFound)
 		return
 	}
+	// Refuse to mint a presigned URL for a version clamd has already
+	// flagged. Migration 008 pairs this check with the scan worker:
+	// without it the scan pipeline only surfaces quarantine via the
+	// admin notification, while the infected bytes remain pullable.
+	if current.ScanStatus == scan.StatusQuarantined {
+		http.Error(w, "file version quarantined by virus scan", http.StatusForbidden)
+		return
+	}
 	url, err := h.storage.GenerateDownloadURL(r.Context(), current.ObjectKey, storage.DefaultPresignExpiry)
 	if err != nil {
 		http.Error(w, "generate download url: "+err.Error(), http.StatusInternalServerError)
@@ -1812,13 +1821,29 @@ func (h *Handler) PreviewURL(w http.ResponseWriter, r *http.Request) {
 	// logic runs. Admins bypass assertResourceAccess, so without this
 	// lookup an admin in workspace A could request a file id from
 	// workspace B and get a presigned URL to B's preview.
-	if _, err := h.files.GetByID(r.Context(), workspaceID, id); err != nil {
+	f, err := h.files.GetByID(r.Context(), workspaceID, id)
+	if err != nil {
 		writeServiceError(w, err)
 		return
 	}
 	if err := h.assertResourceAccess(r.Context(), permission.ResourceFile, id, permission.RoleViewer); err != nil {
 		writeServiceError(w, err)
 		return
+	}
+	// Refuse to serve a preview for a quarantined version for the
+	// same reason DownloadURL refuses: the preview is derived from
+	// the infected source bytes and we do not want to surface it in
+	// the UI.
+	if f.CurrentVersionID != nil {
+		versions, verr := h.files.ListVersions(r.Context(), workspaceID, f.ID)
+		if verr == nil {
+			for _, v := range versions {
+				if v.ID == *f.CurrentVersionID && v.ScanStatus == scan.StatusQuarantined {
+					http.Error(w, "file version quarantined by virus scan", http.StatusForbidden)
+					return
+				}
+			}
+		}
 	}
 	p, err := h.previews.GetLatestByFile(r.Context(), id)
 	if err != nil {

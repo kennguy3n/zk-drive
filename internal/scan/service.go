@@ -189,7 +189,19 @@ func (s *Service) downloadObject(ctx context.Context, key string) ([]byte, error
 	if resp.StatusCode/100 != 2 {
 		return nil, fmt.Errorf("get %s: status %d", key, resp.StatusCode)
 	}
-	return io.ReadAll(io.LimitReader(resp.Body, MaxScanBytes))
+	// Read MaxScanBytes+1 so we can distinguish an overflow from a
+	// file that is exactly MaxScanBytes long. Silently truncating
+	// would let malware past the cap slip through as 'clean'; we
+	// surface an error instead so the version is left in 'scanning'
+	// and the worker Naks for redelivery / alerting.
+	buf, err := io.ReadAll(io.LimitReader(resp.Body, MaxScanBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(buf)) > MaxScanBytes {
+		return nil, fmt.Errorf("source %s exceeds %d bytes", key, MaxScanBytes)
+	}
+	return buf, nil
 }
 
 // instream implements the clamd INSTREAM protocol. Frames look like:

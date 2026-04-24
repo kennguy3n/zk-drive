@@ -24,12 +24,15 @@ type File struct {
 
 // FileVersion is an immutable pointer to a single blob in zk-object-fabric.
 type FileVersion struct {
-	ID            uuid.UUID `json:"id"`
-	FileID        uuid.UUID `json:"file_id"`
-	VersionNumber int       `json:"version_number"`
-	ObjectKey     string    `json:"object_key"`
-	SizeBytes     int64     `json:"size_bytes"`
-	Checksum      string    `json:"checksum"`
-	CreatedBy     uuid.UUID `json:"created_by"`
-	CreatedAt     time.Time `json:"created_at"`
+	ID            uuid.UUID  `json:"id"`
+	FileID        uuid.UUID  `json:"file_id"`
+	VersionNumber int        `json:"version_number"`
+	ObjectKey     string     `json:"object_key"`
+	SizeBytes     int64      `json:"size_bytes"`
+	Checksum      string     `json:"checksum"`
+	CreatedBy     uuid.UUID  `json:"created_by"`
+	CreatedAt     time.Time  `json:"created_at"`
+	ScanStatus    string     `json:"scan_status"`
+	ScanDetail    string     `json:"scan_detail,omitempty"`
+	ScannedAt     *time.Time `json:"scanned_at,omitempty"`
 }

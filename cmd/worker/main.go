@@ -228,9 +228,10 @@ func previewHandler(ctx context.Context, svc *preview.Service) nats.MsgHandler {
 }
 
 // scanHandler decodes the FileJob envelope and runs the scan service.
-// All verdicts (clean / quarantined / pending) are acked so the
-// message doesn't loop; the final status is persisted to file_versions
-// so operators can audit results via SQL.
+// Successful verdicts (clean / quarantined) are acked; transient
+// failures (pending — typically clamd connectivity errors) are Nak'd
+// so NATS redelivers on the next AckWait cycle. The final status is
+// persisted to file_versions so operators can audit results via SQL.
 func scanHandler(ctx context.Context, svc *scan.Service) nats.MsgHandler {
 	return func(msg *nats.Msg) {
 		var job jobs.FileJob

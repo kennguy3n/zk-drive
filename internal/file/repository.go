@@ -282,7 +282,8 @@ func (r *PostgresRepository) ListVersions(ctx context.Context, workspaceID, file
 		return nil, fmt.Errorf("verify file workspace: %w", err)
 	}
 	const q = `
-SELECT id, file_id, version_number, object_key, size_bytes, checksum, created_by, created_at
+SELECT id, file_id, version_number, object_key, size_bytes, checksum, created_by, created_at,
+       COALESCE(scan_status, ''), COALESCE(scan_detail, ''), scanned_at
 FROM file_versions WHERE file_id = $1 ORDER BY version_number DESC`
 	rows, err := r.pool.Query(ctx, q, fileID)
 	if err != nil {
@@ -292,7 +293,7 @@ FROM file_versions WHERE file_id = $1 ORDER BY version_number DESC`
 	var out []*FileVersion
 	for rows.Next() {
 		v := &FileVersion{}
-		if err := rows.Scan(&v.ID, &v.FileID, &v.VersionNumber, &v.ObjectKey, &v.SizeBytes, &v.Checksum, &v.CreatedBy, &v.CreatedAt); err != nil {
+		if err := rows.Scan(&v.ID, &v.FileID, &v.VersionNumber, &v.ObjectKey, &v.SizeBytes, &v.Checksum, &v.CreatedBy, &v.CreatedAt, &v.ScanStatus, &v.ScanDetail, &v.ScannedAt); err != nil {
 			return nil, err
 		}
 		out = append(out, v)
