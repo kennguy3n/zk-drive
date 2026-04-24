@@ -263,9 +263,9 @@ func insertVersionTx(ctx context.Context, tx pgx.Tx, workspaceID uuid.UUID, v *F
 	const q = `
 INSERT INTO file_versions (id, file_id, version_number, object_key, size_bytes, checksum, created_by)
 SELECT $1, $2, COALESCE(MAX(version_number), 0) + 1, $3, $4, $5, $6 FROM file_versions WHERE file_id = $2
-RETURNING version_number, created_at`
+RETURNING version_number, created_at, COALESCE(scan_status, ''), COALESCE(scan_detail, ''), scanned_at`
 	if err := tx.QueryRow(ctx, q, v.ID, v.FileID, v.ObjectKey, v.SizeBytes, v.Checksum, v.CreatedBy).
-		Scan(&v.VersionNumber, &v.CreatedAt); err != nil {
+		Scan(&v.VersionNumber, &v.CreatedAt, &v.ScanStatus, &v.ScanDetail, &v.ScannedAt); err != nil {
 		return fmt.Errorf("insert file version: %w", err)
 	}
 	return nil
@@ -282,7 +282,8 @@ func (r *PostgresRepository) ListVersions(ctx context.Context, workspaceID, file
 		return nil, fmt.Errorf("verify file workspace: %w", err)
 	}
 	const q = `
-SELECT id, file_id, version_number, object_key, size_bytes, checksum, created_by, created_at
+SELECT id, file_id, version_number, object_key, size_bytes, checksum, created_by, created_at,
+       COALESCE(scan_status, ''), COALESCE(scan_detail, ''), scanned_at
 FROM file_versions WHERE file_id = $1 ORDER BY version_number DESC`
 	rows, err := r.pool.Query(ctx, q, fileID)
 	if err != nil {
@@ -292,7 +293,7 @@ FROM file_versions WHERE file_id = $1 ORDER BY version_number DESC`
 	var out []*FileVersion
 	for rows.Next() {
 		v := &FileVersion{}
-		if err := rows.Scan(&v.ID, &v.FileID, &v.VersionNumber, &v.ObjectKey, &v.SizeBytes, &v.Checksum, &v.CreatedBy, &v.CreatedAt); err != nil {
+		if err := rows.Scan(&v.ID, &v.FileID, &v.VersionNumber, &v.ObjectKey, &v.SizeBytes, &v.Checksum, &v.CreatedBy, &v.CreatedAt, &v.ScanStatus, &v.ScanDetail, &v.ScannedAt); err != nil {
 			return nil, err
 		}
 		out = append(out, v)

@@ -24,7 +24,9 @@ import (
 	"github.com/kennguy3n/zk-drive/internal/file"
 	"github.com/kennguy3n/zk-drive/internal/folder"
 	"github.com/kennguy3n/zk-drive/internal/jobs"
+	"github.com/kennguy3n/zk-drive/internal/notification"
 	"github.com/kennguy3n/zk-drive/internal/permission"
+	"github.com/kennguy3n/zk-drive/internal/preview"
 	"github.com/kennguy3n/zk-drive/internal/search"
 	"github.com/kennguy3n/zk-drive/internal/sharing"
 	"github.com/kennguy3n/zk-drive/internal/storage"
@@ -124,12 +126,17 @@ func run() error {
 		}
 	}
 
+	notificationSvc := notification.NewService(notification.NewPostgresRepository(pool))
+	previewRepo := preview.NewPostgresRepository(pool)
+
 	authHandler := auth.NewHandler(pool, userSvc, wsSvc, cfg.JWTSecret)
 	driveHandler := drive.NewHandler(pool, wsSvc, folderSvc, fileSvc, userSvc, storageClient, permissionSvc, activitySvc).
 		WithSharing(sharingSvc).
 		WithSearch(searchSvc).
 		WithClientRooms(clientRoomSvc).
-		WithJobs(jobPublisher)
+		WithJobs(jobPublisher).
+		WithNotifications(notificationSvc).
+		WithPreviews(previewRepo)
 
 	r := chi.NewRouter()
 	r.Use(chimw.RequestID)
@@ -179,6 +186,7 @@ func run() error {
 			r.Post("/files/{id}/move", driveHandler.MoveFile)
 			r.Get("/files/{id}/versions", driveHandler.ListFileVersions)
 			r.Get("/files/{id}/download-url", driveHandler.DownloadURL)
+			r.Get("/files/{id}/preview-url", driveHandler.PreviewURL)
 
 			r.Get("/permissions", driveHandler.ListPermissions)
 			r.Post("/permissions", driveHandler.GrantPermission)
@@ -197,6 +205,10 @@ func run() error {
 			r.Delete("/client-rooms/{id}", driveHandler.DeleteClientRoom)
 
 			r.Get("/search", driveHandler.Search)
+
+			r.Get("/notifications", driveHandler.ListNotifications)
+			r.Post("/notifications/read-all", driveHandler.MarkAllNotificationsRead)
+			r.Post("/notifications/{id}/read", driveHandler.MarkNotificationRead)
 
 			r.Get("/activity", driveHandler.ListActivity)
 		})

@@ -68,13 +68,28 @@ export default function ShareDialog({ resource, onClose }: Props) {
     }
   };
 
+  // Guest invites are always folder-scoped on the backend
+  // (internal/sharing/models.go GuestInvite.FolderID). When the current
+  // resource is a file, fall back to its parent folder so the invite
+  // grants access to the directory that contains the file. If the file
+  // is somehow unparented (shouldn't happen for normal user-owned
+  // files) we surface a clear error instead of silently sending an
+  // invalid request.
+  const inviteFolderID: string | null =
+    resource.type === "folder"
+      ? resource.value.id
+      : resource.value.folder_id ?? null;
+
   const submitInvite = async (e: React.FormEvent) => {
     e.preventDefault();
     setError(null);
+    if (!inviteFolderID) {
+      setError("This file has no parent folder; invites must target a folder.");
+      return;
+    }
     try {
       const created = await createGuestInvite({
-        resource_type: resource.type,
-        resource_id: resource.value.id,
+        folder_id: inviteFolderID,
         email: inviteEmail,
         role: inviteRole,
         expires_at: inviteExpiresAt || undefined,

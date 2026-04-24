@@ -3,7 +3,7 @@
 - **Project**: ZK Drive
 - **License**: Proprietary — All Rights Reserved.
 - **Status**: Phase 2 — Sharing & Collaboration (kicked off 2026-04-24)
-- **Last updated**: 2026-04-24 (sharing, search, client rooms, NATS skeleton)
+- **Last updated**: 2026-04-24 (sprint 3: preview worker, scan worker, notifications, PR #6 review fixes)
 
 This document is a phase-gated tracker. Each phase has an explicit
 checklist and a decision gate. Do not skip to the next phase until
@@ -144,25 +144,34 @@ Checklist:
       `internal/sharing/`.
 - [x] NATS JetStream setup: job dispatch for preview, scan, index,
       retention. `cmd/worker/`.
-- [ ] Preview worker: generate thumbnails / previews for images,
-      PDFs, and office documents using LibreOffice / ImageMagick.
-      Store previews as derived objects in zk-object-fabric.
-      `internal/preview/`. **Deferred to next Phase 2 sprint.**
-- [ ] Virus scan worker: async ClamAV scan on upload. Quarantine
-      infected files. Notify admin. `internal/scan/`.
-      **Deferred to next Phase 2 sprint.**
+- [x] Preview worker: generate thumbnails for images using pure-Go
+      stdlib decoders + `golang.org/x/image` for resampling. Store
+      previews as derived objects in zk-object-fabric. `internal/preview/`.
+      PDF / office doc support deferred (requires ImageMagick /
+      LibreOffice; tracked as a Phase 3 hardening item).
+- [x] Virus scan worker: async ClamAV scan over the INSTREAM protocol.
+      Quarantine infected file versions by flipping `scan_status` and
+      firing a notification to workspace admins. `internal/scan/`.
+      Runs in permissive mode when `CLAMAV_ADDRESS` is unset so local
+      dev / CI pass without a clamd sidecar.
 - [x] Search: Postgres FTS over file names, folder names, and tags.
       `internal/search/`, `api/drive/`.
 - [x] Folder permission inheritance: child folders / files inherit
       parent permissions unless overridden. `internal/permission/`.
 - [x] Frontend: sharing dialogs, guest invite UI, file preview
-      display, search bar. `frontend/`. (Preview display waits on the
-      preview worker; dialogs and search bar landed.)
-- [ ] Notification system: in-app notifications for shares, guest
-      invites, and scan results. `internal/notification/`.
-- [ ] Integration tests: sharing flows, guest access, search, preview
-      generation. `tests/integration/` (partial — sharing cap and
-      resolve covered; preview generation blocked on worker).
+      display, search bar. `frontend/`. Preview component
+      (`FilePreview.tsx`) now fetches `/api/files/{id}/preview-url` and
+      renders a placeholder when no preview is available.
+- [x] Notification system: in-app notifications for share-link
+      creation, guest invites sent / accepted, and scan quarantine.
+      `internal/notification/`. Nil-safe wiring (same pattern as
+      `logActivity`) so the metadata plane works even when the
+      notification service is unconfigured.
+- [x] Integration tests: sharing flows (including the atomic
+      `max_downloads` enforcement), guest access, search, client
+      rooms, notifications. `tests/integration/`. Preview generation
+      is exercised by `internal/preview` unit tests; integration-level
+      preview coverage requires live storage and is deferred.
 - [ ] Decision gate: validate end-to-end sharing flow — an internal
       user shares a folder with a guest, the guest uploads a file via
       dropbox, the file is scanned and previewed, and all activity is
@@ -176,7 +185,9 @@ Checklist:
   `ErrLinkExhausted` sentinel as 429. Removed the pre-check in
   `ResolveShareLink` so the atomic increment is the only enforcement
   point. Integration test `TestMaxDownloadsSingleUseAtomic` pins the
-  behaviour.
+  behaviour. (Note: sprint 3 review confirmed the atomic `UPDATE` and
+  the test were already present in the tree when this note was first
+  written; no further code change was required.)
 - PR #5 search-limit cap fixed at the handler layer. `Search` now
   clamps `limit` to `search.MaxLimit` before it reaches the service so
   the response envelope echoes the effective value back to the client,
@@ -209,6 +220,71 @@ Checklist:
   share-link and guest-invite flows in one modal; `SearchBar` talks to
   `/api/search` with 250 ms debouncing and renders file / folder hits
   with a type badge and path.
+
+**Decisions / Deferrals (2026-04-24, sprint 3)**:
+
+- PR #6 review findings resolved:
+  - `ListFileVersions` now calls `assertResourceAccess` with
+    `permission.RoleViewer` before returning version rows, matching
+    the pattern in `GetFile` / `DownloadURL`. Without this guard any
+    authenticated workspace member could enumerate versions of files
+    they had no permission to read.
+  - The `/api/search` response envelope now uses `hits` (not
+    `results`) and echoes the `query` parameter, matching the
+    frontend's documented `SearchResponse` contract.
+  - The guest-invite create payload is now folder-scoped on the
+    frontend: `CreateGuestInviteInput` sends `folder_id` (matching the
+    backend's `createGuestInviteRequest`) instead of the previous
+    `resource_type` / `resource_id` pair. `ShareDialog` surfaces a
+    clear error when a file has no parent folder, since guest invites
+    are always folder-scoped.
+  - The TOCTOU fix for share-link `max_downloads` described in sprint
+    2 was re-verified during PR #6 triage; the atomic `UPDATE` guard
+    and `TestMaxDownloadsSingleUseAtomic` were already in the tree.
+- Client room delete ordering fixed: the room row is now deleted
+  before its backing share link is revoked, to satisfy the
+  `client_rooms_share_link_id_fkey` `ON DELETE RESTRICT` constraint.
+  The previous order produced a 500 in tests.
+- Preview worker (`internal/preview/`) implemented as a pure-Go
+  pipeline: stdlib `image/*` decoders + `golang.org/x/image/draw`
+  bilinear resampling at a 256 px target, PNG-encoded preview
+  uploaded to `{workspace_id}/{file_id}/{version_id}/preview.png` and
+  persisted in a new `file_previews` table (migration 007). The
+  worker subscribes to the existing `drive.preview.generate` subject;
+  unsupported mime types are acked without error so JetStream doesn't
+  redeliver. PDF / office document support is deferred to a later
+  sprint (ImageMagick Apache-2.0, LibreOffice MPL-2.0 — both safe for
+  a proprietary product but each adds packaging surface worth a
+  dedicated design pass).
+- Virus-scan worker (`internal/scan/`) talks to clamd over the
+  INSTREAM TCP protocol. `file_versions` gained `scan_status`,
+  `scan_detail`, and `scanned_at` columns (migration 008). When
+  `CLAMAV_ADDRESS` is unset the worker runs in permissive mode and
+  marks every version clean so local dev and CI don't need a clamd
+  sidecar; the `docker-compose.yml` update to add a clamav service is
+  deferred.
+- In-app notification system (`internal/notification/`) lands the
+  full CRUD surface: `Notification` rows (migration 009) are scoped
+  by workspace + user, queried with unread-first ordering, and
+  written for four events today — share-link created, guest invite
+  sent (only when the invitee already has a workspace account),
+  guest invite accepted, and scan quarantine. New endpoints:
+  `GET /api/notifications`, `POST /api/notifications/{id}/read`, and
+  `POST /api/notifications/read-all`. Wiring uses the same nil-safe
+  helper pattern as `logActivity` so callers without a notification
+  service configured keep working unchanged.
+- Frontend preview display: `FilePreview.tsx` fetches a presigned
+  URL from the new `GET /api/files/{id}/preview-url` endpoint and
+  renders a 48 px thumbnail inline in the file list. On 404 (no
+  preview generated yet, or unsupported mime) it falls back to a
+  small mime-type-aware placeholder badge so the list never shows a
+  broken image.
+- Integration coverage expanded: new `tests/integration/search_test.go`
+  covers happy-path search, pagination, and the empty-query 400;
+  `client_room_test.go` walks the create / list / get / delete
+  lifecycle; `notification_test.go` verifies share-link creation,
+  guest-invite acceptance, and both single / bulk mark-as-read
+  endpoints fan out the expected notification rows.
 
 ---
 

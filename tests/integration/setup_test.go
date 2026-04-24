@@ -24,7 +24,9 @@ import (
 	"github.com/kennguy3n/zk-drive/internal/database"
 	"github.com/kennguy3n/zk-drive/internal/file"
 	"github.com/kennguy3n/zk-drive/internal/folder"
+	"github.com/kennguy3n/zk-drive/internal/notification"
 	"github.com/kennguy3n/zk-drive/internal/permission"
+	"github.com/kennguy3n/zk-drive/internal/preview"
 	"github.com/kennguy3n/zk-drive/internal/search"
 	"github.com/kennguy3n/zk-drive/internal/sharing"
 	"github.com/kennguy3n/zk-drive/internal/storage"
@@ -84,11 +86,21 @@ func setupEnv(t *testing.T) *testEnv {
 
 	sharingSvc := sharing.NewService(sharing.NewPostgresRepository(pool), testPermissionGranter{svc: permissionSvc})
 	searchSvc := search.NewService(pool)
+	clientRoomSvc := sharing.NewClientRoomService(
+		sharing.NewPostgresClientRoomRepository(pool),
+		testFolderCreator{svc: folderSvc},
+		sharingSvc,
+	)
+	notificationSvc := notification.NewService(notification.NewPostgresRepository(pool))
+	previewRepo := preview.NewPostgresRepository(pool)
 
 	authHandler := auth.NewHandler(pool, userSvc, wsSvc, testJWTSecret)
 	driveHandler := drive.NewHandler(pool, wsSvc, folderSvc, fileSvc, userSvc, storageClient, permissionSvc, activitySvc).
 		WithSharing(sharingSvc).
-		WithSearch(searchSvc)
+		WithSearch(searchSvc).
+		WithClientRooms(clientRoomSvc).
+		WithNotifications(notificationSvc).
+		WithPreviews(previewRepo)
 
 	r := chi.NewRouter()
 	r.Use(chimw.Recoverer)
@@ -128,6 +140,7 @@ func setupEnv(t *testing.T) *testEnv {
 			r.Post("/files/{id}/move", driveHandler.MoveFile)
 			r.Get("/files/{id}/versions", driveHandler.ListFileVersions)
 			r.Get("/files/{id}/download-url", driveHandler.DownloadURL)
+			r.Get("/files/{id}/preview-url", driveHandler.PreviewURL)
 
 			r.Get("/permissions", driveHandler.ListPermissions)
 			r.Post("/permissions", driveHandler.GrantPermission)
@@ -141,6 +154,15 @@ func setupEnv(t *testing.T) *testEnv {
 			r.Delete("/guest-invites/{id}", driveHandler.RevokeGuestInvite)
 
 			r.Get("/search", driveHandler.Search)
+
+			r.Get("/client-rooms", driveHandler.ListClientRooms)
+			r.Post("/client-rooms", driveHandler.CreateClientRoom)
+			r.Get("/client-rooms/{id}", driveHandler.GetClientRoom)
+			r.Delete("/client-rooms/{id}", driveHandler.DeleteClientRoom)
+
+			r.Get("/notifications", driveHandler.ListNotifications)
+			r.Post("/notifications/read-all", driveHandler.MarkAllNotificationsRead)
+			r.Post("/notifications/{id}/read", driveHandler.MarkNotificationRead)
 
 			r.Get("/activity", driveHandler.ListActivity)
 		})
@@ -171,7 +193,7 @@ func (e *testEnv) ResetTables() {
 	defer cancel()
 	stmts := []string{
 		`ALTER TABLE workspaces DROP CONSTRAINT IF EXISTS fk_workspaces_owner`,
-		`TRUNCATE guest_invites, share_links, activity_log, permissions, file_versions, files, folders, users, workspaces RESTART IDENTITY CASCADE`,
+		`TRUNCATE notifications, file_previews, client_rooms, guest_invites, share_links, activity_log, permissions, file_versions, files, folders, users, workspaces RESTART IDENTITY CASCADE`,
 		`ALTER TABLE workspaces ADD CONSTRAINT fk_workspaces_owner FOREIGN KEY (owner_user_id) REFERENCES users(id)`,
 	}
 	for _, s := range stmts {
@@ -320,4 +342,19 @@ func (a testPermissionGranter) Grant(ctx context.Context, workspaceID uuid.UUID,
 
 func (a testPermissionGranter) Revoke(ctx context.Context, workspaceID, permID uuid.UUID) error {
 	return a.svc.Revoke(ctx, workspaceID, permID)
+}
+
+// testFolderCreator bridges folder.Service to sharing.FolderCreator,
+// mirroring cmd/server/main.go's folderCreatorAdapter so client-room
+// creation in tests exercises the same path as production.
+type testFolderCreator struct {
+	svc *folder.Service
+}
+
+func (a testFolderCreator) Create(ctx context.Context, workspaceID uuid.UUID, parentID *uuid.UUID, name string, createdBy uuid.UUID) (sharing.FolderRef, error) {
+	f, err := a.svc.Create(ctx, workspaceID, parentID, name, createdBy)
+	if err != nil {
+		return sharing.FolderRef{}, err
+	}
+	return sharing.FolderRef{ID: f.ID}, nil
 }

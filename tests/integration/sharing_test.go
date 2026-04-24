@@ -527,7 +527,7 @@ func TestSearchFiltersByWorkspace(t *testing.T) {
 		Results []struct {
 			Name string `json:"name"`
 			Type string `json:"type"`
-		} `json:"results"`
+		} `json:"hits"`
 	}
 	env.decodeJSON(body, &out)
 	if len(out.Results) != 1 {

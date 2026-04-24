@@ -19,7 +19,10 @@ import (
 	"github.com/kennguy3n/zk-drive/internal/file"
 	"github.com/kennguy3n/zk-drive/internal/folder"
 	"github.com/kennguy3n/zk-drive/internal/jobs"
+	"github.com/kennguy3n/zk-drive/internal/notification"
 	"github.com/kennguy3n/zk-drive/internal/permission"
+	"github.com/kennguy3n/zk-drive/internal/preview"
+	"github.com/kennguy3n/zk-drive/internal/scan"
 	"github.com/kennguy3n/zk-drive/internal/search"
 	"github.com/kennguy3n/zk-drive/internal/sharing"
 	"github.com/kennguy3n/zk-drive/internal/storage"
@@ -49,8 +52,10 @@ type Handler struct {
 	activity    *activity.Service
 	sharing     *sharing.Service
 	search      *search.Service
-	clientRooms *sharing.ClientRoomService
-	jobs        *jobs.Publisher
+	clientRooms   *sharing.ClientRoomService
+	jobs          *jobs.Publisher
+	notifications *notification.Service
+	previews      preview.Repository
 }
 
 // NewHandler constructs a Handler from the underlying services. The pool is
@@ -111,6 +116,35 @@ func (h *Handler) WithClientRooms(s *sharing.ClientRoomService) *Handler {
 func (h *Handler) WithJobs(p *jobs.Publisher) *Handler {
 	h.jobs = p
 	return h
+}
+
+// WithNotifications wires the notification service. A nil service
+// disables in-app notifications (notify* calls become no-ops) so the
+// metadata plane keeps working in tests that don't care about
+// notifications.
+func (h *Handler) WithNotifications(s *notification.Service) *Handler {
+	h.notifications = s
+	return h
+}
+
+// WithPreviews wires the preview repository so the handler can serve
+// preview download URLs without going through a service layer. A nil
+// repository causes /api/files/{id}/preview-url to respond 404.
+func (h *Handler) WithPreviews(r preview.Repository) *Handler {
+	h.previews = r
+	return h
+}
+
+// notify is a nil-safe wrapper around the notification service,
+// mirroring the logActivity pattern. Errors are logged and swallowed
+// so notification failures never break the parent operation.
+func (h *Handler) notify(ctx context.Context, fn func(*notification.Service) error) {
+	if h.notifications == nil {
+		return
+	}
+	if err := fn(h.notifications); err != nil {
+		log.Printf("notification error: %v", err)
+	}
 }
 
 // logActivity is a nil-safe wrapper so callers don't need to null-check
@@ -674,6 +708,10 @@ func (h *Handler) ListFileVersions(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid id", http.StatusBadRequest)
 		return
 	}
+	if err := h.assertResourceAccess(r.Context(), permission.ResourceFile, id, permission.RoleViewer); err != nil {
+		writeServiceError(w, err)
+		return
+	}
 	versions, err := h.files.ListVersions(r.Context(), workspaceID, id)
 	if err != nil {
 		writeServiceError(w, err)
@@ -882,6 +920,14 @@ func (h *Handler) DownloadURL(w http.ResponseWriter, r *http.Request) {
 	}
 	if current == nil {
 		http.Error(w, "current version not found", http.StatusNotFound)
+		return
+	}
+	// Refuse to mint a presigned URL for a version clamd has already
+	// flagged. Migration 008 pairs this check with the scan worker:
+	// without it the scan pipeline only surfaces quarantine via the
+	// admin notification, while the infected bytes remain pullable.
+	if current.ScanStatus == scan.StatusQuarantined {
+		http.Error(w, "file version quarantined by virus scan", http.StatusForbidden)
 		return
 	}
 	url, err := h.storage.GenerateDownloadURL(r.Context(), current.ObjectKey, storage.DefaultPresignExpiry)
@@ -1309,6 +1355,9 @@ func (h *Handler) CreateShareLink(w http.ResponseWriter, r *http.Request) {
 		writeSharingError(w, err)
 		return
 	}
+	h.notify(r.Context(), func(n *notification.Service) error {
+		return n.NotifyShareLinkCreated(r.Context(), workspaceID, userID, link.ID, req.ResourceType, resourceID)
+	})
 	writeJSON(w, http.StatusCreated, link)
 }
 
@@ -1411,6 +1460,17 @@ func (h *Handler) CreateGuestInvite(w http.ResponseWriter, r *http.Request) {
 		writeSharingError(w, err)
 		return
 	}
+	// Best-effort invitee notification: only users who already have an
+	// account in this workspace get an in-app notification. External
+	// invitees receive an email out-of-band (out of scope for this
+	// sprint).
+	if h.users != nil && h.notifications != nil {
+		if u, uerr := h.users.GetByEmail(r.Context(), workspaceID, req.Email); uerr == nil && u != nil {
+			h.notify(r.Context(), func(n *notification.Service) error {
+				return n.NotifyGuestInviteSent(r.Context(), workspaceID, u.ID, inv.ID, folderID, req.Email)
+			})
+		}
+	}
 	writeJSON(w, http.StatusCreated, inv)
 }
 
@@ -1433,6 +1493,9 @@ func (h *Handler) AcceptGuestInvite(w http.ResponseWriter, r *http.Request) {
 		writeSharingError(w, err)
 		return
 	}
+	h.notify(r.Context(), func(n *notification.Service) error {
+		return n.NotifyGuestInviteAccepted(r.Context(), workspaceID, inv.CreatedBy, inv.ID, inv.Email)
+	})
 	writeJSON(w, http.StatusOK, inv)
 }
 
@@ -1624,9 +1687,10 @@ func (h *Handler) Search(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"results": results,
-		"limit":   limit,
-		"offset":  offset,
+		"hits":   results,
+		"query":  query,
+		"limit":  limit,
+		"offset": offset,
 	})
 }
 
@@ -1656,4 +1720,159 @@ func writeSharingError(w http.ResponseWriter, err error) {
 	default:
 		writeServiceError(w, err)
 	}
+}
+
+// --- Notifications -------------------------------------------------------
+
+// ListNotifications returns the caller's notifications (unread-first,
+// newest-first). limit is capped at 100.
+func (h *Handler) ListNotifications(w http.ResponseWriter, r *http.Request) {
+	if h.notifications == nil {
+		http.Error(w, "notifications not configured", http.StatusNotImplemented)
+		return
+	}
+	workspaceID, _ := middleware.WorkspaceIDFromContext(r.Context())
+	userID, _ := middleware.UserIDFromContext(r.Context())
+	limit := parseIntParam(r.URL.Query().Get("limit"), notification.DefaultLimit)
+	offset := parseIntParam(r.URL.Query().Get("offset"), 0)
+	// Cap at the handler layer so the response envelope echoes the
+	// clamped values back to clients. The service also clamps
+	// defensively, but echoing the pre-service limit would lie to
+	// callers that paginate on len(items) < limit.
+	if limit <= 0 {
+		limit = notification.DefaultLimit
+	}
+	if limit > notification.MaxLimit {
+		limit = notification.MaxLimit
+	}
+	if offset < 0 {
+		offset = 0
+	}
+	items, err := h.notifications.List(r.Context(), workspaceID, userID, limit, offset)
+	if err != nil {
+		writeServiceError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"notifications": items,
+		"limit":         limit,
+		"offset":        offset,
+	})
+}
+
+// MarkNotificationRead flips a single notification to read.
+func (h *Handler) MarkNotificationRead(w http.ResponseWriter, r *http.Request) {
+	if h.notifications == nil {
+		http.Error(w, "notifications not configured", http.StatusNotImplemented)
+		return
+	}
+	workspaceID, _ := middleware.WorkspaceIDFromContext(r.Context())
+	userID, _ := middleware.UserIDFromContext(r.Context())
+	id, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		http.Error(w, "invalid id", http.StatusBadRequest)
+		return
+	}
+	if err := h.notifications.MarkRead(r.Context(), workspaceID, userID, id); err != nil {
+		if errors.Is(err, notification.ErrNotFound) {
+			http.Error(w, err.Error(), http.StatusNotFound)
+			return
+		}
+		writeServiceError(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// MarkAllNotificationsRead flips every unread notification for the caller.
+func (h *Handler) MarkAllNotificationsRead(w http.ResponseWriter, r *http.Request) {
+	if h.notifications == nil {
+		http.Error(w, "notifications not configured", http.StatusNotImplemented)
+		return
+	}
+	workspaceID, _ := middleware.WorkspaceIDFromContext(r.Context())
+	userID, _ := middleware.UserIDFromContext(r.Context())
+	if err := h.notifications.MarkAllRead(r.Context(), workspaceID, userID); err != nil {
+		writeServiceError(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// --- Preview URL ---------------------------------------------------------
+
+// PreviewURL returns a presigned GET URL for the latest generated
+// preview of a file. Returns 404 when no preview has been built yet
+// (either the mime type is unsupported or the worker hasn't run
+// against this version); the frontend renders a placeholder icon in
+// that case.
+func (h *Handler) PreviewURL(w http.ResponseWriter, r *http.Request) {
+	if h.previews == nil || h.storage == nil {
+		http.Error(w, "previews not configured", http.StatusNotImplemented)
+		return
+	}
+	workspaceID, _ := middleware.WorkspaceIDFromContext(r.Context())
+	id, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		http.Error(w, "invalid id", http.StatusBadRequest)
+		return
+	}
+	// Bind the file id to the caller's workspace before any permission
+	// logic runs. Admins bypass assertResourceAccess, so without this
+	// lookup an admin in workspace A could request a file id from
+	// workspace B and get a presigned URL to B's preview.
+	f, err := h.files.GetByID(r.Context(), workspaceID, id)
+	if err != nil {
+		writeServiceError(w, err)
+		return
+	}
+	if err := h.assertResourceAccess(r.Context(), permission.ResourceFile, id, permission.RoleViewer); err != nil {
+		writeServiceError(w, err)
+		return
+	}
+	// Refuse to serve a preview for a quarantined version for the
+	// same reason DownloadURL refuses: the preview is derived from
+	// the infected source bytes and we do not want to surface it in
+	// the UI. We check both the file's current version *and* the
+	// specific version the preview was generated from: GetLatestByFile
+	// returns the newest preview by created_at, which may predate the
+	// current version if the preview worker has not caught up.
+	versions, verr := h.files.ListVersions(r.Context(), workspaceID, f.ID)
+	if verr != nil {
+		writeServiceError(w, verr)
+		return
+	}
+	scanStatusByVersion := make(map[uuid.UUID]string, len(versions))
+	for _, v := range versions {
+		scanStatusByVersion[v.ID] = v.ScanStatus
+	}
+	if f.CurrentVersionID != nil {
+		if scanStatusByVersion[*f.CurrentVersionID] == scan.StatusQuarantined {
+			http.Error(w, "file version quarantined by virus scan", http.StatusForbidden)
+			return
+		}
+	}
+	p, err := h.previews.GetLatestByFile(r.Context(), id)
+	if err != nil {
+		if errors.Is(err, preview.ErrNotFound) {
+			http.Error(w, "no preview available", http.StatusNotFound)
+			return
+		}
+		writeServiceError(w, err)
+		return
+	}
+	if scanStatusByVersion[p.VersionID] == scan.StatusQuarantined {
+		http.Error(w, "file version quarantined by virus scan", http.StatusForbidden)
+		return
+	}
+	url, err := h.storage.GenerateDownloadURL(r.Context(), p.ObjectKey, 0)
+	if err != nil {
+		http.Error(w, "preview url: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"preview_url": url,
+		"object_key":  p.ObjectKey,
+		"mime_type":   p.MimeType,
+	})
 }
