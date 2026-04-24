@@ -2,7 +2,7 @@
 
 - **Project**: ZK Drive
 - **License**: Proprietary — All Rights Reserved.
-- **Status**: Phase 1 — Foundation (in progress)
+- **Status**: Phase 1 — Foundation (functionally complete pending upstream presigned URL validation)
 - **Last updated**: 2026-04-23
 
 This document is a phase-gated tracker. Each phase has an explicit
@@ -45,12 +45,13 @@ Checklist:
       recording. `api/drive/`.
 - [x] Direct-to-storage download flow: presigned GET URL generation
       with permission check. `api/drive/`.
-- [ ] React frontend scaffold: Vite + React + TypeScript. Login /
+- [x] React frontend scaffold: Vite + React + TypeScript. Login /
       signup page, file browser page, upload component. `frontend/`.
-- [ ] Basic permission model: workspace-level roles (admin, member).
+- [x] Basic permission model: workspace-level roles (admin, member)
+      plus per-resource grants (viewer / editor / admin).
       `internal/permission/`.
-- [ ] Activity logging: record file / folder operations in
-      `activity_log` table. `internal/workspace/`.
+- [x] Activity logging: record file / folder operations in
+      `activity_log` table. `internal/activity/`.
 - [x] Soft delete (trash): deleted files / folders marked with
       `deleted_at`, recoverable for 30 days. `internal/file/`,
       `internal/folder/`.
@@ -76,13 +77,29 @@ Checklist:
   Object keys are workspace-scoped
   (`{workspace_id}/{file_id}/{version_id}`). Permission checks run
   before URL generation; bytes never transit the ZK Drive API server.
-- Permission model (workspace-level roles beyond admin/member) deferred
-  to next batch.
-- Activity logging deferred to next batch (will hook into existing CRUD
-  operations).
+- Permission model implemented: workspace-level roles (admin, member)
+  with per-resource grants (viewer, editor, admin). Schema lives in
+  migration 004; `internal/permission/` implements the repository and
+  service (`Grant`, `Revoke`, `HasAccess`, `ListForResource`). Handler
+  exposes `GET/POST/DELETE /api/permissions`. Folder permission
+  inheritance deferred to Phase 2.
+- Activity logging implemented: fire-and-forget async logging of every
+  folder / file CRUD operation and permission grant / revoke via a
+  buffered channel + background worker in `internal/activity/`. Entries
+  are tenant-scoped and queryable via
+  `GET /api/activity?limit=50&offset=0`. Failures are swallowed so
+  logging never blocks or fails the parent operation.
 - Soft delete implemented for folders and files (`deleted_at` column,
   excluded from listings).
-- React frontend scaffold deferred to next batch.
+- React frontend scaffold landed: Vite + React + TypeScript under
+  `frontend/` with login, signup, and file browser pages plus the
+  presigned-URL upload flow. No sharing UI yet (Phase 2). Dependencies
+  vetted for non-AGPL licensing (MIT / Apache-2.0 only).
+
+**Phase 1 status**: functionally complete. Only the decision gate
+remains partially blocked on the upstream `zk-object-fabric` gateway
+accepting query-string SigV4 presigned URLs. Once that lands upstream,
+the full round-trip can be validated end to end.
 
 ---
 
