@@ -1833,18 +1833,23 @@ func (h *Handler) PreviewURL(w http.ResponseWriter, r *http.Request) {
 	// Refuse to serve a preview for a quarantined version for the
 	// same reason DownloadURL refuses: the preview is derived from
 	// the infected source bytes and we do not want to surface it in
-	// the UI.
+	// the UI. We check both the file's current version *and* the
+	// specific version the preview was generated from: GetLatestByFile
+	// returns the newest preview by created_at, which may predate the
+	// current version if the preview worker has not caught up.
+	versions, verr := h.files.ListVersions(r.Context(), workspaceID, f.ID)
+	if verr != nil {
+		writeServiceError(w, verr)
+		return
+	}
+	scanStatusByVersion := make(map[uuid.UUID]string, len(versions))
+	for _, v := range versions {
+		scanStatusByVersion[v.ID] = v.ScanStatus
+	}
 	if f.CurrentVersionID != nil {
-		versions, verr := h.files.ListVersions(r.Context(), workspaceID, f.ID)
-		if verr != nil {
-			writeServiceError(w, verr)
+		if scanStatusByVersion[*f.CurrentVersionID] == scan.StatusQuarantined {
+			http.Error(w, "file version quarantined by virus scan", http.StatusForbidden)
 			return
-		}
-		for _, v := range versions {
-			if v.ID == *f.CurrentVersionID && v.ScanStatus == scan.StatusQuarantined {
-				http.Error(w, "file version quarantined by virus scan", http.StatusForbidden)
-				return
-			}
 		}
 	}
 	p, err := h.previews.GetLatestByFile(r.Context(), id)
@@ -1854,6 +1859,10 @@ func (h *Handler) PreviewURL(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		writeServiceError(w, err)
+		return
+	}
+	if scanStatusByVersion[p.VersionID] == scan.StatusQuarantined {
+		http.Error(w, "file version quarantined by virus scan", http.StatusForbidden)
 		return
 	}
 	url, err := h.storage.GenerateDownloadURL(r.Context(), p.ObjectKey, 0)
