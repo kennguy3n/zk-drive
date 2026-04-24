@@ -154,18 +154,22 @@ func (s *ClientRoomService) List(ctx context.Context, workspaceID uuid.UUID) ([]
 	return s.repo.List(ctx, workspaceID)
 }
 
-// Delete tears down a room: the share link is revoked first (so the
-// public URL stops working immediately), then the room row is deleted.
-// The backing folder is intentionally left alone — callers may want to
-// keep the uploaded files; the folder can be deleted through the
-// regular folder API if desired.
+// Delete tears down a room: the room row is deleted first (to satisfy
+// the client_rooms.share_link_id FK on RESTRICT), then the share link
+// is revoked so the public URL stops working. The backing folder is
+// intentionally left alone — callers may want to keep the uploaded
+// files; the folder can be deleted through the regular folder API if
+// desired.
 func (s *ClientRoomService) Delete(ctx context.Context, workspaceID, id uuid.UUID) error {
 	room, err := s.repo.Get(ctx, workspaceID, id)
 	if err != nil {
 		return err
 	}
+	if derr := s.repo.Delete(ctx, workspaceID, id); derr != nil {
+		return derr
+	}
 	if rerr := s.shareLinks.RevokeShareLink(ctx, workspaceID, room.ShareLinkID); rerr != nil && !errors.Is(rerr, ErrNotFound) {
 		return fmt.Errorf("revoke room share link: %w", rerr)
 	}
-	return s.repo.Delete(ctx, workspaceID, id)
+	return nil
 }

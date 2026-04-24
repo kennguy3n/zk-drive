@@ -1,4 +1,5 @@
 import { getDownloadURL, type FileItem } from "../api/client";
+import FilePreview from "./FilePreview";
 
 export interface FileListProps {
   files: FileItem[];
@@ -50,7 +51,12 @@ export default function FileList({ files, onRename, onDelete, onShare }: FileLis
       <tbody>
         {files.map((f) => (
           <tr key={f.id} style={{ borderBottom: "1px solid #f3f4f6" }}>
-            <td style={{ padding: "8px 12px" }}>{f.name}</td>
+            <td style={{ padding: "8px 12px" }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                <FilePreview fileID={f.id} mimeType={f.mime_type} size="thumb" alt={f.name} />
+                <span>{f.name}</span>
+              </div>
+            </td>
             <td style={{ padding: "8px 12px", fontSize: 13, color: "#374151" }}>
               {formatBytes(f.size_bytes)}
             </td>

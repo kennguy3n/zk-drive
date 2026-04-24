@@ -209,6 +209,19 @@ export async function getDownloadURL(fileID: string): Promise<string> {
   return data.download_url;
 }
 
+// getFilePreviewURL fetches a presigned GET URL for the server-rendered
+// thumbnail of a file. The backend returns 404 when no preview has been
+// built yet (unsupported mime or worker hasn't run); the caller renders
+// a placeholder in that case.
+export async function getFilePreviewURL(fileID: string): Promise<string> {
+  const { data } = await client.get<{
+    preview_url: string;
+    object_key: string;
+    mime_type: string;
+  }>(`/files/${fileID}/preview-url`);
+  return data.preview_url;
+}
+
 export async function deleteFile(id: string): Promise<void> {
   await client.delete(`/files/${id}`);
 }
@@ -243,14 +256,13 @@ export interface ShareLink {
 export interface GuestInvite {
   id: string;
   workspace_id: string;
-  resource_type: string;
-  resource_id: string;
+  folder_id: string;
   email: string;
   role: string;
-  token: string;
+  token?: string;
   expires_at: string | null;
   accepted_at: string | null;
-  revoked_at: string | null;
+  permission_id?: string;
   created_by: string;
   created_at: string;
 }
@@ -287,16 +299,24 @@ export async function revokeShareLink(id: string): Promise<void> {
   await client.delete(`/share-links/${id}`);
 }
 
+// CreateGuestInviteInput mirrors api/drive/handler.go's
+// createGuestInviteRequest. Guest invites are always folder-scoped —
+// the backend model keeps a single folder_id column on guest_invites
+// and the permission grant is issued against that folder.
 export interface CreateGuestInviteInput {
-  resource_type: "file" | "folder";
-  resource_id: string;
+  folder_id: string;
   email: string;
   role: "viewer" | "commenter" | "editor";
   expires_at?: string;
 }
 
 export async function createGuestInvite(input: CreateGuestInviteInput): Promise<GuestInvite> {
-  const { data } = await client.post<GuestInvite>("/guest-invites", input);
+  const { data } = await client.post<GuestInvite>("/guest-invites", {
+    folder_id: input.folder_id,
+    email: input.email,
+    role: input.role,
+    expires_at: input.expires_at,
+  });
   return data;
 }
 
