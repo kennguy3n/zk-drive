@@ -7,6 +7,14 @@ import (
 	"github.com/google/uuid"
 )
 
+// DefaultLimit is the page size used when the caller passes limit <= 0.
+const DefaultLimit = 20
+
+// MaxLimit caps the page size so a client cannot request unbounded
+// pages. Exported so handlers can clamp before they echo the effective
+// value back to clients.
+const MaxLimit = 100
+
 // Service wires notification creation primitives on top of the
 // repository. Methods are typed per-event so callers do not have to
 // know the internal type string constants.
@@ -23,10 +31,10 @@ func NewService(repo Repository) *Service {
 // clamped to [1, 100]; offset is floored at 0.
 func (s *Service) List(ctx context.Context, workspaceID, userID uuid.UUID, limit, offset int) ([]*Notification, error) {
 	if limit <= 0 {
-		limit = 20
+		limit = DefaultLimit
 	}
-	if limit > 100 {
-		limit = 100
+	if limit > MaxLimit {
+		limit = MaxLimit
 	}
 	if offset < 0 {
 		offset = 0

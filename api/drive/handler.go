@@ -1724,8 +1724,21 @@ func (h *Handler) ListNotifications(w http.ResponseWriter, r *http.Request) {
 	}
 	workspaceID, _ := middleware.WorkspaceIDFromContext(r.Context())
 	userID, _ := middleware.UserIDFromContext(r.Context())
-	limit := parseIntParam(r.URL.Query().Get("limit"), 20)
+	limit := parseIntParam(r.URL.Query().Get("limit"), notification.DefaultLimit)
 	offset := parseIntParam(r.URL.Query().Get("offset"), 0)
+	// Cap at the handler layer so the response envelope echoes the
+	// clamped values back to clients. The service also clamps
+	// defensively, but echoing the pre-service limit would lie to
+	// callers that paginate on len(items) < limit.
+	if limit <= 0 {
+		limit = notification.DefaultLimit
+	}
+	if limit > notification.MaxLimit {
+		limit = notification.MaxLimit
+	}
+	if offset < 0 {
+		offset = 0
+	}
 	items, err := h.notifications.List(r.Context(), workspaceID, userID, limit, offset)
 	if err != nil {
 		writeServiceError(w, err)

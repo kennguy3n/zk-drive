@@ -96,12 +96,19 @@ func (s *Service) Scan(ctx context.Context, fileID, versionID uuid.UUID) (Verdic
 		return Verdict{Status: StatusScanning, Detail: err.Error()}, err
 	}
 
-	verdict := s.scanBytes(ctx, body)
+	verdict, scanErr := s.scanBytes(ctx, body)
 	at := s.now()
 	verdict.ScannedAt = at
 
 	if err := s.markStatus(ctx, versionID, verdict.Status, verdict.Detail, &at); err != nil {
 		return verdict, err
+	}
+
+	// Transient clamd failures must propagate so the JetStream worker
+	// Naks the message and NATS redelivers. The row is left in
+	// 'pending' with a detail string so operators can audit retries.
+	if scanErr != nil {
+		return verdict, scanErr
 	}
 
 	if verdict.Status == StatusQuarantined && s.notifier != nil {
@@ -114,19 +121,21 @@ func (s *Service) Scan(ctx context.Context, fileID, versionID uuid.UUID) (Verdic
 
 // scanBytes is split out so tests can inject bodies without a real
 // presigned-URL round trip. Returns clean / quarantined based on the
-// clamd verdict, or clean when permissive mode is active.
-func (s *Service) scanBytes(ctx context.Context, body []byte) Verdict {
+// clamd verdict, or clean when permissive mode is active. A non-nil
+// error signals a transient clamd connectivity failure — callers must
+// propagate it so the worker retries the job rather than acking it.
+func (s *Service) scanBytes(ctx context.Context, body []byte) (Verdict, error) {
 	if s.permissive {
-		return Verdict{Status: StatusClean, Detail: "permissive mode: scan skipped"}
+		return Verdict{Status: StatusClean, Detail: "permissive mode: scan skipped"}, nil
 	}
 	sig, err := s.instream(ctx, body)
 	if err != nil {
-		return Verdict{Status: StatusPending, Detail: fmt.Sprintf("clamd error: %v", err)}
+		return Verdict{Status: StatusPending, Detail: fmt.Sprintf("clamd error: %v", err)}, err
 	}
 	if sig == "" {
-		return Verdict{Status: StatusClean}
+		return Verdict{Status: StatusClean}, nil
 	}
-	return Verdict{Status: StatusQuarantined, Detail: sig}
+	return Verdict{Status: StatusQuarantined, Detail: sig}, nil
 }
 
 type versionMeta struct {
