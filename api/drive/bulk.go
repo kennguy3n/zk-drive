@@ -16,6 +16,7 @@ import (
 	"github.com/kennguy3n/zk-drive/api/middleware"
 	"github.com/kennguy3n/zk-drive/internal/activity"
 	"github.com/kennguy3n/zk-drive/internal/file"
+	"github.com/kennguy3n/zk-drive/internal/folder"
 	"github.com/kennguy3n/zk-drive/internal/permission"
 	"github.com/kennguy3n/zk-drive/internal/scan"
 	"github.com/kennguy3n/zk-drive/internal/storage"
@@ -70,7 +71,8 @@ func (h *Handler) BulkMove(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid target_folder_id", http.StatusBadRequest)
 		return
 	}
-	if _, err := h.folders.GetByID(r.Context(), workspaceID, targetID); err != nil {
+	targetFolder, err := h.folders.GetByID(r.Context(), workspaceID, targetID)
+	if err != nil {
 		writeServiceError(w, err)
 		return
 	}
@@ -88,6 +90,24 @@ func (h *Handler) BulkMove(w http.ResponseWriter, r *http.Request) {
 		}
 		if err := h.assertResourceAccess(r.Context(), permission.ResourceFile, id, permission.RoleEditor); err != nil {
 			resp.Failed = append(resp.Failed, bulkFailure{ID: raw, Error: err.Error()})
+			continue
+		}
+		// Cross-mode moves are rejected at the metadata layer because
+		// the underlying objects live under different keying / placement
+		// regimes. Record a per-item failure rather than aborting the
+		// whole batch, mirroring the single-file MoveFile handler.
+		srcFile, err := h.files.GetByID(r.Context(), workspaceID, id)
+		if err != nil {
+			resp.Failed = append(resp.Failed, bulkFailure{ID: raw, Error: err.Error()})
+			continue
+		}
+		srcFolder, err := h.folders.GetByID(r.Context(), workspaceID, srcFile.FolderID)
+		if err != nil {
+			resp.Failed = append(resp.Failed, bulkFailure{ID: raw, Error: err.Error()})
+			continue
+		}
+		if !sameFolderEncryptionMode(srcFolder.EncryptionMode, targetFolder.EncryptionMode) {
+			resp.Failed = append(resp.Failed, bulkFailure{ID: raw, Error: folder.ErrEncryptionModeMismatch.Error()})
 			continue
 		}
 		if _, err := h.files.Move(r.Context(), workspaceID, id, targetID); err != nil {
@@ -182,7 +202,8 @@ func (h *Handler) BulkCopy(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid target_folder_id", http.StatusBadRequest)
 		return
 	}
-	if _, err := h.folders.GetByID(r.Context(), workspaceID, targetID); err != nil {
+	targetFolder, err := h.folders.GetByID(r.Context(), workspaceID, targetID)
+	if err != nil {
 		writeServiceError(w, err)
 		return
 	}
@@ -204,6 +225,19 @@ func (h *Handler) BulkCopy(w http.ResponseWriter, r *http.Request) {
 		src, err := h.files.GetByID(r.Context(), workspaceID, id)
 		if err != nil {
 			resp.Failed = append(resp.Failed, bulkFailure{ID: raw, Error: err.Error()})
+			continue
+		}
+		// Cross-mode copies would land an object in a folder whose
+		// keying / placement regime does not match how the source
+		// version was written. Reject at the metadata layer with a
+		// per-item failure to mirror the single-file move semantics.
+		srcFolder, err := h.folders.GetByID(r.Context(), workspaceID, src.FolderID)
+		if err != nil {
+			resp.Failed = append(resp.Failed, bulkFailure{ID: raw, Error: err.Error()})
+			continue
+		}
+		if !sameFolderEncryptionMode(srcFolder.EncryptionMode, targetFolder.EncryptionMode) {
+			resp.Failed = append(resp.Failed, bulkFailure{ID: raw, Error: folder.ErrEncryptionModeMismatch.Error()})
 			continue
 		}
 		if src.CurrentVersionID == nil {
@@ -261,11 +295,12 @@ func (h *Handler) BulkCopy(w http.ResponseWriter, r *http.Request) {
 // — the tradeoff is documented in docs/PROGRESS.md. Larger downloads
 // should move to an async "build zip in object storage" worker later.
 func (h *Handler) BulkDownload(w http.ResponseWriter, r *http.Request) {
-	if h.storage == nil {
+	workspaceID, _ := middleware.WorkspaceIDFromContext(r.Context())
+	store := h.resolveStorage(r.Context(), workspaceID)
+	if store == nil {
 		http.Error(w, "storage not configured", http.StatusNotImplemented)
 		return
 	}
-	workspaceID, _ := middleware.WorkspaceIDFromContext(r.Context())
 	var req bulkDownloadRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "invalid json body", http.StatusBadRequest)
@@ -336,7 +371,7 @@ func (h *Handler) BulkDownload(w http.ResponseWriter, r *http.Request) {
 	defer zw.Close()
 	client := &http.Client{}
 	for _, it := range items {
-		if err := appendZipEntry(r.Context(), zw, client, h.storage, it.name, it.objectKey); err != nil {
+		if err := appendZipEntry(r.Context(), zw, client, store, it.name, it.objectKey); err != nil {
 			// Past the header we can only signal via the zip stream;
 			// return without a partial entry and log server-side so
 			// operators can correlate truncated downloads with a cause.
