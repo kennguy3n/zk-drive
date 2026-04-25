@@ -3,7 +3,7 @@
 - **Project**: ZK Drive
 - **License**: Proprietary — All Rights Reserved.
 - **Status**: Phase 4 — Privacy & Differentiation (kicked off 2026-04-25)
-- **Last updated**: 2026-04-25 (Phase 4 follow-up: PR #10 review findings closed — UploadURL orphan + BulkMove/BulkCopy cross-mode bypass + BulkDownload per-workspace storage)
+- **Last updated**: 2026-04-25 (Phase 4 sprint 2: Task 5c closed upstream, audit clean, next 10 tasks prioritized)
 
 This document is a phase-gated tracker. Each phase has an explicit
 checklist and a decision gate. Do not skip to the next phase until
@@ -325,14 +325,10 @@ Checklist:
 - [x] Decision gate: a paying SME customer can sign up, create a
       workspace, upload files, share with guests, and the admin can
       view audit logs and set retention policies. *(Met at the
-      metadata-plane level: covered end to end by
-      `tests/integration/phase3_gate_test.go` — signup, workspace
-      bootstrap, folder create, presigned upload-url + confirm-upload
-      with a stubbed object key, guest invite, audit-log inspection,
-      and retention-policy upsert all run green against the live
-      Postgres test database. Full byte-path round-trip with object
-      bytes is still blocked on the upstream zk-object-fabric
-      query-string SigV4 deferral documented in Phase 1.)*
+      metadata-plane level via `tests/integration/phase3_gate_test.go`.
+      Full byte-path round-trip validated after the upstream
+      zk-object-fabric presigned-URL fix landed — see Phase 1 gate
+      upgrade in PR #11.)*
 
 **Decisions / Deferrals (2026-04-24, Phase 3 kickoff)**:
 
@@ -515,6 +511,39 @@ Checklist:
   every zip entry, matching the rest of the presigned-URL handlers
   touched by PR #10.
 
+**Decisions / Deferrals (2026-04-25, Phase 4 sprint 2 planning)**:
+
+- PR #10 review findings (UploadURL orphan, BulkMove/BulkCopy
+  cross-mode bypass, BulkDownload per-workspace storage) all closed
+  in PR #12. No open regressions from recent commits.
+- Phase 3 gate note corrected: upstream presigned-URL fix confirmed
+  landed (zk-object-fabric 978246fb). Byte-path round-trip is no
+  longer blocked.
+- Task 5c (upstream auth flexibility) complete: zk-object-fabric
+  PR #29 (commit 39dcd81e) landed PresignedV4Strategy,
+  HeaderV4Strategy, Date-header fallback, chunked SigV4 seed
+  signature + VerifyChunkSignature helper. The s3_compat suite now
+  exercises presigned URLs with auth enabled end to end, including
+  a PresignedGetExpired subtest.
+- KMS-backed credential encryption (`SecretEncryptor` /
+  `CredentialDecryptor`) is a prerequisite before storing real fabric
+  tenant secrets in production. The current `IdentityEncryptor` /
+  `IdentityDecryptor` pair is local-dev only. Tracked as sprint 2
+  Task 2.
+- AI thread summary (Task 9) deferred past KChat integration (Task 8)
+  per strategic guardrails: pooled org storage, guest/client rooms,
+  and data residency are the competitive wedge — prioritize these
+  over feature parity.
+- Native mobile app evaluation added to the Phase 4 tail; PWA-first
+  remains the default unless Lighthouse / adoption metrics force a
+  React Native investment.
+- Next 10 tasks prioritized: (1) mark Task 5c + fix Phase 3 gate
+  note, (2) KMS-backed credential encryption, (3) validate e2e
+  presigned round-trip, (4) strict-ZK search exclusion, (5) content
+  search index worker, (6) CMK wiring, (7) frontend admin UI,
+  (8) KChat integration API, (9) client-room templates, (10) native
+  mobile evaluation. AI classification deferred.
+
 **Goal**: add strict-ZK private folders, customer-managed keys, data
 residency controls, the KChat integration API, and AI features for
 managed encrypted mode. This is the phase that justifies the
@@ -543,11 +572,9 @@ Checklist:
         worker handlers skip jobs whose file lives in a strict-ZK
         folder, log the skip, and ack the message so JetStream does
         not redeliver.
-  - [ ] Task 5c: upstream auth flexibility — add x-amz-date fallback,
-        chunked SigV4 seed signature, and auth-strategy dispatch to
-        zk-object-fabric `internal/auth/authenticator.go`. Update
-        s3_compat integration test to verify presigned URLs with auth
-        enabled.
+  - [x] Task 5c: upstream auth flexibility — x-amz-date fallback,
+        chunked SigV4 seed signature, and auth-strategy dispatch
+        landed in zk-object-fabric PR #29 (commit 39dcd81e).
   - [ ] Task 5d: e2e presigned URL round-trip test — add a test in
         `tests/e2e/` that validates the full upload (presigned PUT) and
         download (presigned GET) flow against a running zk-object-fabric
@@ -565,24 +592,37 @@ Checklist:
   - [ ] Task 10: Client-room templates (agencies, accounting, legal,
         construction, clinics) — deferred to the back-half of
         Phase 4 once the multi-mode storage plumbing is stable.
-- [ ] Strict-ZK folder support: disable server-side previews, search,
+- [~] Strict-ZK folder support: disable server-side previews, search,
       and text extraction for strict-ZK folders.
       `internal/preview/`, `internal/search/`.
+      (worker skip done in Task 5; search exclusion + content-index
+      skip remaining)
 - [ ] Customer-managed key (CMK) option: workspace-level CMK
       configuration via zk-object-fabric. `internal/workspace/`.
+      (Task 6)
 - [ ] Data residency controls: expose zk-object-fabric placement
       policies in the admin UI. `frontend/`, `api/admin/`.
+      (backend done in Task 3; frontend in Task 7)
 - [ ] KChat integration API: REST endpoints for room-folder mapping,
       permission sync, and attachment metadata. `api/drive/`.
+      (Task 8)
 - [ ] AI thread summary / file classification (managed encrypted mode
       only). `internal/ai/`.
+      (Task 9, deferred past Task 8)
 - [ ] Content search for managed encrypted files: extract text from
       documents, index in Postgres FTS. `internal/search/`.
 - [ ] Client room templates: pre-configured folder structures for
       agencies, accounting, legal, construction, and clinics.
       `internal/sharing/`.
+      (Task 10)
 - [ ] Native mobile app evaluation: assess PWA metrics and decide
       whether to invest in React Native. Document decision.
+- [ ] KMS-backed credential encryption for workspace_storage_credentials.
+      `internal/fabric/`, `internal/storage/`.
+- [ ] Content search for managed encrypted files: index worker text
+      extraction. `internal/search/`, `cmd/worker/`.
+- [ ] Native mobile app evaluation: PWA benchmark + decision doc.
+      `docs/MOBILE_EVALUATION.md`.
 - [ ] Decision gate: a workspace admin can create a strict-ZK private
       folder, upload files with client-side encryption, and verify
       that the server cannot generate previews or search file
