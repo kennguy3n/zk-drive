@@ -25,7 +25,6 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/nats-io/nats.go"
 
 	"github.com/kennguy3n/zk-drive/internal/config"
@@ -38,6 +37,7 @@ import (
 	"github.com/kennguy3n/zk-drive/internal/scan"
 	"github.com/kennguy3n/zk-drive/internal/sharing"
 	"github.com/kennguy3n/zk-drive/internal/storage"
+	"github.com/kennguy3n/zk-drive/internal/wiring"
 )
 
 const (
@@ -103,7 +103,7 @@ func run() error {
 	// the server process doesn't take on extra cron-like
 	// responsibilities. A 5-minute cadence is fine for Phase 3 —
 	// share-link TTLs are generally hours / days.
-	sharingSvc := sharing.NewService(sharing.NewPostgresRepository(pool), permissionGranterAdapter{permission.NewService(permission.NewPostgresRepository(pool))})
+	sharingSvc := sharing.NewService(sharing.NewPostgresRepository(pool), wiring.NewPermissionGranter(permission.NewService(permission.NewPostgresRepository(pool))))
 	go runGuestExpirySweep(ctx, sharingSvc, 5*time.Minute)
 
 	natsURL := os.Getenv("NATS_URL")
@@ -321,26 +321,6 @@ func runGuestExpirySweep(ctx context.Context, svc *sharing.Service, interval tim
 		case <-t.C:
 		}
 	}
-}
-
-// permissionGranterAdapter bridges *permission.Service to
-// sharing.PermissionGranter. Duplicated from cmd/server so the worker
-// can stand up its own sharing service without pulling the server's
-// wiring file.
-type permissionGranterAdapter struct {
-	svc *permission.Service
-}
-
-func (a permissionGranterAdapter) Grant(ctx context.Context, workspaceID uuid.UUID, resourceType string, resourceID uuid.UUID, granteeType string, granteeID uuid.UUID, role string, expiresAt *time.Time) (sharing.PermissionRef, error) {
-	p, err := a.svc.Grant(ctx, workspaceID, resourceType, resourceID, granteeType, granteeID, role, expiresAt)
-	if err != nil {
-		return sharing.PermissionRef{}, err
-	}
-	return sharing.PermissionRef{ID: p.ID}, nil
-}
-
-func (a permissionGranterAdapter) Revoke(ctx context.Context, workspaceID, permID uuid.UUID) error {
-	return a.svc.Revoke(ctx, workspaceID, permID)
 }
 
 // indexHandler remains a logging placeholder; search indexing lives

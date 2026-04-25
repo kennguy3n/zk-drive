@@ -1,0 +1,6 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: zk-drive
+  labels:
+    app.kubernetes.io/name: zk-drive

@@ -8,6 +8,12 @@ export interface FileListProps {
   // onShare is optional so callers that don't wire ShareDialog yet
   // keep working unchanged — the Share button is hidden when omitted.
   onShare?: (file: FileItem) => void;
+  // selectedIDs + onToggleSelect power the bulk-operations toolbar
+  // rendered by the parent page. When omitted, selection checkboxes
+  // are hidden (keeps the legacy single-file UX for callers that
+  // haven't opted in yet).
+  selectedIDs?: Set<string>;
+  onToggleSelect?: (id: string) => void;
 }
 
 // formatBytes renders a byte count as a human-friendly string. Kept
@@ -32,16 +38,25 @@ async function handleDownload(id: string): Promise<void> {
   window.open(url, "_blank", "noopener");
 }
 
-export default function FileList({ files, onRename, onDelete, onShare }: FileListProps) {
+export default function FileList({
+  files,
+  onRename,
+  onDelete,
+  onShare,
+  selectedIDs,
+  onToggleSelect,
+}: FileListProps) {
   if (files.length === 0) {
     return (
       <div style={{ padding: 32, color: "#6b7280" }}>No files in this folder.</div>
     );
   }
+  const showSelection = !!onToggleSelect;
   return (
     <table style={{ width: "100%", borderCollapse: "collapse" }}>
       <thead>
         <tr style={{ textAlign: "left", borderBottom: "1px solid #e5e7eb" }}>
+          {showSelection ? <th style={{ padding: "8px 12px", width: 32 }}></th> : null}
           <th style={{ padding: "8px 12px", fontSize: 12, color: "#6b7280" }}>Name</th>
           <th style={{ padding: "8px 12px", fontSize: 12, color: "#6b7280" }}>Size</th>
           <th style={{ padding: "8px 12px", fontSize: 12, color: "#6b7280" }}>Updated</th>
@@ -51,6 +66,16 @@ export default function FileList({ files, onRename, onDelete, onShare }: FileLis
       <tbody>
         {files.map((f) => (
           <tr key={f.id} style={{ borderBottom: "1px solid #f3f4f6" }}>
+            {showSelection ? (
+              <td style={{ padding: "8px 12px" }}>
+                <input
+                  type="checkbox"
+                  checked={selectedIDs?.has(f.id) ?? false}
+                  onChange={() => onToggleSelect?.(f.id)}
+                  aria-label={`select ${f.name}`}
+                />
+              </td>
+            ) : null}
             <td style={{ padding: "8px 12px" }}>
               <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
                 <FilePreview fileID={f.id} mimeType={f.mime_type} size="thumb" alt={f.name} />

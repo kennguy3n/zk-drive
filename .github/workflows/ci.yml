@@ -87,3 +87,9 @@ jobs:
 
       - name: Run integration tests
         run: go test -count=1 ./tests/integration/...
+
+# Note: the Playwright e2e job lives in .github/workflows/e2e.yml and
+# is triggered via workflow_dispatch. It is kept out of the default
+# PR-blocking CI pipeline while the storage gateway / test harness
+# are still being stabilised — see deploy/README.md and
+# tests/e2e/*.spec.ts for the gating env vars (E2E_RUN_UPLOAD=1).

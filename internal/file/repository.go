@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -13,6 +14,11 @@ import (
 // ErrNotFound is returned when the requested file (or version) does not
 // exist within the supplied workspace.
 var ErrNotFound = errors.New("file not found")
+
+// ErrTagAlreadyExists is returned when AddTag would violate the
+// (file_id, tag) unique constraint. Distinct from ErrNotFound so the
+// HTTP layer can map it to 409 Conflict.
+var ErrTagAlreadyExists = errors.New("tag already exists on file")
 
 // Repository defines persistence operations for files and file versions.
 type Repository interface {
@@ -31,6 +37,11 @@ type Repository interface {
 	ListVersions(ctx context.Context, workspaceID, fileID uuid.UUID) ([]*FileVersion, error)
 	GetVersionByID(ctx context.Context, workspaceID, versionID uuid.UUID) (*FileVersion, error)
 	SetCurrentVersion(ctx context.Context, workspaceID, fileID, versionID uuid.UUID) error
+
+	AddTag(ctx context.Context, workspaceID, fileID, createdBy uuid.UUID, tag string) (*Tag, error)
+	RemoveTag(ctx context.Context, workspaceID, fileID uuid.UUID, tag string) error
+	ListTagsByFile(ctx context.Context, workspaceID, fileID uuid.UUID) ([]*Tag, error)
+	ListTagsByWorkspace(ctx context.Context, workspaceID uuid.UUID) ([]*Tag, error)
 }
 
 // PostgresRepository implements Repository against Postgres.
@@ -339,4 +350,120 @@ WHERE workspace_id = $1 AND id = $2 AND deleted_at IS NULL`
 		return ErrNotFound
 	}
 	return nil
+}
+
+// pgUniqueViolation is the SQLSTATE class for unique_violation. We
+// match on the literal so we don't pull pgconn into the file package
+// just for one constant.
+const pgUniqueViolation = "23505"
+
+// AddTag attaches a tag to a file. The (file_id, tag) unique index
+// surfaces duplicate inserts as ErrTagAlreadyExists rather than a
+// generic 500 so the HTTP layer can return 409. The file ownership
+// check happens inside the same transaction so a concurrent
+// soft-delete cannot leave an orphan tag pointing at a tombstoned
+// file.
+func (r *PostgresRepository) AddTag(ctx context.Context, workspaceID, fileID, createdBy uuid.UUID, tag string) (*Tag, error) {
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("begin add tag: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	var exists int
+	if err := tx.QueryRow(ctx, `SELECT 1 FROM files WHERE workspace_id = $1 AND id = $2 AND deleted_at IS NULL`, workspaceID, fileID).Scan(&exists); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, ErrNotFound
+		}
+		return nil, fmt.Errorf("verify file: %w", err)
+	}
+
+	t := &Tag{
+		ID:          uuid.New(),
+		FileID:      fileID,
+		WorkspaceID: workspaceID,
+		Tag:         tag,
+		CreatedBy:   createdBy,
+	}
+	const q = `
+INSERT INTO file_tags (id, file_id, workspace_id, tag, created_by)
+VALUES ($1, $2, $3, $4, $5)
+RETURNING created_at`
+	if err := tx.QueryRow(ctx, q, t.ID, t.FileID, t.WorkspaceID, t.Tag, t.CreatedBy).Scan(&t.CreatedAt); err != nil {
+		// pgx returns *pgconn.PgError on SQL errors. Use string match
+		// to detect the unique violation without taking a pgconn
+		// dependency in this file.
+		if strings.Contains(err.Error(), pgUniqueViolation) {
+			return nil, ErrTagAlreadyExists
+		}
+		return nil, fmt.Errorf("insert tag: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("commit add tag: %w", err)
+	}
+	return t, nil
+}
+
+// RemoveTag deletes a single (file, tag) pair. Returns ErrNotFound
+// when no row matches so the handler can map to 404 instead of 204.
+func (r *PostgresRepository) RemoveTag(ctx context.Context, workspaceID, fileID uuid.UUID, tag string) error {
+	const q = `
+DELETE FROM file_tags
+WHERE workspace_id = $1 AND file_id = $2 AND tag = $3`
+	cmd, err := r.pool.Exec(ctx, q, workspaceID, fileID, tag)
+	if err != nil {
+		return fmt.Errorf("delete tag: %w", err)
+	}
+	if cmd.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// ListTagsByFile returns every tag attached to a file, alphabetically.
+func (r *PostgresRepository) ListTagsByFile(ctx context.Context, workspaceID, fileID uuid.UUID) ([]*Tag, error) {
+	const q = `
+SELECT id, file_id, workspace_id, tag, created_by, created_at
+FROM file_tags
+WHERE workspace_id = $1 AND file_id = $2
+ORDER BY tag ASC`
+	rows, err := r.pool.Query(ctx, q, workspaceID, fileID)
+	if err != nil {
+		return nil, fmt.Errorf("list tags by file: %w", err)
+	}
+	defer rows.Close()
+	out := []*Tag{}
+	for rows.Next() {
+		t := &Tag{}
+		if err := rows.Scan(&t.ID, &t.FileID, &t.WorkspaceID, &t.Tag, &t.CreatedBy, &t.CreatedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, t)
+	}
+	return out, rows.Err()
+}
+
+// ListTagsByWorkspace returns every tag in a workspace ordered by
+// (tag, created_at). Used by admin UIs that want to surface popular
+// tags across the org.
+func (r *PostgresRepository) ListTagsByWorkspace(ctx context.Context, workspaceID uuid.UUID) ([]*Tag, error) {
+	const q = `
+SELECT id, file_id, workspace_id, tag, created_by, created_at
+FROM file_tags
+WHERE workspace_id = $1
+ORDER BY tag ASC, created_at ASC`
+	rows, err := r.pool.Query(ctx, q, workspaceID)
+	if err != nil {
+		return nil, fmt.Errorf("list tags by workspace: %w", err)
+	}
+	defer rows.Close()
+	out := []*Tag{}
+	for rows.Next() {
+		t := &Tag{}
+		if err := rows.Scan(&t.ID, &t.FileID, &t.WorkspaceID, &t.Tag, &t.CreatedBy, &t.CreatedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, t)
+	}
+	return out, rows.Err()
 }

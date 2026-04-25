@@ -1,0 +1,36 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: zk-drive-worker
+  namespace: zk-drive
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: zk-drive-worker
+  template:
+    metadata:
+      labels:
+        app: zk-drive-worker
+    spec:
+      containers:
+        - name: worker
+          image: ghcr.io/kennguy3n/zk-drive:latest
+          args: ["worker"]
+          envFrom:
+            - configMapRef:
+                name: zk-drive-config
+            - secretRef:
+                name: zk-drive-secrets
+          # The worker is a NATS JetStream consumer with no HTTP plane,
+          # so there is no port to publish or readiness-probe. Pod
+          # health is observed via the NATS subscription itself; if the
+          # consumer disconnects the kubelet's restart-on-exit policy
+          # recycles the pod.
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 1000m
+              memory: 512Mi

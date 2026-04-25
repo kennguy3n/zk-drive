@@ -2,6 +2,8 @@ import { Navigate, Route, Routes } from "react-router-dom";
 import LoginPage from "./pages/LoginPage";
 import SignupPage from "./pages/SignupPage";
 import FileBrowserPage from "./pages/FileBrowserPage";
+import AdminPage from "./pages/AdminPage";
+import BillingPage from "./pages/BillingPage";
 import RequireAuth from "./components/RequireAuth";
 
 // App-level routing. Unauthenticated visitors hit /login; everyone else
@@ -25,6 +27,22 @@ export default function App() {
         element={
           <RequireAuth>
             <FileBrowserPage />
+          </RequireAuth>
+        }
+      />
+      <Route
+        path="/admin"
+        element={
+          <RequireAuth>
+            <AdminPage />
+          </RequireAuth>
+        }
+      />
+      <Route
+        path="/billing"
+        element={
+          <RequireAuth>
+            <BillingPage />
           </RequireAuth>
         }
       />
