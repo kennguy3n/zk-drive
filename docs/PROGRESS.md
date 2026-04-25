@@ -3,7 +3,7 @@
 - **Project**: ZK Drive
 - **License**: Proprietary — All Rights Reserved.
 - **Status**: Phase 4 — Privacy & Differentiation (kicked off 2026-04-25)
-- **Last updated**: 2026-04-25 (Phase 4 sprint 5: PR/commit audit, check off Task 1, refresh next-10)
+- **Last updated**: 2026-04-25 (Phase 4 sprint 5: revised next-10 with comprehensive test gates)
 
 This document is a phase-gated tracker. Each phase has an explicit
 checklist and a decision gate. Do not skip to the next phase until
@@ -664,6 +664,57 @@ Checklist:
 Deferred: AI thread summary (past KChat integration), Stripe webhook
 wiring (Phase 5), Playwright continue-on-error removal (harness
 stabilization), native mobile app evaluation (after Phase 4 gate).
+
+**Decisions / Deferrals (2026-04-25, sprint 5 — test-first refresh)**:
+
+- Test gap audit revealed that Phase 3 features (admin API, billing,
+  retention, audit log, rate limiting, bulk ops, file tags) currently
+  have zero integration test coverage because
+  `tests/integration/setup_test.go` does not wire those routes into
+  the test harness — handlers exist on `main` but are unreachable
+  from the integration tests, so regressions land unnoticed.
+- `TestUploadConfirmDownloadRoundTrip` in
+  `tests/integration/storage_test.go` is always skipped in CI because
+  `S3_ENDPOINT` is never set in the GitHub Actions environment. The
+  presigned PUT/GET byte-path round-trip — the test that closes the
+  Phase 3 decision gate — has therefore never actually executed in CI.
+- The Playwright `guest-access.spec.ts` spec is a placeholder stub
+  with no real assertions; the e2e suite reports "passing" without
+  exercising guest access.
+- Permission inheritance (cascading folder grants), file versioning
+  (re-upload creating a new `file_versions` row), and
+  soft-delete/restore (trash workflow) have no integration-level
+  tests despite all three being load-bearing for Phase 3 correctness.
+- Decision: front-load test infrastructure (Tasks 1–6) before feature
+  work (Tasks 7–10) so that regressions across admin / billing /
+  retention / audit / bulk / tag / inheritance / versioning / trash
+  surfaces are caught immediately on every PR. Feature tasks (KMS,
+  strict-ZK search exclusion, e2e presigned URL CI integration,
+  content search index worker) ride on top of the new harness with
+  their own dedicated test gates.
+
+### Next 10 Tasks (Phase 4, sprint 5 — test-first refresh)
+
+| # | Task | Test gate |
+|---|------|-----------|
+| 1 | Wire Phase 3 routes in `setup_test.go` — add admin, billing, retention, audit, rate-limit, bulk, and tag routes to the integration harness | `setup_test.go` compiles with all Phase 3 handlers; existing tests still pass |
+| 2 | Integration tests: admin API + audit log — `tests/integration/admin_test.go` | `TestAdminListUsers`, `TestAdminDeactivateUser`, `TestAuditLogRecordsLogin`, `TestAuditLogRecordsPermissionGrant` |
+| 3 | Integration tests: billing & quota enforcement — `tests/integration/billing_test.go` | `TestStorageQuotaBlocksUpload`, `TestUserQuotaBlocksInvite`, `TestBandwidthMeteringRecordsEvent` |
+| 4 | Integration tests: retention & archive — `tests/integration/retention_test.go` | `TestRetentionPolicyCRUD`, `TestEvaluateReturnsExpiredVersions`, `TestColdArchiveWritesGzipObject` |
+| 5 | Integration tests: bulk ops + file tags — `tests/integration/bulk_test.go`, `tests/integration/tag_test.go` | `TestBulkMoveCrossWorkspaceRejected`, `TestBulkDeleteSoftDeletes`, `TestTagSearchSurfacesTaggedFile` |
+| 6 | Integration tests: permission inheritance + versioning + soft delete — `tests/integration/inheritance_test.go`, `tests/integration/version_test.go`, `tests/integration/trash_test.go` | `TestChildFileInheritsParentGrant`, `TestReUploadCreatesNewVersion`, `TestSoftDeleteAndRestore` |
+| 7 | KMS-backed credential encryption — replace `IdentityEncryptor`/`IdentityDecryptor` in `internal/fabric/provisioner.go` + `internal/storage/factory.go` | `TestKMSEncryptDecryptRoundTrip` unit test; integration test confirms ciphertext != plaintext |
+| 8 | Strict-ZK search exclusion — filter `internal/search/service.go` to exclude `encryption_mode = 'strict_zk'` | `TestSearchExcludesStrictZKFiles` integration test |
+| 9 | E2e presigned URL round-trip in CI — add zk-object-fabric Docker service to `.github/workflows/ci.yml` integration job | `TestUploadConfirmDownloadRoundTrip` runs and passes in CI (no longer skipped) |
+| 10 | Content search index worker — text extraction in `cmd/worker/main.go` `indexHandler` | `TestIndexWorkerExtractsText` integration test |
+
+The next-10 above is the execution plan for reaching the existing
+Phase 4 checklist items below; each task carries an explicit test
+gate so correctness is provable at every step. Tasks 1–6 build the
+test infrastructure that the Phase 3 feature surface should have
+shipped with; Tasks 7–10 are the Phase 4 feature follow-throughs
+(KMS, strict-ZK search exclusion, presigned-URL CI byte-path proof,
+content search index worker), each with its own integration test.
 
 **Goal**: add strict-ZK private folders, customer-managed keys, data
 residency controls, the KChat integration API, and AI features for
