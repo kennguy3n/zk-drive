@@ -212,6 +212,10 @@ func (h *Handler) BulkCopy(w http.ResponseWriter, r *http.Request) {
 			resp.Failed = append(resp.Failed, bulkFailure{ID: raw, Error: "file version quarantined by virus scan"})
 			continue
 		}
+		if err := h.billing.CheckStorageQuota(r.Context(), workspaceID, srcVer.SizeBytes); err != nil {
+			resp.Failed = append(resp.Failed, bulkFailure{ID: raw, Error: err.Error()})
+			continue
+		}
 		newFile, err := h.files.Create(r.Context(), workspaceID, targetID, src.Name, src.MimeType, userID)
 		if err != nil {
 			resp.Failed = append(resp.Failed, bulkFailure{ID: raw, Error: err.Error()})
@@ -229,6 +233,7 @@ func (h *Handler) BulkCopy(w http.ResponseWriter, r *http.Request) {
 			resp.Failed = append(resp.Failed, bulkFailure{ID: raw, Error: err.Error()})
 			continue
 		}
+		h.billing.RecordUpload(r.Context(), workspaceID, srcVer.SizeBytes)
 		h.logActivity(r.Context(), activity.ActionFileBulkCopy, permission.ResourceFile, newFile.ID, map[string]any{
 			"source_file_id": src.ID,
 		})
@@ -304,6 +309,10 @@ func (h *Handler) BulkDownload(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		items = append(items, prepped{name: f.Name, objectKey: v.ObjectKey, size: v.SizeBytes})
+	}
+	if err := h.billing.CheckBandwidthQuota(r.Context(), workspaceID, total); err != nil {
+		writeBillingError(w, err)
+		return
 	}
 
 	w.Header().Set("Content-Type", "application/zip")

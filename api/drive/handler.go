@@ -975,6 +975,10 @@ func (h *Handler) DownloadURL(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "file version quarantined by virus scan", http.StatusForbidden)
 		return
 	}
+	if err := h.billing.CheckBandwidthQuota(r.Context(), workspaceID, current.SizeBytes); err != nil {
+		writeBillingError(w, err)
+		return
+	}
 	url, err := h.storage.GenerateDownloadURL(r.Context(), current.ObjectKey, storage.DefaultPresignExpiry)
 	if err != nil {
 		http.Error(w, "generate download url: "+err.Error(), http.StatusInternalServerError)
