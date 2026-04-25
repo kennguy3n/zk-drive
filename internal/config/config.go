@@ -39,6 +39,24 @@ type Config struct {
 	// not accidentally disable rate limiting entirely.
 	RateLimitPerUser      int
 	RateLimitPerWorkspace int
+
+	// FabricConsoleURL is the base URL of the zk-object-fabric console
+	// API (e.g. "https://console.fabric.example.com"). When empty,
+	// signup falls back to the static S3_* env vars and per-workspace
+	// tenant provisioning is disabled.
+	FabricConsoleURL string
+	// FabricConsoleAdminToken is sent as a bearer token on console
+	// admin endpoints (placement read / write). The signup endpoint is
+	// public and does not require it.
+	FabricConsoleAdminToken string
+	// FabricBucketTemplate names the bucket created per tenant. The
+	// literal string "{tenant}" is replaced with the new tenant ID.
+	// When empty, defaults to "zk-drive-{tenant}".
+	FabricBucketTemplate string
+	// FabricDefaultPlacementRef is the placement_policy_ref recorded
+	// on freshly provisioned workspaces. Defaults to
+	// "b2c_pooled_default" to mirror the migration default.
+	FabricDefaultPlacementRef string
 }
 
 // Load reads configuration from environment variables and returns a populated
@@ -67,8 +85,12 @@ func Load() (*Config, error) {
 		MicrosoftClientID:     os.Getenv("MICROSOFT_CLIENT_ID"),
 		MicrosoftClientSecret: os.Getenv("MICROSOFT_CLIENT_SECRET"),
 		MicrosoftRedirectURL:  os.Getenv("MICROSOFT_REDIRECT_URL"),
-		RateLimitPerUser:      parseIntDefault(os.Getenv("RATE_LIMIT_PER_USER"), 0),
-		RateLimitPerWorkspace: parseIntDefault(os.Getenv("RATE_LIMIT_PER_WORKSPACE"), 0),
+		RateLimitPerUser:        parseIntDefault(os.Getenv("RATE_LIMIT_PER_USER"), 0),
+		RateLimitPerWorkspace:   parseIntDefault(os.Getenv("RATE_LIMIT_PER_WORKSPACE"), 0),
+		FabricConsoleURL:        os.Getenv("FABRIC_CONSOLE_URL"),
+		FabricConsoleAdminToken: os.Getenv("FABRIC_CONSOLE_ADMIN_TOKEN"),
+		FabricBucketTemplate:    getEnvDefault("FABRIC_BUCKET_TEMPLATE", "zk-drive-{tenant}"),
+		FabricDefaultPlacementRef: getEnvDefault("FABRIC_DEFAULT_PLACEMENT_REF", "b2c_pooled_default"),
 	}
 
 	var missing []string

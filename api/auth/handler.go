@@ -18,6 +18,13 @@ import (
 	"github.com/kennguy3n/zk-drive/internal/workspace"
 )
 
+// PostSignupHook is invoked after the signup transaction commits. It
+// is best-effort: a non-nil error is logged via Hook's own logging
+// path but never propagated to the HTTP response, so workspace
+// creation succeeds even when downstream side-effects (e.g. fabric
+// tenant provisioning) fail. Callers wire this with WithPostSignupHook.
+type PostSignupHook func(ctx context.Context, workspaceID uuid.UUID, workspaceName string)
+
 // Handler serves authentication HTTP endpoints.
 type Handler struct {
 	pool       *pgxpool.Pool
@@ -25,6 +32,7 @@ type Handler struct {
 	workspaces *workspace.Service
 	audit      *audit.Service
 	jwtSecret  string
+	postSignup PostSignupHook
 }
 
 // NewHandler constructs a Handler from the user and workspace services. The
@@ -37,6 +45,14 @@ func NewHandler(pool *pgxpool.Pool, users *user.Service, workspaces *workspace.S
 // are recorded. Optional: handlers work when nil (fire-and-forget).
 func (h *Handler) WithAudit(svc *audit.Service) *Handler {
 	h.audit = svc
+	return h
+}
+
+// WithPostSignupHook wires a callback invoked after a successful
+// signup commit. The hook runs in the request goroutine but its
+// errors do not affect the HTTP response — see PostSignupHook docs.
+func (h *Handler) WithPostSignupHook(hook PostSignupHook) *Handler {
+	h.postSignup = hook
 	return h
 }
 
@@ -109,6 +125,14 @@ func (h *Handler) Signup(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		http.Error(w, "signup: "+err.Error(), http.StatusInternalServerError)
 		return
+	}
+
+	// Best-effort post-signup hook (fabric tenant provisioning). Any
+	// error inside the hook is the hook's responsibility to log; we
+	// must not let it block the HTTP response because the user-facing
+	// signup is already durable on disk.
+	if h.postSignup != nil {
+		h.postSignup(r.Context(), ws.ID, ws.Name)
 	}
 
 	writeToken(w, h.jwtSecret, u.ID, ws.ID, u.Role)

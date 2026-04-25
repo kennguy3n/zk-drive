@@ -50,6 +50,7 @@ type Handler struct {
 	files       *file.Service
 	users       *user.Service
 	storage     *storage.Client
+	storageFactory *storage.ClientFactory
 	permissions *permission.Service
 	activity    *activity.Service
 	sharing     *sharing.Service
@@ -171,6 +172,32 @@ func (h *Handler) WithPreviews(r preview.Repository) *Handler {
 	return h
 }
 
+// WithStorageFactory wires a per-workspace storage client factory.
+// When set, presigned-URL handlers prefer the factory's per-workspace
+// client (resolved from workspace_storage_credentials) and fall back
+// to the static client only when the factory cannot resolve one. A
+// nil factory keeps the legacy behaviour of always using the static
+// client.
+func (h *Handler) WithStorageFactory(f *storage.ClientFactory) *Handler {
+	h.storageFactory = f
+	return h
+}
+
+// resolveStorage returns the storage client to use for workspaceID.
+// It consults the per-workspace factory first; on miss or error it
+// returns the static fallback. The factory itself encapsulates the
+// fallback so the only case where this method returns nil is the
+// "no storage configured at all" mode (S3_ENDPOINT empty + no
+// fabric console wired).
+func (h *Handler) resolveStorage(ctx context.Context, workspaceID uuid.UUID) *storage.Client {
+	if h.storageFactory != nil {
+		if c, err := h.storageFactory.ForWorkspace(ctx, workspaceID); err == nil {
+			return c
+		}
+	}
+	return h.storage
+}
+
 // notify is a nil-safe wrapper around the notification service,
 // mirroring the logActivity pattern. Errors are logged and swallowed
 // so notification failures never break the parent operation.
@@ -212,6 +239,7 @@ type createFolderRequest struct {
 	WorkspaceID    string  `json:"workspace_id"`
 	ParentFolderID *string `json:"parent_folder_id,omitempty"`
 	Name           string  `json:"name"`
+	EncryptionMode string  `json:"encryption_mode,omitempty"`
 }
 
 type renameFolderRequest struct {
@@ -430,7 +458,7 @@ func (h *Handler) CreateFolder(w http.ResponseWriter, r *http.Request) {
 		}
 		parentID = &pid
 	}
-	f, err := h.folders.Create(r.Context(), workspaceID, parentID, req.Name, userID)
+	f, err := h.folders.CreateWithMode(r.Context(), workspaceID, parentID, req.Name, req.EncryptionMode, userID)
 	if err != nil {
 		writeServiceError(w, err)
 		return
@@ -438,6 +466,7 @@ func (h *Handler) CreateFolder(w http.ResponseWriter, r *http.Request) {
 	h.logActivity(r.Context(), activity.ActionFolderCreate, permission.ResourceFolder, f.ID, map[string]any{
 		"name":             f.Name,
 		"parent_folder_id": f.ParentFolderID,
+		"encryption_mode":  f.EncryptionMode,
 	})
 	writeJSON(w, http.StatusCreated, f)
 }
@@ -718,7 +747,8 @@ func (h *Handler) MoveFile(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid folder_id", http.StatusBadRequest)
 		return
 	}
-	if _, err := h.folders.GetByID(r.Context(), workspaceID, folderID); err != nil {
+	dstFolder, err := h.folders.GetByID(r.Context(), workspaceID, folderID)
+	if err != nil {
 		writeServiceError(w, err)
 		return
 	}
@@ -728,6 +758,23 @@ func (h *Handler) MoveFile(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := h.assertResourceAccess(r.Context(), permission.ResourceFolder, folderID, permission.RoleEditor); err != nil {
 		writeServiceError(w, err)
+		return
+	}
+	// Cross-mode moves require re-upload because the underlying objects
+	// live under different keying / placement regimes; reject the
+	// metadata-level move with 409 Conflict before touching files.Move.
+	srcFile, err := h.files.GetByID(r.Context(), workspaceID, id)
+	if err != nil {
+		writeServiceError(w, err)
+		return
+	}
+	srcFolder, err := h.folders.GetByID(r.Context(), workspaceID, srcFile.FolderID)
+	if err != nil {
+		writeServiceError(w, err)
+		return
+	}
+	if !sameFolderEncryptionMode(srcFolder.EncryptionMode, dstFolder.EncryptionMode) {
+		writeServiceError(w, folder.ErrEncryptionModeMismatch)
 		return
 	}
 	f, err := h.files.Move(r.Context(), workspaceID, id, folderID)
@@ -770,7 +817,7 @@ func (h *Handler) ListFileVersions(w http.ResponseWriter, r *http.Request) {
 // client; it must be echoed back verbatim on confirm so the server records
 // the exact key it signed.
 func (h *Handler) UploadURL(w http.ResponseWriter, r *http.Request) {
-	if h.storage == nil {
+	if h.storage == nil && h.storageFactory == nil {
 		http.Error(w, "storage not configured", http.StatusNotImplemented)
 		return
 	}
@@ -819,7 +866,12 @@ func (h *Handler) UploadURL(w http.ResponseWriter, r *http.Request) {
 	versionID := uuid.New()
 	objectKey := storage.NewObjectKey(workspaceID, f.ID, versionID)
 
-	url, err := h.storage.GenerateUploadURL(r.Context(), objectKey, req.MimeType, storage.DefaultPresignExpiry)
+	store := h.resolveStorage(r.Context(), workspaceID)
+	if store == nil {
+		http.Error(w, "storage not configured", http.StatusNotImplemented)
+		return
+	}
+	url, err := store.GenerateUploadURL(r.Context(), objectKey, req.MimeType, storage.DefaultPresignExpiry)
 	if err != nil {
 		http.Error(w, "generate upload url: "+err.Error(), http.StatusInternalServerError)
 		return
@@ -836,7 +888,7 @@ func (h *Handler) UploadURL(w http.ResponseWriter, r *http.Request) {
 // after the direct-to-storage PUT succeeds; otherwise the file row exists
 // without a current version and Downloads will 404.
 func (h *Handler) ConfirmUpload(w http.ResponseWriter, r *http.Request) {
-	if h.storage == nil {
+	if h.storage == nil && h.storageFactory == nil {
 		http.Error(w, "storage not configured", http.StatusNotImplemented)
 		return
 	}
@@ -946,7 +998,7 @@ func (h *Handler) publishPostUploadJobs(ctx context.Context, fileID, versionID u
 
 // DownloadURL returns a presigned GET URL for the file's current version.
 func (h *Handler) DownloadURL(w http.ResponseWriter, r *http.Request) {
-	if h.storage == nil {
+	if h.storage == nil && h.storageFactory == nil {
 		http.Error(w, "storage not configured", http.StatusNotImplemented)
 		return
 	}
@@ -990,7 +1042,12 @@ func (h *Handler) DownloadURL(w http.ResponseWriter, r *http.Request) {
 		writeBillingError(w, err)
 		return
 	}
-	url, err := h.storage.GenerateDownloadURL(r.Context(), current.ObjectKey, storage.DefaultPresignExpiry)
+	store := h.resolveStorage(r.Context(), workspaceID)
+	if store == nil {
+		http.Error(w, "storage not configured", http.StatusNotImplemented)
+		return
+	}
+	url, err := store.GenerateDownloadURL(r.Context(), current.ObjectKey, storage.DefaultPresignExpiry)
 	if err != nil {
 		http.Error(w, "generate download url: "+err.Error(), http.StatusInternalServerError)
 		return
@@ -1345,6 +1402,19 @@ type forbiddenErr struct{ msg string }
 
 func (e forbiddenErr) Error() string { return e.msg }
 
+// sameFolderEncryptionMode treats an empty string as the default
+// managed-encrypted mode so rows from before migration 018 are still
+// considered managed-encrypted on the file-move path.
+func sameFolderEncryptionMode(a, b string) bool {
+	if a == "" {
+		a = folder.EncryptionManagedEncrypted
+	}
+	if b == "" {
+		b = folder.EncryptionManagedEncrypted
+	}
+	return a == b
+}
+
 func writeServiceError(w http.ResponseWriter, err error) {
 	switch {
 	case errors.Is(err, folder.ErrNotFound),
@@ -1353,8 +1423,13 @@ func writeServiceError(w http.ResponseWriter, err error) {
 		errors.Is(err, user.ErrNotFound),
 		errors.Is(err, permission.ErrNotFound):
 		http.Error(w, err.Error(), http.StatusNotFound)
-	case errors.Is(err, folder.ErrInvalidName), errors.Is(err, folder.ErrInvalidParent), errors.Is(err, file.ErrInvalidName):
+	case errors.Is(err, folder.ErrInvalidName),
+		errors.Is(err, folder.ErrInvalidParent),
+		errors.Is(err, folder.ErrInvalidEncryptionMode),
+		errors.Is(err, file.ErrInvalidName):
 		http.Error(w, err.Error(), http.StatusBadRequest)
+	case errors.Is(err, folder.ErrEncryptionModeMismatch):
+		http.Error(w, err.Error(), http.StatusConflict)
 	default:
 		var br badRequestErr
 		var fb forbiddenErr
@@ -1897,7 +1972,7 @@ func (h *Handler) MarkAllNotificationsRead(w http.ResponseWriter, r *http.Reques
 // against this version); the frontend renders a placeholder icon in
 // that case.
 func (h *Handler) PreviewURL(w http.ResponseWriter, r *http.Request) {
-	if h.previews == nil || h.storage == nil {
+	if h.previews == nil || (h.storage == nil && h.storageFactory == nil) {
 		http.Error(w, "previews not configured", http.StatusNotImplemented)
 		return
 	}
@@ -1956,7 +2031,12 @@ func (h *Handler) PreviewURL(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "file version quarantined by virus scan", http.StatusForbidden)
 		return
 	}
-	url, err := h.storage.GenerateDownloadURL(r.Context(), p.ObjectKey, storage.DefaultPresignExpiry)
+	store := h.resolveStorage(r.Context(), workspaceID)
+	if store == nil {
+		http.Error(w, "storage not configured", http.StatusNotImplemented)
+		return
+	}
+	url, err := store.GenerateDownloadURL(r.Context(), p.ObjectKey, storage.DefaultPresignExpiry)
 	if err != nil {
 		http.Error(w, "preview url: "+err.Error(), http.StatusInternalServerError)
 		return
