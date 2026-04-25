@@ -268,7 +268,11 @@ function AuditTab() {
 function RetentionTab() {
   const [policies, setPolicies] = useState<RetentionPolicy[]>([]);
   const [error, setError] = useState<string | null>(null);
-  const [form, setForm] = useState({ retention_days: 30, action: "soft_delete" });
+  const [form, setForm] = useState<{
+    max_versions: string;
+    max_age_days: string;
+    archive_after_days: string;
+  }>({ max_versions: "", max_age_days: "30", archive_after_days: "" });
   const refresh = useCallback(async () => {
     try {
       setPolicies(await fetchRetentionPolicies());
@@ -279,6 +283,17 @@ function RetentionTab() {
   useEffect(() => {
     refresh();
   }, [refresh]);
+  const parseOpt = (s: string): number | null => {
+    const n = Number(s);
+    return s === "" || Number.isNaN(n) ? null : n;
+  };
+  const summarise = (p: RetentionPolicy): string => {
+    const parts: string[] = [];
+    if (p.max_versions != null) parts.push(`${p.max_versions} versions`);
+    if (p.max_age_days != null) parts.push(`${p.max_age_days}d max age`);
+    if (p.archive_after_days != null) parts.push(`archive after ${p.archive_after_days}d`);
+    return parts.length === 0 ? "no limits configured" : parts.join(", ");
+  };
   return (
     <section>
       <h2>Retention policies</h2>
@@ -288,32 +303,53 @@ function RetentionTab() {
           e.preventDefault();
           try {
             await upsertRetentionPolicy({
-              retention_days: Number(form.retention_days),
-              action: form.action,
+              max_versions: parseOpt(form.max_versions),
+              max_age_days: parseOpt(form.max_age_days),
+              archive_after_days: parseOpt(form.archive_after_days),
             });
             await refresh();
           } catch (err) {
             setError(errMessage(err));
           }
         }}
-        style={{ display: "flex", gap: 8, marginBottom: 16 }}
+        style={{ display: "flex", gap: 8, marginBottom: 16, flexWrap: "wrap" }}
       >
-        <input
-          type="number"
-          min={1}
-          value={form.retention_days}
-          onChange={(e) => setForm({ ...form, retention_days: Number(e.target.value) })}
-        />
-        <select value={form.action} onChange={(e) => setForm({ ...form, action: e.target.value })}>
-          <option value="soft_delete">soft_delete</option>
-          <option value="hard_delete">hard_delete</option>
-        </select>
+        <label>
+          Max versions{" "}
+          <input
+            type="number"
+            min={1}
+            placeholder="unset"
+            value={form.max_versions}
+            onChange={(e) => setForm({ ...form, max_versions: e.target.value })}
+          />
+        </label>
+        <label>
+          Max age (days){" "}
+          <input
+            type="number"
+            min={1}
+            placeholder="unset"
+            value={form.max_age_days}
+            onChange={(e) => setForm({ ...form, max_age_days: e.target.value })}
+          />
+        </label>
+        <label>
+          Archive after (days){" "}
+          <input
+            type="number"
+            min={1}
+            placeholder="unset"
+            value={form.archive_after_days}
+            onChange={(e) => setForm({ ...form, archive_after_days: e.target.value })}
+          />
+        </label>
         <button type="submit">Save policy</button>
       </form>
       <ul>
         {policies.map((p) => (
           <li key={p.id} style={{ marginBottom: 8 }}>
-            {p.folder_id ? `folder ${p.folder_id}` : "workspace default"} — {p.retention_days}d → {p.action}{" "}
+            {p.folder_id ? `folder ${p.folder_id}` : "workspace default"} — {summarise(p)}{" "}
             <button
               onClick={async () => {
                 if (!confirm("Delete policy?")) return;

@@ -515,8 +515,9 @@ export interface RetentionPolicy {
   id: string;
   workspace_id: string;
   folder_id: string | null;
-  retention_days: number;
-  action: string;
+  max_versions?: number | null;
+  max_age_days?: number | null;
+  archive_after_days?: number | null;
   created_at: string;
   updated_at: string;
 }
@@ -568,8 +569,9 @@ export async function fetchRetentionPolicies(): Promise<RetentionPolicy[]> {
 
 export async function upsertRetentionPolicy(input: {
   folder_id?: string | null;
-  retention_days: number;
-  action: string;
+  max_versions?: number | null;
+  max_age_days?: number | null;
+  archive_after_days?: number | null;
 }): Promise<RetentionPolicy> {
   const { data } = await client.post<RetentionPolicy>("/admin/retention-policies", input);
   return data;

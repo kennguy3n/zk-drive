@@ -881,6 +881,17 @@ func (h *Handler) ConfirmUpload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Storage quota is re-checked against the actual size now that the
+	// client has uploaded; the UploadURL pre-check only screens
+	// already-over-quota workspaces. The S3 object is already written
+	// here, but rejecting the confirm leaves the row unconfirmed and
+	// the orphan object can be reclaimed by a future GC pass — better
+	// than silently allowing unbounded overage.
+	if err := h.billing.CheckStorageQuota(r.Context(), workspaceID, req.SizeBytes); err != nil {
+		writeBillingError(w, err)
+		return
+	}
+
 	v := &file.FileVersion{
 		FileID:    f.ID,
 		ObjectKey: req.ObjectKey,
