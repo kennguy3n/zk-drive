@@ -58,18 +58,12 @@ Checklist:
 - [x] Integration tests: API-level tests for folder CRUD, file upload
       / download, auth. `tests/integration/` (partial — auth,
       workspace, folder, file CRUD).
-- [~] Decision gate: all code-level findings from PRs #2–#4 are
-      resolved; only the upstream presigned URL validation remains.
-      zk-drive's SigV4 presigned URL generation is correct (tests pass;
-      URLs carry `X-Amz-Algorithm` / `X-Amz-Signature` / `X-Amz-Expires`),
-      and direct PUT / GET with an `Authorization` header works against
-      the Docker demo. However, the zk-object-fabric gateway
-      (`internal/auth/authenticator.go`) only accepts SigV4 via the
-      `Authorization` header and rejects query-string presigned URLs
-      with 403 `missing Authorization header`. This is an explicit
-      upstream deferral, not a zk-drive bug. Full round-trip against
-      the demo is blocked until zk-object-fabric lands query-param
-      SigV4 validation. Multipart upload still deferred.
+- [x] Decision gate: all code-level findings from PRs #2–#4 are
+      resolved. The upstream presigned URL validation blocker
+      (zk-object-fabric `internal/auth/authenticator.go` rejecting
+      query-string SigV4) was resolved in upstream commit 978246fb
+      (2026-04-23). Full round-trip presigned PUT / GET works against
+      the Docker demo. Multipart upload still deferred.
 
 **Decisions / Deferrals (2026-04-23)**:
 
@@ -97,10 +91,9 @@ Checklist:
   presigned-URL upload flow. No sharing UI yet (Phase 2). Dependencies
   vetted for non-AGPL licensing (MIT / Apache-2.0 only).
 
-**Phase 1 status**: functionally complete. Only the decision gate
-remains partially blocked on the upstream `zk-object-fabric` gateway
-accepting query-string SigV4 presigned URLs. Once that lands upstream,
-the full round-trip can be validated end to end.
+**Phase 1 status**: `COMPLETE`. The upstream presigned URL blocker was
+resolved in zk-object-fabric commit 978246fb (2026-04-23). Full
+presigned PUT / GET round-trip validated against the Docker demo.
 
 ---
 
@@ -460,6 +453,11 @@ Checklist:
 
 **Decisions / Deferrals (2026-04-25, Phase 4 kickoff)**:
 
+- Upstream presigned URL support confirmed landed (zk-object-fabric
+  commit 978246fb, 2026-04-23). Phase 1 decision gate upgraded from
+  [~] to [x]. Remaining auth gaps (chunked SigV4, x-amz-date
+  fallback, STS temp credentials) tracked as Phase 4 Task 5c for
+  flexible auth strategy dispatch.
 - Tenant provisioning to zk-object-fabric is the prerequisite for
   data residency and CMK. Each ZK Drive workspace maps 1:1 to a
   zk-object-fabric tenant. On workspace creation, ZK Drive will call
@@ -518,6 +516,15 @@ Checklist:
         worker handlers skip jobs whose file lives in a strict-ZK
         folder, log the skip, and ack the message so JetStream does
         not redeliver.
+  - [ ] Task 5c: upstream auth flexibility — add x-amz-date fallback,
+        chunked SigV4 seed signature, and auth-strategy dispatch to
+        zk-object-fabric `internal/auth/authenticator.go`. Update
+        s3_compat integration test to verify presigned URLs with auth
+        enabled.
+  - [ ] Task 5d: e2e presigned URL round-trip test — add a test in
+        `tests/e2e/` that validates the full upload (presigned PUT) and
+        download (presigned GET) flow against a running zk-object-fabric
+        Docker demo.
   - [ ] Task 6: Customer-managed key (CMK) wiring against
         zk-object-fabric KMS references (deferred, follow-up sprint).
   - [ ] Task 7: Frontend admin UI for placement policy and per-folder
