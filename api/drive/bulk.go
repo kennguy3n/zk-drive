@@ -6,7 +6,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
+	"path"
+	"strings"
 
 	"github.com/google/uuid"
 
@@ -285,6 +288,7 @@ func (h *Handler) BulkDownload(w http.ResponseWriter, r *http.Request) {
 		size      int64
 	}
 	items := make([]prepped, 0, len(req.FileIDs))
+	seenNames := make(map[string]int, len(req.FileIDs))
 	var total int64
 	for _, raw := range req.FileIDs {
 		id, err := uuid.Parse(raw)
@@ -319,7 +323,7 @@ func (h *Handler) BulkDownload(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, fmt.Sprintf("bulk download exceeds %d byte cap", MaxBulkDownloadBytes), http.StatusRequestEntityTooLarge)
 			return
 		}
-		items = append(items, prepped{name: f.Name, objectKey: v.ObjectKey, size: v.SizeBytes})
+		items = append(items, prepped{name: dedupeZipName(seenNames, f.Name), objectKey: v.ObjectKey, size: v.SizeBytes})
 	}
 	if err := h.billing.CheckBandwidthQuota(r.Context(), workspaceID, total); err != nil {
 		writeBillingError(w, err)
@@ -334,7 +338,9 @@ func (h *Handler) BulkDownload(w http.ResponseWriter, r *http.Request) {
 	for _, it := range items {
 		if err := appendZipEntry(r.Context(), zw, client, h.storage, it.name, it.objectKey); err != nil {
 			// Past the header we can only signal via the zip stream;
-			// return without a partial entry and log server-side.
+			// return without a partial entry and log server-side so
+			// operators can correlate truncated downloads with a cause.
+			log.Printf("drive: bulk download: append zip entry %q: %v", it.name, err)
 			return
 		}
 	}
@@ -343,6 +349,30 @@ func (h *Handler) BulkDownload(w http.ResponseWriter, r *http.Request) {
 		"file_count":  len(items),
 		"total_bytes": total,
 	})
+}
+
+// dedupeZipName disambiguates zip entry names that would collide. The
+// first occurrence of a name is used verbatim; subsequent collisions
+// are suffixed before the extension (e.g. "report.pdf" -> "report
+// (1).pdf"). This prevents most extractors from silently overwriting
+// earlier entries when the user selects multiple files that happen to
+// share a name across folders.
+func dedupeZipName(seen map[string]int, name string) string {
+	if _, ok := seen[name]; !ok {
+		seen[name] = 1
+		return name
+	}
+	ext := path.Ext(name)
+	stem := strings.TrimSuffix(name, ext)
+	for {
+		n := seen[name]
+		candidate := fmt.Sprintf("%s (%d)%s", stem, n, ext)
+		seen[name] = n + 1
+		if _, taken := seen[candidate]; !taken {
+			seen[candidate] = 1
+			return candidate
+		}
+	}
 }
 
 func appendZipEntry(ctx context.Context, zw *zip.Writer, client *http.Client, st *storage.Client, name, objectKey string) error {
