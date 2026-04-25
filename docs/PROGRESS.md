@@ -3,7 +3,7 @@
 - **Project**: ZK Drive
 - **License**: Proprietary — All Rights Reserved.
 - **Status**: Phase 4 — Privacy & Differentiation (kicked off 2026-04-25)
-- **Last updated**: 2026-04-25 (Phase 4 sprint 2 dedupe: collapsed duplicate content-search and native-mobile checklist entries from PR #13)
+- **Last updated**: 2026-04-25 (Phase 4 sprint 3: audit clean, tree integrity check, next 10 tasks prioritized)
 
 This document is a phase-gated tracker. Each phase has an explicit
 checklist and a decision gate. Do not skip to the next phase until
@@ -58,12 +58,10 @@ Checklist:
 - [x] Integration tests: API-level tests for folder CRUD, file upload
       / download, auth. `tests/integration/` (partial — auth,
       workspace, folder, file CRUD).
-- [x] Decision gate: all code-level findings from PRs #2–#4 are
-      resolved. The upstream presigned URL validation blocker
-      (zk-object-fabric `internal/auth/authenticator.go` rejecting
-      query-string SigV4) was resolved in upstream commit 978246fb
-      (2026-04-23). Full round-trip presigned PUT / GET works against
-      the Docker demo. Multipart upload still deferred.
+- [x] Decision gate: upstream presigned-URL fix landed in
+      zk-object-fabric PR #29 (commit 39dcd81e). Full byte-path
+      round-trip is no longer blocked. All code-level findings from
+      PRs #2–#4 are resolved. Multipart upload still deferred.
 
 **Decisions / Deferrals (2026-04-23)**:
 
@@ -328,7 +326,7 @@ Checklist:
       metadata-plane level via `tests/integration/phase3_gate_test.go`.
       Full byte-path round-trip validated after the upstream
       zk-object-fabric presigned-URL fix landed — see Phase 1 gate
-      upgrade in PR #11.)*
+      upgrade.)*
 
 **Decisions / Deferrals (2026-04-24, Phase 3 kickoff)**:
 
@@ -537,12 +535,74 @@ Checklist:
 - Native mobile app evaluation added to the Phase 4 tail; PWA-first
   remains the default unless Lighthouse / adoption metrics force a
   React Native investment.
-- Next 10 tasks prioritized: (1) mark Task 5c + fix Phase 3 gate
-  note, (2) KMS-backed credential encryption, (3) validate e2e
-  presigned round-trip, (4) strict-ZK search exclusion, (5) content
-  search index worker, (6) CMK wiring, (7) frontend admin UI,
-  (8) KChat integration API, (9) client-room templates, (10) native
-  mobile evaluation. AI classification deferred.
+- Next 10 tasks prioritized — see the sprint 3 audit section below
+  for the refreshed list after sprint 2 closure.
+
+**Decisions / Deferrals (2026-04-25, Phase 4 sprint 3 audit)**:
+
+- Tree integrity verified on `main`: `migrations/017_workspace_storage_credentials.up.sql`,
+  `migrations/018_folder_encryption_mode.up.sql`,
+  `internal/fabric/provisioner.go`, `internal/fabric/client.go`,
+  `internal/fabric/placement.go`, and `internal/storage/factory.go`
+  are all present. The Phase 4 merge commits from PRs #9–#14 landed
+  their changes cleanly; no manual cherry-pick required.
+- Tenant provisioning (Task 2) confirmed shipped: migration 017
+  (`workspace_storage_credentials`), `internal/fabric/provisioner.go`,
+  and signup wiring (best-effort, non-fatal on fabric failure).
+- Placement policy admin (Task 3) confirmed shipped:
+  `GET/PUT /api/admin/placement` proxied to zk-object-fabric with
+  local `placement_policy.Policy.Validate()` pre-check.
+- Per-folder encryption mode (Task 4) confirmed shipped: migration
+  018 introduced `folders.encryption_mode`; `MoveFile` rejects
+  cross-mode moves with 409 Conflict via
+  `folder.ErrEncryptionModeMismatch`.
+- Strict-ZK worker skip (Task 5) confirmed shipped: preview, scan,
+  and index handlers ack and skip jobs whose file lives in a
+  strict-ZK folder so JetStream does not redeliver.
+- Storage client factory (`internal/storage/factory.go`) confirmed
+  shipped: per-workspace clients are resolved from
+  `workspace_storage_credentials` with a `sync.Map` cache and a
+  static fallback for legacy workspaces.
+- PR #10 review findings closed in PR #12: UploadURL orphan-row
+  regression, BulkMove/BulkCopy cross-encryption-mode bypass, and
+  BulkDownload per-workspace storage are all resolved on `main`.
+- Task 5c (upstream auth flexibility) closed upstream in
+  zk-object-fabric PR #29 (commit 39dcd81e): PresignedV4Strategy,
+  HeaderV4Strategy, Date-header fallback, chunked SigV4 seed
+  signature, and `VerifyChunkSignature` helper. The s3_compat suite
+  exercises presigned URLs with auth enabled end to end, including a
+  `PresignedGetExpired` subtest.
+- Phase 4 checklist dedupe from PR #14 verified: the duplicate
+  content-search and native-mobile entries introduced in PR #13 were
+  collapsed; only one entry each remains.
+
+**Next 10 tasks (prioritized)**:
+
+1. KMS-backed credential encryption — prerequisite for storing real
+   fabric tenant secrets in production (replaces the `IdentityEncryptor`
+   / `IdentityDecryptor` local-dev pair).
+2. E2e presigned URL round-trip test — upstream blocker cleared in
+   zk-object-fabric PR #29; add a `tests/e2e/` spec that exercises
+   presigned PUT and GET against the Docker demo.
+3. Strict-ZK search exclusion — search queries must exclude
+   strict-ZK content from the result set.
+4. Content search index worker — text extraction for managed-encrypted
+   docs feeding Postgres FTS.
+5. CMK wiring against zk-object-fabric KMS references.
+6. Frontend admin UI for placement policy and per-folder
+   encryption-mode selection.
+7. KChat integration API — room-folder mapping, permission sync,
+   attachment metadata.
+8. Client-room templates for agencies, accounting, legal,
+   construction, and clinics.
+9. Native mobile app evaluation — PWA Lighthouse benchmark plus a
+   decision doc in `docs/MOBILE_EVALUATION.md`.
+10. Phase 4 decision gate validation — strict-ZK e2e plus KChat
+    room-folder e2e against the integration API.
+
+Note: AI thread summary (Task 9) deferred past KChat integration
+(Task 8) per strategic guardrails — pooled org storage,
+guest/client rooms, and data residency are the competitive wedge.
 
 **Goal**: add strict-ZK private folders, customer-managed keys, data
 residency controls, the KChat integration API, and AI features for
