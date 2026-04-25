@@ -3,7 +3,7 @@
 - **Project**: ZK Drive
 - **License**: Proprietary — All Rights Reserved.
 - **Status**: Phase 4 — Privacy & Differentiation (kicked off 2026-04-25)
-- **Last updated**: 2026-04-25 (Phase 4 sprint 3: audit clean, tree integrity check, next 10 tasks prioritized)
+- **Last updated**: 2026-04-25 (Phase 4 sprint 4: PR audit, tree integrity verification, next-10 refresh)
 
 This document is a phase-gated tracker. Each phase has an explicit
 checklist and a decision gate. Do not skip to the next phase until
@@ -576,33 +576,68 @@ Checklist:
   content-search and native-mobile entries introduced in PR #13 were
   collapsed; only one entry each remains.
 
-**Next 10 tasks (prioritized)**:
+**Decisions / Deferrals (2026-04-25, Phase 4 sprint 4 audit)**:
 
-1. KMS-backed credential encryption — prerequisite for storing real
-   fabric tenant secrets in production (replaces the `IdentityEncryptor`
-   / `IdentityDecryptor` local-dev pair).
-2. E2e presigned URL round-trip test — upstream blocker cleared in
-   zk-object-fabric PR #29; add a `tests/e2e/` spec that exercises
+- PR #12 bulk-fix tree integrity: verified that `BulkMove` /
+  `BulkCopy` cross-encryption-mode checks (target folder captured
+  via `h.folders.GetByID`, `sameFolderEncryptionMode` guard before
+  `h.files.Move` / `h.files.Create`) and `BulkDownload`
+  per-workspace storage resolution (`h.resolveStorage` threaded
+  through `appendZipEntry`), plus the `UploadURL` orphan-row fix
+  (`h.resolveStorage` called before `h.files.Create`), are all
+  present on `main`. No re-apply of commit 2afe7a06 was required;
+  the merge commit 3645dee5 propagated the bulk.go and handler.go
+  changes cleanly.
+- Strict-ZK search exclusion identified as unresolved:
+  `internal/search/service.go` does not filter on
+  `folders.encryption_mode`. Files in strict-ZK folders appear in
+  FTS results, violating the strict-ZK privacy contract.
+  Prioritized as Task 4 in the refreshed next-10 list.
+- `IdentityEncryptor` / `IdentityDecryptor` flagged as production
+  blocker: `workspace_storage_credentials.secret_key_encrypted` is
+  stored in plaintext when using the default encryptor. KMS-backed
+  implementation is Task 2 in the next-10 list.
+- Content search index worker confirmed as no-op: `indexHandler` in
+  `cmd/worker/main.go` acks messages without text extraction.
+  Managed-encrypted files are not content-searchable. Task 5 in
+  next-10.
+- Playwright e2e suite still runs with `continue-on-error: true` in
+  CI. Deferred to post-Phase-4 stabilization.
+- AI thread summary deferred past KChat integration per strategic
+  guardrails (pooled org storage, guest/client rooms, and data
+  residency are the competitive wedge).
+
+**Next 10 tasks (prioritized, sprint 4 refresh)**:
+
+1. Verify PR #12 bulk fixes on `main` — confirm
+   `BulkMove` / `BulkCopy` cross-mode check and `BulkDownload`
+   per-workspace storage are in the tree; re-apply if missing
+   (P0 security). Verified clean in this sprint.
+2. KMS-backed credential encryption — replace `IdentityEncryptor` /
+   `IdentityDecryptor` with a KMS-backed implementation for
+   `workspace_storage_credentials.secret_key_encrypted` (production
+   blocker).
+3. E2e presigned URL round-trip test — upstream blocker cleared in
+   zk-object-fabric PR #29; add a `tests/e2e/` spec exercising
    presigned PUT and GET against the Docker demo.
-3. Strict-ZK search exclusion — search queries must exclude
-   strict-ZK content from the result set.
-4. Content search index worker — text extraction for managed-encrypted
-   docs feeding Postgres FTS.
-5. CMK wiring against zk-object-fabric KMS references.
-6. Frontend admin UI for placement policy and per-folder
+4. Strict-ZK search exclusion — filter `internal/search/service.go`
+   to exclude files in strict-ZK folders from FTS results.
+5. Content search index worker — text extraction for managed-
+   encrypted docs feeding Postgres FTS in the `indexHandler`.
+6. CMK wiring against zk-object-fabric KMS references (depends on
+   upstream KMS/Vault wrappers from zk-object-fabric PR #28).
+7. Frontend admin UI for placement policy and per-folder
    encryption-mode selection.
-7. KChat integration API — room-folder mapping, permission sync,
+8. KChat integration API — room-folder mapping, permission sync,
    attachment metadata.
-8. Client-room templates for agencies, accounting, legal,
+9. Client-room templates for agencies, accounting, legal,
    construction, and clinics.
-9. Native mobile app evaluation — PWA Lighthouse benchmark plus a
-   decision doc in `docs/MOBILE_EVALUATION.md`.
-10. Phase 4 decision gate validation — strict-ZK e2e plus KChat
-    room-folder e2e against the integration API.
+10. Native mobile app evaluation — PWA Lighthouse benchmark plus a
+    decision doc in `docs/MOBILE_EVALUATION.md`.
 
-Note: AI thread summary (Task 9) deferred past KChat integration
-(Task 8) per strategic guardrails — pooled org storage,
-guest/client rooms, and data residency are the competitive wedge.
+Deferred: AI thread summary (past KChat integration), Stripe webhook
+wiring (Phase 5), Playwright continue-on-error removal (harness
+stabilization).
 
 **Goal**: add strict-ZK private folders, customer-managed keys, data
 residency controls, the KChat integration API, and AI features for
@@ -657,6 +692,12 @@ Checklist:
       `internal/preview/`, `internal/search/`.
       (worker skip done in Task 5; search exclusion + content-index
       skip remaining)
+  - [ ] Strict-ZK search exclusion: filter
+        `internal/search/service.go` so FTS queries exclude files
+        whose folder has `encryption_mode = 'strict_zk'`. Today the
+        service does not join on `folders.encryption_mode`, so
+        strict-ZK files can leak into result sets in violation of
+        the privacy contract. Tracked as next-10 Task 4.
 - [ ] Customer-managed key (CMK) option: workspace-level CMK
       configuration via zk-object-fabric. `internal/workspace/`.
       (Task 6)
