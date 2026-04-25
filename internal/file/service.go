@@ -157,6 +157,16 @@ func (s *Service) ListWorkspaceTags(ctx context.Context, workspaceID uuid.UUID) 
 	return s.repo.ListTagsByWorkspace(ctx, workspaceID)
 }
 
+// normalizeTag trims whitespace and lowercases the tag, then rejects
+// any tag containing characters whose URL-encoding semantics make the
+// path-param round-trip ambiguous: `/` (chi's path separator) and `%`
+// (the URL-encoding sentinel — `net/http` already decodes
+// `Request.URL.Path` so we can't safely double-decode in the handler).
+// Returns "" for invalid tags so callers can map to ErrInvalidTag.
 func normalizeTag(t string) string {
-	return strings.ToLower(strings.TrimSpace(t))
+	t = strings.ToLower(strings.TrimSpace(t))
+	if strings.ContainsAny(t, "/%") {
+		return ""
+	}
+	return t
 }

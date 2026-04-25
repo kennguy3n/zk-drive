@@ -6,7 +6,6 @@ import (
 	"errors"
 	"log"
 	"net/http"
-	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -2034,19 +2033,16 @@ func (h *Handler) RemoveFileTag(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid id", http.StatusBadRequest)
 		return
 	}
-	rawTag := chi.URLParam(r, "tag")
-	if rawTag == "" {
+	tag := chi.URLParam(r, "tag")
+	if tag == "" {
 		http.Error(w, "tag is required", http.StatusBadRequest)
 		return
 	}
-	// chi does not URL-decode path params, so a tag like "my tag" arrives
-	// here as "my%20tag". Decode before normalizing so the value matches
-	// what AddFileTag stored from the JSON body.
-	tag, err := url.PathUnescape(rawTag)
-	if err != nil {
-		http.Error(w, "invalid tag encoding", http.StatusBadRequest)
-		return
-	}
+	// net/http already decodes Request.URL.Path before chi extracts
+	// route params, so the value here is already URL-decoded. Tags
+	// containing '/' or '%' are rejected at AddTag time, so the
+	// path-param round-trip is unambiguous and no further unescaping
+	// is required.
 	if err := h.assertResourceAccess(r.Context(), permission.ResourceFile, id, permission.RoleEditor); err != nil {
 		writeServiceError(w, err)
 		return
