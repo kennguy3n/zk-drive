@@ -9,6 +9,7 @@ const client: AxiosInstance = axios.create({
 
 const TOKEN_STORAGE_KEY = "zkdrive.token";
 const WORKSPACE_STORAGE_KEY = "zkdrive.workspace_id";
+const ROLE_STORAGE_KEY = "zkdrive.role";
 
 // Attach the JWT to every outgoing request. Kept as a single interceptor
 // so the token is always fresh (e.g. after login, the next request picks
@@ -98,6 +99,7 @@ export async function login(input: {
 export function logout(): void {
   localStorage.removeItem(TOKEN_STORAGE_KEY);
   localStorage.removeItem(WORKSPACE_STORAGE_KEY);
+  localStorage.removeItem(ROLE_STORAGE_KEY);
 }
 
 export function currentToken(): string | null {
@@ -108,9 +110,16 @@ export function currentWorkspaceID(): string | null {
   return localStorage.getItem(WORKSPACE_STORAGE_KEY);
 }
 
+export function currentRole(): string | null {
+  return localStorage.getItem(ROLE_STORAGE_KEY);
+}
+
 function storeAuth(r: AuthResponse): void {
   localStorage.setItem(TOKEN_STORAGE_KEY, r.token);
   localStorage.setItem(WORKSPACE_STORAGE_KEY, r.workspace_id);
+  if (r.role) {
+    localStorage.setItem(ROLE_STORAGE_KEY, r.role);
+  }
 }
 
 // --- Folders -------------------------------------------------------------
@@ -399,6 +408,203 @@ export async function uploadFile(
     size_bytes: file.size,
   });
   return confirmed.file;
+}
+
+// --- Tags ---------------------------------------------------------------
+
+export interface FileTag {
+  id: string;
+  file_id: string;
+  workspace_id: string;
+  tag: string;
+  created_by: string;
+  created_at: string;
+}
+
+export async function listFileTags(fileID: string): Promise<FileTag[]> {
+  const { data } = await client.get<{ tags: FileTag[] }>(`/files/${fileID}/tags`);
+  return data.tags ?? [];
+}
+
+export async function addFileTag(fileID: string, tag: string): Promise<FileTag> {
+  const { data } = await client.post<FileTag>(`/files/${fileID}/tags`, { tag });
+  return data;
+}
+
+export async function removeFileTag(fileID: string, tag: string): Promise<void> {
+  await client.delete(`/files/${fileID}/tags/${encodeURIComponent(tag)}`);
+}
+
+// --- Bulk operations ----------------------------------------------------
+
+export interface BulkResponse {
+  succeeded: string[];
+  failed: { id: string; error: string }[];
+}
+
+export async function bulkMove(input: {
+  file_ids?: string[];
+  folder_ids?: string[];
+  target_folder_id: string;
+}): Promise<BulkResponse> {
+  const { data } = await client.post<BulkResponse>("/bulk/move", input);
+  return { succeeded: data.succeeded ?? [], failed: data.failed ?? [] };
+}
+
+export async function bulkCopy(input: {
+  file_ids: string[];
+  target_folder_id: string;
+}): Promise<BulkResponse> {
+  const { data } = await client.post<BulkResponse>("/bulk/copy", input);
+  return { succeeded: data.succeeded ?? [], failed: data.failed ?? [] };
+}
+
+export async function bulkDelete(input: {
+  file_ids?: string[];
+  folder_ids?: string[];
+}): Promise<BulkResponse> {
+  const { data } = await client.post<BulkResponse>("/bulk/delete", input);
+  return { succeeded: data.succeeded ?? [], failed: data.failed ?? [] };
+}
+
+export async function bulkDownload(fileIDs: string[]): Promise<Blob> {
+  const { data } = await client.post<Blob>(
+    "/bulk/download",
+    { file_ids: fileIDs },
+    { responseType: "blob" },
+  );
+  return data;
+}
+
+// --- Admin --------------------------------------------------------------
+
+export interface AdminUser {
+  id: string;
+  email: string;
+  name: string;
+  role: string;
+  workspace_id: string;
+  deactivated_at: string | null;
+  created_at: string;
+}
+
+export interface AuditEntry {
+  id: string;
+  workspace_id: string;
+  actor_id?: string | null;
+  action: string;
+  resource_type?: string | null;
+  resource_id?: string | null;
+  ip_address?: string | null;
+  user_agent?: string | null;
+  metadata?: unknown;
+  created_at: string;
+}
+
+export interface StorageUsage {
+  total_bytes: number;
+  per_user: {
+    user_id: string;
+    email: string;
+    total_bytes: number;
+    file_count: number;
+  }[];
+}
+
+export interface RetentionPolicy {
+  id: string;
+  workspace_id: string;
+  folder_id: string | null;
+  retention_days: number;
+  action: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export async function fetchUsers(): Promise<AdminUser[]> {
+  const { data } = await client.get<{ users: AdminUser[] }>("/admin/users");
+  return data.users ?? [];
+}
+
+export async function inviteUser(input: {
+  email: string;
+  name: string;
+  password: string;
+  role: string;
+}): Promise<AdminUser> {
+  const { data } = await client.post<AdminUser>("/admin/users", input);
+  return data;
+}
+
+export async function deactivateUser(id: string): Promise<void> {
+  await client.delete(`/admin/users/${id}`);
+}
+
+export async function updateUserRole(id: string, role: string): Promise<AdminUser> {
+  const { data } = await client.put<AdminUser>(`/admin/users/${id}/role`, { role });
+  return data;
+}
+
+export async function fetchAuditLog(opts: {
+  action?: string;
+  limit?: number;
+  offset?: number;
+} = {}): Promise<AuditEntry[]> {
+  const { data } = await client.get<{ entries: AuditEntry[] }>("/admin/audit-log", {
+    params: { action: opts.action, limit: opts.limit, offset: opts.offset },
+  });
+  return data.entries ?? [];
+}
+
+export async function fetchStorageUsage(): Promise<StorageUsage> {
+  const { data } = await client.get<StorageUsage>("/admin/storage-usage");
+  return data;
+}
+
+export async function fetchRetentionPolicies(): Promise<RetentionPolicy[]> {
+  const { data } = await client.get<{ policies: RetentionPolicy[] }>("/admin/retention-policies");
+  return data.policies ?? [];
+}
+
+export async function upsertRetentionPolicy(input: {
+  folder_id?: string | null;
+  retention_days: number;
+  action: string;
+}): Promise<RetentionPolicy> {
+  const { data } = await client.post<RetentionPolicy>("/admin/retention-policies", input);
+  return data;
+}
+
+export async function deleteRetentionPolicy(id: string): Promise<void> {
+  await client.delete(`/admin/retention-policies/${id}`);
+}
+
+// --- Billing ------------------------------------------------------------
+
+export interface BillingUsageSummary {
+  tier: string;
+  storage_used_bytes: number;
+  storage_limit_bytes: number;
+  bandwidth_used_bytes_month: number;
+  bandwidth_limit_bytes_month: number;
+  user_count: number;
+  user_limit: number;
+  plan_configured: boolean;
+}
+
+export async function fetchBillingUsage(): Promise<BillingUsageSummary> {
+  const { data } = await client.get<BillingUsageSummary>("/admin/billing/usage");
+  return data;
+}
+
+export async function updateBillingPlan(input: {
+  tier: string;
+  max_storage_bytes?: number;
+  max_users?: number;
+  max_bandwidth_bytes_monthly?: number;
+}): Promise<unknown> {
+  const { data } = await client.put("/admin/billing/plan", input);
+  return data;
 }
 
 export default client;

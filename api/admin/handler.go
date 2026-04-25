@@ -18,6 +18,7 @@ import (
 
 	"github.com/kennguy3n/zk-drive/api/middleware"
 	"github.com/kennguy3n/zk-drive/internal/audit"
+	"github.com/kennguy3n/zk-drive/internal/billing"
 	"github.com/kennguy3n/zk-drive/internal/retention"
 	"github.com/kennguy3n/zk-drive/internal/user"
 )
@@ -30,12 +31,21 @@ type Handler struct {
 	users     *user.Service
 	audit     *audit.Service
 	retention *retention.Service
+	billing   *billing.Service
 }
 
 // NewHandler constructs a Handler. Pass nil for services that are
 // not wired yet; the related routes will respond 501 Not Implemented.
 func NewHandler(pool *pgxpool.Pool, users *user.Service, aud *audit.Service, ret *retention.Service) *Handler {
 	return &Handler{pool: pool, users: users, audit: aud, retention: ret}
+}
+
+// WithBilling wires the billing service so admin billing endpoints
+// stop responding 501 Not Implemented. A nil service keeps them
+// disabled.
+func (h *Handler) WithBilling(b *billing.Service) *Handler {
+	h.billing = b
+	return h
 }
 
 // RegisterRoutes wires admin routes onto r. Callers are expected to
@@ -51,6 +61,8 @@ func (h *Handler) RegisterRoutes(r chi.Router) {
 	r.Get("/retention-policies", h.ListRetentionPolicies)
 	r.Post("/retention-policies", h.UpsertRetentionPolicy)
 	r.Delete("/retention-policies/{id}", h.DeleteRetentionPolicy)
+	r.Get("/billing/usage", h.BillingUsage)
+	r.Put("/billing/plan", h.UpdateBillingPlan)
 }
 
 // GetAuditLog returns paginated audit entries. Filters by action
@@ -165,6 +177,10 @@ func (h *Handler) InviteUser(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "email, name, password are required", http.StatusBadRequest)
 		return
 	}
+	if err := h.billing.CheckUserQuota(r.Context(), workspaceID); err != nil {
+		writeBillingError(w, err)
+		return
+	}
 	u, err := h.users.Create(r.Context(), workspaceID, req.Email, req.Name, req.Password, req.Role)
 	if err != nil {
 		http.Error(w, "create user: "+err.Error(), http.StatusInternalServerError)
@@ -177,6 +193,7 @@ func (h *Handler) InviteUser(w http.ResponseWriter, r *http.Request) {
 			"role":  u.Role,
 		})
 	}
+	h.billing.RecordUserAdded(r.Context(), workspaceID)
 	writeJSON(w, http.StatusCreated, toUserView(u))
 }
 
@@ -415,4 +432,79 @@ func parseIntQuery(r *http.Request, key string, def int) int {
 		return def
 	}
 	return v
+}
+
+// Billing -----------------------------------------------------------
+
+type updatePlanRequest struct {
+	Tier                     string `json:"tier"`
+	MaxStorageBytes          *int64 `json:"max_storage_bytes,omitempty"`
+	MaxUsers                 *int   `json:"max_users,omitempty"`
+	MaxBandwidthBytesMonthly *int64 `json:"max_bandwidth_bytes_monthly,omitempty"`
+}
+
+// BillingUsage returns the workspace's current usage versus its plan
+// limits. Admin-only because non-admins shouldn't see other users'
+// counts.
+func (h *Handler) BillingUsage(w http.ResponseWriter, r *http.Request) {
+	if h.billing == nil {
+		http.Error(w, "billing not configured", http.StatusNotImplemented)
+		return
+	}
+	workspaceID, _ := middleware.WorkspaceIDFromContext(r.Context())
+	summary, err := h.billing.GetUsageSummary(r.Context(), workspaceID)
+	if err != nil {
+		http.Error(w, "billing usage: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, http.StatusOK, summary)
+}
+
+// UpdateBillingPlan upserts the workspace's plan row.
+func (h *Handler) UpdateBillingPlan(w http.ResponseWriter, r *http.Request) {
+	if h.billing == nil {
+		http.Error(w, "billing not configured", http.StatusNotImplemented)
+		return
+	}
+	workspaceID, _ := middleware.WorkspaceIDFromContext(r.Context())
+	actor, _ := middleware.UserIDFromContext(r.Context())
+	var req updatePlanRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid json body", http.StatusBadRequest)
+		return
+	}
+	if !billing.IsValidTier(req.Tier) {
+		http.Error(w, "invalid tier", http.StatusBadRequest)
+		return
+	}
+	plan := &billing.Plan{
+		WorkspaceID:              workspaceID,
+		Tier:                     req.Tier,
+		MaxStorageBytes:          req.MaxStorageBytes,
+		MaxUsers:                 req.MaxUsers,
+		MaxBandwidthBytesMonthly: req.MaxBandwidthBytesMonthly,
+	}
+	out, err := h.billing.UpsertPlan(r.Context(), plan)
+	if err != nil {
+		http.Error(w, "upsert plan: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if h.audit != nil {
+		pid := out.ID
+		h.audit.LogAction(r.Context(), workspaceID, &actor, audit.ActionAdminBillingUpdate, "billing_plan", &pid, r, map[string]any{
+			"tier": out.Tier,
+		})
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+// writeBillingError maps billing.ErrQuotaExceeded to 402 Payment
+// Required so the frontend can prompt the user to upgrade their plan.
+func writeBillingError(w http.ResponseWriter, err error) {
+	switch {
+	case errors.Is(err, billing.ErrQuotaExceeded):
+		http.Error(w, err.Error(), http.StatusPaymentRequired)
+	default:
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+	}
 }

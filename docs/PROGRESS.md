@@ -313,21 +313,21 @@ Checklist:
 - [x] Admin dashboard API: user management, storage usage, audit log
       viewer, workspace settings. `api/admin/`. Frontend pages
       deferred.
-- [ ] Billing integration: usage metering (storage, bandwidth,
+- [x] Billing integration: usage metering (storage, bandwidth,
       users), plan enforcement (quota limits). `internal/billing/`.
 - [x] Rate limiting and abuse controls: per-workspace and per-user
       rate limits. `api/middleware/`.
 - [x] Expiring guest access: automatic revocation of guest
       permissions after expiry date. `internal/sharing/`.
-- [ ] File tagging: user-defined tags on files for organization and
+- [x] File tagging: user-defined tags on files for organization and
       search. `internal/file/`.
-- [ ] Bulk operations: multi-select move, copy, delete, download (as
+- [x] Bulk operations: multi-select move, copy, delete, download (as
       zip). `api/drive/`.
-- [ ] Frontend: admin pages, retention settings, billing / usage
+- [x] Frontend: admin pages, retention settings, billing / usage
       dashboard, bulk operations UI. `frontend/`.
-- [ ] Playwright e2e tests: critical user flows (signup, upload,
+- [x] Playwright e2e tests: critical user flows (signup, upload,
       share, guest access, admin). `tests/e2e/`.
-- [ ] Production deployment configuration: Docker Compose for local
+- [x] Production deployment configuration: Docker Compose for local
       dev, Kubernetes manifests for production. `deploy/`.
 - [ ] Decision gate: a paying SME customer can sign up, create a
       workspace, upload files, share with guests, and the admin can
@@ -337,7 +337,7 @@ Checklist:
 
 - SSO implemented with OAuth2 PKCE against Google and Microsoft.
   State + verifier live in short-lived httponly cookies (S256
-  challenge, 10 min TTL). Migration 010 adds
+  challenge, 5 min TTL). Migration 010 adds
   `users.auth_provider` / `users.auth_provider_id` with a unique
   index so a single `(workspace, provider, sub)` always maps to one
   user. All SSO routes are under `/api/auth/oauth/{provider}` and
@@ -404,6 +404,45 @@ Checklist:
   file tagging, bulk operations, Playwright e2e suite, Kubernetes
   manifests, frontend admin / billing UI. These are still on the
   Phase 3 checklist but not part of this kickoff PR.
+
+**Decisions / Deferrals (2026-04-25, Phase 3 completion sprint)**:
+
+- File tags live in a dedicated `file_tags` join table (migration
+  015), not a column on `files`. Keeps the primary table lean and
+  lets a single file accumulate tags without schema changes. The
+  search path (`internal/search/`) `LEFT JOIN`s `file_tags` via a
+  CTE that aggregates tag text into a per-file bag before feeding
+  the tsvector, so matching a tag surfaces the file exactly once.
+- Billing (migration 016) ships two tables:
+  `workspace_plans` (per-workspace tier + overridable limits) and
+  `usage_events` (append-only ledger of storage / bandwidth /
+  user-added events). The quota checkers (`CheckStorageQuota`,
+  `CheckUserQuota`, `CheckBandwidthQuota`) read current-state
+  counters (files table, users table, month-to-date sum of
+  bandwidth events) rather than replaying the full ledger. Stripe
+  integration is **stubbed, not live** — the admin API exposes
+  `PUT /api/admin/billing/plan` for manual tier updates; webhook
+  wiring lands in a follow-up.
+- Bulk zip download is the one endpoint where the API server
+  proxies object bytes (everything else is presigned-URL direct to
+  storage). Capped at 100 files and 1 GiB total per request. For
+  larger archives the plan is to assemble the zip as a temp object
+  via an async worker and return a presigned URL — deferred.
+- Kubernetes manifests under `deploy/k8s/` are **dev/staging only**:
+  single-replica Postgres StatefulSet, in-cluster NATS, no
+  HorizontalPodAutoscaler or PodDisruptionBudgets. Production
+  should use managed Postgres (RDS / Cloud SQL) and managed NATS;
+  documented in `deploy/README.md`.
+- Playwright e2e suite runs signup / admin / billing flows green
+  out of the box; upload / sharing / guest specs are gated behind
+  `E2E_RUN_UPLOAD=1` so they only execute in environments where
+  the object storage gateway is configured. The CI job is marked
+  `continue-on-error: true` while the harness stabilizes.
+- Minor hygiene: docs PROGRESS.md corrected to reflect the actual
+  5 min OAuth state cookie TTL, and `permissionGranterAdapter` was
+  lifted from both `cmd/server/main.go` and `cmd/worker/main.go`
+  into the shared `internal/wiring/` package so the two binaries
+  share a single implementation.
 
 ---
 

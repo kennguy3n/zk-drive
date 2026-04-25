@@ -1,0 +1,39 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: zk-drive-worker
+  namespace: zk-drive
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: zk-drive-worker
+  template:
+    metadata:
+      labels:
+        app: zk-drive-worker
+    spec:
+      containers:
+        - name: worker
+          image: ghcr.io/kennguy3n/zk-drive:latest
+          args: ["worker"]
+          envFrom:
+            - configMapRef:
+                name: zk-drive-config
+            - secretRef:
+                name: zk-drive-secrets
+          ports:
+            - containerPort: 8081
+          readinessProbe:
+            httpGet:
+              port: 8081
+              path: /healthz
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 1000m
+              memory: 512Mi

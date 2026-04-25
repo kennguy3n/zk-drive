@@ -6,6 +6,10 @@ import UploadButton from "../components/UploadButton";
 import SearchBar from "../components/SearchBar";
 import ShareDialog from "../components/ShareDialog";
 import {
+  bulkCopy,
+  bulkDelete,
+  bulkDownload,
+  bulkMove,
   createFolder,
   deleteFile,
   deleteFolder,
@@ -31,13 +35,23 @@ export default function FileBrowserPage() {
   const { folderId } = useParams<{ folderId?: string }>();
   const currentFolderID = folderId ?? null;
   const nav = useNavigate();
-  const { logout } = useAuth();
+  const { logout, isAdmin } = useAuth();
 
   const [folder, setFolder] = useState<Folder | null>(null);
   const [subfolders, setSubfolders] = useState<Folder[]>([]);
   const [files, setFiles] = useState<FileItem[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [shareTarget, setShareTarget] = useState<ShareTarget | null>(null);
+  const [selectedFiles, setSelectedFiles] = useState<Set<string>>(new Set());
+
+  const toggleSelect = useCallback((id: string) => {
+    setSelectedFiles((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  }, []);
 
   const refresh = useCallback(async () => {
     setError(null);
@@ -94,6 +108,16 @@ export default function FileBrowserPage() {
             <SearchBar />
             <button onClick={handleCreateFolder} style={btn}>New folder</button>
             <UploadButton folderID={currentFolderID} onUploaded={() => refresh()} />
+            {isAdmin ? (
+              <>
+                <Link to="/admin" style={{ ...btn, textDecoration: "none", color: "#111827" }}>
+                  Admin
+                </Link>
+                <Link to="/billing" style={{ ...btn, textDecoration: "none", color: "#111827" }}>
+                  Billing
+                </Link>
+              </>
+            ) : null}
             <button
               onClick={() => {
                 logout();
@@ -151,6 +175,73 @@ export default function FileBrowserPage() {
           <h2 style={{ fontSize: 14, color: "#6b7280", textTransform: "uppercase", margin: "8px 0" }}>
             Files
           </h2>
+          {selectedFiles.size > 0 ? (
+            <div
+              style={{
+                display: "flex",
+                gap: 8,
+                padding: "8px 12px",
+                marginBottom: 8,
+                background: "#eff6ff",
+                border: "1px solid #bfdbfe",
+                borderRadius: 4,
+              }}
+            >
+              <span style={{ fontSize: 13 }}>{selectedFiles.size} selected</span>
+              <button
+                style={btn}
+                onClick={async () => {
+                  const target = prompt("Target folder id:");
+                  if (!target) return;
+                  await bulkMove({ file_ids: [...selectedFiles], target_folder_id: target });
+                  setSelectedFiles(new Set());
+                  refresh();
+                }}
+              >
+                Move
+              </button>
+              <button
+                style={btn}
+                onClick={async () => {
+                  const target = prompt("Target folder id:");
+                  if (!target) return;
+                  await bulkCopy({ file_ids: [...selectedFiles], target_folder_id: target });
+                  setSelectedFiles(new Set());
+                  refresh();
+                }}
+              >
+                Copy
+              </button>
+              <button
+                style={{ ...btn, color: "#b91c1c" }}
+                onClick={async () => {
+                  if (!confirm(`Delete ${selectedFiles.size} files?`)) return;
+                  await bulkDelete({ file_ids: [...selectedFiles] });
+                  setSelectedFiles(new Set());
+                  refresh();
+                }}
+              >
+                Delete
+              </button>
+              <button
+                style={btn}
+                onClick={async () => {
+                  const blob = await bulkDownload([...selectedFiles]);
+                  const url = URL.createObjectURL(blob);
+                  const a = document.createElement("a");
+                  a.href = url;
+                  a.download = "download.zip";
+                  a.click();
+                  URL.revokeObjectURL(url);
+                }}
+              >
+                Download zip
+              </button>
+              <button style={btn} onClick={() => setSelectedFiles(new Set())}>
+                Clear
+              </button>
+            </div>
+          ) : null}
           <FileList
             files={files}
             onRename={async (id, name) => {
@@ -162,6 +253,8 @@ export default function FileBrowserPage() {
               refresh();
             }}
             onShare={(f) => setShareTarget({ type: "file", value: f })}
+            selectedIDs={selectedFiles}
+            onToggleSelect={toggleSelect}
           />
         </section>
       </main>

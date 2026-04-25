@@ -21,6 +21,7 @@ import (
 	"github.com/kennguy3n/zk-drive/api/middleware"
 	"github.com/kennguy3n/zk-drive/internal/activity"
 	"github.com/kennguy3n/zk-drive/internal/audit"
+	"github.com/kennguy3n/zk-drive/internal/billing"
 	"github.com/kennguy3n/zk-drive/internal/config"
 	"github.com/kennguy3n/zk-drive/internal/database"
 	"github.com/kennguy3n/zk-drive/internal/file"
@@ -34,6 +35,7 @@ import (
 	"github.com/kennguy3n/zk-drive/internal/sharing"
 	"github.com/kennguy3n/zk-drive/internal/storage"
 	"github.com/kennguy3n/zk-drive/internal/user"
+	"github.com/kennguy3n/zk-drive/internal/wiring"
 	"github.com/kennguy3n/zk-drive/internal/workspace"
 )
 
@@ -94,7 +96,7 @@ func run() error {
 	activitySvc := activity.NewService(activity.NewPostgresRepository(pool))
 	defer activitySvc.Close()
 
-	sharingSvc := sharing.NewService(sharing.NewPostgresRepository(pool), permissionGranterAdapter{permissionSvc})
+	sharingSvc := sharing.NewService(sharing.NewPostgresRepository(pool), wiring.NewPermissionGranter(permissionSvc))
 	searchSvc := search.NewService(pool)
 	clientRoomSvc := sharing.NewClientRoomService(
 		sharing.NewPostgresClientRoomRepository(pool),
@@ -144,6 +146,7 @@ func run() error {
 		MicrosoftClientSecret: cfg.MicrosoftClientSecret,
 		MicrosoftRedirectURL:  cfg.MicrosoftRedirectURL,
 	}).WithAudit(auditSvc)
+	billingSvc := billing.NewService(billing.NewPostgresRepository(pool))
 	driveHandler := drive.NewHandler(pool, wsSvc, folderSvc, fileSvc, userSvc, storageClient, permissionSvc, activitySvc).
 		WithSharing(sharingSvc).
 		WithSearch(searchSvc).
@@ -151,8 +154,9 @@ func run() error {
 		WithJobs(jobPublisher).
 		WithNotifications(notificationSvc).
 		WithPreviews(previewRepo).
-		WithAudit(auditSvc)
-	adminHandler := admin.NewHandler(pool, userSvc, auditSvc, retentionSvc)
+		WithAudit(auditSvc).
+		WithBilling(billingSvc)
+	adminHandler := admin.NewHandler(pool, userSvc, auditSvc, retentionSvc).WithBilling(billingSvc)
 
 	r := chi.NewRouter()
 	r.Use(chimw.RequestID)
@@ -210,6 +214,14 @@ func run() error {
 			r.Get("/files/{id}/versions", driveHandler.ListFileVersions)
 			r.Get("/files/{id}/download-url", driveHandler.DownloadURL)
 			r.Get("/files/{id}/preview-url", driveHandler.PreviewURL)
+			r.Get("/files/{id}/tags", driveHandler.ListFileTags)
+			r.Post("/files/{id}/tags", driveHandler.AddFileTag)
+			r.Delete("/files/{id}/tags/{tag}", driveHandler.RemoveFileTag)
+
+			r.Post("/bulk/move", driveHandler.BulkMove)
+			r.Post("/bulk/copy", driveHandler.BulkCopy)
+			r.Post("/bulk/delete", driveHandler.BulkDelete)
+			r.Post("/bulk/download", driveHandler.BulkDownload)
 
 			r.Get("/permissions", driveHandler.ListPermissions)
 			r.Post("/permissions", driveHandler.GrantPermission)
@@ -284,27 +296,6 @@ func run() error {
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer shutdownCancel()
 	return srv.Shutdown(shutdownCtx)
-}
-
-// permissionGranterAdapter bridges *permission.Service to
-// sharing.PermissionGranter. The sharing package can't import
-// permission directly without creating a dependency loop in future
-// packages that want to use both sides, so we keep the adapter at the
-// cmd/server layer where the full dependency graph is already visible.
-type permissionGranterAdapter struct {
-	svc *permission.Service
-}
-
-func (a permissionGranterAdapter) Grant(ctx context.Context, workspaceID uuid.UUID, resourceType string, resourceID uuid.UUID, granteeType string, granteeID uuid.UUID, role string, expiresAt *time.Time) (sharing.PermissionRef, error) {
-	p, err := a.svc.Grant(ctx, workspaceID, resourceType, resourceID, granteeType, granteeID, role, expiresAt)
-	if err != nil {
-		return sharing.PermissionRef{}, err
-	}
-	return sharing.PermissionRef{ID: p.ID}, nil
-}
-
-func (a permissionGranterAdapter) Revoke(ctx context.Context, workspaceID, permID uuid.UUID) error {
-	return a.svc.Revoke(ctx, workspaceID, permID)
 }
 
 // folderCreatorAdapter bridges *folder.Service to

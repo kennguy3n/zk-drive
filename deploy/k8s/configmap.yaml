@@ -1,0 +1,16 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: zk-drive-config
+  namespace: zk-drive
+data:
+  # DATABASE_URL is resolved by the server pod from postgres service
+  # below. Production overlays should replace this with the managed
+  # Postgres (RDS / Cloud SQL) connection string via a Kustomize or
+  # Helm value.
+  DATABASE_URL: postgres://zkdrive:zkdrive@postgres.zk-drive.svc.cluster.local:5432/zkdrive?sslmode=disable
+  NATS_URL: nats://nats.zk-drive.svc.cluster.local:4222
+  LISTEN_ADDR: ":8080"
+  WORKER_LISTEN_ADDR: ":8081"
+  RATE_LIMIT_PER_USER: "100"
+  RATE_LIMIT_PER_WORKSPACE: "500"
