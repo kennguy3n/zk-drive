@@ -3,7 +3,7 @@
 - **Project**: ZK Drive
 - **License**: Proprietary — All Rights Reserved.
 - **Status**: Phase 4 — Privacy & Differentiation (kicked off 2026-04-25)
-- **Last updated**: 2026-04-25 (Phase 4 sprint 4: PR audit, tree integrity verification, next-10 refresh)
+- **Last updated**: 2026-04-25 (Phase 4 sprint 5: PR/commit audit, check off Task 1, refresh next-10)
 
 This document is a phase-gated tracker. Each phase has an explicit
 checklist and a decision gate. Do not skip to the next phase until
@@ -327,6 +327,8 @@ Checklist:
       Full byte-path round-trip validated after the upstream
       zk-object-fabric presigned-URL fix landed — see Phase 1 gate
       upgrade.)*
+      (Blocked on Task 3 — e2e presigned URL round-trip test. All
+      feature items complete.)
 
 **Decisions / Deferrals (2026-04-24, Phase 3 kickoff)**:
 
@@ -607,37 +609,61 @@ Checklist:
   guardrails (pooled org storage, guest/client rooms, and data
   residency are the competitive wedge).
 
-**Next 10 tasks (prioritized, sprint 4 refresh)**:
+**Decisions / Deferrals (2026-04-25, Phase 4 sprint 5 audit)**:
 
-1. Verify PR #12 bulk fixes on `main` — confirm
-   `BulkMove` / `BulkCopy` cross-mode check and `BulkDownload`
-   per-workspace storage are in the tree; re-apply if missing
-   (P0 security). Verified clean in this sprint.
-2. KMS-backed credential encryption — replace `IdentityEncryptor` /
-   `IdentityDecryptor` with a KMS-backed implementation for
+- PR/commit audit of the 30 most recent commits found no new
+  regressions beyond the three items already tracked (strict-ZK
+  search leak, `IdentityDecryptor`, `indexHandler` no-op).
+- zk-object-fabric PR #29 (flexible SigV4 dispatch) and PR #28
+  (KMS/Vault wrappers) are both merged on zk-object-fabric `main`,
+  clearing the upstream blockers for Tasks 3 and 6.
+- Playwright e2e suite was moved to `workflow_dispatch` (commit
+  ad93efab) and is not running on every PR. Deferred to
+  post-Phase-4 stabilization.
+- Phase 3 decision gate remains unchecked despite all Phase 3
+  checklist items being [x]. Note: gate can be closed once the e2e
+  presigned URL round-trip test (Task 3) passes, since that was the
+  last Phase 1→3 blocker.
+- Native mobile app evaluation demoted from next-10 Task 10 to
+  deferred; replaced with Phase 3+4 decision gate validation as
+  Task 10 since closing gates is higher priority.
+- AI thread summary remains deferred past KChat integration per
+  strategic guardrails.
+
+**Next 10 tasks (prioritized, sprint 5 refresh)**:
+
+1. ~~Verify PR #12 bulk fixes on `main`~~ — DONE (sprint 4).
+2. KMS-backed credential encryption — replace `IdentityDecryptor` /
+   `IdentityDecryptor` in `internal/storage/factory.go` with a
+   KMS-backed implementation for
    `workspace_storage_credentials.secret_key_encrypted` (production
    blocker).
 3. E2e presigned URL round-trip test — upstream blocker cleared in
    zk-object-fabric PR #29; add a `tests/e2e/` spec exercising
    presigned PUT and GET against the Docker demo.
 4. Strict-ZK search exclusion — filter `internal/search/service.go`
-   to exclude files in strict-ZK folders from FTS results.
-5. Content search index worker — text extraction for managed-
-   encrypted docs feeding Postgres FTS in the `indexHandler`.
-6. CMK wiring against zk-object-fabric KMS references (depends on
-   upstream KMS/Vault wrappers from zk-object-fabric PR #28).
+   so FTS queries exclude files whose parent folder has
+   `encryption_mode = 'strict_zk'`. Today the service does not join
+   on `folders.encryption_mode`, so strict-ZK files leak into result
+   sets.
+5. Content search index worker — implement text extraction in
+   `indexHandler` (`cmd/worker/main.go`) for managed-encrypted docs
+   feeding Postgres FTS.
+6. CMK wiring against zk-object-fabric KMS/Vault wrappers (upstream
+   PR #28 now merged).
 7. Frontend admin UI for placement policy and per-folder
    encryption-mode selection.
 8. KChat integration API — room-folder mapping, permission sync,
    attachment metadata.
 9. Client-room templates for agencies, accounting, legal,
    construction, and clinics.
-10. Native mobile app evaluation — PWA Lighthouse benchmark plus a
-    decision doc in `docs/MOBILE_EVALUATION.md`.
+10. Close Phase 3 decision gate + Phase 4 decision gate validation —
+    e2e presigned URL round-trip (Task 3) closes Phase 3 gate;
+    strict-ZK e2e + KChat room-folder e2e closes Phase 4 gate.
 
 Deferred: AI thread summary (past KChat integration), Stripe webhook
 wiring (Phase 5), Playwright continue-on-error removal (harness
-stabilization).
+stabilization), native mobile app evaluation (after Phase 4 gate).
 
 **Goal**: add strict-ZK private folders, customer-managed keys, data
 residency controls, the KChat integration API, and AI features for
