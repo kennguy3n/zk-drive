@@ -11,6 +11,5 @@ data:
   DATABASE_URL: postgres://zkdrive:zkdrive@postgres.zk-drive.svc.cluster.local:5432/zkdrive?sslmode=disable
   NATS_URL: nats://nats.zk-drive.svc.cluster.local:4222
   LISTEN_ADDR: ":8080"
-  WORKER_LISTEN_ADDR: ":8081"
   RATE_LIMIT_PER_USER: "100"
   RATE_LIMIT_PER_WORKSPACE: "500"

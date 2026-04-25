@@ -22,14 +22,11 @@ spec:
                 name: zk-drive-config
             - secretRef:
                 name: zk-drive-secrets
-          ports:
-            - containerPort: 8081
-          readinessProbe:
-            httpGet:
-              port: 8081
-              path: /healthz
-            initialDelaySeconds: 5
-            periodSeconds: 10
+          # The worker is a NATS JetStream consumer with no HTTP plane,
+          # so there is no port to publish or readiness-probe. Pod
+          # health is observed via the NATS subscription itself; if the
+          # consumer disconnects the kubelet's restart-on-exit policy
+          # recycles the pod.
           resources:
             requests:
               cpu: 100m
