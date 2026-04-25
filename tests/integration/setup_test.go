@@ -17,16 +17,19 @@ import (
 	chimw "github.com/go-chi/chi/v5/middleware"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/kennguy3n/zk-drive/api/admin"
 	"github.com/kennguy3n/zk-drive/api/auth"
 	"github.com/kennguy3n/zk-drive/api/drive"
 	"github.com/kennguy3n/zk-drive/api/middleware"
 	"github.com/kennguy3n/zk-drive/internal/activity"
+	"github.com/kennguy3n/zk-drive/internal/audit"
 	"github.com/kennguy3n/zk-drive/internal/database"
 	"github.com/kennguy3n/zk-drive/internal/file"
 	"github.com/kennguy3n/zk-drive/internal/folder"
 	"github.com/kennguy3n/zk-drive/internal/notification"
 	"github.com/kennguy3n/zk-drive/internal/permission"
 	"github.com/kennguy3n/zk-drive/internal/preview"
+	"github.com/kennguy3n/zk-drive/internal/retention"
 	"github.com/kennguy3n/zk-drive/internal/search"
 	"github.com/kennguy3n/zk-drive/internal/sharing"
 	"github.com/kennguy3n/zk-drive/internal/storage"
@@ -93,14 +96,18 @@ func setupEnv(t *testing.T) *testEnv {
 	)
 	notificationSvc := notification.NewService(notification.NewPostgresRepository(pool))
 	previewRepo := preview.NewPostgresRepository(pool)
+	auditSvc := audit.NewService(audit.NewPostgresRepository(pool))
+	retentionSvc := retention.NewService(retention.NewPostgresRepository(pool), pool)
 
-	authHandler := auth.NewHandler(pool, userSvc, wsSvc, testJWTSecret)
+	authHandler := auth.NewHandler(pool, userSvc, wsSvc, testJWTSecret).WithAudit(auditSvc)
 	driveHandler := drive.NewHandler(pool, wsSvc, folderSvc, fileSvc, userSvc, storageClient, permissionSvc, activitySvc).
 		WithSharing(sharingSvc).
 		WithSearch(searchSvc).
 		WithClientRooms(clientRoomSvc).
 		WithNotifications(notificationSvc).
-		WithPreviews(previewRepo)
+		WithPreviews(previewRepo).
+		WithAudit(auditSvc)
+	adminHandler := admin.NewHandler(pool, userSvc, auditSvc, retentionSvc)
 
 	r := chi.NewRouter()
 	r.Use(chimw.Recoverer)
@@ -167,6 +174,13 @@ func setupEnv(t *testing.T) *testEnv {
 			r.Get("/activity", driveHandler.ListActivity)
 		})
 
+		r.Route("/admin", func(r chi.Router) {
+			r.Use(middleware.AuthMiddleware(testJWTSecret))
+			r.Use(middleware.TenantGuard())
+			r.Use(middleware.AdminOnly())
+			adminHandler.RegisterRoutes(r)
+		})
+
 		r.Get("/share-links/{token}", driveHandler.ResolveShareLink)
 		r.Post("/share-links/{token}", driveHandler.ResolveShareLink)
 	})
@@ -175,10 +189,11 @@ func setupEnv(t *testing.T) *testEnv {
 	env := &testEnv{t: t, pool: pool, server: srv, storage: storageClient}
 	t.Cleanup(func() {
 		srv.Close()
-		// Close activity before the pool so any final drain writes still
-		// find a live connection; otherwise the worker goroutine leaks
-		// and blocks shutdown of the test binary.
+		// Close activity / audit before the pool so any final drain
+		// writes still find a live connection; otherwise the worker
+		// goroutine leaks and blocks shutdown of the test binary.
 		activitySvc.Close()
+		auditSvc.Close()
 		pool.Close()
 	})
 	env.ResetTables()

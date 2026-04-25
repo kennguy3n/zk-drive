@@ -25,10 +25,13 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/nats-io/nats.go"
 
 	"github.com/kennguy3n/zk-drive/internal/config"
 	"github.com/kennguy3n/zk-drive/internal/database"
+	"github.com/kennguy3n/zk-drive/internal/folder"
 	"github.com/kennguy3n/zk-drive/internal/jobs"
 	"github.com/kennguy3n/zk-drive/internal/notification"
 	"github.com/kennguy3n/zk-drive/internal/permission"
@@ -130,7 +133,7 @@ func run() error {
 		return fmt.Errorf("ensure stream: %w", err)
 	}
 
-	subs, err := subscribeAll(ctx, js, previewSvc, scanSvc, archiveSvc)
+	subs, err := subscribeAll(ctx, js, pool, previewSvc, scanSvc, archiveSvc)
 	if err != nil {
 		return fmt.Errorf("subscribe: %w", err)
 	}
@@ -172,15 +175,15 @@ func ensureStream(js nats.JetStreamContext) error {
 
 // subscribeAll wires a durable consumer for each subject. Durable
 // names let the worker restart without losing checkpoint state.
-func subscribeAll(ctx context.Context, js nats.JetStreamContext, previewSvc *preview.Service, scanSvc *scan.Service, archiveSvc *retention.ArchiveService) ([]*nats.Subscription, error) {
+func subscribeAll(ctx context.Context, js nats.JetStreamContext, pool *pgxpool.Pool, previewSvc *preview.Service, scanSvc *scan.Service, archiveSvc *retention.ArchiveService) ([]*nats.Subscription, error) {
 	subjects := []struct {
 		subject string
 		durable string
 		handler nats.MsgHandler
 	}{
-		{jobs.SubjectPreview, "drive-preview", previewHandler(ctx, previewSvc)},
-		{jobs.SubjectScan, "drive-scan", scanHandler(ctx, scanSvc)},
-		{jobs.SubjectIndex, "drive-index", indexHandler()},
+		{jobs.SubjectPreview, "drive-preview", previewHandler(ctx, pool, previewSvc)},
+		{jobs.SubjectScan, "drive-scan", scanHandler(ctx, pool, scanSvc)},
+		{jobs.SubjectIndex, "drive-index", indexHandler(ctx, pool)},
 		{jobs.SubjectArchive, "drive-archive", archiveHandler(ctx, archiveSvc)},
 	}
 	var subs []*nats.Subscription
@@ -210,12 +213,17 @@ func unsubscribeAll(subs []*nats.Subscription) {
 // service. Unsupported mime types (ErrUnsupportedMime) ack without
 // error because the file is simply not previewable; every other
 // failure Nak's so NATS redelivers on the next AckWait cycle.
-func previewHandler(ctx context.Context, svc *preview.Service) nats.MsgHandler {
+func previewHandler(ctx context.Context, pool *pgxpool.Pool, svc *preview.Service) nats.MsgHandler {
 	return func(msg *nats.Msg) {
 		var job jobs.FileJob
 		if err := json.Unmarshal(msg.Data, &job); err != nil {
 			log.Printf("worker: malformed preview payload: %v", err)
 			_ = msg.Term()
+			return
+		}
+		if isStrictZK(ctx, pool, job.FileID) {
+			log.Printf("worker: skipping strict-zk file (preview) file=%s version=%s", job.FileID, job.VersionID)
+			_ = msg.Ack()
 			return
 		}
 		if svc == nil {
@@ -246,12 +254,17 @@ func previewHandler(ctx context.Context, svc *preview.Service) nats.MsgHandler {
 // failures (pending — typically clamd connectivity errors) are Nak'd
 // so NATS redelivers on the next AckWait cycle. The final status is
 // persisted to file_versions so operators can audit results via SQL.
-func scanHandler(ctx context.Context, svc *scan.Service) nats.MsgHandler {
+func scanHandler(ctx context.Context, pool *pgxpool.Pool, svc *scan.Service) nats.MsgHandler {
 	return func(msg *nats.Msg) {
 		var job jobs.FileJob
 		if err := json.Unmarshal(msg.Data, &job); err != nil {
 			log.Printf("worker: malformed scan payload: %v", err)
 			_ = msg.Term()
+			return
+		}
+		if isStrictZK(ctx, pool, job.FileID) {
+			log.Printf("worker: skipping strict-zk file (scan) file=%s version=%s", job.FileID, job.VersionID)
+			_ = msg.Ack()
 			return
 		}
 		if svc == nil {
@@ -327,7 +340,7 @@ func runGuestExpirySweep(ctx context.Context, svc *sharing.Service, interval tim
 // inline in the confirm-upload handler today via the Postgres FTS
 // trigger migration, so this consumer only drains the subject so
 // queues don't back up.
-func indexHandler() nats.MsgHandler {
+func indexHandler(ctx context.Context, pool *pgxpool.Pool) nats.MsgHandler {
 	return func(msg *nats.Msg) {
 		var job jobs.FileJob
 		if err := json.Unmarshal(msg.Data, &job); err != nil {
@@ -335,7 +348,30 @@ func indexHandler() nats.MsgHandler {
 			_ = msg.Term()
 			return
 		}
+		if isStrictZK(ctx, pool, job.FileID) {
+			log.Printf("worker: skipping strict-zk file (index) file=%s version=%s", job.FileID, job.VersionID)
+			_ = msg.Ack()
+			return
+		}
 		log.Printf("worker: index job acked file=%s version=%s", job.FileID, job.VersionID)
 		_ = msg.Ack()
 	}
+}
+
+// isStrictZK looks up the encryption_mode of the folder owning the
+// file. Errors are logged and treated as managed-encrypted so the
+// worker fails open (continues processing) instead of silently
+// stalling the pipeline. The actual cross-mode invariant is enforced
+// at the API layer; this is the worker-side optimisation that keeps
+// strict-zk objects out of preview / scan / index codepaths.
+func isStrictZK(ctx context.Context, pool *pgxpool.Pool, fileID uuid.UUID) bool {
+	if pool == nil {
+		return false
+	}
+	mode, err := folder.EncryptionModeForFile(ctx, pool, fileID)
+	if err != nil {
+		log.Printf("worker: lookup encryption mode for file=%s: %v", fileID, err)
+		return false
+	}
+	return mode == folder.EncryptionStrictZK
 }

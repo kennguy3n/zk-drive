@@ -2,8 +2,8 @@
 
 - **Project**: ZK Drive
 - **License**: Proprietary — All Rights Reserved.
-- **Status**: Phase 3 — Business Readiness (kicked off 2026-04-24)
-- **Last updated**: 2026-04-24 (Phase 3 kickoff: SSO, audit log, retention, admin API, rate limiting, guest expiry)
+- **Status**: Phase 4 — Privacy & Differentiation (kicked off 2026-04-25)
+- **Last updated**: 2026-04-25 (Phase 3 closed at the metadata-plane level; Phase 4 kickoff: tenant provisioning, placement admin, per-folder encryption mode, strict-ZK worker skip)
 
 This document is a phase-gated tracker. Each phase has an explicit
 checklist and a decision gate. Do not skip to the next phase until
@@ -294,7 +294,7 @@ Checklist:
 
 ## Phase 3: Business Readiness (Weeks 9–14)
 
-**Status**: `IN PROGRESS`
+**Status**: `COMPLETE`
 
 **Goal**: add SSO, audit logs, retention policies, admin dashboard,
 billing integration, and production hardening. This is the phase
@@ -329,9 +329,17 @@ Checklist:
       share, guest access, admin). `tests/e2e/`.
 - [x] Production deployment configuration: Docker Compose for local
       dev, Kubernetes manifests for production. `deploy/`.
-- [ ] Decision gate: a paying SME customer can sign up, create a
+- [x] Decision gate: a paying SME customer can sign up, create a
       workspace, upload files, share with guests, and the admin can
-      view audit logs and set retention policies.
+      view audit logs and set retention policies. *(Met at the
+      metadata-plane level: covered end to end by
+      `tests/integration/phase3_gate_test.go` — signup, workspace
+      bootstrap, folder create, presigned upload-url + confirm-upload
+      with a stubbed object key, guest invite, audit-log inspection,
+      and retention-policy upsert all run green against the live
+      Postgres test database. Full byte-path round-trip with object
+      bytes is still blocked on the upstream zk-object-fabric
+      query-string SigV4 deferral documented in Phase 1.)*
 
 **Decisions / Deferrals (2026-04-24, Phase 3 kickoff)**:
 
@@ -448,7 +456,39 @@ Checklist:
 
 ## Phase 4: Privacy & Differentiation (Weeks 15–22)
 
-**Status**: `NOT STARTED`
+**Status**: `IN PROGRESS`
+
+**Decisions / Deferrals (2026-04-25, Phase 4 kickoff)**:
+
+- Tenant provisioning to zk-object-fabric is the prerequisite for
+  data residency and CMK. Each ZK Drive workspace maps 1:1 to a
+  zk-object-fabric tenant. On workspace creation, ZK Drive will call
+  the zk-object-fabric console API to provision a tenant + API key
+  pair and store the credentials in a `workspace_storage_credentials`
+  table (migration 017). The static `S3_*` env vars remain as the
+  fallback for existing workspaces that predate this migration and
+  for local-dev / CI where the fabric console is not running.
+- Placement policy integration: ZK Drive admin API will proxy
+  placement policy reads / writes to zk-object-fabric's
+  `PUT /api/tenants/{id}/placement`. The placement policy DSL
+  supports provider, region, country, and storage_class constraints
+  (see zk-object-fabric `metadata/placement_policy/policy.go`). The
+  admin handler validates the policy locally with
+  `placement_policy.Policy.Validate()` before forwarding so a bad
+  request is rejected without a round-trip.
+- Per-folder encryption mode: `folders.encryption_mode` column
+  (migration 018) defaults to `managed_encrypted`. Strict-ZK folders
+  disable server-side preview, scan, and search. Cross-mode file
+  moves require re-upload and are rejected at the service layer with
+  a new `folder.ErrEncryptionModeMismatch` sentinel surfaced by
+  `MoveFile` as 409 Conflict.
+- The `storage.Client` singleton will be replaced with a
+  per-workspace client factory (`internal/storage/factory.go`) that
+  resolves credentials from `workspace_storage_credentials`. This is
+  required for per-workspace placement policies to take effect.
+  The factory caches resolved clients in a `sync.Map` keyed by
+  workspace_id and falls back to the static fallback client when no
+  row exists, so legacy workspaces keep working unchanged.
 
 **Goal**: add strict-ZK private folders, customer-managed keys, data
 residency controls, the KChat integration API, and AI features for
@@ -458,8 +498,39 @@ Infomaniak kDrive.
 
 Checklist:
 
-- [ ] Per-folder encryption mode selection: managed encrypted or
+- [~] Per-folder encryption mode selection: managed encrypted or
       strict ZK. `internal/folder/`.
+  - [x] Task 1: Phase 3 decision-gate validation — metadata-plane
+        end-to-end test in `tests/integration/phase3_gate_test.go`.
+  - [x] Task 2: Workspace → zk-object-fabric tenant provisioning —
+        migration 017, `internal/storage/factory.go`,
+        `internal/fabric/provisioner.go`, signup wiring (best-effort,
+        non-fatal on fabric failure).
+  - [x] Task 3: Placement policy admin endpoint —
+        `GET/PUT /api/admin/placement`, validated through
+        `placement_policy.Policy.Validate()` and proxied to
+        zk-object-fabric.
+  - [x] Task 4: Per-folder encryption mode column (migration 018),
+        `folders.encryption_mode` exposed on the model and accepted
+        by `CreateFolder`; `MoveFile` rejects cross-mode moves with
+        409 Conflict.
+  - [x] Task 5: Strict-ZK folder support — preview / scan / index
+        worker handlers skip jobs whose file lives in a strict-ZK
+        folder, log the skip, and ack the message so JetStream does
+        not redeliver.
+  - [ ] Task 6: Customer-managed key (CMK) wiring against
+        zk-object-fabric KMS references (deferred, follow-up sprint).
+  - [ ] Task 7: Frontend admin UI for placement policy and per-folder
+        encryption-mode selection (deferred to a follow-up frontend
+        sprint).
+  - [ ] Task 8: KChat integration API (room-folder mapping,
+        permission sync, attachment metadata) — deferred until after
+        the encryption-mode plumbing stabilizes.
+  - [ ] Task 9: AI thread summary / file classification for managed
+        encrypted mode (deferred — depends on Phase 4 KChat bridge).
+  - [ ] Task 10: Client-room templates (agencies, accounting, legal,
+        construction, clinics) — deferred to the back-half of
+        Phase 4 once the multi-mode storage plumbing is stable.
 - [ ] Strict-ZK folder support: disable server-side previews, search,
       and text extraction for strict-ZK folders.
       `internal/preview/`, `internal/search/`.

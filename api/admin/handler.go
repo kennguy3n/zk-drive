@@ -5,6 +5,7 @@
 package admin
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -19,19 +20,32 @@ import (
 	"github.com/kennguy3n/zk-drive/api/middleware"
 	"github.com/kennguy3n/zk-drive/internal/audit"
 	"github.com/kennguy3n/zk-drive/internal/billing"
+	"github.com/kennguy3n/zk-drive/internal/fabric"
 	"github.com/kennguy3n/zk-drive/internal/retention"
+	"github.com/kennguy3n/zk-drive/internal/storage"
 	"github.com/kennguy3n/zk-drive/internal/user"
 )
+
+// FabricClient is the subset of fabric.Client the admin handler
+// needs. Wrapping the upstream client in an interface keeps the
+// handler unit-testable with an in-memory fake.
+type FabricClient interface {
+	GetPlacement(ctx context.Context, tenantID string) (*fabric.Policy, error)
+	PutPlacement(ctx context.Context, tenantID string, p *fabric.Policy) error
+}
 
 // Handler serves admin HTTP endpoints. All service dependencies are
 // optional: when a service is nil the corresponding route returns 501
 // so the rest of the admin surface keeps functioning.
 type Handler struct {
-	pool      *pgxpool.Pool
-	users     *user.Service
-	audit     *audit.Service
-	retention *retention.Service
-	billing   *billing.Service
+	pool        *pgxpool.Pool
+	users       *user.Service
+	audit       *audit.Service
+	retention   *retention.Service
+	billing     *billing.Service
+	fabric      FabricClient
+	provisioner *fabric.Provisioner
+	storeFactory *storage.ClientFactory
 }
 
 // NewHandler constructs a Handler. Pass nil for services that are
@@ -45,6 +59,20 @@ func NewHandler(pool *pgxpool.Pool, users *user.Service, aud *audit.Service, ret
 // disabled.
 func (h *Handler) WithBilling(b *billing.Service) *Handler {
 	h.billing = b
+	return h
+}
+
+// WithFabric wires the placement-policy admin endpoints. The
+// FabricClient talks to the upstream zk-object-fabric console; the
+// provisioner is used to look up the per-workspace tenant ID and
+// update the local workspace_storage_credentials row after a
+// successful console PUT. The storage factory's per-workspace cache
+// is invalidated on PUT so subsequent presigns pick up the new
+// placement immediately.
+func (h *Handler) WithFabric(c FabricClient, p *fabric.Provisioner, sf *storage.ClientFactory) *Handler {
+	h.fabric = c
+	h.provisioner = p
+	h.storeFactory = sf
 	return h
 }
 
@@ -63,6 +91,99 @@ func (h *Handler) RegisterRoutes(r chi.Router) {
 	r.Delete("/retention-policies/{id}", h.DeleteRetentionPolicy)
 	r.Get("/billing/usage", h.BillingUsage)
 	r.Put("/billing/plan", h.UpdateBillingPlan)
+	r.Get("/placement", h.GetPlacement)
+	r.Put("/placement", h.PutPlacement)
+}
+
+// GetPlacement returns the workspace's current placement policy by
+// proxying through to zk-object-fabric. Responds 501 when fabric is
+// not configured (e.g. local-dev with no console URL).
+func (h *Handler) GetPlacement(w http.ResponseWriter, r *http.Request) {
+	if h.fabric == nil || h.provisioner == nil {
+		http.Error(w, "fabric not configured", http.StatusNotImplemented)
+		return
+	}
+	workspaceID, ok := middleware.WorkspaceIDFromContext(r.Context())
+	if !ok {
+		http.Error(w, "unauthenticated", http.StatusUnauthorized)
+		return
+	}
+	tenantID, err := h.provisioner.LookupTenantID(r.Context(), workspaceID)
+	if err != nil {
+		if errors.Is(err, fabric.ErrNoCredentials) {
+			http.Error(w, "workspace not provisioned with fabric", http.StatusNotFound)
+			return
+		}
+		http.Error(w, "lookup tenant: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	policy, err := h.fabric.GetPlacement(r.Context(), tenantID)
+	if err != nil {
+		if errors.Is(err, fabric.ErrPlacementNotFound) {
+			http.Error(w, "placement policy not set", http.StatusNotFound)
+			return
+		}
+		http.Error(w, "get placement: "+err.Error(), http.StatusBadGateway)
+		return
+	}
+	writeJSON(w, http.StatusOK, policy)
+}
+
+// PutPlacement validates and forwards a placement policy to
+// zk-object-fabric, then updates the local
+// workspace_storage_credentials row to mirror the new policy_ref /
+// data residency for fast lookups.
+func (h *Handler) PutPlacement(w http.ResponseWriter, r *http.Request) {
+	if h.fabric == nil || h.provisioner == nil {
+		http.Error(w, "fabric not configured", http.StatusNotImplemented)
+		return
+	}
+	workspaceID, ok := middleware.WorkspaceIDFromContext(r.Context())
+	if !ok {
+		http.Error(w, "unauthenticated", http.StatusUnauthorized)
+		return
+	}
+	var policy fabric.Policy
+	if err := json.NewDecoder(r.Body).Decode(&policy); err != nil {
+		http.Error(w, "invalid json body", http.StatusBadRequest)
+		return
+	}
+	tenantID, err := h.provisioner.LookupTenantID(r.Context(), workspaceID)
+	if err != nil {
+		if errors.Is(err, fabric.ErrNoCredentials) {
+			http.Error(w, "workspace not provisioned with fabric", http.StatusNotFound)
+			return
+		}
+		http.Error(w, "lookup tenant: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	// Force the policy's tenant field to match the workspace's
+	// resolved tenant, so callers cannot retarget another tenant via
+	// the request body.
+	policy.Tenant = tenantID
+	if err := policy.Validate(); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if err := h.fabric.PutPlacement(r.Context(), tenantID, &policy); err != nil {
+		http.Error(w, "put placement: "+err.Error(), http.StatusBadGateway)
+		return
+	}
+	// Mirror the policy_ref into the local credentials row so the
+	// per-workspace storage factory sees the correct placement
+	// reference without re-reading from fabric on every signed URL.
+	policyRef := policy.Spec.Encryption.KMS
+	if policyRef == "" {
+		policyRef = "custom"
+	}
+	if err := h.provisioner.UpdatePlacement(r.Context(), workspaceID, policyRef, policy.FirstCountry()); err != nil && !errors.Is(err, fabric.ErrNoCredentials) {
+		http.Error(w, "update local placement mirror: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if h.storeFactory != nil {
+		h.storeFactory.Invalidate(workspaceID)
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 // GetAuditLog returns paginated audit entries. Filters by action

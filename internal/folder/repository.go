@@ -34,16 +34,41 @@ type PostgresRepository struct {
 	pool *pgxpool.Pool
 }
 
+// EncryptionModeForFile returns the encryption_mode of the folder
+// owning fileID. The worker uses this on the hot path to decide
+// whether to skip strict-zk files, so it joins through files in a
+// single round-trip.
+//
+// Returns "" with a nil error when the file or folder row is missing
+// — callers treat that as "default mode" and proceed.
+func EncryptionModeForFile(ctx context.Context, pool *pgxpool.Pool, fileID uuid.UUID) (string, error) {
+	const q = `
+SELECT f.encryption_mode
+  FROM files
+  JOIN folders f ON f.id = files.folder_id
+ WHERE files.id = $1
+   AND files.deleted_at IS NULL
+   AND f.deleted_at IS NULL`
+	var mode string
+	if err := pool.QueryRow(ctx, q, fileID).Scan(&mode); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return "", nil
+		}
+		return "", fmt.Errorf("folder: lookup encryption mode by file: %w", err)
+	}
+	return mode, nil
+}
+
 // NewPostgresRepository returns a PostgresRepository using the supplied pool.
 func NewPostgresRepository(pool *pgxpool.Pool) *PostgresRepository {
 	return &PostgresRepository{pool: pool}
 }
 
-const folderColumns = "id, workspace_id, parent_folder_id, name, path, created_by, created_at, updated_at, deleted_at"
+const folderColumns = "id, workspace_id, parent_folder_id, name, path, encryption_mode, created_by, created_at, updated_at, deleted_at"
 
 func scanFolder(row pgx.Row) (*Folder, error) {
 	f := &Folder{}
-	if err := row.Scan(&f.ID, &f.WorkspaceID, &f.ParentFolderID, &f.Name, &f.Path, &f.CreatedBy, &f.CreatedAt, &f.UpdatedAt, &f.DeletedAt); err != nil {
+	if err := row.Scan(&f.ID, &f.WorkspaceID, &f.ParentFolderID, &f.Name, &f.Path, &f.EncryptionMode, &f.CreatedBy, &f.CreatedAt, &f.UpdatedAt, &f.DeletedAt); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, ErrNotFound
 		}
@@ -57,11 +82,14 @@ func (r *PostgresRepository) Create(ctx context.Context, f *Folder) error {
 	if f.ID == uuid.Nil {
 		f.ID = uuid.New()
 	}
+	if f.EncryptionMode == "" {
+		f.EncryptionMode = EncryptionManagedEncrypted
+	}
 	const q = `
-INSERT INTO folders (id, workspace_id, parent_folder_id, name, path, created_by)
-VALUES ($1, $2, $3, $4, $5, $6)
+INSERT INTO folders (id, workspace_id, parent_folder_id, name, path, encryption_mode, created_by)
+VALUES ($1, $2, $3, $4, $5, $6, $7)
 RETURNING created_at, updated_at`
-	if err := r.pool.QueryRow(ctx, q, f.ID, f.WorkspaceID, f.ParentFolderID, f.Name, f.Path, f.CreatedBy).
+	if err := r.pool.QueryRow(ctx, q, f.ID, f.WorkspaceID, f.ParentFolderID, f.Name, f.Path, f.EncryptionMode, f.CreatedBy).
 		Scan(&f.CreatedAt, &f.UpdatedAt); err != nil {
 		return fmt.Errorf("insert folder: %w", err)
 	}
@@ -257,7 +285,7 @@ func (r *PostgresRepository) ListChildren(ctx context.Context, workspaceID uuid.
 	var out []*Folder
 	for rows.Next() {
 		f := &Folder{}
-		if err := rows.Scan(&f.ID, &f.WorkspaceID, &f.ParentFolderID, &f.Name, &f.Path, &f.CreatedBy, &f.CreatedAt, &f.UpdatedAt, &f.DeletedAt); err != nil {
+		if err := rows.Scan(&f.ID, &f.WorkspaceID, &f.ParentFolderID, &f.Name, &f.Path, &f.EncryptionMode, &f.CreatedBy, &f.CreatedAt, &f.UpdatedAt, &f.DeletedAt); err != nil {
 			return nil, err
 		}
 		out = append(out, f)
@@ -272,7 +300,7 @@ WITH RECURSIVE subtree AS (
     SELECT ` + folderColumns + ` FROM folders
         WHERE workspace_id = $1 AND parent_folder_id = $2 AND deleted_at IS NULL
     UNION ALL
-    SELECT f.id, f.workspace_id, f.parent_folder_id, f.name, f.path, f.created_by, f.created_at, f.updated_at, f.deleted_at
+    SELECT f.id, f.workspace_id, f.parent_folder_id, f.name, f.path, f.encryption_mode, f.created_by, f.created_at, f.updated_at, f.deleted_at
         FROM folders f JOIN subtree s ON f.parent_folder_id = s.id
         WHERE f.workspace_id = $1 AND f.deleted_at IS NULL
 )
@@ -286,7 +314,7 @@ SELECT ` + folderColumns + ` FROM subtree`
 	var out []*Folder
 	for rows.Next() {
 		f := &Folder{}
-		if err := rows.Scan(&f.ID, &f.WorkspaceID, &f.ParentFolderID, &f.Name, &f.Path, &f.CreatedBy, &f.CreatedAt, &f.UpdatedAt, &f.DeletedAt); err != nil {
+		if err := rows.Scan(&f.ID, &f.WorkspaceID, &f.ParentFolderID, &f.Name, &f.Path, &f.EncryptionMode, &f.CreatedBy, &f.CreatedAt, &f.UpdatedAt, &f.DeletedAt); err != nil {
 			return nil, err
 		}
 		out = append(out, f)

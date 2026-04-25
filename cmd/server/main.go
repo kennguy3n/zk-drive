@@ -24,6 +24,7 @@ import (
 	"github.com/kennguy3n/zk-drive/internal/billing"
 	"github.com/kennguy3n/zk-drive/internal/config"
 	"github.com/kennguy3n/zk-drive/internal/database"
+	"github.com/kennguy3n/zk-drive/internal/fabric"
 	"github.com/kennguy3n/zk-drive/internal/file"
 	"github.com/kennguy3n/zk-drive/internal/folder"
 	"github.com/kennguy3n/zk-drive/internal/jobs"
@@ -87,9 +88,22 @@ func run() error {
 		if err != nil {
 			return fmt.Errorf("storage client: %w", err)
 		}
-		log.Printf("storage: presigned-URL client wired to %s (bucket=%s)", cfg.S3Endpoint, cfg.S3Bucket)
+		log.Printf("storage: fallback presigned-URL client wired to %s (bucket=%s)", cfg.S3Endpoint, cfg.S3Bucket)
 	} else {
-		log.Printf("storage: S3_ENDPOINT not set, upload/download-url endpoints will return 501")
+		log.Printf("storage: S3_ENDPOINT not set; per-workspace credentials must be provisioned via fabric")
+	}
+
+	storageFactory := storage.NewClientFactory(pool, storageClient, storage.IdentityDecryptor{})
+
+	provisioner := fabric.NewProvisioner(pool, fabric.Config{
+		ConsoleURL:       cfg.FabricConsoleURL,
+		BucketTemplate:   cfg.FabricBucketTemplate,
+		DefaultPolicyRef: cfg.FabricDefaultPlacementRef,
+	})
+	if cfg.FabricConsoleURL != "" {
+		log.Printf("fabric: tenant provisioning enabled, console=%s", cfg.FabricConsoleURL)
+	} else {
+		log.Printf("fabric: console URL not set, signup will skip tenant provisioning")
 	}
 
 	permissionSvc := permission.NewService(permission.NewPostgresRepository(pool))
@@ -137,7 +151,22 @@ func run() error {
 	defer auditSvc.Close()
 	retentionSvc := retention.NewService(retention.NewPostgresRepository(pool), pool)
 
-	authHandler := auth.NewHandler(pool, userSvc, wsSvc, cfg.JWTSecret).WithAudit(auditSvc)
+	authHandler := auth.NewHandler(pool, userSvc, wsSvc, cfg.JWTSecret).
+		WithAudit(auditSvc).
+		WithPostSignupHook(func(ctx context.Context, workspaceID uuid.UUID, workspaceName string) {
+			// Best-effort: provision a fabric tenant for the new
+			// workspace. Errors are logged and swallowed so signup
+			// stays durable even when the console is unreachable.
+			if cfg.FabricConsoleURL == "" {
+				return
+			}
+			if _, err := provisioner.Provision(ctx, workspaceID, workspaceName); err != nil {
+				log.Printf("fabric: provision workspace=%s: %v", workspaceID, err)
+				return
+			}
+			storageFactory.Invalidate(workspaceID)
+			log.Printf("fabric: provisioned workspace=%s", workspaceID)
+		})
 	oauthHandler := auth.NewOAuthHandler(authHandler, auth.OAuthConfig{
 		GoogleClientID:        cfg.GoogleClientID,
 		GoogleClientSecret:    cfg.GoogleClientSecret,
@@ -148,6 +177,7 @@ func run() error {
 	}).WithAudit(auditSvc)
 	billingSvc := billing.NewService(billing.NewPostgresRepository(pool))
 	driveHandler := drive.NewHandler(pool, wsSvc, folderSvc, fileSvc, userSvc, storageClient, permissionSvc, activitySvc).
+		WithStorageFactory(storageFactory).
 		WithSharing(sharingSvc).
 		WithSearch(searchSvc).
 		WithClientRooms(clientRoomSvc).
@@ -156,7 +186,16 @@ func run() error {
 		WithPreviews(previewRepo).
 		WithAudit(auditSvc).
 		WithBilling(billingSvc)
-	adminHandler := admin.NewHandler(pool, userSvc, auditSvc, retentionSvc).WithBilling(billingSvc)
+	var fabricClient admin.FabricClient
+	if cfg.FabricConsoleURL != "" {
+		fabricClient = fabric.NewClient(fabric.ClientConfig{
+			BaseURL:    cfg.FabricConsoleURL,
+			AdminToken: cfg.FabricConsoleAdminToken,
+		})
+	}
+	adminHandler := admin.NewHandler(pool, userSvc, auditSvc, retentionSvc).
+		WithBilling(billingSvc).
+		WithFabric(fabricClient, provisioner, storageFactory)
 
 	r := chi.NewRouter()
 	r.Use(chimw.RequestID)
