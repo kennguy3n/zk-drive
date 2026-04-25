@@ -14,6 +14,7 @@ import (
 	"github.com/kennguy3n/zk-drive/internal/activity"
 	"github.com/kennguy3n/zk-drive/internal/file"
 	"github.com/kennguy3n/zk-drive/internal/permission"
+	"github.com/kennguy3n/zk-drive/internal/scan"
 	"github.com/kennguy3n/zk-drive/internal/storage"
 )
 
@@ -207,6 +208,10 @@ func (h *Handler) BulkCopy(w http.ResponseWriter, r *http.Request) {
 			resp.Failed = append(resp.Failed, bulkFailure{ID: raw, Error: err.Error()})
 			continue
 		}
+		if srcVer.ScanStatus == scan.StatusQuarantined {
+			resp.Failed = append(resp.Failed, bulkFailure{ID: raw, Error: "file version quarantined by virus scan"})
+			continue
+		}
 		newFile, err := h.files.Create(r.Context(), workspaceID, targetID, src.Name, src.MimeType, userID)
 		if err != nil {
 			resp.Failed = append(resp.Failed, bulkFailure{ID: raw, Error: err.Error()})
@@ -287,6 +292,10 @@ func (h *Handler) BulkDownload(w http.ResponseWriter, r *http.Request) {
 		v, err := h.files.GetVersionByID(r.Context(), workspaceID, *f.CurrentVersionID)
 		if err != nil {
 			writeServiceError(w, err)
+			return
+		}
+		if v.ScanStatus == scan.StatusQuarantined {
+			http.Error(w, "file version quarantined by virus scan: "+raw, http.StatusForbidden)
 			return
 		}
 		total += v.SizeBytes
