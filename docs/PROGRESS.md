@@ -633,9 +633,9 @@ Checklist:
 **Next 10 tasks (prioritized, sprint 5 refresh)**:
 
 1. ~~Verify PR #12 bulk fixes on `main`~~ — DONE (sprint 4).
-2. KMS-backed credential encryption — replace `IdentityDecryptor` /
-   `IdentityDecryptor` in `internal/storage/factory.go` with a
-   KMS-backed implementation for
+2. KMS-backed credential encryption — replace `IdentityEncryptor` /
+   `IdentityDecryptor` in `internal/fabric/provisioner.go` and
+   `internal/storage/factory.go` with a KMS-backed implementation for
    `workspace_storage_credentials.secret_key_encrypted` (production
    blocker).
 3. E2e presigned URL round-trip test — upstream blocker cleared in
