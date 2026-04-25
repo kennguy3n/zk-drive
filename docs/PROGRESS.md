@@ -3,7 +3,7 @@
 - **Project**: ZK Drive
 - **License**: Proprietary — All Rights Reserved.
 - **Status**: Phase 4 — Privacy & Differentiation (kicked off 2026-04-25)
-- **Last updated**: 2026-04-25 (Phase 4 sprint 2: Task 5c closed upstream, audit clean, next 10 tasks prioritized)
+- **Last updated**: 2026-04-25 (Phase 4 sprint 2 dedupe: collapsed duplicate content-search and native-mobile checklist entries from PR #13)
 
 This document is a phase-gated tracker. Each phase has an explicit
 checklist and a decision gate. Do not skip to the next phase until
@@ -609,20 +609,18 @@ Checklist:
 - [ ] AI thread summary / file classification (managed encrypted mode
       only). `internal/ai/`.
       (Task 9, deferred past Task 8)
-- [ ] Content search for managed encrypted files: extract text from
-      documents, index in Postgres FTS. `internal/search/`.
+- [ ] Content search for managed encrypted files: index worker
+      extracts text from documents and writes Postgres FTS.
+      `internal/search/`, `cmd/worker/`.
 - [ ] Client room templates: pre-configured folder structures for
       agencies, accounting, legal, construction, and clinics.
       `internal/sharing/`.
       (Task 10)
-- [ ] Native mobile app evaluation: assess PWA metrics and decide
-      whether to invest in React Native. Document decision.
+- [ ] Native mobile app evaluation: PWA Lighthouse benchmark + decide
+      on React Native investment. Document decision in
+      `docs/MOBILE_EVALUATION.md`.
 - [ ] KMS-backed credential encryption for workspace_storage_credentials.
       `internal/fabric/`, `internal/storage/`.
-- [ ] Content search for managed encrypted files: index worker text
-      extraction. `internal/search/`, `cmd/worker/`.
-- [ ] Native mobile app evaluation: PWA benchmark + decision doc.
-      `docs/MOBILE_EVALUATION.md`.
 - [ ] Decision gate: a workspace admin can create a strict-ZK private
       folder, upload files with client-side encryption, and verify
       that the server cannot generate previews or search file
