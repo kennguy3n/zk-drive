@@ -170,6 +170,10 @@ func (h *Handler) BulkCopy(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	if len(req.FolderIDs) > 0 {
+		http.Error(w, "folder copy is not supported; use file_ids only", http.StatusBadRequest)
+		return
+	}
 	targetID, err := uuid.Parse(req.TargetFolderID)
 	if err != nil {
 		http.Error(w, "invalid target_folder_id", http.StatusBadRequest)

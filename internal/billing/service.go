@@ -164,8 +164,18 @@ type UsageSummary struct {
 }
 
 // GetUsageSummary aggregates current usage and the effective limits
-// for a workspace.
+// for a workspace. Honors the nil-receiver contract by returning the
+// free-tier defaults with zero usage when the service is disabled.
 func (s *Service) GetUsageSummary(ctx context.Context, workspaceID uuid.UUID) (UsageSummary, error) {
+	if s == nil {
+		limits := DefaultLimitsFor(TierFree)
+		return UsageSummary{
+			Tier:           limits.Tier,
+			StorageLimit:   limits.MaxStorageBytes,
+			BandwidthLimit: limits.MaxBandwidthBytesMonthly,
+			UserLimit:      limits.MaxUsers,
+		}, nil
+	}
 	limits, plan, err := s.LimitsFor(ctx, workspaceID)
 	if err != nil {
 		return UsageSummary{}, err
