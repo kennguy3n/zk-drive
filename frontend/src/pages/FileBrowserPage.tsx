@@ -78,6 +78,12 @@ export default function FileBrowserPage() {
     refresh();
   }, [refresh]);
 
+  // Selections are folder-scoped; clearing them on navigation prevents
+  // stale IDs from a previous folder leaking into bulk operations.
+  useEffect(() => {
+    setSelectedFiles(new Set());
+  }, [currentFolderID]);
+
   const handleCreateFolder = async () => {
     const name = prompt("New folder name:");
     if (!name || !name.trim()) return;
