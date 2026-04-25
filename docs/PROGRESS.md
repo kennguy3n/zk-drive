@@ -3,7 +3,7 @@
 - **Project**: ZK Drive
 - **License**: Proprietary — All Rights Reserved.
 - **Status**: Phase 4 — Privacy & Differentiation (kicked off 2026-04-25)
-- **Last updated**: 2026-04-25 (Phase 3 closed at the metadata-plane level; Phase 4 kickoff: tenant provisioning, placement admin, per-folder encryption mode, strict-ZK worker skip)
+- **Last updated**: 2026-04-25 (Phase 4 follow-up: PR #10 review findings closed — UploadURL orphan + BulkMove/BulkCopy cross-mode bypass + BulkDownload per-workspace storage)
 
 This document is a phase-gated tracker. Each phase has an explicit
 checklist and a decision gate. Do not skip to the next phase until
@@ -487,6 +487,33 @@ Checklist:
   The factory caches resolved clients in a `sync.Map` keyed by
   workspace_id and falls back to the static fallback client when no
   row exists, so legacy workspaces keep working unchanged.
+
+**Follow-up (2026-04-25, post-PR #10 review)**:
+
+- `UploadURL` orphan-row regression: PR #10 created the file metadata
+  row before resolving the per-workspace storage client, so a
+  workspace without storage configured would get a stranded file
+  row and a 501 response. Fixed by hoisting `resolveStorage` (and
+  the nil check) ahead of `h.files.Create`, and dropping the
+  misleading `h.storage == nil && h.storageFactory == nil` early
+  guard that could never trigger now that the factory is always
+  non-nil.
+- `BulkMove` / `BulkCopy` cross-mode bypass: the single-file
+  `MoveFile` handler rejects cross-encryption-mode moves via
+  `sameFolderEncryptionMode`, but the bulk handlers skipped the
+  check, allowing strict-ZK files to be relocated into managed
+  folders (and vice versa). Both bulk loops now resolve the source
+  folder, compare its `EncryptionMode` to the already-resolved
+  target folder, and emit a per-item `encryption mode mismatch`
+  failure on divergence instead of aborting the batch. Bulk folder
+  moves continue to delegate to `folder.Service.Move`, which already
+  enforces the same invariant internally.
+- `BulkDownload` per-workspace storage: the handler still used the
+  static `h.storage` fallback for both the configured-check and
+  `appendZipEntry`. Updated to call `h.resolveStorage(ctx,
+  workspaceID)` once at the top and thread the resolved client into
+  every zip entry, matching the rest of the presigned-URL handlers
+  touched by PR #10.
 
 **Goal**: add strict-ZK private folders, customer-managed keys, data
 residency controls, the KChat integration API, and AI features for

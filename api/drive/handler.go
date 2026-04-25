@@ -817,10 +817,6 @@ func (h *Handler) ListFileVersions(w http.ResponseWriter, r *http.Request) {
 // client; it must be echoed back verbatim on confirm so the server records
 // the exact key it signed.
 func (h *Handler) UploadURL(w http.ResponseWriter, r *http.Request) {
-	if h.storage == nil && h.storageFactory == nil {
-		http.Error(w, "storage not configured", http.StatusNotImplemented)
-		return
-	}
 	workspaceID, ok := middleware.WorkspaceIDFromContext(r.Context())
 	if !ok {
 		http.Error(w, "unauthenticated", http.StatusUnauthorized)
@@ -857,6 +853,16 @@ func (h *Handler) UploadURL(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Resolve the per-workspace storage client BEFORE creating the
+	// metadata row. If storage is unconfigured for this workspace we
+	// must reject the request without leaving an orphan file row that
+	// has no corresponding upload URL or object.
+	store := h.resolveStorage(r.Context(), workspaceID)
+	if store == nil {
+		http.Error(w, "storage not configured", http.StatusNotImplemented)
+		return
+	}
+
 	f, err := h.files.Create(r.Context(), workspaceID, folderID, req.Filename, req.MimeType, userID)
 	if err != nil {
 		writeServiceError(w, err)
@@ -866,11 +872,6 @@ func (h *Handler) UploadURL(w http.ResponseWriter, r *http.Request) {
 	versionID := uuid.New()
 	objectKey := storage.NewObjectKey(workspaceID, f.ID, versionID)
 
-	store := h.resolveStorage(r.Context(), workspaceID)
-	if store == nil {
-		http.Error(w, "storage not configured", http.StatusNotImplemented)
-		return
-	}
 	url, err := store.GenerateUploadURL(r.Context(), objectKey, req.MimeType, storage.DefaultPresignExpiry)
 	if err != nil {
 		http.Error(w, "generate upload url: "+err.Error(), http.StatusInternalServerError)
