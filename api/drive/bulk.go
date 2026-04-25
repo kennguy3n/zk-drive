@@ -234,6 +234,13 @@ func (h *Handler) BulkCopy(w http.ResponseWriter, r *http.Request) {
 			CreatedBy:  userID,
 		}
 		if err := h.files.ConfirmVersion(r.Context(), workspaceID, newVersion); err != nil {
+			// Soft-delete the orphan file row we just created so the
+			// target folder doesn't accumulate 0-byte rows when the
+			// version write fails. The Delete error is swallowed: if
+			// it also fails, the original ConfirmVersion error is the
+			// more useful one to surface, and an admin can clean up
+			// the orphan later.
+			_ = h.files.Delete(r.Context(), workspaceID, newFile.ID)
 			resp.Failed = append(resp.Failed, bulkFailure{ID: raw, Error: err.Error()})
 			continue
 		}
