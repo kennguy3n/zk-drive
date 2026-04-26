@@ -16,6 +16,7 @@ import (
 	"github.com/nats-io/nats.go"
 
 	"github.com/kennguy3n/zk-drive/api/admin"
+	apikchat "github.com/kennguy3n/zk-drive/api/kchat"
 	"github.com/kennguy3n/zk-drive/api/auth"
 	"github.com/kennguy3n/zk-drive/api/drive"
 	"github.com/kennguy3n/zk-drive/api/middleware"
@@ -28,6 +29,7 @@ import (
 	"github.com/kennguy3n/zk-drive/internal/fabric"
 	"github.com/kennguy3n/zk-drive/internal/file"
 	"github.com/kennguy3n/zk-drive/internal/folder"
+	"github.com/kennguy3n/zk-drive/internal/kchat"
 	"github.com/kennguy3n/zk-drive/internal/jobs"
 	"github.com/kennguy3n/zk-drive/internal/notification"
 	"github.com/kennguy3n/zk-drive/internal/permission"
@@ -205,6 +207,16 @@ func run() error {
 		WithBilling(billingSvc).
 		WithFabric(fabricClient, provisioner, storageFactory)
 
+	kchatSvc := kchat.NewRoomService(
+		kchat.NewPostgresRepository(pool),
+		wiring.NewKChatFolderCreator(folderSvc),
+		wiring.NewKChatPermissionGranter(permissionSvc),
+		wiring.NewKChatFileCreator(fileSvc),
+		wiring.NewKChatPresignResolver(storageFactory),
+		wiring.KChatObjectKey,
+	)
+	kchatHandler := apikchat.NewHandler(kchatSvc)
+
 	r := chi.NewRouter()
 	r.Use(chimw.RequestID)
 	r.Use(chimw.RealIP)
@@ -283,6 +295,8 @@ func run() error {
 
 			r.Get("/client-rooms", driveHandler.ListClientRooms)
 			r.Post("/client-rooms", driveHandler.CreateClientRoom)
+			r.Get("/client-rooms/templates", driveHandler.ListClientRoomTemplates)
+			r.Post("/client-rooms/from-template", driveHandler.CreateClientRoomFromTemplate)
 			r.Get("/client-rooms/{id}", driveHandler.GetClientRoom)
 			r.Delete("/client-rooms/{id}", driveHandler.DeleteClientRoom)
 
@@ -304,6 +318,16 @@ func run() error {
 				PerWorkspace: cfg.RateLimitPerWorkspace,
 			}))
 			adminHandler.RegisterRoutes(r)
+		})
+
+		r.Route("/kchat", func(r chi.Router) {
+			r.Use(middleware.AuthMiddleware(cfg.JWTSecret))
+			r.Use(middleware.TenantGuard())
+			r.Use(middleware.RateLimiter(middleware.RateLimitConfig{
+				PerUser:      cfg.RateLimitPerUser,
+				PerWorkspace: cfg.RateLimitPerWorkspace,
+			}))
+			kchatHandler.RegisterRoutes(r)
 		})
 
 		// Public share-link resolution — deliberately outside the auth

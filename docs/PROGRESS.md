@@ -3,7 +3,7 @@
 - **Project**: ZK Drive
 - **License**: Proprietary — All Rights Reserved.
 - **Status**: Phase 4 — Privacy & Differentiation (kicked off 2026-04-25)
-- **Last updated**: 2026-04-26 (Phase 4 sprint 7 audit: sprint 6 next-10 confirmed NOT STARTED; no regressions)
+- **Last updated**: 2026-04-26 (Phase 4 sprint 8: CMK wiring + KChat API + client-room templates landed; Tasks 6, 8, 10 complete; Tasks 7 and 9 still deferred)
 
 This document is a phase-gated tracker. Each phase has an explicit
 checklist and a decision gate. Do not skip to the next phase until
@@ -821,19 +821,37 @@ Checklist:
         up the zk-object-fabric demo gateway via docker compose so
         `TestUploadConfirmDownloadRoundTrip` runs in the integration
         job (next-10 Task 9).
-  - [ ] Task 6: Customer-managed key (CMK) wiring against
-        zk-object-fabric KMS references (deferred, follow-up sprint).
+  - [x] Task 6: CMK wiring — migration 020 adds `cmk_uri` column to
+        `workspace_storage_credentials`; `internal/crypto/cmk.go`
+        introduces `ModeKMS`, `CMKConfig`, and `ValidateCMKURI`
+        (accepts `arn:aws:kms:`, `kms://`, `vault://`, `transit://`,
+        or empty for gateway-default); admin endpoints
+        `GET/PUT /api/admin/cmk` persist locally and best-effort
+        forward to the fabric console via `fabric.Client.PutCMK`.
+        `TestCMKProvisionAndRotate` and
+        `TestCMKReturns404WhenWorkspaceNotProvisioned` pin the full
+        contract.
   - [ ] Task 7: Frontend admin UI for placement policy and per-folder
         encryption-mode selection (deferred to a follow-up frontend
         sprint).
-  - [ ] Task 8: KChat integration API (room-folder mapping,
-        permission sync, attachment metadata) — deferred until after
-        the encryption-mode plumbing stabilizes.
+  - [x] Task 8: KChat integration API — migration 021 creates
+        `kchat_room_folders`; `internal/kchat/` ships a service +
+        Postgres repository covering room-folder mapping, permission
+        sync, and attachment metadata, exposed under `/api/kchat`.
+        `TestKChatRoomFolderMapping`, `TestKChatPermissionSync`, and
+        `TestKChatAttachmentUpload` exercise the create/list/delete
+        lifecycle, three-round member reconciliation, and the
+        upload-URL → confirm round-trip respectively.
   - [ ] Task 9: AI thread summary / file classification for managed
-        encrypted mode (deferred — depends on Phase 4 KChat bridge).
-  - [ ] Task 10: Client-room templates (agencies, accounting, legal,
-        construction, clinics) — deferred to the back-half of
-        Phase 4 once the multi-mode storage plumbing is stable.
+        encrypted mode (deferred — KChat bridge no longer blocks it).
+  - [x] Task 10: Client-room templates — `internal/sharing/templates.go`
+        registers the agency, accounting, legal, construction, and
+        clinic verticals; `ClientRoomService.CreateFromTemplate`
+        provisions sub-folders under the room folder; admin
+        endpoints `GET /api/client-rooms/templates` and
+        `POST /api/client-rooms/from-template` round out the API.
+        `TestClientRoomTemplateCreate` pins the four-sub-folder
+        agency layout end-to-end.
 - [x] Strict-ZK folder support: disable server-side previews, search,
       and text extraction for strict-ZK folders.
       `internal/preview/`, `internal/search/`.
@@ -843,15 +861,20 @@ Checklist:
         folder itself is `strict_zk` (folder branch). The content
         index worker also short-circuits before download for
         strict-ZK files (next-10 Tasks 8 + 10).
-- [ ] Customer-managed key (CMK) option: workspace-level CMK
-      configuration via zk-object-fabric. `internal/workspace/`.
-      (Task 6)
+- [x] Customer-managed key (CMK) option: workspace-level CMK
+      configuration via zk-object-fabric. `internal/crypto/cmk.go`
+      validates `arn:aws:kms:`, `kms://`, `vault://`, `transit://`,
+      and gateway-default; persisted to
+      `workspace_storage_credentials.cmk_uri` and best-effort
+      forwarded to the fabric console via `fabric.Client.PutCMK`.
+      Admin endpoints `GET/PUT /api/admin/cmk`. (Task 6)
 - [ ] Data residency controls: expose zk-object-fabric placement
       policies in the admin UI. `frontend/`, `api/admin/`.
       (backend done in Task 3; frontend in Task 7)
-- [ ] KChat integration API: REST endpoints for room-folder mapping,
-      permission sync, and attachment metadata. `api/drive/`.
-      (Task 8)
+- [x] KChat integration API: REST endpoints for room-folder mapping,
+      permission sync, and attachment metadata. New `internal/kchat`
+      package + `api/kchat/handler.go`; routes mounted under
+      `/api/kchat` with auth + tenant guard. (Task 8)
 - [ ] AI thread summary / file classification (managed encrypted mode
       only). `internal/ai/`.
       (Task 9, deferred past Task 8)
@@ -860,10 +883,12 @@ Checklist:
       `files.content_text` (migration 019), and the search FTS
       expression now scores on body content alongside name + tags.
       Strict-ZK files never reach the index worker.
-- [ ] Client room templates: pre-configured folder structures for
+- [x] Client room templates: pre-configured folder structures for
       agencies, accounting, legal, construction, and clinics.
-      `internal/sharing/`.
-      (Task 10)
+      `internal/sharing/templates.go` plus the
+      `CreateFromTemplate` extension on `ClientRoomService`. Exposed
+      via `GET /api/client-rooms/templates` and
+      `POST /api/client-rooms/from-template`. (Task 10)
 - [ ] Native mobile app evaluation: PWA Lighthouse benchmark + decide
       on React Native investment. Document decision in
       `docs/MOBILE_EVALUATION.md`.
@@ -879,6 +904,71 @@ Checklist:
       that the server cannot generate previews or search file
       content. KChat can create a room-folder mapping and upload
       attachments via the integration API.
+
+**Decisions / Deferrals (2026-04-26, Phase 4 sprint 8 — coding sprint)**:
+
+- 5 backend coding tasks landed in this sprint, all with passing
+  integration tests against the live Postgres test database:
+  - **CMK wiring** (Task 6): migration 020 adds the `cmk_uri`
+    column; `internal/crypto/cmk.go` introduces `ModeKMS`,
+    `CMKConfig`, and `ValidateCMKURI`. Admin endpoints
+    `GET/PUT /api/admin/cmk` persist the URI and best-effort forward
+    to the fabric console via `fabric.Client.PutCMK`. Per-tenant
+    persistence is the source of truth so a console outage never
+    blocks rotation. `tests/integration/cmk_test.go` covers the full
+    rotate/reset lifecycle plus the 404 contract for unprovisioned
+    workspaces.
+  - **KChat room-folder mapping** (Task 8.a): migration 021 creates
+    `kchat_room_folders` (workspace × room unique). New
+    `internal/kchat/` package mirrors the small-interface pattern
+    from `internal/sharing/client_room.go` (FolderCreator,
+    PermissionGranter, FileCreator) so the package never imports
+    folder/permission/file directly. Routes mounted under
+    `/api/kchat`; the creator receives an automatic admin grant on
+    the room folder.
+  - **KChat permission sync** (Task 8.b): `RoomService.SyncMembers`
+    indexes existing `user`-type grants, revokes anything not in
+    the desired set, and adds/upgrades the rest. Guest grants are
+    left alone so KChat sync never clobbers an out-of-band guest
+    invite. Idempotent: re-sending the same set leaves grants
+    unchanged.
+  - **KChat attachment metadata** (Task 8.c):
+    `AttachmentUploadURL` resolves the room's folder, creates the
+    file metadata row up front, and mints a presigned PUT keyed by
+    `{workspaceID}/{fileID}/{versionID}`. `ConfirmAttachment`
+    validates the object-key prefix before flipping the file's
+    current version pointer, so a malicious caller cannot graft an
+    arbitrary key onto someone else's file row.
+  - **Client-room templates** (Task 10):
+    `internal/sharing/templates.go` registers agency, accounting,
+    legal, construction, and clinic verticals. The new
+    `ClientRoomService.CreateFromTemplate` creates the room then
+    provisions sub-folders under the room folder via the existing
+    `FolderCreator` interface. Two new admin endpoints —
+    `GET /api/client-rooms/templates` and
+    `POST /api/client-rooms/from-template` — round out the API.
+
+- Remaining Phase 4 work (still unchecked):
+  - **Task 7** (frontend admin UI for placement policy + per-folder
+    encryption-mode selection) is the next priority. The backend
+    surface is complete (placement policy in Task 3, CMK in Task
+    6, encryption mode in Task 4); the UI is now the only missing
+    piece for the encryption story.
+  - **Task 9** (AI thread summary / file classification) is
+    unblocked now that the KChat bridge exists, but not yet
+    started.
+  - Data residency frontend, native mobile evaluation, and the
+    Phase 4 decision gate remain deferred.
+
+**Phase 4 sprint 8 next-5**:
+
+| # | Task | Test Gate |
+|---|------|-----------|
+| 1 | [ ] Frontend admin UI: placement policy editor (`frontend/src/admin/placement.tsx`) talking to `/api/admin/placement` | Cypress / Playwright e2e: pick a region, save, reload, assert persisted |
+| 2 | [ ] Frontend admin UI: encryption-mode selector and CMK URI entry (`frontend/src/admin/encryption.tsx`) talking to `/api/admin/cmk` | e2e: set ARN, save, reload, assert displayed |
+| 3 | [ ] AI thread summary scaffold (`internal/ai/summary.go`) + `POST /api/kchat/rooms/{id}/summary` (managed encrypted only) | `TestThreadSummaryRespectsEncryptionMode` integration test |
+| 4 | [ ] File classification job (`cmd/worker/` consumer) routed off the existing index queue, persisting `files.classification` | `TestClassificationWorkerSkipsStrictZK` integration test |
+| 5 | [ ] Phase 4 decision-gate end-to-end test combining strict-ZK upload + KChat attachment + template room creation in `tests/integration/phase4_gate_test.go` | Single integration test that exercises the full gate |
 
 ---
 
