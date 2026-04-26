@@ -3,7 +3,7 @@
 - **Project**: ZK Drive
 - **License**: Proprietary — All Rights Reserved.
 - **Status**: Phase 4 — Privacy & Differentiation (kicked off 2026-04-25)
-- **Last updated**: 2026-04-25 (Phase 4 sprint 5: revised next-10 with comprehensive test gates)
+- **Last updated**: 2026-04-26 (Phase 4 sprint 6: audit — no new regressions, next-10 unchanged)
 
 This document is a phase-gated tracker. Each phase has an explicit
 checklist and a decision gate. Do not skip to the next phase until
@@ -692,6 +692,34 @@ stabilization), native mobile app evaluation (after Phase 4 gate).
   strict-ZK search exclusion, e2e presigned URL CI integration,
   content search index worker) ride on top of the new harness with
   their own dedicated test gates.
+
+**Decisions / Deferrals (2026-04-26, Phase 4 sprint 6 audit)**:
+
+- PR/commit audit of the 30 most recent commits (`fd4ceaa8` through
+  `fde37f8a`) found no new regressions beyond the three already
+  tracked: strict-ZK search leak in `internal/search/service.go`,
+  `IdentityEncryptor` / `IdentityDecryptor` plaintext storage, and
+  `indexHandler` no-op in `cmd/worker/main.go`.
+- zk-object-fabric `main` is current through commit `7d22a4d7`
+  (PR #31, 2026-04-25). Phase 3 finalization (B2C billing wiring,
+  SSE alias, deploy fixes) all landed. No upstream blockers for
+  zk-drive Phase 4 work.
+- `setup_test.go` `ResetTables` confirmed missing `workspace_plans`,
+  `usage_events`, and `file_tags` from the TRUNCATE statement — must
+  be added as part of Task 1.
+- Bulk ops routes (`BulkMove`, `BulkCopy`, `BulkDelete`,
+  `BulkDownload`) and file tag routes (`AddFileTag`, `RemoveFileTag`)
+  confirmed wired in `cmd/server/main.go` but absent from
+  `tests/integration/setup_test.go` — zero integration coverage
+  confirmed.
+- `guest-access.spec.ts` confirmed as a placeholder stub with no real
+  assertions; deferred to post-Phase-4 Playwright stabilization.
+- No open PRs on zk-drive. All PRs through #18 are merged to `main`.
+- Sprint 5 next-10 Tasks 1–10 all remain `NOT STARTED`. No items to
+  check off.
+- Deferrals unchanged: AI thread summary (past KChat), Stripe
+  webhooks (Phase 5), Playwright `continue-on-error` removal
+  (post-Phase-4), native mobile (after Phase 4 gate).
 
 ### Next 10 Tasks (Phase 4, sprint 5 — test-first refresh)
 
