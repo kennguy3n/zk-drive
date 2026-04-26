@@ -106,6 +106,19 @@ func TestClientRoomTemplateCreate(t *testing.T) {
 	if len(tplResp.Templates) != len(sharing.ListTemplates()) {
 		t.Errorf("templates: API returns %d, registry has %d", len(tplResp.Templates), len(sharing.ListTemplates()))
 	}
+
+	// Order is part of the contract: ListTemplates sorts by Name
+	// ascending, so the response is identical across calls. A future
+	// caller that re-introduces map-iteration order would flake this.
+	wantOrder := []string{"accounting", "agency", "clinic", "construction", "legal"}
+	if len(tplResp.Templates) != len(wantOrder) {
+		t.Fatalf("templates: expected %d entries, got %d", len(wantOrder), len(tplResp.Templates))
+	}
+	for i, want := range wantOrder {
+		if tplResp.Templates[i].Name != want {
+			t.Errorf("templates[%d]: expected %q, got %q", i, want, tplResp.Templates[i].Name)
+		}
+	}
 }
 
 func childNames(cs []folder.Folder) []string {

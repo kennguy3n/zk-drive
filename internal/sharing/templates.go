@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"log"
+	"sort"
 
 	"github.com/google/uuid"
 )
@@ -64,14 +65,16 @@ func GetTemplate(name string) (*Template, error) {
 	return &tc, nil
 }
 
-// ListTemplates returns every registered template. Returned in a
-// stable name-sorted order is not promised — callers that care
-// (HTTP responses) sort on their own.
+// ListTemplates returns every registered template, sorted by Name
+// ascending. Sorting here (rather than at each call site) keeps the
+// HTTP contract — and any client-side caching keyed on the array —
+// stable, and prevents a future caller from forgetting to sort.
 func ListTemplates() []Template {
 	out := make([]Template, 0, len(builtinTemplates))
 	for _, t := range builtinTemplates {
 		out = append(out, t)
 	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
 	return out
 }
 
