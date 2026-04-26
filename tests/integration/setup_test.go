@@ -23,6 +23,7 @@ import (
 	"github.com/kennguy3n/zk-drive/api/middleware"
 	"github.com/kennguy3n/zk-drive/internal/activity"
 	"github.com/kennguy3n/zk-drive/internal/audit"
+	"github.com/kennguy3n/zk-drive/internal/billing"
 	"github.com/kennguy3n/zk-drive/internal/database"
 	"github.com/kennguy3n/zk-drive/internal/file"
 	"github.com/kennguy3n/zk-drive/internal/folder"
@@ -98,6 +99,7 @@ func setupEnv(t *testing.T) *testEnv {
 	previewRepo := preview.NewPostgresRepository(pool)
 	auditSvc := audit.NewService(audit.NewPostgresRepository(pool))
 	retentionSvc := retention.NewService(retention.NewPostgresRepository(pool), pool)
+	billingSvc := billing.NewService(billing.NewPostgresRepository(pool))
 
 	authHandler := auth.NewHandler(pool, userSvc, wsSvc, testJWTSecret).WithAudit(auditSvc)
 	driveHandler := drive.NewHandler(pool, wsSvc, folderSvc, fileSvc, userSvc, storageClient, permissionSvc, activitySvc).
@@ -106,8 +108,10 @@ func setupEnv(t *testing.T) *testEnv {
 		WithClientRooms(clientRoomSvc).
 		WithNotifications(notificationSvc).
 		WithPreviews(previewRepo).
-		WithAudit(auditSvc)
-	adminHandler := admin.NewHandler(pool, userSvc, auditSvc, retentionSvc)
+		WithAudit(auditSvc).
+		WithBilling(billingSvc)
+	adminHandler := admin.NewHandler(pool, userSvc, auditSvc, retentionSvc).
+		WithBilling(billingSvc)
 
 	r := chi.NewRouter()
 	r.Use(chimw.Recoverer)
@@ -125,6 +129,13 @@ func setupEnv(t *testing.T) *testEnv {
 		r.Group(func(r chi.Router) {
 			r.Use(middleware.AuthMiddleware(testJWTSecret))
 			r.Use(middleware.TenantGuard())
+			// Permissive rate-limit (PerUser/PerWorkspace=0) so tests
+			// don't have to worry about throttling, but still exercise
+			// the middleware's request-counting code path.
+			r.Use(middleware.RateLimiter(middleware.RateLimitConfig{
+				PerUser:      0,
+				PerWorkspace: 0,
+			}))
 
 			r.Get("/workspaces", driveHandler.ListWorkspaces)
 			r.Post("/workspaces", driveHandler.CreateWorkspace)
@@ -148,6 +159,14 @@ func setupEnv(t *testing.T) *testEnv {
 			r.Get("/files/{id}/versions", driveHandler.ListFileVersions)
 			r.Get("/files/{id}/download-url", driveHandler.DownloadURL)
 			r.Get("/files/{id}/preview-url", driveHandler.PreviewURL)
+			r.Get("/files/{id}/tags", driveHandler.ListFileTags)
+			r.Post("/files/{id}/tags", driveHandler.AddFileTag)
+			r.Delete("/files/{id}/tags/{tag}", driveHandler.RemoveFileTag)
+
+			r.Post("/bulk/move", driveHandler.BulkMove)
+			r.Post("/bulk/copy", driveHandler.BulkCopy)
+			r.Post("/bulk/delete", driveHandler.BulkDelete)
+			r.Post("/bulk/download", driveHandler.BulkDownload)
 
 			r.Get("/permissions", driveHandler.ListPermissions)
 			r.Post("/permissions", driveHandler.GrantPermission)
@@ -208,7 +227,7 @@ func (e *testEnv) ResetTables() {
 	defer cancel()
 	stmts := []string{
 		`ALTER TABLE workspaces DROP CONSTRAINT IF EXISTS fk_workspaces_owner`,
-		`TRUNCATE retention_policies, audit_log, notifications, file_previews, client_rooms, guest_invites, share_links, activity_log, permissions, file_versions, files, folders, users, workspaces RESTART IDENTITY CASCADE`,
+		`TRUNCATE workspace_storage_credentials, workspace_plans, usage_events, file_tags, retention_policies, audit_log, notifications, file_previews, client_rooms, guest_invites, share_links, activity_log, permissions, file_versions, files, folders, users, workspaces RESTART IDENTITY CASCADE`,
 		`ALTER TABLE workspaces ADD CONSTRAINT fk_workspaces_owner FOREIGN KEY (owner_user_id) REFERENCES users(id)`,
 	}
 	for _, s := range stmts {

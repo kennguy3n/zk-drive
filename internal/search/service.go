@@ -101,7 +101,7 @@ matches AS (
            f.folder_id,
            f.created_at,
            ts_rank_cd(
-               to_tsvector('simple', f.name || ' ' || COALESCE(ft.tag_text, '')),
+               to_tsvector('simple', f.name || ' ' || COALESCE(ft.tag_text, '') || ' ' || COALESCE(f.content_text, '')),
                plainto_tsquery('simple', $2)
            ) AS rank,
            COALESCE(ft.tags, ARRAY[]::TEXT[]) AS tags
@@ -111,7 +111,8 @@ matches AS (
     WHERE f.workspace_id = $1
       AND f.deleted_at IS NULL
       AND parent.deleted_at IS NULL
-      AND to_tsvector('simple', f.name || ' ' || COALESCE(ft.tag_text, ''))
+      AND parent.encryption_mode <> 'strict_zk'
+      AND to_tsvector('simple', f.name || ' ' || COALESCE(ft.tag_text, '') || ' ' || COALESCE(f.content_text, ''))
           @@ plainto_tsquery('simple', $2)
     UNION ALL
     SELECT 'folder'::TEXT AS type,
@@ -125,6 +126,7 @@ matches AS (
     FROM folders fo
     WHERE fo.workspace_id = $1
       AND fo.deleted_at IS NULL
+      AND fo.encryption_mode <> 'strict_zk'
       AND to_tsvector('simple', fo.name) @@ plainto_tsquery('simple', $2)
 )
 SELECT type, id, name, path, folder_id, created_at, rank, tags

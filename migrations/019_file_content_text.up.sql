@@ -1,0 +1,11 @@
+-- Phase 4 sprint 5 — content search index.
+--
+-- The search worker (cmd/worker, drive.search.index subject) extracts
+-- text from supported file types (plain text, PDF) and persists it
+-- here so the FTS query in internal/search can score on body content
+-- in addition to file name and tag list.
+--
+-- Strict-ZK files never reach this column: the worker bails before
+-- download, and the search query already excludes strict-ZK folders
+-- so a stray write would still not surface in results.
+ALTER TABLE files ADD COLUMN content_text TEXT;

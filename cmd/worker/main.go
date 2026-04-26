@@ -32,6 +32,7 @@ import (
 	"github.com/kennguy3n/zk-drive/internal/config"
 	"github.com/kennguy3n/zk-drive/internal/database"
 	"github.com/kennguy3n/zk-drive/internal/folder"
+	"github.com/kennguy3n/zk-drive/internal/index"
 	"github.com/kennguy3n/zk-drive/internal/jobs"
 	"github.com/kennguy3n/zk-drive/internal/notification"
 	"github.com/kennguy3n/zk-drive/internal/permission"
@@ -95,11 +96,13 @@ func run() error {
 	var previewSvc *preview.Service
 	var scanSvc *scan.Service
 	var archiveSvc *retention.ArchiveService
+	var indexSvc *index.Service
 	if storageClient != nil {
 		previewSvc = preview.NewService(pool, storageClient, preview.NewPostgresRepository(pool))
 		scanSvc = scan.NewService(pool, storageClient, os.Getenv("CLAMAV_ADDRESS"))
 		scanSvc.SetNotifier(notifSvc)
 		archiveSvc = retention.NewArchiveService(pool, storageClient, nil)
+		indexSvc = index.NewService(pool, storageClient, nil)
 	}
 
 	// Guest expiry sweep runs on a timer inside the worker binary so
@@ -133,7 +136,7 @@ func run() error {
 		return fmt.Errorf("ensure stream: %w", err)
 	}
 
-	subs, err := subscribeAll(ctx, js, pool, previewSvc, scanSvc, archiveSvc)
+	subs, err := subscribeAll(ctx, js, pool, previewSvc, scanSvc, archiveSvc, indexSvc)
 	if err != nil {
 		return fmt.Errorf("subscribe: %w", err)
 	}
@@ -175,7 +178,7 @@ func ensureStream(js nats.JetStreamContext) error {
 
 // subscribeAll wires a durable consumer for each subject. Durable
 // names let the worker restart without losing checkpoint state.
-func subscribeAll(ctx context.Context, js nats.JetStreamContext, pool *pgxpool.Pool, previewSvc *preview.Service, scanSvc *scan.Service, archiveSvc *retention.ArchiveService) ([]*nats.Subscription, error) {
+func subscribeAll(ctx context.Context, js nats.JetStreamContext, pool *pgxpool.Pool, previewSvc *preview.Service, scanSvc *scan.Service, archiveSvc *retention.ArchiveService, indexSvc *index.Service) ([]*nats.Subscription, error) {
 	subjects := []struct {
 		subject string
 		durable string
@@ -183,7 +186,7 @@ func subscribeAll(ctx context.Context, js nats.JetStreamContext, pool *pgxpool.P
 	}{
 		{jobs.SubjectPreview, "drive-preview", previewHandler(ctx, pool, previewSvc)},
 		{jobs.SubjectScan, "drive-scan", scanHandler(ctx, pool, scanSvc)},
-		{jobs.SubjectIndex, "drive-index", indexHandler(ctx, pool)},
+		{jobs.SubjectIndex, "drive-index", indexHandler(ctx, pool, indexSvc)},
 		{jobs.SubjectArchive, "drive-archive", archiveHandler(ctx, archiveSvc)},
 	}
 	var subs []*nats.Subscription
@@ -336,11 +339,17 @@ func runGuestExpirySweep(ctx context.Context, svc *sharing.Service, interval tim
 	}
 }
 
-// indexHandler remains a logging placeholder; search indexing lives
-// inline in the confirm-upload handler today via the Postgres FTS
-// trigger migration, so this consumer only drains the subject so
-// queues don't back up.
-func indexHandler(ctx context.Context, pool *pgxpool.Pool) nats.MsgHandler {
+// indexHandler downloads the uploaded object, extracts text, and
+// writes it to files.content_text so the search FTS query in
+// internal/search can score on body content. Strict-ZK files short-
+// circuit before any download — the server's plaintext never leaves
+// the device for those folders by design.
+//
+// When the worker boots without a storage client the handler falls
+// back to the original logging-only behaviour so cold-start setups
+// (no S3_ENDPOINT) still drain the subject and don't queue up
+// JetStream messages.
+func indexHandler(ctx context.Context, pool *pgxpool.Pool, svc *index.Service) nats.MsgHandler {
 	return func(msg *nats.Msg) {
 		var job jobs.FileJob
 		if err := json.Unmarshal(msg.Data, &job); err != nil {
@@ -353,7 +362,19 @@ func indexHandler(ctx context.Context, pool *pgxpool.Pool) nats.MsgHandler {
 			_ = msg.Ack()
 			return
 		}
-		log.Printf("worker: index job acked file=%s version=%s", job.FileID, job.VersionID)
+		if svc == nil {
+			log.Printf("worker: index acked (no storage) file=%s version=%s", job.FileID, job.VersionID)
+			_ = msg.Ack()
+			return
+		}
+		jobCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
+		defer cancel()
+		if err := svc.IndexFile(jobCtx, job.FileID, job.VersionID); err != nil {
+			log.Printf("worker: index failed file=%s version=%s: %v", job.FileID, job.VersionID, err)
+			_ = msg.Nak()
+			return
+		}
+		log.Printf("worker: index ok file=%s version=%s", job.FileID, job.VersionID)
 		_ = msg.Ack()
 	}
 }
