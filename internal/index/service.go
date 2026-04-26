@@ -16,6 +16,7 @@ import (
 	"net/http"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -107,16 +108,33 @@ func ExtractText(mimeType string, body []byte) (string, error) {
 	}
 	switch {
 	case strings.HasPrefix(mt, "text/"):
-		s := string(body)
-		if int64(len(s)) > MaxIndexBytes {
-			s = s[:MaxIndexBytes]
-		}
-		return s, nil
+		return truncateUTF8(string(body), MaxIndexBytes), nil
 	case mt == "application/json", mt == "application/xml":
-		return string(body), nil
+		return truncateUTF8(string(body), MaxIndexBytes), nil
 	default:
 		return "", ErrUnsupportedMimeType
 	}
+}
+
+// truncateUTF8 trims s so it ends on a rune boundary and its byte
+// length does not exceed max. Postgres rejects invalid UTF-8 on the
+// content_text column, so a raw byte-offset slice can cause the
+// worker to loop on redelivery when a multi-byte rune straddles the
+// cap. Also strips any trailing invalid byte sequences from the
+// already-valid prefix.
+func truncateUTF8(s string, max int64) string {
+	if int64(len(s)) > max {
+		s = s[:max]
+	}
+	for len(s) > 0 {
+		r, size := utf8.DecodeLastRuneInString(s)
+		if r == utf8.RuneError && size <= 1 {
+			s = s[:len(s)-1]
+			continue
+		}
+		break
+	}
+	return s
 }
 
 type versionRow struct {
