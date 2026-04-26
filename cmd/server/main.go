@@ -23,6 +23,7 @@ import (
 	"github.com/kennguy3n/zk-drive/internal/audit"
 	"github.com/kennguy3n/zk-drive/internal/billing"
 	"github.com/kennguy3n/zk-drive/internal/config"
+	cryptopkg "github.com/kennguy3n/zk-drive/internal/crypto"
 	"github.com/kennguy3n/zk-drive/internal/database"
 	"github.com/kennguy3n/zk-drive/internal/fabric"
 	"github.com/kennguy3n/zk-drive/internal/file"
@@ -93,12 +94,19 @@ func run() error {
 		log.Printf("storage: S3_ENDPOINT not set; per-workspace credentials must be provisioned via fabric")
 	}
 
-	storageFactory := storage.NewClientFactory(pool, storageClient, storage.IdentityDecryptor{})
+	credentialCodec, err := cryptopkg.LoadFromEnv()
+	if err != nil {
+		return fmt.Errorf("credential codec: %w", err)
+	}
+	log.Printf("crypto: credential encryption mode=%s", credentialCodec.Mode())
+
+	storageFactory := storage.NewClientFactory(pool, storageClient, credentialCodec)
 
 	provisioner := fabric.NewProvisioner(pool, fabric.Config{
 		ConsoleURL:       cfg.FabricConsoleURL,
 		BucketTemplate:   cfg.FabricBucketTemplate,
 		DefaultPolicyRef: cfg.FabricDefaultPlacementRef,
+		Encryptor:        credentialCodec,
 	})
 	if cfg.FabricConsoleURL != "" {
 		log.Printf("fabric: tenant provisioning enabled, console=%s", cfg.FabricConsoleURL)
