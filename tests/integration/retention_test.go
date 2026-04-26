@@ -1,7 +1,9 @@
 package integration
 
 import (
+	"bytes"
 	"context"
+	"io"
 	"net/http"
 	"os"
 	"testing"
@@ -119,19 +121,70 @@ WHERE file_id = $1 AND id <> (SELECT current_version_id FROM files WHERE id = $1
 	}
 }
 
+// uploadAndConfirm runs the full upload-url + presigned PUT +
+// confirm-upload flow. Unlike confirmUploadHelper it actually puts
+// the bytes at the gateway, which the cold-archive code path needs
+// because it fetches the object body before writing the gzip copy.
+func uploadAndConfirm(t *testing.T, env *testEnv, token string, folderID uuid.UUID, name, mime string, body []byte) uuid.UUID {
+	t.Helper()
+	status, raw := env.httpRequest(http.MethodPost, "/api/files/upload-url", token, map[string]string{
+		"folder_id": folderID.String(),
+		"filename":  name,
+		"mime_type": mime,
+	})
+	if status != http.StatusOK {
+		t.Fatalf("upload-url: status=%d body=%s", status, string(raw))
+	}
+	var ur struct {
+		UploadURL string    `json:"upload_url"`
+		UploadID  uuid.UUID `json:"upload_id"`
+		ObjectKey string    `json:"object_key"`
+	}
+	env.decodeJSON(raw, &ur)
+	req, err := http.NewRequest(http.MethodPut, ur.UploadURL, bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("new put: %v", err)
+	}
+	req.Header.Set("Content-Type", mime)
+	req.ContentLength = int64(len(body))
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("put upload: %v", err)
+	}
+	rb, _ := io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+	if resp.StatusCode/100 != 2 {
+		t.Fatalf("put upload: status=%d body=%s", resp.StatusCode, string(rb))
+	}
+	status, raw = env.httpRequest(http.MethodPost, "/api/files/confirm-upload", token, map[string]any{
+		"file_id":    ur.UploadID.String(),
+		"object_key": ur.ObjectKey,
+		"size_bytes": len(body),
+	})
+	if status != http.StatusOK {
+		t.Fatalf("confirm-upload: status=%d body=%s", status, string(raw))
+	}
+	return ur.UploadID
+}
+
 func TestColdArchiveWritesGzipObject(t *testing.T) {
 	if os.Getenv("S3_ENDPOINT") == "" {
 		t.Skip("S3_ENDPOINT not set; cold-archive round-trip needs a live object store")
 	}
 	env := setupEnv(t)
 	tok := env.signupAndLogin("Acme", "admin@acme.test", "Alice", "pw")
-	wsID, _ := uuid.Parse(tok.WorkspaceID)
 	fold := createFolder(t, env, tok.Token, nil, "Docs")
 
-	fileID := confirmUploadHelper(t, env, tok.Token, fold.ID, "report.txt", "text/plain", 0)
-	addAdditionalVersion(t, env, tok.Token, wsID, fileID, 0)
+	// Need real bytes at the gateway for both versions: the archive
+	// path fetches the hot object, gzips it, and writes the cold
+	// copy. confirmUploadHelper / addAdditionalVersion only touch
+	// the metadata plane, which is fine for retention.Evaluate but
+	// not for an end-to-end ArchiveVersion call.
+	v1Body := []byte("v1 contents — to be archived\n")
+	v2Body := []byte("v2 contents — current version\n")
+	fileID := uploadAndConfirm(t, env, tok.Token, fold.ID, "report.txt", "text/plain", v1Body)
+	_ = uploadAndConfirm(t, env, tok.Token, fold.ID, "report.txt", "text/plain", v2Body)
 
-	// Pick the oldest (non-current) version row and archive it.
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	var versionID uuid.UUID
