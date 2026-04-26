@@ -8,6 +8,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"log"
 	"net/http"
 	"strconv"
 	"strings"
@@ -269,17 +270,14 @@ func (h *Handler) PutCMK(w http.ResponseWriter, r *http.Request) {
 	// Best-effort fabric console notification: log and ignore errors
 	// so a transient console outage does not roll back the local
 	// persisted value. Operators reconcile via a follow-up PUT once
-	// the console is reachable again.
+	// the console is reachable again. Cache invalidation runs
+	// regardless so the next request sees the new URI.
 	if h.fabric != nil {
 		tenantID, terr := h.provisioner.LookupTenantID(r.Context(), workspaceID)
-		if terr == nil {
-			if perr := h.fabric.PutCMK(r.Context(), tenantID, uri); perr != nil {
-				// Soft-fail: surface as 502 so the caller knows the
-				// upstream call failed but the local state is now
-				// authoritative for the next reconciliation pass.
-				http.Error(w, "fabric cmk update: "+perr.Error(), http.StatusBadGateway)
-				return
-			}
+		if terr != nil {
+			log.Printf("admin.PutCMK: lookup tenant id workspace=%s: %v", workspaceID, terr)
+		} else if perr := h.fabric.PutCMK(r.Context(), tenantID, uri); perr != nil {
+			log.Printf("admin.PutCMK: fabric console update workspace=%s tenant=%s: %v", workspaceID, tenantID, perr)
 		}
 	}
 	if h.storeFactory != nil {

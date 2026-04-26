@@ -3,7 +3,7 @@ package sharing
 import (
 	"context"
 	"errors"
-	"fmt"
+	"log"
 
 	"github.com/google/uuid"
 )
@@ -79,12 +79,14 @@ func ListTemplates() []Template {
 // then populates the room's folder with the template's sub-folders.
 // Sub-folder creation failures are not fatal — the room is already
 // usable without them, and surfacing a partial success is friendlier
-// than rolling back a possibly-already-shared room. The error path
-// is reserved for the underlying Create call.
+// than rolling back a possibly-already-shared room. Failed
+// sub-folders are logged and skipped; the error return is reserved
+// for the underlying Create call.
 //
 // The first return is the room. The second is the share link
 // (matching Create's signature). The third is the list of created
-// sub-folder ids in template-defined order.
+// sub-folder ids in template-defined order — short of len(tpl.SubFolders)
+// when one or more individual creates failed.
 func (s *ClientRoomService) CreateFromTemplate(ctx context.Context, workspaceID, createdBy uuid.UUID, in ClientRoomInput, templateName string) (*ClientRoom, *ShareLink, []uuid.UUID, error) {
 	tpl, err := GetTemplate(templateName)
 	if err != nil {
@@ -98,10 +100,13 @@ func (s *ClientRoomService) CreateFromTemplate(ctx context.Context, workspaceID,
 	for _, name := range tpl.SubFolders {
 		fref, ferr := s.folders.Create(ctx, workspaceID, &room.FolderID, name, createdBy)
 		if ferr != nil {
-			// Best-effort: log-and-continue would require a logger
-			// dep we don't want; surfacing the partial result lets
-			// the handler decide whether to surface a warning.
-			return room, link, subIDs, fmt.Errorf("create sub-folder %q: %w", name, ferr)
+			// Log-and-continue: the room itself is already created
+			// and shared; failing the whole call would force the
+			// caller to clean up an already-public room. Operators
+			// can re-create missing sub-folders through the regular
+			// folder API.
+			log.Printf("sharing.CreateFromTemplate: create sub-folder %q room=%s: %v", name, room.ID, ferr)
+			continue
 		}
 		subIDs = append(subIDs, fref.ID)
 	}
