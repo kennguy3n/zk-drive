@@ -101,7 +101,7 @@ matches AS (
            f.folder_id,
            f.created_at,
            ts_rank_cd(
-               to_tsvector('simple', f.name || ' ' || COALESCE(ft.tag_text, '')),
+               to_tsvector('simple', f.name || ' ' || COALESCE(ft.tag_text, '') || ' ' || COALESCE(f.content_text, '')),
                plainto_tsquery('simple', $2)
            ) AS rank,
            COALESCE(ft.tags, ARRAY[]::TEXT[]) AS tags
@@ -112,7 +112,7 @@ matches AS (
       AND f.deleted_at IS NULL
       AND parent.deleted_at IS NULL
       AND parent.encryption_mode <> 'strict_zk'
-      AND to_tsvector('simple', f.name || ' ' || COALESCE(ft.tag_text, ''))
+      AND to_tsvector('simple', f.name || ' ' || COALESCE(ft.tag_text, '') || ' ' || COALESCE(f.content_text, ''))
           @@ plainto_tsquery('simple', $2)
     UNION ALL
     SELECT 'folder'::TEXT AS type,

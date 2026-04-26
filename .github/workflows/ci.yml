@@ -75,6 +75,13 @@ jobs:
           --health-retries 10
     env:
       TEST_DATABASE_URL: postgres://zkdrive:zkdrive@localhost:5432/zk-drive?sslmode=disable
+      # zk-object-fabric demo credentials. The gateway is started below
+      # via docker compose so TestUploadConfirmDownloadRoundTrip exercises a
+      # real presigned-URL round-trip (it skips when S3_ENDPOINT is empty).
+      S3_ENDPOINT: http://localhost:8080
+      S3_BUCKET: zk-drive-ci
+      S3_ACCESS_KEY: demo-access-key
+      S3_SECRET_KEY: demo-secret-key
     steps:
       - uses: actions/checkout@v4
 
@@ -85,8 +92,46 @@ jobs:
           check-latest: true
           cache: true
 
+      - name: Check out zk-object-fabric
+        uses: actions/checkout@v4
+        with:
+          repository: kennguy3n/zk-object-fabric
+          path: zk-object-fabric
+
+      - name: Start zk-object-fabric demo gateway
+        working-directory: zk-object-fabric
+        run: |
+          docker compose up -d --build
+          # Poll the S3 API port until the gateway accepts traffic.
+          # The healthcheck inside the container is `nc -z localhost 8080`,
+          # but here we wait from the runner's perspective because the
+          # service-container helpers don't apply to ad-hoc compose stacks.
+          for i in $(seq 1 60); do
+            if curl --silent --output /dev/null --head http://localhost:8080/; then
+              echo "zk-object-fabric ready after ${i}s"
+              break
+            fi
+            sleep 1
+          done
+
+      - name: Pre-create CI bucket
+        env:
+          AWS_ACCESS_KEY_ID: demo-access-key
+          AWS_SECRET_ACCESS_KEY: demo-secret-key
+          AWS_DEFAULT_REGION: us-east-1
+        run: |
+          # The fabric demo accepts arbitrary bucket names via mb;
+          # zk-drive presigns against a specific bucket so we create it
+          # up front rather than rely on auto-create at PUT time.
+          aws --endpoint-url "${S3_ENDPOINT}" s3 mb "s3://${S3_BUCKET}" || true
+
       - name: Run integration tests
         run: go test -count=1 ./tests/integration/...
+
+      - name: Dump zk-object-fabric logs on failure
+        if: failure()
+        working-directory: zk-object-fabric
+        run: docker compose logs zk-fabric || true
 
 # Note: the Playwright e2e job lives in .github/workflows/e2e.yml and
 # is triggered via workflow_dispatch. It is kept out of the default

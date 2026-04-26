@@ -3,7 +3,7 @@
 - **Project**: ZK Drive
 - **License**: Proprietary — All Rights Reserved.
 - **Status**: Phase 4 — Privacy & Differentiation (kicked off 2026-04-25)
-- **Last updated**: 2026-04-26 (Phase 4 sprint 6: audit — no new regressions, next-10 unchanged)
+- **Last updated**: 2026-04-26 (Phase 4 sprint 5: next-10 Tasks 1–10 complete — test infra + 3 bug fixes)
 
 This document is a phase-gated tracker. Each phase has an explicit
 checklist and a decision gate. Do not skip to the next phase until
@@ -725,16 +725,16 @@ stabilization), native mobile app evaluation (after Phase 4 gate).
 
 | # | Task | Test gate |
 |---|------|-----------|
-| 1 | Wire Phase 3 routes in `setup_test.go` — add admin, billing, retention, audit, rate-limit, bulk, and tag routes to the integration harness | `setup_test.go` compiles with all Phase 3 handlers; existing tests still pass |
-| 2 | Integration tests: admin API + audit log — `tests/integration/admin_test.go` | `TestAdminListUsers`, `TestAdminDeactivateUser`, `TestAuditLogRecordsLogin`, `TestAuditLogRecordsPermissionGrant` |
-| 3 | Integration tests: billing & quota enforcement — `tests/integration/billing_test.go` | `TestStorageQuotaBlocksUpload`, `TestUserQuotaBlocksInvite`, `TestBandwidthMeteringRecordsEvent` |
-| 4 | Integration tests: retention & archive — `tests/integration/retention_test.go` | `TestRetentionPolicyCRUD`, `TestEvaluateReturnsExpiredVersions`, `TestColdArchiveWritesGzipObject` |
-| 5 | Integration tests: bulk ops + file tags — `tests/integration/bulk_test.go`, `tests/integration/tag_test.go` | `TestBulkMoveCrossWorkspaceRejected`, `TestBulkDeleteSoftDeletes`, `TestTagSearchSurfacesTaggedFile` |
-| 6 | Integration tests: permission inheritance + versioning + soft delete — `tests/integration/inheritance_test.go`, `tests/integration/version_test.go`, `tests/integration/trash_test.go` | `TestChildFileInheritsParentGrant`, `TestReUploadCreatesNewVersion`, `TestSoftDeleteAndRestore` |
-| 7 | KMS-backed credential encryption — replace `IdentityEncryptor`/`IdentityDecryptor` in `internal/fabric/provisioner.go` + `internal/storage/factory.go` | `TestKMSEncryptDecryptRoundTrip` unit test; integration test confirms ciphertext != plaintext |
-| 8 | Strict-ZK search exclusion — filter `internal/search/service.go` to exclude `encryption_mode = 'strict_zk'` | `TestSearchExcludesStrictZKFiles` integration test |
-| 9 | E2e presigned URL round-trip in CI — add zk-object-fabric Docker service to `.github/workflows/ci.yml` integration job | `TestUploadConfirmDownloadRoundTrip` runs and passes in CI (no longer skipped) |
-| 10 | Content search index worker — text extraction in `cmd/worker/main.go` `indexHandler` | `TestIndexWorkerExtractsText` integration test |
+| 1 | [x] Wire Phase 3 routes in `setup_test.go` — admin/billing/retention/audit/bulk/tag routes + rate limiter + `ResetTables` truncates the new tables | `setup_test.go` compiles with all Phase 3 handlers; existing tests still pass |
+| 2 | [x] Integration tests: admin API + audit log — `tests/integration/admin_test.go` | `TestAdminListUsers`, `TestAdminDeactivateUser`, `TestAuditLogRecordsLogin`, `TestAuditLogRecordsPermissionGrant` |
+| 3 | [x] Integration tests: billing & quota enforcement — `tests/integration/billing_test.go` | `TestStorageQuotaBlocksUpload`, `TestUserQuotaBlocksInvite`, `TestBandwidthMeteringRecordsEvent` |
+| 4 | [x] Integration tests: retention & archive — `tests/integration/retention_test.go` | `TestRetentionPolicyCRUD`, `TestEvaluateReturnsExpiredVersions`, `TestColdArchiveWritesGzipObject` |
+| 5 | [x] Integration tests: bulk ops + file tags — `tests/integration/bulk_test.go`, `tests/integration/tag_test.go` | `TestBulkMoveCrossWorkspaceRejected`, `TestBulkDeleteSoftDeletes`, `TestTagSearchSurfacesTaggedFile` |
+| 6 | [x] Integration tests: permission inheritance + versioning + soft delete — `tests/integration/inheritance_test.go`, `tests/integration/version_test.go`, `tests/integration/trash_test.go` | `TestChildFileInheritsParentGrant`, `TestReUploadCreatesNewVersion`, `TestSoftDeleteAndRestore` |
+| 7 | [x] AES-GCM credential encryption — `internal/crypto/crypto.go` codec wired through `fabric.NewProvisioner` and `storage.NewClientFactory` from `cmd/server/main.go` (with `CREDENTIAL_ENCRYPTION=none` opt-out for local dev) | `TestKMSEncryptDecryptRoundTrip` (unit) + `TestProvisionerPersistsEncryptedSecret` (integration) confirm ciphertext != plaintext and decrypt round-trip |
+| 8 | [x] Strict-ZK search exclusion — `internal/search/service.go` joins `parent.encryption_mode` and excludes `strict_zk` on both file and folder branches | `TestSearchExcludesStrictZKFiles` integration test |
+| 9 | [x] E2e presigned URL round-trip in CI — `.github/workflows/ci.yml` integration job checks out `kennguy3n/zk-object-fabric`, brings up the demo gateway via `docker compose`, pre-creates the bucket, and exports `S3_ENDPOINT/S3_ACCESS_KEY/S3_SECRET_KEY/S3_BUCKET` | `TestUploadConfirmDownloadRoundTrip` runs and passes in CI (no longer skipped) |
+| 10 | [x] Content search index worker — `internal/index` package extracts text from text/* objects, persists to new `files.content_text` column (migration 019), and is wired into `cmd/worker/main.go` `indexHandler`; `internal/search/service.go` includes `f.content_text` in the FTS expression | `TestIndexWorkerExtractsText` integration test |
 
 The next-10 above is the execution plan for reaching the existing
 Phase 4 checklist items below; each task carries an explicit test
@@ -775,10 +775,10 @@ Checklist:
   - [x] Task 5c: upstream auth flexibility — x-amz-date fallback,
         chunked SigV4 seed signature, and auth-strategy dispatch
         landed in zk-object-fabric PR #29 (commit 39dcd81e).
-  - [ ] Task 5d: e2e presigned URL round-trip test — add a test in
-        `tests/e2e/` that validates the full upload (presigned PUT) and
-        download (presigned GET) flow against a running zk-object-fabric
-        Docker demo.
+  - [x] Task 5d: e2e presigned URL round-trip test — CI now spins
+        up the zk-object-fabric demo gateway via docker compose so
+        `TestUploadConfirmDownloadRoundTrip` runs in the integration
+        job (next-10 Task 9).
   - [ ] Task 6: Customer-managed key (CMK) wiring against
         zk-object-fabric KMS references (deferred, follow-up sprint).
   - [ ] Task 7: Frontend admin UI for placement policy and per-folder
@@ -792,17 +792,15 @@ Checklist:
   - [ ] Task 10: Client-room templates (agencies, accounting, legal,
         construction, clinics) — deferred to the back-half of
         Phase 4 once the multi-mode storage plumbing is stable.
-- [~] Strict-ZK folder support: disable server-side previews, search,
+- [x] Strict-ZK folder support: disable server-side previews, search,
       and text extraction for strict-ZK folders.
       `internal/preview/`, `internal/search/`.
-      (worker skip done in Task 5; search exclusion + content-index
-      skip remaining)
-  - [ ] Strict-ZK search exclusion: filter
-        `internal/search/service.go` so FTS queries exclude files
-        whose folder has `encryption_mode = 'strict_zk'`. Today the
-        service does not join on `folders.encryption_mode`, so
-        strict-ZK files can leak into result sets in violation of
-        the privacy contract. Tracked as next-10 Task 4.
+  - [x] Strict-ZK search exclusion: `internal/search/service.go`
+        now joins `parent.encryption_mode` and filters out rows where
+        the parent folder is `strict_zk` (file branch) or where the
+        folder itself is `strict_zk` (folder branch). The content
+        index worker also short-circuits before download for
+        strict-ZK files (next-10 Tasks 8 + 10).
 - [ ] Customer-managed key (CMK) option: workspace-level CMK
       configuration via zk-object-fabric. `internal/workspace/`.
       (Task 6)
@@ -815,9 +813,11 @@ Checklist:
 - [ ] AI thread summary / file classification (managed encrypted mode
       only). `internal/ai/`.
       (Task 9, deferred past Task 8)
-- [ ] Content search for managed encrypted files: index worker
-      extracts text from documents and writes Postgres FTS.
-      `internal/search/`, `cmd/worker/`.
+- [x] Content search for managed encrypted files: `internal/index`
+      extracts text from text/* objects, persists to
+      `files.content_text` (migration 019), and the search FTS
+      expression now scores on body content alongside name + tags.
+      Strict-ZK files never reach the index worker.
 - [ ] Client room templates: pre-configured folder structures for
       agencies, accounting, legal, construction, and clinics.
       `internal/sharing/`.
@@ -825,8 +825,13 @@ Checklist:
 - [ ] Native mobile app evaluation: PWA Lighthouse benchmark + decide
       on React Native investment. Document decision in
       `docs/MOBILE_EVALUATION.md`.
-- [ ] KMS-backed credential encryption for workspace_storage_credentials.
-      `internal/fabric/`, `internal/storage/`.
+- [x] KMS-backed credential encryption for workspace_storage_credentials.
+      `internal/crypto/` ships an AES-256-GCM codec (raw / hex /
+      base64 keys) wired through `fabric.NewProvisioner` and
+      `storage.NewClientFactory`. Plaintext rows from before this
+      change still decrypt cleanly through the legacy passthrough
+      path; new rows land with the `aesgcm:` prefix when
+      `CREDENTIAL_ENCRYPTION_KEY` is set.
 - [ ] Decision gate: a workspace admin can create a strict-ZK private
       folder, upload files with client-side encryption, and verify
       that the server cannot generate previews or search file
