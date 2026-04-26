@@ -18,6 +18,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/kennguy3n/zk-drive/api/admin"
+	apikchat "github.com/kennguy3n/zk-drive/api/kchat"
 	"github.com/kennguy3n/zk-drive/api/auth"
 	"github.com/kennguy3n/zk-drive/api/drive"
 	"github.com/kennguy3n/zk-drive/api/middleware"
@@ -25,14 +26,17 @@ import (
 	"github.com/kennguy3n/zk-drive/internal/audit"
 	"github.com/kennguy3n/zk-drive/internal/billing"
 	"github.com/kennguy3n/zk-drive/internal/database"
+	"github.com/kennguy3n/zk-drive/internal/fabric"
 	"github.com/kennguy3n/zk-drive/internal/file"
 	"github.com/kennguy3n/zk-drive/internal/folder"
+	"github.com/kennguy3n/zk-drive/internal/kchat"
 	"github.com/kennguy3n/zk-drive/internal/notification"
 	"github.com/kennguy3n/zk-drive/internal/permission"
 	"github.com/kennguy3n/zk-drive/internal/preview"
 	"github.com/kennguy3n/zk-drive/internal/retention"
 	"github.com/kennguy3n/zk-drive/internal/search"
 	"github.com/kennguy3n/zk-drive/internal/sharing"
+	"github.com/kennguy3n/zk-drive/internal/wiring"
 	"github.com/kennguy3n/zk-drive/internal/storage"
 	"github.com/kennguy3n/zk-drive/internal/user"
 	"github.com/kennguy3n/zk-drive/internal/workspace"
@@ -48,10 +52,11 @@ const testJWTSecret = "integration-test-secret"
 // httptest server, the pgx pool, and the initialised services. Callers use
 // testEnv.ResetTables between tests.
 type testEnv struct {
-	t       *testing.T
-	pool    *pgxpool.Pool
-	server  *httptest.Server
-	storage *storage.Client
+	t           *testing.T
+	pool        *pgxpool.Pool
+	server      *httptest.Server
+	storage     *storage.Client
+	provisioner *fabric.Provisioner
 }
 
 // setupEnv connects to Postgres, runs migrations, wires the API, and starts
@@ -110,8 +115,28 @@ func setupEnv(t *testing.T) *testEnv {
 		WithPreviews(previewRepo).
 		WithAudit(auditSvc).
 		WithBilling(billingSvc)
+	// Wire a Postgres-backed fabric provisioner with no console URL
+	// so admin endpoints that only need persistence (CMK) work; the
+	// FabricClient interface is left nil because no test fakes the
+	// upstream console yet.
+	provisioner := fabric.NewProvisioner(pool, fabric.Config{})
 	adminHandler := admin.NewHandler(pool, userSvc, auditSvc, retentionSvc).
-		WithBilling(billingSvc)
+		WithBilling(billingSvc).
+		WithFabric(nil, provisioner, nil)
+
+	// KChat service: same wiring as cmd/server/main.go, with a fallback
+	// storage factory so AttachmentUploadURL can mint signed URLs in
+	// tests even without per-workspace credentials.
+	kchatStorageFactory := storage.NewClientFactory(nil, storageClient, nil)
+	kchatSvc := kchat.NewRoomService(
+		kchat.NewPostgresRepository(pool),
+		wiring.NewKChatFolderCreator(folderSvc),
+		wiring.NewKChatPermissionGranter(permissionSvc),
+		wiring.NewKChatFileCreator(fileSvc),
+		wiring.NewKChatPresignResolver(kchatStorageFactory),
+		wiring.KChatObjectKey,
+	)
+	kchatHandler := apikchat.NewHandler(kchatSvc)
 
 	r := chi.NewRouter()
 	r.Use(chimw.Recoverer)
@@ -183,6 +208,8 @@ func setupEnv(t *testing.T) *testEnv {
 
 			r.Get("/client-rooms", driveHandler.ListClientRooms)
 			r.Post("/client-rooms", driveHandler.CreateClientRoom)
+			r.Get("/client-rooms/templates", driveHandler.ListClientRoomTemplates)
+			r.Post("/client-rooms/from-template", driveHandler.CreateClientRoomFromTemplate)
 			r.Get("/client-rooms/{id}", driveHandler.GetClientRoom)
 			r.Delete("/client-rooms/{id}", driveHandler.DeleteClientRoom)
 
@@ -200,12 +227,18 @@ func setupEnv(t *testing.T) *testEnv {
 			adminHandler.RegisterRoutes(r)
 		})
 
+		r.Route("/kchat", func(r chi.Router) {
+			r.Use(middleware.AuthMiddleware(testJWTSecret))
+			r.Use(middleware.TenantGuard())
+			kchatHandler.RegisterRoutes(r)
+		})
+
 		r.Get("/share-links/{token}", driveHandler.ResolveShareLink)
 		r.Post("/share-links/{token}", driveHandler.ResolveShareLink)
 	})
 
 	srv := httptest.NewServer(r)
-	env := &testEnv{t: t, pool: pool, server: srv, storage: storageClient}
+	env := &testEnv{t: t, pool: pool, server: srv, storage: storageClient, provisioner: provisioner}
 	t.Cleanup(func() {
 		srv.Close()
 		// Close activity / audit before the pool so any final drain
@@ -227,7 +260,7 @@ func (e *testEnv) ResetTables() {
 	defer cancel()
 	stmts := []string{
 		`ALTER TABLE workspaces DROP CONSTRAINT IF EXISTS fk_workspaces_owner`,
-		`TRUNCATE workspace_storage_credentials, workspace_plans, usage_events, file_tags, retention_policies, audit_log, notifications, file_previews, client_rooms, guest_invites, share_links, activity_log, permissions, file_versions, files, folders, users, workspaces RESTART IDENTITY CASCADE`,
+		`TRUNCATE kchat_room_folders, workspace_storage_credentials, workspace_plans, usage_events, file_tags, retention_policies, audit_log, notifications, file_previews, client_rooms, guest_invites, share_links, activity_log, permissions, file_versions, files, folders, users, workspaces RESTART IDENTITY CASCADE`,
 		`ALTER TABLE workspaces ADD CONSTRAINT fk_workspaces_owner FOREIGN KEY (owner_user_id) REFERENCES users(id)`,
 	}
 	for _, s := range stmts {

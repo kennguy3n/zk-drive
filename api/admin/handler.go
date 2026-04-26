@@ -20,11 +20,17 @@ import (
 	"github.com/kennguy3n/zk-drive/api/middleware"
 	"github.com/kennguy3n/zk-drive/internal/audit"
 	"github.com/kennguy3n/zk-drive/internal/billing"
+	cryptopkg "github.com/kennguy3n/zk-drive/internal/crypto"
 	"github.com/kennguy3n/zk-drive/internal/fabric"
 	"github.com/kennguy3n/zk-drive/internal/retention"
 	"github.com/kennguy3n/zk-drive/internal/storage"
 	"github.com/kennguy3n/zk-drive/internal/user"
 )
+
+// cryptoValidateCMKURI is a thin alias so the handler stays
+// readable; the actual validation lives in the crypto package
+// alongside the ModeKMS / scheme prefix constants.
+func cryptoValidateCMKURI(uri string) error { return cryptopkg.ValidateCMKURI(uri) }
 
 // FabricClient is the subset of fabric.Client the admin handler
 // needs. Wrapping the upstream client in an interface keeps the
@@ -32,6 +38,7 @@ import (
 type FabricClient interface {
 	GetPlacement(ctx context.Context, tenantID string) (*fabric.Policy, error)
 	PutPlacement(ctx context.Context, tenantID string, p *fabric.Policy) error
+	PutCMK(ctx context.Context, tenantID, cmkURI string) error
 }
 
 // Handler serves admin HTTP endpoints. All service dependencies are
@@ -93,6 +100,8 @@ func (h *Handler) RegisterRoutes(r chi.Router) {
 	r.Put("/billing/plan", h.UpdateBillingPlan)
 	r.Get("/placement", h.GetPlacement)
 	r.Put("/placement", h.PutPlacement)
+	r.Get("/cmk", h.GetCMK)
+	r.Put("/cmk", h.PutCMK)
 }
 
 // GetPlacement returns the workspace's current placement policy by
@@ -184,6 +193,99 @@ func (h *Handler) PutPlacement(w http.ResponseWriter, r *http.Request) {
 		h.storeFactory.Invalidate(workspaceID)
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// cmkRequest is the {"cmk_uri": "..."} body accepted by PutCMK.
+type cmkRequest struct {
+	CMKURI string `json:"cmk_uri"`
+}
+
+// cmkResponse is the body returned by GetCMK and embedded in the
+// PutCMK echo so callers can confirm the canonicalised value.
+type cmkResponse struct {
+	CMKURI string `json:"cmk_uri"`
+}
+
+// GetCMK returns the workspace's current customer-managed key URI.
+// An empty string is a valid response and means "use the gateway
+// default key". Responds 404 when the workspace has no
+// fabric-provisioned credentials row yet.
+func (h *Handler) GetCMK(w http.ResponseWriter, r *http.Request) {
+	if h.provisioner == nil {
+		http.Error(w, "fabric not configured", http.StatusNotImplemented)
+		return
+	}
+	workspaceID, ok := middleware.WorkspaceIDFromContext(r.Context())
+	if !ok {
+		http.Error(w, "unauthenticated", http.StatusUnauthorized)
+		return
+	}
+	uri, err := h.provisioner.LookupCMK(r.Context(), workspaceID)
+	if err != nil {
+		if errors.Is(err, fabric.ErrNoCredentials) {
+			http.Error(w, "workspace not provisioned with fabric", http.StatusNotFound)
+			return
+		}
+		http.Error(w, "lookup cmk: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, http.StatusOK, cmkResponse{CMKURI: uri})
+}
+
+// PutCMK persists a workspace's customer-managed key URI. The URI
+// scheme is validated by crypto.ValidateCMKURI before any state
+// mutation. The local row is updated first; the upstream fabric
+// console is then notified best-effort so a console outage doesn't
+// roll back a successful local persistence — the next placement
+// reconciliation will re-sync.
+func (h *Handler) PutCMK(w http.ResponseWriter, r *http.Request) {
+	if h.provisioner == nil {
+		http.Error(w, "fabric not configured", http.StatusNotImplemented)
+		return
+	}
+	workspaceID, ok := middleware.WorkspaceIDFromContext(r.Context())
+	if !ok {
+		http.Error(w, "unauthenticated", http.StatusUnauthorized)
+		return
+	}
+	var req cmkRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid json body", http.StatusBadRequest)
+		return
+	}
+	uri := strings.TrimSpace(req.CMKURI)
+	if err := cryptoValidateCMKURI(uri); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if err := h.provisioner.UpdateCMK(r.Context(), workspaceID, uri); err != nil {
+		if errors.Is(err, fabric.ErrNoCredentials) {
+			http.Error(w, "workspace not provisioned with fabric", http.StatusNotFound)
+			return
+		}
+		http.Error(w, "update cmk: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	// Best-effort fabric console notification: log and ignore errors
+	// so a transient console outage does not roll back the local
+	// persisted value. Operators reconcile via a follow-up PUT once
+	// the console is reachable again.
+	if h.fabric != nil {
+		tenantID, terr := h.provisioner.LookupTenantID(r.Context(), workspaceID)
+		if terr == nil {
+			if perr := h.fabric.PutCMK(r.Context(), tenantID, uri); perr != nil {
+				// Soft-fail: surface as 502 so the caller knows the
+				// upstream call failed but the local state is now
+				// authoritative for the next reconciliation pass.
+				http.Error(w, "fabric cmk update: "+perr.Error(), http.StatusBadGateway)
+				return
+			}
+		}
+	}
+	if h.storeFactory != nil {
+		h.storeFactory.Invalidate(workspaceID)
+	}
+	writeJSON(w, http.StatusOK, cmkResponse{CMKURI: uri})
 }
 
 // GetAuditLog returns paginated audit entries. Filters by action

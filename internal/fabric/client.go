@@ -122,6 +122,42 @@ func (c *Client) PutPlacement(ctx context.Context, tenantID string, p *Policy) e
 	return nil
 }
 
+// PutCMK forwards the workspace's customer-managed key URI to
+// zk-object-fabric so the gateway can rewrap subsequent objects. The
+// upstream endpoint accepts {"cmk_uri": "..."}; an empty URI is
+// allowed and resets the tenant back to the gateway-default key.
+// Errors are surfaced verbatim so the admin handler can decide
+// whether to roll back the local persisted value.
+func (c *Client) PutCMK(ctx context.Context, tenantID, cmkURI string) error {
+	if c.baseURL == "" {
+		return ErrNotConfigured
+	}
+	endpoint, err := url.JoinPath(c.baseURL, "/api/tenants/", tenantID, "/cmk")
+	if err != nil {
+		return fmt.Errorf("build cmk URL: %w", err)
+	}
+	body, err := json.Marshal(map[string]string{"cmk_uri": cmkURI})
+	if err != nil {
+		return err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPut, endpoint, bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	c.applyAuth(req)
+	resp, err := c.httpc.Do(req)
+	if err != nil {
+		return fmt.Errorf("call console: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode/100 != 2 {
+		preview, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+		return fmt.Errorf("console PUT cmk: status %d: %s", resp.StatusCode, strings.TrimSpace(string(preview)))
+	}
+	return nil
+}
+
 func (c *Client) applyAuth(req *http.Request) {
 	if c.adminToken != "" {
 		req.Header.Set("Authorization", "Bearer "+c.adminToken)

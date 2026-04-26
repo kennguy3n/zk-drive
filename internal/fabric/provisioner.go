@@ -228,6 +228,48 @@ UPDATE workspace_storage_credentials
 	return nil
 }
 
+// UpdateCMK persists the workspace's customer-managed key URI into
+// workspace_storage_credentials.cmk_uri. Empty input resets the
+// workspace back to the gateway-default key. Returns ErrNoCredentials
+// when no row exists for the workspace so the admin handler can
+// surface a 404 rather than a silent no-op.
+func (p *Provisioner) UpdateCMK(ctx context.Context, workspaceID uuid.UUID, cmkURI string) error {
+	if p.pool == nil {
+		return nil
+	}
+	const q = `
+UPDATE workspace_storage_credentials
+   SET cmk_uri = $2,
+       updated_at = now()
+ WHERE workspace_id = $1`
+	tag, err := p.pool.Exec(ctx, q, workspaceID, strings.TrimSpace(cmkURI))
+	if err != nil {
+		return fmt.Errorf("update cmk: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrNoCredentials
+	}
+	return nil
+}
+
+// LookupCMK returns the persisted cmk_uri for a workspace. An empty
+// string with a nil error means "row exists, gateway default in
+// use". Returns ErrNoCredentials when no credentials row exists.
+func (p *Provisioner) LookupCMK(ctx context.Context, workspaceID uuid.UUID) (string, error) {
+	if p.pool == nil {
+		return "", ErrNoCredentials
+	}
+	var uri string
+	const q = `SELECT cmk_uri FROM workspace_storage_credentials WHERE workspace_id = $1`
+	if err := p.pool.QueryRow(ctx, q, workspaceID).Scan(&uri); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return "", ErrNoCredentials
+		}
+		return "", fmt.Errorf("lookup cmk_uri: %w", err)
+	}
+	return uri, nil
+}
+
 // ErrNoCredentials is returned by lookups when no
 // workspace_storage_credentials row exists.
 var ErrNoCredentials = errors.New("fabric: no credentials for workspace")
