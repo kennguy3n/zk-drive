@@ -3,7 +3,7 @@
 - **Project**: ZK Drive
 - **License**: Proprietary — All Rights Reserved.
 - **Status**: Phase 4 — Privacy & Differentiation (kicked off 2026-04-25)
-- **Last updated**: 2026-04-26 (Phase 4 sprint 8: CMK wiring + KChat API + client-room templates landed; Tasks 6, 8, 10 complete; Tasks 7 and 9 still deferred)
+- **Last updated**: 2026-04-26 (Phase 4 sprint 9 audit: sprint 8 next-5 confirmed NOT STARTED; Phase 3 gate ready to close; no regressions; next-10 planned)
 
 This document is a phase-gated tracker. Each phase has an explicit
 checklist and a decision gate. Do not skip to the next phase until
@@ -326,7 +326,7 @@ Checklist:
       metadata-plane level via `tests/integration/phase3_gate_test.go`.
       Full byte-path round-trip validated after the upstream
       zk-object-fabric presigned-URL fix landed — see Phase 1 gate
-      upgrade.)*
+      upgrade.)* (Formally closed sprint 9 — TestUploadConfirmDownloadRoundTrip passes in CI since sprint 5.)
 
 **Decisions / Deferrals (2026-04-24, Phase 3 kickoff)**:
 
@@ -969,6 +969,35 @@ Checklist:
 | 3 | [ ] AI thread summary scaffold (`internal/ai/summary.go`) + `POST /api/kchat/rooms/{id}/summary` (managed encrypted only) | `TestThreadSummaryRespectsEncryptionMode` integration test |
 | 4 | [ ] File classification job (`cmd/worker/` consumer) routed off the existing index queue, persisting `files.classification` | `TestClassificationWorkerSkipsStrictZK` integration test |
 | 5 | [ ] Phase 4 decision-gate end-to-end test combining strict-ZK upload + KChat attachment + template room creation in `tests/integration/phase4_gate_test.go` | Single integration test that exercises the full gate |
+
+**Decisions / Deferrals (2026-04-26, Phase 4 sprint 9 audit)**:
+
+- PR/commit audit of HEAD (`0d1aa5c5`, PR #23 merge) found no new regressions. All three previously tracked issues (strict-ZK search leak, `IdentityEncryptor` plaintext, `indexHandler` no-op) remain resolved since PR #20.
+- zk-object-fabric current through PR #36 (`18b379e1`, 2026-04-26) — Phase 3.5 intra-tenant dedup scaffolding. No upstream blockers for zk-drive Phase 4 work.
+- No open PRs on zk-drive. All PRs through #23 merged to `main`.
+- Sprint 8 next-5 Tasks 1–5 all confirmed `NOT STARTED`. No items to check off.
+- Phase 3 decision gate formally closed: all Phase 3 checklist items are `[x]` and `TestUploadConfirmDownloadRoundTrip` passes in CI (confirmed since sprint 5 next-10 Task 9).
+- Source code verification of remaining Phase 4 gaps:
+  - No frontend admin pages for placement/encryption/CMK: `frontend/src/pages/` has AdminPage, BillingPage, FileBrowserPage, LoginPage, SignupPage only.
+  - No `internal/ai/` package: AI thread summary remains unstarted.
+  - No `phase4_gate_test.go`: decision-gate e2e test does not exist yet.
+- Sprint 8 coding sprint review: PR #23 post-merge fixes addressed best-effort error handling (`PutCMK`, `CreateFromTemplate`), admin-role gating on KChat mutating endpoints, deterministic template list ordering, and KChat downstream error sentinel mapping. All fixes have integration test coverage.
+- Deferrals: native mobile evaluation (after Phase 4 gate), Stripe webhooks (Phase 5), Playwright `continue-on-error` removal (post-Phase-4).
+
+### Next 10 Tasks (Phase 4, sprint 9)
+
+| # | Task | Test Gate |
+|---|------|-----------|
+| 1 | Close Phase 3 decision gate — mark `[x]` in PROGRESS.md | CI green on `main` |
+| 2 | Frontend admin UI: placement policy editor (`frontend/src/pages/PlacementPage.tsx`) talking to `GET/PUT /api/admin/placement` | Playwright spec or manual QA gate |
+| 3 | Frontend admin UI: encryption-mode selector + CMK URI entry (`frontend/src/pages/EncryptionPage.tsx`) talking to `GET/PUT /api/admin/cmk` | Playwright spec or manual QA gate |
+| 4 | Frontend: per-folder encryption-mode toggle in folder create/edit dialog with tradeoff warnings | Manual QA gate |
+| 5 | AI thread summary scaffold (`internal/ai/summary.go`) + `POST /api/kchat/rooms/{id}/summary` (managed encrypted only) | `TestThreadSummaryRespectsEncryptionMode` integration test |
+| 6 | File classification job (`cmd/worker/` consumer) persisting `files.classification` column; strict-ZK files skipped | `TestClassificationWorkerSkipsStrictZK` integration test |
+| 7 | Frontend: KChat room-folder management page (list/create/delete mappings, trigger sync) | Manual QA or Playwright spec |
+| 8 | Frontend: client-room template picker in create-room dialog | Manual QA or Playwright spec |
+| 9 | Phase 4 decision-gate e2e test — `tests/integration/phase4_gate_test.go` (strict-ZK + KChat + template) | Single integration test exercising the full gate |
+| 10 | Close Phase 4 decision gate — mark `[x]` once Task 9 passes in CI | CI green on `main` |
 
 ---
 
