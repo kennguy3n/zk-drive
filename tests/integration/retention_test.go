@@ -175,15 +175,15 @@ func TestColdArchiveWritesGzipObject(t *testing.T) {
 	tok := env.signupAndLogin("Acme", "admin@acme.test", "Alice", "pw")
 	fold := createFolder(t, env, tok.Token, nil, "Docs")
 
-	// Need real bytes at the gateway for both versions: the archive
-	// path fetches the hot object, gzips it, and writes the cold
-	// copy. confirmUploadHelper / addAdditionalVersion only touch
-	// the metadata plane, which is fine for retention.Evaluate but
-	// not for an end-to-end ArchiveVersion call.
+	// v1 lands real bytes at the gateway; the archive path only
+	// reads the non-current version's body so v2 just needs a
+	// metadata row to flip current_version_id (upload-url is a
+	// no-go for a same-name re-upload because the unique index on
+	// (workspace_id, folder_id, name) blocks a second files row).
+	wsID, _ := uuid.Parse(tok.WorkspaceID)
 	v1Body := []byte("v1 contents — to be archived\n")
-	v2Body := []byte("v2 contents — current version\n")
 	fileID := uploadAndConfirm(t, env, tok.Token, fold.ID, "report.txt", "text/plain", v1Body)
-	_ = uploadAndConfirm(t, env, tok.Token, fold.ID, "report.txt", "text/plain", v2Body)
+	addAdditionalVersion(t, env, tok.Token, wsID, fileID, int64(len(v1Body)+1))
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
