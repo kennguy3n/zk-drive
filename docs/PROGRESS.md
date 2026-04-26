@@ -3,7 +3,7 @@
 - **Project**: ZK Drive
 - **License**: Proprietary — All Rights Reserved.
 - **Status**: Phase 4 — Privacy & Differentiation (kicked off 2026-04-25)
-- **Last updated**: 2026-04-26 (Phase 4 sprint 6: all sprint 5 next-10 complete; sprint 6 next-10 planned)
+- **Last updated**: 2026-04-26 (Phase 4 sprint 7 audit: sprint 6 next-10 confirmed NOT STARTED; no regressions)
 
 This document is a phase-gated tracker. Each phase has an explicit
 checklist and a decision gate. Do not skip to the next phase until
@@ -746,6 +746,22 @@ stabilization), native mobile app evaluation (after Phase 4 gate).
 | 8 | Close Phase 3 decision gate — all Phase 3 checklist items are `[x]` and `TestUploadConfirmDownloadRoundTrip` now passes in CI; mark gate `[x]` | CI green on `main` |
 | 9 | Phase 4 decision gate: strict-ZK e2e — create strict-ZK folder, upload file, verify no preview generated and search excludes it | `TestStrictZKE2E` integration test |
 | 10 | Phase 4 decision gate: KChat room-folder e2e — create room mapping, upload attachment via integration API, verify metadata + permissions | `TestKChatE2E` integration test |
+
+**Decisions / Deferrals (2026-04-26, Phase 4 sprint 7 audit)**:
+
+- Fresh source code audit on `main` (HEAD = `7350709d`, PR #21 merge). No new code PRs since PR #20 (sprint 5 implementation). PR #21 was docs-only.
+- Sprint 6 next-10 Tasks 1–10 all remain `NOT STARTED`. No items to check off.
+- Source code verification of remaining Phase 4 gaps:
+  - No CMK wiring: `internal/crypto/crypto.go` line 19 explicitly defers KMS-backed mode. The `Codec` interface is the seam; zk-object-fabric PR #28 (`KMSWrapper`, `VaultWrapper`) clears the upstream dependency.
+  - No KChat integration API: no `/api/kchat/` routes in `cmd/server/main.go`. Only `internal/sharing/client_room.go` exists (generic client-room CRUD, not KChat-specific).
+  - No placement policy or encryption-mode frontend pages: `frontend/src/pages/` has AdminPage, BillingPage, FileBrowserPage, LoginPage, SignupPage only.
+  - No `internal/ai/` package: AI thread summary remains deferred past KChat integration.
+  - No client-room templates: `internal/sharing/client_room.go` has generic CRUD but no pre-configured templates.
+  - `IdentityEncryptor`/`IdentityDecryptor` types still exist as fallback types in `internal/fabric/provisioner.go` and `internal/storage/factory.go` but are no longer the default path — `internal/crypto/crypto.go` Codec is wired through `cmd/server/main.go`.
+- zk-object-fabric current through PR #32 (`0a0e2dd8`, 2026-04-26). No upstream blockers.
+- Phase 3 decision gate: `TestUploadConfirmDownloadRoundTrip` confirmed running in CI (`.github/workflows/ci.yml` sets `S3_ENDPOINT`, checks out zk-object-fabric, starts demo gateway). Gate can be formally closed by sprint 6 Task 8.
+- Sprint 6 next-10 priorities confirmed correct per strategic guardrails (pooled org storage, guest/client rooms, data residency > feature parity). No reprioritization needed.
+- Deferrals unchanged: AI thread summary (past KChat), Stripe webhooks (Phase 5), Playwright `continue-on-error` removal (post-Phase-4), native mobile (after Phase 4 gate).
 
 ### Next 10 Tasks (Phase 4, sprint 5 — test-first refresh)
 
