@@ -53,4 +53,20 @@ var (
 	// ErrInvalidRole is returned when a member's role is not one of
 	// the recognized permission roles.
 	ErrInvalidRole = errors.New("kchat: invalid member role")
+
+	// ErrInvalidObjectKey is returned by ConfirmAttachment when the
+	// object_key is empty or otherwise malformed by the caller.
+	// Handlers map this to 400.
+	ErrInvalidObjectKey = errors.New("kchat: object_key is required")
+
+	// ErrInvalidSize is returned when size_bytes is negative on the
+	// upload URL or confirm path. Handlers map this to 400.
+	ErrInvalidSize = errors.New("kchat: size_bytes must be non-negative")
+
+	// ErrObjectKeyMismatch is returned by ConfirmAttachment when the
+	// supplied object_key does not match the workspace + file ID
+	// prefix produced by AttachmentUploadURL. Treated as a client
+	// error (400) because the caller is presenting a key that did
+	// not come from this service.
+	ErrObjectKeyMismatch = errors.New("kchat: object_key does not belong to file")
 )

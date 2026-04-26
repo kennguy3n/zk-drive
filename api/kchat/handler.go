@@ -13,6 +13,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/kennguy3n/zk-drive/api/middleware"
+	"github.com/kennguy3n/zk-drive/internal/file"
 	kchatpkg "github.com/kennguy3n/zk-drive/internal/kchat"
 	"github.com/kennguy3n/zk-drive/internal/user"
 )
@@ -295,12 +296,16 @@ func writeJSON(w http.ResponseWriter, status int, payload any) {
 // into HTTP status codes. Unknown errors map to 500.
 func writeServiceError(w http.ResponseWriter, err error) {
 	switch {
-	case errors.Is(err, kchatpkg.ErrRoomNotFound):
+	case errors.Is(err, kchatpkg.ErrRoomNotFound),
+		errors.Is(err, file.ErrNotFound):
 		http.Error(w, err.Error(), http.StatusNotFound)
 	case errors.Is(err, kchatpkg.ErrRoomAlreadyMapped):
 		http.Error(w, err.Error(), http.StatusConflict)
 	case errors.Is(err, kchatpkg.ErrInvalidRoomID),
-		errors.Is(err, kchatpkg.ErrInvalidRole):
+		errors.Is(err, kchatpkg.ErrInvalidRole),
+		errors.Is(err, kchatpkg.ErrInvalidObjectKey),
+		errors.Is(err, kchatpkg.ErrInvalidSize),
+		errors.Is(err, kchatpkg.ErrObjectKeyMismatch):
 		http.Error(w, err.Error(), http.StatusBadRequest)
 	default:
 		http.Error(w, err.Error(), http.StatusInternalServerError)

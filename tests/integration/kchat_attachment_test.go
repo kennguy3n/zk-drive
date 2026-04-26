@@ -107,7 +107,7 @@ func TestKChatAttachmentUpload(t *testing.T) {
 
 	// A confirm that fakes a foreign object_key is rejected so a
 	// malicious caller cannot bind their file row to someone else's
-	// upload.
+	// upload. The mismatch is a client error (400), not a 500.
 	other := uuid.NewString()
 	status, _ = env.httpRequest(http.MethodPost, "/api/kchat/attachments/confirm", tok.Token,
 		map[string]any{
@@ -115,8 +115,42 @@ func TestKChatAttachmentUpload(t *testing.T) {
 			"object_key": tok.WorkspaceID + "/" + other + "/" + uuid.NewString(),
 			"size_bytes": 1024,
 		})
-	if status == http.StatusOK {
-		t.Errorf("foreign object_key confirm should fail, got 200")
+	if status != http.StatusBadRequest {
+		t.Errorf("foreign object_key confirm: expected 400, got %d", status)
+	}
+
+	// Confirming with an unknown file_id is a 404, not a 500. The
+	// service surfaces file.ErrNotFound and the handler maps it.
+	status, _ = env.httpRequest(http.MethodPost, "/api/kchat/attachments/confirm", tok.Token,
+		map[string]any{
+			"file_id":    uuid.NewString(),
+			"object_key": uploadResp.ObjectKey,
+			"size_bytes": 1024,
+		})
+	if status != http.StatusNotFound {
+		t.Errorf("unknown file_id confirm: expected 404, got %d", status)
+	}
+
+	// Empty object_key is a 400 (kchat.ErrInvalidObjectKey).
+	status, _ = env.httpRequest(http.MethodPost, "/api/kchat/attachments/confirm", tok.Token,
+		map[string]any{
+			"file_id":    uploadResp.UploadID.String(),
+			"object_key": "   ",
+			"size_bytes": 1024,
+		})
+	if status != http.StatusBadRequest {
+		t.Errorf("empty object_key confirm: expected 400, got %d", status)
+	}
+
+	// Negative size_bytes is a 400 (kchat.ErrInvalidSize).
+	status, _ = env.httpRequest(http.MethodPost, "/api/kchat/attachments/confirm", tok.Token,
+		map[string]any{
+			"file_id":    uploadResp.UploadID.String(),
+			"object_key": uploadResp.ObjectKey,
+			"size_bytes": -1,
+		})
+	if status != http.StatusBadRequest {
+		t.Errorf("negative size_bytes confirm: expected 400, got %d", status)
 	}
 
 	// Upload-url for an unmapped room is a 404, not a 500.

@@ -351,7 +351,7 @@ func (s *RoomService) AttachmentUploadURL(ctx context.Context, workspaceID uuid.
 		return nil, errors.New("kchat: attachment flow not configured")
 	}
 	if sizeBytes < 0 {
-		return nil, errors.New("kchat: size_bytes must be non-negative")
+		return nil, ErrInvalidSize
 	}
 	mapping, err := s.repo.GetByRoomID(ctx, workspaceID, kchatRoomID)
 	if err != nil {
@@ -403,10 +403,10 @@ func (s *RoomService) ConfirmAttachment(ctx context.Context, workspaceID, fileID
 		return nil, errors.New("kchat: attachment flow not configured")
 	}
 	if strings.TrimSpace(objectKey) == "" {
-		return nil, errors.New("kchat: object_key is required")
+		return nil, ErrInvalidObjectKey
 	}
 	if sizeBytes < 0 {
-		return nil, errors.New("kchat: size_bytes must be non-negative")
+		return nil, ErrInvalidSize
 	}
 	f, err := s.files.GetByID(ctx, workspaceID, fileID)
 	if err != nil {
@@ -414,7 +414,7 @@ func (s *RoomService) ConfirmAttachment(ctx context.Context, workspaceID, fileID
 	}
 	expectedPrefix := workspaceID.String() + "/" + f.ID.String() + "/"
 	if !strings.HasPrefix(objectKey, expectedPrefix) {
-		return nil, fmt.Errorf("kchat: object_key does not belong to file %s", fileID)
+		return nil, fmt.Errorf("%w %s", ErrObjectKeyMismatch, fileID)
 	}
 	v, err := s.files.ConfirmVersion(ctx, workspaceID, f.ID, objectKey, checksum, sizeBytes, createdBy)
 	if err != nil {
