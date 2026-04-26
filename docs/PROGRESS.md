@@ -3,7 +3,7 @@
 - **Project**: ZK Drive
 - **License**: Proprietary — All Rights Reserved.
 - **Status**: Phase 4 — Privacy & Differentiation (kicked off 2026-04-25)
-- **Last updated**: 2026-04-26 (Phase 4 sprint 5: next-10 Tasks 1–10 complete — test infra + 3 bug fixes)
+- **Last updated**: 2026-04-26 (Phase 4 sprint 6: all sprint 5 next-10 complete; sprint 6 next-10 planned)
 
 This document is a phase-gated tracker. Each phase has an explicit
 checklist and a decision gate. Do not skip to the next phase until
@@ -327,8 +327,6 @@ Checklist:
       Full byte-path round-trip validated after the upstream
       zk-object-fabric presigned-URL fix landed — see Phase 1 gate
       upgrade.)*
-      (Blocked on Task 3 — e2e presigned URL round-trip test. All
-      feature items complete.)
 
 **Decisions / Deferrals (2026-04-24, Phase 3 kickoff)**:
 
@@ -720,6 +718,34 @@ stabilization), native mobile app evaluation (after Phase 4 gate).
 - Deferrals unchanged: AI thread summary (past KChat), Stripe
   webhooks (Phase 5), Playwright `continue-on-error` removal
   (post-Phase-4), native mobile (after Phase 4 gate).
+
+**Decisions / Deferrals (2026-04-26, Phase 4 sprint 6 — post-sprint-5 closure)**:
+
+- PR/commit audit of commits since the sprint 6 audit (`d8f8c776` through `6cc7dc4e`, PR #20) found no new regressions. All three previously tracked issues are now resolved on `main`:
+  - Strict-ZK search leak: `internal/search/service.go` now filters `parent.encryption_mode <> 'strict_zk'` (file branch) and `fo.encryption_mode <> 'strict_zk'` (folder branch). Pinned by `TestSearchExcludesStrictZKFiles`.
+  - `IdentityEncryptor` / `IdentityDecryptor` plaintext storage: replaced by `internal/crypto/crypto.go` AES-256-GCM codec wired through `cmd/server/main.go`. Pinned by `TestKMSEncryptDecryptRoundTrip` (unit) + `TestProvisionerPersistsEncryptedSecret` (integration).
+  - `indexHandler` no-op: `internal/index/service.go` now extracts text from text/*, application/json, application/xml and persists to `files.content_text`. Pinned by `TestIndexWorkerExtractsText`.
+- In-flight bug fix in PR #20: `ExtractText` UTF-8 rune boundary truncation (`e0fdf3b5`) — initial implementation could split a multi-byte rune at `MaxIndexBytes`, causing Postgres to reject the write and the worker to Nak/redeliver in a loop. Fixed by `truncateUTF8()` with unit tests.
+- zk-object-fabric current through PR #32 (`0a0e2dd8`, 2026-04-26). No upstream blockers.
+- No open PRs on zk-drive. All PRs through #20 merged to `main`.
+- Sprint 5 next-10 Tasks 1–10 all confirmed `[x]` COMPLETE.
+- Phase 3 decision gate can now be closed: all Phase 3 checklist items are [x] and `TestUploadConfirmDownloadRoundTrip` passes in CI (no longer skipped). Task 8 in sprint 6 next-10.
+- Deferrals unchanged: AI thread summary (past KChat), Stripe webhooks (Phase 5), Playwright `continue-on-error` removal (post-Phase-4), native mobile (after Phase 4 gate).
+
+### Next 10 Tasks (Phase 4, sprint 6)
+
+| # | Task | Test gate |
+|---|------|-----------|
+| 1 | CMK wiring — integrate `internal/crypto/` with zk-object-fabric KMS/Vault wrappers (upstream PR #28) for workspace-level customer-managed keys; `PUT /api/admin/cmk` | `TestCMKProvisionAndRotate` integration test |
+| 2 | Frontend admin UI: placement policy editor — expose `GET/PUT /api/admin/placement` in a React admin page with region/country/provider selectors | Playwright spec or manual QA gate |
+| 3 | Frontend admin UI: per-folder encryption-mode selector — folder create/edit dialog shows managed-encrypted vs strict-ZK toggle with tradeoff warnings | Playwright spec or manual QA gate |
+| 4 | KChat integration API: room-folder mapping — `POST/GET/DELETE /api/kchat/rooms` creates a folder + permission bundle per KChat room | `TestKChatRoomFolderMapping` integration test |
+| 5 | KChat integration API: permission sync — room membership changes propagate to ZK Drive folder grants via `POST /api/kchat/rooms/{id}/sync-members` | `TestKChatPermissionSync` integration test |
+| 6 | KChat integration API: attachment metadata — `POST /api/kchat/attachments/upload-url` + `POST /api/kchat/attachments/confirm` for room-scoped uploads | `TestKChatAttachmentUpload` integration test |
+| 7 | Client-room templates — pre-configured folder structures for agencies, accounting, legal, construction, clinics in `internal/sharing/` | `TestClientRoomTemplateCreate` integration test |
+| 8 | Close Phase 3 decision gate — all Phase 3 checklist items are `[x]` and `TestUploadConfirmDownloadRoundTrip` now passes in CI; mark gate `[x]` | CI green on `main` |
+| 9 | Phase 4 decision gate: strict-ZK e2e — create strict-ZK folder, upload file, verify no preview generated and search excludes it | `TestStrictZKE2E` integration test |
+| 10 | Phase 4 decision gate: KChat room-folder e2e — create room mapping, upload attachment via integration API, verify metadata + permissions | `TestKChatE2E` integration test |
 
 ### Next 10 Tasks (Phase 4, sprint 5 — test-first refresh)
 
