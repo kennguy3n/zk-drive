@@ -14,7 +14,21 @@ import (
 
 	"github.com/kennguy3n/zk-drive/api/middleware"
 	kchatpkg "github.com/kennguy3n/zk-drive/internal/kchat"
+	"github.com/kennguy3n/zk-drive/internal/user"
 )
+
+// requireAdmin enforces that the caller has the admin role. Returns
+// true when the request was already responded to (403 written) and
+// the caller should bail out. Mirrors the per-handler check used
+// throughout api/drive/handler.go for mutation endpoints.
+func requireAdmin(w http.ResponseWriter, r *http.Request) bool {
+	role, _ := middleware.RoleFromContext(r.Context())
+	if role != user.RoleAdmin {
+		http.Error(w, "admin role required", http.StatusForbidden)
+		return true
+	}
+	return false
+}
 
 // Handler serves /api/kchat/* endpoints. The handler is intentionally
 // thin — it delegates to kchat.RoomService and translates service
@@ -49,11 +63,16 @@ type createRoomRequest struct {
 
 // CreateRoom maps a KChat room id to a freshly-provisioned folder.
 // Responds 409 when the room is already mapped so a retried POST
-// surfaces the duplicate rather than silently no-op'ing.
+// surfaces the duplicate rather than silently no-op'ing. Admin-only
+// because creating a room provisions a folder + grants the caller
+// admin on it.
 func (h *Handler) CreateRoom(w http.ResponseWriter, r *http.Request) {
 	workspaceID, ok := middleware.WorkspaceIDFromContext(r.Context())
 	if !ok {
 		http.Error(w, "unauthenticated", http.StatusUnauthorized)
+		return
+	}
+	if requireAdmin(w, r) {
 		return
 	}
 	userID, _ := middleware.UserIDFromContext(r.Context())
@@ -112,10 +131,15 @@ func (h *Handler) GetRoom(w http.ResponseWriter, r *http.Request) {
 // DeleteRoom removes the mapping row. The backing folder is left
 // intact so operators can keep the uploaded files; deleting the
 // folder is a separate action through the regular folder API.
+// Admin-only because unmapping disrupts the integration for the
+// whole workspace.
 func (h *Handler) DeleteRoom(w http.ResponseWriter, r *http.Request) {
 	workspaceID, ok := middleware.WorkspaceIDFromContext(r.Context())
 	if !ok {
 		http.Error(w, "unauthenticated", http.StatusUnauthorized)
+		return
+	}
+	if requireAdmin(w, r) {
 		return
 	}
 	id, err := uuid.Parse(chi.URLParam(r, "id"))
@@ -143,11 +167,16 @@ type memberSyncJSON struct {
 
 // SyncMembers reconciles the supplied member list against the
 // folder's existing user grants. Adds new grants, revokes removed
-// ones, and updates roles where they differ.
+// ones, and updates roles where they differ. Admin-only because
+// the caller dictates the full grant set — anything less would let a
+// regular member self-promote to admin on any KChat-mapped folder.
 func (h *Handler) SyncMembers(w http.ResponseWriter, r *http.Request) {
 	workspaceID, ok := middleware.WorkspaceIDFromContext(r.Context())
 	if !ok {
 		http.Error(w, "unauthenticated", http.StatusUnauthorized)
+		return
+	}
+	if requireAdmin(w, r) {
 		return
 	}
 	id, err := uuid.Parse(chi.URLParam(r, "id"))
