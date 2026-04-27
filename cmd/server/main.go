@@ -7,6 +7,8 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
@@ -352,6 +354,15 @@ func run() error {
 		r.Post("/webhooks/stripe", stripeWebhookHandler.HandleWebhook)
 	})
 
+	if cfg.StaticDir != "" {
+		if info, err := os.Stat(cfg.StaticDir); err == nil && info.IsDir() {
+			log.Printf("static: serving SPA assets from %s", cfg.StaticDir)
+			r.NotFound(spaHandler(cfg.StaticDir))
+		} else {
+			log.Printf("static: STATIC_DIR=%q is not a readable directory, skipping SPA serving", cfg.StaticDir)
+		}
+	}
+
 	srv := &http.Server{
 		Addr:         cfg.ListenAddr,
 		Handler:      r,
@@ -381,6 +392,34 @@ func run() error {
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer shutdownCancel()
 	return srv.Shutdown(shutdownCtx)
+}
+
+// spaHandler serves a Vite-built single-page app from `dir`. Concrete
+// asset files (JS, CSS, the favicon, ...) are returned verbatim;
+// anything else falls back to `index.html` so client-side routes survive
+// a hard refresh. The `/api` and `/healthz` namespaces are already
+// handled before this NotFound handler runs, so we only see SPA paths
+// here. We deliberately reject `..` traversal to keep the handler safe
+// when STATIC_DIR is a sibling of sensitive files.
+func spaHandler(dir string) http.HandlerFunc {
+	indexPath := filepath.Join(dir, "index.html")
+	return func(w http.ResponseWriter, r *http.Request) {
+		clean := filepath.Clean("/" + strings.TrimPrefix(r.URL.Path, "/"))
+		if strings.Contains(clean, "..") {
+			http.Error(w, "invalid path", http.StatusBadRequest)
+			return
+		}
+		candidate := filepath.Join(dir, clean)
+		if rel, err := filepath.Rel(dir, candidate); err != nil || strings.HasPrefix(rel, "..") {
+			http.ServeFile(w, r, indexPath)
+			return
+		}
+		if info, err := os.Stat(candidate); err == nil && !info.IsDir() {
+			http.ServeFile(w, r, candidate)
+			return
+		}
+		http.ServeFile(w, r, indexPath)
+	}
 }
 
 // folderCreatorAdapter bridges *folder.Service to
