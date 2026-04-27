@@ -23,17 +23,12 @@ export default defineConfig({
         ],
       },
       workbox: {
+        // Precache the static app shell only. API responses (presigned URLs,
+        // CMK URIs, admin data) are intentionally NOT runtime-cached: in a
+        // zero-knowledge product they must not survive logout in Cache Storage.
         globPatterns: ["**/*.{js,css,html,ico,png,svg}"],
-        runtimeCaching: [
-          {
-            urlPattern: /^https:\/\/.*\/api\//,
-            handler: "NetworkFirst",
-            options: {
-              cacheName: "api-cache",
-              expiration: { maxEntries: 50, maxAgeSeconds: 300 },
-            },
-          },
-        ],
+        navigateFallback: "/index.html",
+        navigateFallbackDenylist: [/^\/api\//],
       },
     }),
   ],
