@@ -57,6 +57,22 @@ type Config struct {
 	// on freshly provisioned workspaces. Defaults to
 	// "b2c_pooled_default" to mirror the migration default.
 	FabricDefaultPlacementRef string
+
+	// Stripe — billing webhook integration. When
+	// StripeWebhookSecret is empty the /api/webhooks/stripe route is
+	// still mounted but every request is rejected with 400 because
+	// signatures cannot be verified. StripeSecretKey is currently
+	// only used for outbound API calls (e.g. retrieving expanded
+	// objects) and is reserved for future server-initiated flows.
+	StripeWebhookSecret string
+	StripeSecretKey     string
+	// StripePriceTierMap maps Stripe price IDs to billing tier names
+	// (`starter`, `business`, `secure_business`). Parsed from the
+	// STRIPE_PRICE_TIER_MAP env var as comma-separated
+	// `price_id:tier` pairs, e.g.
+	// `price_123:starter,price_456:business`. Empty values fall
+	// through to the price object's metadata.tier field.
+	StripePriceTierMap map[string]string
 }
 
 // Load reads configuration from environment variables and returns a populated
@@ -91,6 +107,9 @@ func Load() (*Config, error) {
 		FabricConsoleAdminToken: os.Getenv("FABRIC_CONSOLE_ADMIN_TOKEN"),
 		FabricBucketTemplate:    getEnvDefault("FABRIC_BUCKET_TEMPLATE", "zk-drive-{tenant}"),
 		FabricDefaultPlacementRef: getEnvDefault("FABRIC_DEFAULT_PLACEMENT_REF", "b2c_pooled_default"),
+		StripeWebhookSecret:       os.Getenv("STRIPE_WEBHOOK_SECRET"),
+		StripeSecretKey:           os.Getenv("STRIPE_SECRET_KEY"),
+		StripePriceTierMap:        parsePriceTierMap(os.Getenv("STRIPE_PRICE_TIER_MAP")),
 	}
 
 	var missing []string
@@ -127,6 +146,38 @@ func getEnvDefault(key, def string) string {
 		return v
 	}
 	return def
+}
+
+// parsePriceTierMap parses a comma-separated list of
+// `price_id:tier` pairs into a lookup map. Whitespace around each
+// pair and the colon is tolerated; malformed pairs are skipped so a
+// fat-fingered env var doesn't crash the server at startup.
+func parsePriceTierMap(s string) map[string]string {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return nil
+	}
+	out := make(map[string]string)
+	for _, pair := range strings.Split(s, ",") {
+		pair = strings.TrimSpace(pair)
+		if pair == "" {
+			continue
+		}
+		idx := strings.Index(pair, ":")
+		if idx <= 0 || idx == len(pair)-1 {
+			continue
+		}
+		priceID := strings.TrimSpace(pair[:idx])
+		tier := strings.TrimSpace(pair[idx+1:])
+		if priceID == "" || tier == "" {
+			continue
+		}
+		out[priceID] = tier
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 func parseIntDefault(s string, def int) int {
