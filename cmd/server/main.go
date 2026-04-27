@@ -14,6 +14,7 @@ import (
 	chimw "github.com/go-chi/chi/v5/middleware"
 	"github.com/google/uuid"
 	"github.com/nats-io/nats.go"
+	"github.com/redis/go-redis/v9"
 
 	"github.com/kennguy3n/zk-drive/api/admin"
 	apikchat "github.com/kennguy3n/zk-drive/api/kchat"
@@ -37,6 +38,7 @@ import (
 	"github.com/kennguy3n/zk-drive/internal/preview"
 	"github.com/kennguy3n/zk-drive/internal/retention"
 	"github.com/kennguy3n/zk-drive/internal/search"
+	"github.com/kennguy3n/zk-drive/internal/session"
 	"github.com/kennguy3n/zk-drive/internal/sharing"
 	"github.com/kennguy3n/zk-drive/internal/storage"
 	"github.com/kennguy3n/zk-drive/internal/user"
@@ -156,6 +158,44 @@ func run() error {
 		}
 	}
 
+	// Optional Redis client. When REDIS_URL is set, the rate
+	// limiter and session store switch to a shared backend so
+	// both behave correctly behind multiple replicas. When unset,
+	// the in-memory implementations are used (single-replica).
+	var redisClient *redis.Client
+	var sessionStore *session.RedisSessionStore
+	if cfg.RedisURL != "" {
+		opts, perr := redis.ParseURL(cfg.RedisURL)
+		if perr != nil {
+			return fmt.Errorf("parse REDIS_URL: %w", perr)
+		}
+		redisClient = redis.NewClient(opts)
+		defer redisClient.Close()
+		if perr := redisClient.Ping(ctx).Err(); perr != nil {
+			log.Printf("redis: ping %s failed, continuing with in-memory fallbacks: %v", cfg.RedisURL, perr)
+			redisClient = nil
+		} else {
+			sessionStore = session.NewRedisSessionStore(redisClient)
+			log.Printf("redis: connected to %s, rate limiter and session store backed by Redis", cfg.RedisURL)
+		}
+	} else {
+		log.Printf("redis: REDIS_URL not set, using in-memory rate limiter (single-replica only)")
+	}
+	_ = sessionStore // session store is wired into auth handlers in a follow-up
+
+	rateLimiter := func() func(http.Handler) http.Handler {
+		if redisClient != nil {
+			return middleware.RedisRateLimiter(redisClient, middleware.RedisRateLimiterConfig{
+				PerUser:      cfg.RateLimitPerUser,
+				PerWorkspace: cfg.RateLimitPerWorkspace,
+			})
+		}
+		return middleware.RateLimiter(middleware.RateLimitConfig{
+			PerUser:      cfg.RateLimitPerUser,
+			PerWorkspace: cfg.RateLimitPerWorkspace,
+		})
+	}
+
 	notificationSvc := notification.NewService(notification.NewPostgresRepository(pool))
 	previewRepo := preview.NewPostgresRepository(pool)
 	auditSvc := audit.NewService(audit.NewPostgresRepository(pool))
@@ -248,10 +288,7 @@ func run() error {
 		r.Group(func(r chi.Router) {
 			r.Use(middleware.AuthMiddleware(cfg.JWTSecret))
 			r.Use(middleware.TenantGuard())
-			r.Use(middleware.RateLimiter(middleware.RateLimitConfig{
-				PerUser:      cfg.RateLimitPerUser,
-				PerWorkspace: cfg.RateLimitPerWorkspace,
-			}))
+			r.Use(rateLimiter())
 
 			r.Get("/workspaces", driveHandler.ListWorkspaces)
 			r.Post("/workspaces", driveHandler.CreateWorkspace)
@@ -315,20 +352,14 @@ func run() error {
 			r.Use(middleware.AuthMiddleware(cfg.JWTSecret))
 			r.Use(middleware.TenantGuard())
 			r.Use(middleware.AdminOnly())
-			r.Use(middleware.RateLimiter(middleware.RateLimitConfig{
-				PerUser:      cfg.RateLimitPerUser,
-				PerWorkspace: cfg.RateLimitPerWorkspace,
-			}))
+			r.Use(rateLimiter())
 			adminHandler.RegisterRoutes(r)
 		})
 
 		r.Route("/kchat", func(r chi.Router) {
 			r.Use(middleware.AuthMiddleware(cfg.JWTSecret))
 			r.Use(middleware.TenantGuard())
-			r.Use(middleware.RateLimiter(middleware.RateLimitConfig{
-				PerUser:      cfg.RateLimitPerUser,
-				PerWorkspace: cfg.RateLimitPerWorkspace,
-			}))
+			r.Use(rateLimiter())
 			kchatHandler.RegisterRoutes(r)
 		})
 
