@@ -629,6 +629,47 @@ export async function updateCMK(cmk_uri: string): Promise<void> {
   await client.put("/admin/cmk", { cmk_uri });
 }
 
+// --- KChat rooms (Phase 4) ---------------------------------------------
+
+export interface KChatRoom {
+  id: string;
+  workspace_id: string;
+  kchat_room_id: string;
+  folder_id: string;
+  created_by: string;
+  created_at: string;
+}
+
+export interface KChatMemberSync {
+  user_id: string;
+  role: string;
+}
+
+export async function fetchKChatRooms(): Promise<KChatRoom[]> {
+  const { data } = await client.get<{ rooms: KChatRoom[] }>("/kchat/rooms");
+  return data.rooms ?? [];
+}
+
+export async function createKChatRoom(kchat_room_id: string): Promise<KChatRoom> {
+  const { data } = await client.post<KChatRoom>("/kchat/rooms", { kchat_room_id });
+  return data;
+}
+
+export async function deleteKChatRoom(id: string): Promise<void> {
+  await client.delete(`/kchat/rooms/${id}`);
+}
+
+export async function syncKChatMembers(
+  id: string,
+  members: KChatMemberSync[],
+): Promise<{ synced: number }> {
+  const { data } = await client.post<{ synced: number }>(
+    `/kchat/rooms/${id}/sync-members`,
+    { members },
+  );
+  return data;
+}
+
 // --- Billing ------------------------------------------------------------
 
 export interface BillingUsageSummary {
