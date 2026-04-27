@@ -3,7 +3,7 @@
 - **Project**: ZK Drive
 - **License**: Proprietary — All Rights Reserved.
 - **Status**: Phase 5 — Launch & Revenue (kicked off 2026-04-27)
-- **Last updated**: 2026-04-27 (Phase 4 closed; Phase 5 kicked off with 10-task sprint plan)
+- **Last updated**: 2026-04-27 (Phase 5 sprint 10 audit; all Phase 5 tasks confirmed NOT STARTED)
 
 This document is a phase-gated tracker. Each phase has an explicit
 checklist and a decision gate. Do not skip to the next phase until
@@ -1141,6 +1141,24 @@ Checklist:
 | 8 | LLM-backed AI summaries (`internal/ai/llm.go` + OpenAI) | `TestLLMSummaryFallsBackToScaffold` unit test |
 | 9 | PDF preview support (`internal/preview/pdf.go`) | `TestPDFPreviewGeneration` unit test |
 | 10 | Phase 5 decision gate (`tests/integration/phase5_gate_test.go`) | CI green on `main` |
+
+**Decisions / Deferrals (2026-04-27, Phase 5 sprint 10 audit)**:
+
+- PR/commit audit of HEAD (`e57d2517`, PR #26 merge) found no new regressions. The three previously tracked issues (strict-ZK search leak, `IdentityEncryptor` plaintext, `indexHandler` no-op) all remain resolved since PR #20.
+- zk-object-fabric current through PR #36 (`18b379e1`, 2026-04-26). No upstream blockers for Phase 5 work.
+- No open PRs on zk-drive. All PRs through #26 merged to `main`.
+- Sprint 10 next-10 Tasks 1–10 all confirmed `NOT STARTED`. No items to check off.
+- Source code verification of Phase 5 gaps:
+  - No Stripe code: `internal/billing/` has quota checkers only (`billing.go`, `repository.go`, `service.go`); no Stripe SDK, no webhook handler, no checkout/portal endpoints.
+  - No PWA shell: no `manifest.webmanifest`, no `vite-plugin-pwa`, no service worker in `frontend/`. PWA-first decision recorded in `docs/MOBILE_EVALUATION.md`.
+  - No Redis/Valkey session store: no `internal/session/` directory. In-memory rate limiter from Phase 3 is the only implementation.
+  - No WebSocket handler: no `api/ws/` directory. Notifications are REST-only (`GET /api/notifications`).
+  - No LLM client: `internal/ai/service.go` is a rule-based scaffold. No OpenAI SDK or `LLMClient` interface in source.
+  - No PDF preview: `internal/preview/` handles images only (stdlib decoders + `golang.org/x/image`). No `pdf.go`.
+  - No `React.lazy` code splitting in `frontend/`.
+  - `.github/workflows/` — Playwright e2e workflow was moved to `workflow_dispatch` (sprint 5); `continue-on-error` grep returns 0 matches.
+- Phase 4 decision gate confirmed closed (sprint 9 Task 10, PR #25). All Phase 4 checklist items `[x]`.
+- Deferrals unchanged: React Native (behind PWA adoption metrics), office doc preview (ImageMagick/LibreOffice packaging), real-time collaborative editing (Phase 4+ if demand), desktop sync client, enterprise DLP.
 
 ---
 
