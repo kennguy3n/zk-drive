@@ -85,6 +85,43 @@ func TestRevokeAllForUser(t *testing.T) {
 	}
 }
 
+// TestUserSessionsIndexTTLNeverShrinks regression-tests the bug
+// flagged in Devin Review #3150549347: a short-lived session must
+// not shrink the user_sessions SET TTL, otherwise the index can
+// expire before older long-lived sessions and RevokeAllForUser will
+// silently miss them.
+func TestUserSessionsIndexTTLNeverShrinks(t *testing.T) {
+	store, mr := newTestStore(t)
+	ctx := context.Background()
+
+	userID := uuid.New()
+	wsID := uuid.New()
+	longLived := uuid.NewString()
+	shortLived := uuid.NewString()
+
+	// Long-lived session first: SET TTL = 1 hour.
+	if err := store.Set(ctx, longLived, userID, wsID, time.Hour); err != nil {
+		t.Fatalf("set long-lived: %v", err)
+	}
+	// Short-lived session second: SET TTL must stay at ~1 hour, not
+	// shrink to 1 minute.
+	if err := store.Set(ctx, shortLived, userID, wsID, time.Minute); err != nil {
+		t.Fatalf("set short-lived: %v", err)
+	}
+
+	// Advance 5 minutes — short-lived hash is gone, long-lived
+	// hash and the SET must both still be alive so a subsequent
+	// RevokeAllForUser can find the long-lived session.
+	mr.FastForward(5 * time.Minute)
+
+	if err := store.RevokeAllForUser(ctx, wsID, userID); err != nil {
+		t.Fatalf("revoke-all: %v", err)
+	}
+	if _, _, err := store.Get(ctx, wsID, longLived); !errors.Is(err, ErrSessionNotFound) {
+		t.Fatalf("long-lived session should be revoked, got err=%v", err)
+	}
+}
+
 func TestSessionTTL(t *testing.T) {
 	store, mr := newTestStore(t)
 	ctx := context.Background()

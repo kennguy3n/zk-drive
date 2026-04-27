@@ -76,7 +76,16 @@ func (s *RedisSessionStore) Set(ctx context.Context, sessionID string, userID, w
 	})
 	pipe.Expire(ctx, skey, ttl)
 	pipe.SAdd(ctx, ukey, sessionID)
-	pipe.Expire(ctx, ukey, ttl)
+	// The user_sessions SET TTL must never shrink: a short-lived
+	// session followed by a long-lived one would otherwise expire
+	// the index before the long-lived hash, leaving
+	// RevokeAllForUser unable to find it (Devin Review
+	// #3150549347). ExpireNX seeds the TTL on first SAdd when none
+	// exists; ExpireGT extends it only when ttl is greater than the
+	// current remaining TTL. Together they implement
+	// max(current, ttl) without a separate PTTL round-trip.
+	pipe.ExpireNX(ctx, ukey, ttl)
+	pipe.ExpireGT(ctx, ukey, ttl)
 	if _, err := pipe.Exec(ctx); err != nil {
 		return fmt.Errorf("redis session set: %w", err)
 	}

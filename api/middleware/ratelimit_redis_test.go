@@ -104,6 +104,50 @@ func TestRateLimitFailsOpenOnRedisDown(t *testing.T) {
 	}
 }
 
+// TestUserDeniedDoesNotPollutWorkspaceCounter regression-tests the
+// behaviour flagged in Devin Review #3150549270: a user that exceeds
+// their personal budget and keeps hammering must NOT inflate the
+// workspace counter, otherwise a single misbehaving client can rate
+// limit every other user in the workspace.
+func TestUserDeniedDoesNotPollutWorkspaceCounter(t *testing.T) {
+	_, client := newTestRedis(t)
+
+	// User budget of 2, workspace budget of 5. Attacker sends 20
+	// requests; the workspace counter must stay at 2 (the two
+	// allowed) — every denied request must be a no-op for the
+	// workspace counter.
+	cfg := RedisRateLimiterConfig{PerUser: 2, PerWorkspace: 5}
+	mw := RedisRateLimiter(client, cfg)
+	noop := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+	handler := mw(noop)
+
+	attacker := uuid.New()
+	workspaceID := uuid.New()
+	for i := 0; i < 20; i++ {
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, authedRequest(attacker, workspaceID))
+		// Past the user budget every request must be 429.
+		if i >= 2 && rec.Code != http.StatusTooManyRequests {
+			t.Fatalf("attacker request %d: expected 429, got %d", i, rec.Code)
+		}
+	}
+
+	// A different user in the same workspace should still have
+	// their full personal budget available — workspace counter
+	// should be at 2 (only the attacker's two allowed requests
+	// touched it), so 2 more requests fit comfortably.
+	victim := uuid.New()
+	for i := 0; i < 2; i++ {
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, authedRequest(victim, workspaceID))
+		if rec.Code != http.StatusOK {
+			t.Fatalf("victim request %d: expected 200, got %d (attacker should not have starved the workspace)", i, rec.Code)
+		}
+	}
+}
+
 // TestRateLimitWithoutUserID — anonymous traffic (no auth context)
 // passes through unchanged, matching the in-memory implementation.
 func TestRateLimitWithoutUserID(t *testing.T) {

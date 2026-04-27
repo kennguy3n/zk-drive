@@ -18,6 +18,50 @@ import (
 // keeps Redis hot keys short-lived (each window key is auto-expired).
 const redisRateLimitWindow = time.Second
 
+// rateLimitScript runs the user / workspace counter checks
+// atomically on the Redis server. It mirrors the in-memory
+// limiter's two-phase logic:
+//
+//  1. INCR user counter and EXPIRE it. If it exceeds the user
+//     budget, return immediately — the workspace counter is *not*
+//     touched. This prevents a single misbehaving client from
+//     inflating the workspace counter with denied requests and
+//     starving every other user in the workspace (Devin Review
+//     #3150549270).
+//  2. INCR workspace counter and EXPIRE it. If it exceeds the
+//     workspace budget, DECR the user counter (refund) and signal
+//     a workspace denial.
+//  3. Otherwise allow the request.
+//
+// Return shape: {status, user_count, ws_count} where status is
+// 0=allowed, 1=user-denied, 2=workspace-denied.
+var rateLimitScript = redis.NewScript(`
+local user_key = KEYS[1]
+local ws_key = KEYS[2]
+local user_rate = tonumber(ARGV[1])
+local ws_rate = tonumber(ARGV[2])
+local ttl = tonumber(ARGV[3])
+local has_ws = ARGV[4] == "1"
+
+local u = redis.call('INCR', user_key)
+redis.call('EXPIRE', user_key, ttl)
+if u > user_rate then
+  return {1, u, 0}
+end
+
+if has_ws then
+  local w = redis.call('INCR', ws_key)
+  redis.call('EXPIRE', ws_key, ttl)
+  if w > ws_rate then
+    redis.call('DECR', user_key)
+    return {2, u - 1, w}
+  end
+  return {0, u, w}
+end
+
+return {0, u, 0}
+`)
+
 // RedisRateLimiterConfig matches the in-memory RateLimitConfig so the
 // caller can swap implementations without changing wiring.
 type RedisRateLimiterConfig struct {
@@ -81,35 +125,52 @@ type redisRateLimiter struct {
 	window   time.Duration
 }
 
-// reserve increments the per-user and per-workspace counters for the
-// current window in a single pipeline. Returns the wait interval the
+// reserve runs rateLimitScript to atomically check and increment the
+// per-user and per-workspace counters. Returns the wait interval the
 // caller must respect before retrying; 0 means the request is
 // allowed.
 //
-// EXPIRE is set to 2× the window so a counter that wraps to a new
-// window before the old one expires can never accumulate stale
-// values from the previous window. We don't bother with NX on
-// EXPIRE: the cost of resetting the TTL on every increment is
-// negligible against the savings of avoiding a separate EXISTS
-// round-trip.
+// The script's two-phase logic is what guarantees that a denied
+// per-user request does not pollute the workspace counter, so a
+// single user can't 429 the entire workspace by ignoring 429s. The
+// in-memory limiter has the same property via tokenBucket.refund —
+// see ratelimit.go:reserve.
+//
+// EXPIRE is set to 2× the window inside the script so a counter
+// that wraps to a new window before the old one expires can never
+// accumulate stale values from the previous window. Doing it inside
+// the script also means there's a single network round-trip rather
+// than the two-step pipeline the previous implementation used.
 func (l *redisRateLimiter) reserve(ctx context.Context, workspaceID, userID uuid.UUID, now time.Time) time.Duration {
 	bucket := now.Truncate(l.window).Unix()
 	userKey := rateLimitKey(workspaceID, userID, bucket)
 	wsKey := workspaceLimitKey(workspaceID, bucket)
-	ttl := 2 * l.window
-
-	pipe := l.client.Pipeline()
-	userIncr := pipe.Incr(ctx, userKey)
-	pipe.Expire(ctx, userKey, ttl)
-	var wsIncr *redis.IntCmd
-	if workspaceID != uuid.Nil {
-		wsIncr = pipe.Incr(ctx, wsKey)
-		pipe.Expire(ctx, wsKey, ttl)
+	ttlSeconds := int64((2 * l.window).Seconds())
+	if ttlSeconds < 1 {
+		ttlSeconds = 1
 	}
-	if _, err := pipe.Exec(ctx); err != nil {
+
+	hasWS := "0"
+	if workspaceID != uuid.Nil {
+		hasWS = "1"
+	}
+
+	res, err := rateLimitScript.Run(ctx, l.client,
+		[]string{userKey, wsKey},
+		l.userRate, l.wsRate, ttlSeconds, hasWS,
+	).Slice()
+	if err != nil {
 		// Fail open. Logging here is intentional — a quiet drop
 		// would mask Redis outages from operators.
-		log.Printf("ratelimit_redis: pipeline failed, allowing request: %v", err)
+		log.Printf("ratelimit_redis: script failed, allowing request: %v", err)
+		return 0
+	}
+	if len(res) < 1 {
+		log.Printf("ratelimit_redis: script returned no values, allowing request")
+		return 0
+	}
+	status, _ := res[0].(int64)
+	if status == 0 {
 		return 0
 	}
 
@@ -118,14 +179,7 @@ func (l *redisRateLimiter) reserve(ctx context.Context, workspaceID, userID uuid
 	if wait < 0 {
 		wait = 0
 	}
-
-	if userIncr.Val() > int64(l.userRate) {
-		return wait + time.Millisecond
-	}
-	if wsIncr != nil && wsIncr.Val() > int64(l.wsRate) {
-		return wait + time.Millisecond
-	}
-	return 0
+	return wait + time.Millisecond
 }
 
 // rateLimitKey returns the per-user counter key. The (empty)
