@@ -21,6 +21,7 @@ import (
 	"github.com/kennguy3n/zk-drive/api/drive"
 	"github.com/kennguy3n/zk-drive/api/middleware"
 	"github.com/kennguy3n/zk-drive/internal/activity"
+	"github.com/kennguy3n/zk-drive/internal/ai"
 	"github.com/kennguy3n/zk-drive/internal/audit"
 	"github.com/kennguy3n/zk-drive/internal/billing"
 	"github.com/kennguy3n/zk-drive/internal/config"
@@ -215,7 +216,8 @@ func run() error {
 		wiring.NewKChatPresignResolver(storageFactory),
 		wiring.KChatObjectKey,
 	)
-	kchatHandler := apikchat.NewHandler(kchatSvc)
+	summarySvc := ai.NewSummaryService(pool)
+	kchatHandler := apikchat.NewHandler(kchatSvc, summarySvc)
 
 	r := chi.NewRouter()
 	r.Use(chimw.RequestID)
