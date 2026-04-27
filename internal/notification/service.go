@@ -3,6 +3,7 @@ package notification
 import (
 	"context"
 	"fmt"
+	"log"
 
 	"github.com/google/uuid"
 )
@@ -19,12 +20,23 @@ const MaxLimit = 100
 // repository. Methods are typed per-event so callers do not have to
 // know the internal type string constants.
 type Service struct {
-	repo Repository
+	repo      Repository
+	publisher WSPublisher
 }
 
 // NewService returns a Service backed by the given repository.
 func NewService(repo Repository) *Service {
 	return &Service{repo: repo}
+}
+
+// WithPublisher attaches a WebSocket publisher so create() also
+// pushes a "notification" event to live clients after the row has
+// been persisted. A nil publisher disables the push (matching the
+// pattern used by WithJobs / WithNotifications on the drive
+// handler) — the database row is still written.
+func (s *Service) WithPublisher(p WSPublisher) *Service {
+	s.publisher = p
+	return s
 }
 
 // List returns notifications for a user, unread first. limit is
@@ -114,7 +126,7 @@ func (s *Service) NotifyQuarantine(ctx context.Context, workspaceID, fileID, ver
 			ResourceType: stringPtr("file_version"),
 			ResourceID:   &versionID,
 		}
-		if err := s.repo.Create(ctx, n); err != nil {
+		if err := s.create(ctx, n); err != nil {
 			return err
 		}
 	}
@@ -122,8 +134,24 @@ func (s *Service) NotifyQuarantine(ctx context.Context, workspaceID, fileID, ver
 	return nil
 }
 
+// create writes the notification to Postgres and then best-effort
+// fans the same event to live WebSocket clients. Publish failures
+// are logged and swallowed: the persisted row is the source of
+// truth, transports above it are advisory.
 func (s *Service) create(ctx context.Context, n *Notification) error {
-	return s.repo.Create(ctx, n)
+	if err := s.repo.Create(ctx, n); err != nil {
+		return err
+	}
+	if s.publisher == nil {
+		return nil
+	}
+	if err := s.publisher.Publish(ctx, n.WorkspaceID, n.UserID, Event{
+		Type:    "notification",
+		Payload: n,
+	}); err != nil {
+		log.Printf("notification: ws publish: %v", err)
+	}
+	return nil
 }
 
 func stringPtr(s string) *string { return &s }
