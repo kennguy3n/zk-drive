@@ -33,6 +33,7 @@ const (
 	SubjectIndex    = "drive.search.index"
 	SubjectArchive  = "drive.archive.cold"
 	SubjectRetention = "drive.retention.evaluate"
+	SubjectClassify  = "drive.classify.file"
 )
 
 // FileJob is the common payload shape for every drive.* subject. We
@@ -81,6 +82,12 @@ func (p *Publisher) PublishIndex(ctx context.Context, fileID, versionID uuid.UUI
 // call on a nil receiver.
 func (p *Publisher) PublishArchive(ctx context.Context, fileID, versionID uuid.UUID) error {
 	return p.publish(ctx, SubjectArchive, FileJob{FileID: fileID, VersionID: versionID})
+}
+
+// PublishClassify enqueues a rule-based classification job for the
+// (file, version) pair. Safe to call on a nil receiver.
+func (p *Publisher) PublishClassify(ctx context.Context, fileID, versionID uuid.UUID) error {
+	return p.publish(ctx, SubjectClassify, FileJob{FileID: fileID, VersionID: versionID})
 }
 
 func (p *Publisher) publish(ctx context.Context, subject string, payload FileJob) error {

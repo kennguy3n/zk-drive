@@ -29,6 +29,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/nats-io/nats.go"
 
+	"github.com/kennguy3n/zk-drive/internal/classify"
 	"github.com/kennguy3n/zk-drive/internal/config"
 	"github.com/kennguy3n/zk-drive/internal/database"
 	"github.com/kennguy3n/zk-drive/internal/folder"
@@ -105,6 +106,11 @@ func run() error {
 		indexSvc = index.NewService(pool, storageClient, nil)
 	}
 
+	// Classification reads nothing from object storage — name + mime
+	// are enough — so it is wired unconditionally. Strict-ZK folders
+	// still short-circuit inside the handler.
+	classifySvc := classify.NewService(pool)
+
 	// Guest expiry sweep runs on a timer inside the worker binary so
 	// the server process doesn't take on extra cron-like
 	// responsibilities. A 5-minute cadence is fine for Phase 3 —
@@ -136,7 +142,7 @@ func run() error {
 		return fmt.Errorf("ensure stream: %w", err)
 	}
 
-	subs, err := subscribeAll(ctx, js, pool, previewSvc, scanSvc, archiveSvc, indexSvc)
+	subs, err := subscribeAll(ctx, js, pool, previewSvc, scanSvc, archiveSvc, indexSvc, classifySvc)
 	if err != nil {
 		return fmt.Errorf("subscribe: %w", err)
 	}
@@ -159,7 +165,7 @@ func run() error {
 func ensureStream(js nats.JetStreamContext) error {
 	cfg := &nats.StreamConfig{
 		Name:      streamName,
-		Subjects:  []string{jobs.SubjectPreview, jobs.SubjectScan, jobs.SubjectIndex, jobs.SubjectArchive, jobs.SubjectRetention},
+		Subjects:  []string{jobs.SubjectPreview, jobs.SubjectScan, jobs.SubjectIndex, jobs.SubjectArchive, jobs.SubjectRetention, jobs.SubjectClassify},
 		Storage:   nats.FileStorage,
 		Retention: nats.WorkQueuePolicy,
 		MaxAge:    7 * 24 * time.Hour,
@@ -178,7 +184,7 @@ func ensureStream(js nats.JetStreamContext) error {
 
 // subscribeAll wires a durable consumer for each subject. Durable
 // names let the worker restart without losing checkpoint state.
-func subscribeAll(ctx context.Context, js nats.JetStreamContext, pool *pgxpool.Pool, previewSvc *preview.Service, scanSvc *scan.Service, archiveSvc *retention.ArchiveService, indexSvc *index.Service) ([]*nats.Subscription, error) {
+func subscribeAll(ctx context.Context, js nats.JetStreamContext, pool *pgxpool.Pool, previewSvc *preview.Service, scanSvc *scan.Service, archiveSvc *retention.ArchiveService, indexSvc *index.Service, classifySvc *classify.Service) ([]*nats.Subscription, error) {
 	subjects := []struct {
 		subject string
 		durable string
@@ -188,6 +194,7 @@ func subscribeAll(ctx context.Context, js nats.JetStreamContext, pool *pgxpool.P
 		{jobs.SubjectScan, "drive-scan", scanHandler(ctx, pool, scanSvc)},
 		{jobs.SubjectIndex, "drive-index", indexHandler(ctx, pool, indexSvc)},
 		{jobs.SubjectArchive, "drive-archive", archiveHandler(ctx, archiveSvc)},
+		{jobs.SubjectClassify, "drive-classify", classifyHandler(ctx, pool, classifySvc)},
 	}
 	var subs []*nats.Subscription
 	for _, s := range subjects {
@@ -375,6 +382,39 @@ func indexHandler(ctx context.Context, pool *pgxpool.Pool, svc *index.Service) n
 			return
 		}
 		log.Printf("worker: index ok file=%s version=%s", job.FileID, job.VersionID)
+		_ = msg.Ack()
+	}
+}
+
+// classifyHandler decodes the FileJob envelope and runs the
+// classification service. Strict-ZK files skip + ack so the server
+// never writes a label derived from plaintext it does not hold.
+func classifyHandler(ctx context.Context, pool *pgxpool.Pool, svc *classify.Service) nats.MsgHandler {
+	return func(msg *nats.Msg) {
+		var job jobs.FileJob
+		if err := json.Unmarshal(msg.Data, &job); err != nil {
+			log.Printf("worker: malformed classify payload: %v", err)
+			_ = msg.Term()
+			return
+		}
+		if isStrictZK(ctx, pool, job.FileID) {
+			log.Printf("worker: skipping strict-zk file (classify) file=%s version=%s", job.FileID, job.VersionID)
+			_ = msg.Ack()
+			return
+		}
+		if svc == nil {
+			log.Printf("worker: classify acked (no pool) file=%s version=%s", job.FileID, job.VersionID)
+			_ = msg.Ack()
+			return
+		}
+		jobCtx, cancel := context.WithTimeout(ctx, 1*time.Minute)
+		defer cancel()
+		if err := svc.Classify(jobCtx, job.FileID); err != nil {
+			log.Printf("worker: classify failed file=%s version=%s: %v", job.FileID, job.VersionID, err)
+			_ = msg.Nak()
+			return
+		}
+		log.Printf("worker: classify ok file=%s version=%s", job.FileID, job.VersionID)
 		_ = msg.Ack()
 	}
 }

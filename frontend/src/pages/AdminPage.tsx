@@ -50,6 +50,15 @@ export default function AdminPage() {
       >
         <h1 style={{ margin: 0 }}>Admin</h1>
         <div>
+          <Link to="/admin/placement" style={{ marginRight: 16 }}>
+            Placement
+          </Link>
+          <Link to="/admin/encryption" style={{ marginRight: 16 }}>
+            Encryption
+          </Link>
+          <Link to="/admin/kchat" style={{ marginRight: 16 }}>
+            KChat Rooms
+          </Link>
           <Link to="/billing" style={{ marginRight: 16 }}>
             Billing
           </Link>

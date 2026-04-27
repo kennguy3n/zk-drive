@@ -4,6 +4,9 @@ import SignupPage from "./pages/SignupPage";
 import FileBrowserPage from "./pages/FileBrowserPage";
 import AdminPage from "./pages/AdminPage";
 import BillingPage from "./pages/BillingPage";
+import PlacementPage from "./pages/PlacementPage";
+import EncryptionPage from "./pages/EncryptionPage";
+import KChatRoomsPage from "./pages/KChatRoomsPage";
 import RequireAuth from "./components/RequireAuth";
 
 // App-level routing. Unauthenticated visitors hit /login; everyone else
@@ -43,6 +46,30 @@ export default function App() {
         element={
           <RequireAuth>
             <BillingPage />
+          </RequireAuth>
+        }
+      />
+      <Route
+        path="/admin/placement"
+        element={
+          <RequireAuth>
+            <PlacementPage />
+          </RequireAuth>
+        }
+      />
+      <Route
+        path="/admin/encryption"
+        element={
+          <RequireAuth>
+            <EncryptionPage />
+          </RequireAuth>
+        }
+      />
+      <Route
+        path="/admin/kchat"
+        element={
+          <RequireAuth>
+            <KChatRoomsPage />
           </RequireAuth>
         }
       />

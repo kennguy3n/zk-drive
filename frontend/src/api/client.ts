@@ -54,6 +54,9 @@ export interface Folder {
   path: string;
   created_at: string;
   updated_at: string;
+  // Encryption mode is optional in the response for pre-Phase 4
+  // clients; current folders default to "managed_encrypted".
+  encryption_mode?: string;
 }
 
 export interface FileItem {
@@ -138,6 +141,7 @@ export async function getFolder(id: string): Promise<{ folder: Folder; children:
 export async function createFolder(input: {
   name: string;
   parent_folder_id?: string | null;
+  encryption_mode?: string;
 }): Promise<Folder> {
   const { data } = await client.post<Folder>("/folders", input);
   return data;
@@ -579,6 +583,124 @@ export async function upsertRetentionPolicy(input: {
 
 export async function deleteRetentionPolicy(id: string): Promise<void> {
   await client.delete(`/admin/retention-policies/${id}`);
+}
+
+// --- Placement (Phase 4) -----------------------------------------------
+
+// PlacementPolicy mirrors internal/fabric.Policy. Only the subset the
+// admin UI actually edits is modelled; other fields (tenant, cache
+// location) round-trip through JSON unchanged on PUT because we send
+// the entire payload we received on GET.
+export interface PlacementPolicy {
+  tenant?: string;
+  bucket?: string;
+  policy: {
+    encryption: {
+      mode: string;
+      kms?: string;
+    };
+    placement: {
+      provider: string[];
+      region?: string[];
+      country?: string[];
+      storage_class?: string[];
+      cache_location?: string;
+    };
+  };
+}
+
+export async function fetchPlacement(): Promise<PlacementPolicy> {
+  const { data } = await client.get<PlacementPolicy>("/admin/placement");
+  return data;
+}
+
+export async function updatePlacement(policy: PlacementPolicy): Promise<void> {
+  await client.put("/admin/placement", policy);
+}
+
+// --- CMK (Phase 4) ------------------------------------------------------
+
+export async function fetchCMK(): Promise<{ cmk_uri: string }> {
+  const { data } = await client.get<{ cmk_uri: string }>("/admin/cmk");
+  return data;
+}
+
+export async function updateCMK(cmk_uri: string): Promise<void> {
+  await client.put("/admin/cmk", { cmk_uri });
+}
+
+// --- KChat rooms (Phase 4) ---------------------------------------------
+
+export interface KChatRoom {
+  id: string;
+  workspace_id: string;
+  kchat_room_id: string;
+  folder_id: string;
+  created_by: string;
+  created_at: string;
+}
+
+export interface KChatMemberSync {
+  user_id: string;
+  role: string;
+}
+
+export async function fetchKChatRooms(): Promise<KChatRoom[]> {
+  const { data } = await client.get<{ rooms: KChatRoom[] }>("/kchat/rooms");
+  return data.rooms ?? [];
+}
+
+export async function createKChatRoom(kchat_room_id: string): Promise<KChatRoom> {
+  const { data } = await client.post<KChatRoom>("/kchat/rooms", { kchat_room_id });
+  return data;
+}
+
+export async function deleteKChatRoom(id: string): Promise<void> {
+  await client.delete(`/kchat/rooms/${id}`);
+}
+
+export async function syncKChatMembers(
+  id: string,
+  members: KChatMemberSync[],
+): Promise<{ synced: number }> {
+  const { data } = await client.post<{ synced: number }>(
+    `/kchat/rooms/${id}/sync-members`,
+    { members },
+  );
+  return data;
+}
+
+// --- Client-room templates (Phase 4) -----------------------------------
+
+export interface ClientRoomTemplate {
+  name: string;
+  sub_folders: string[];
+}
+
+export async function fetchClientRoomTemplates(): Promise<ClientRoomTemplate[]> {
+  const { data } = await client.get<{ templates: ClientRoomTemplate[] }>(
+    "/client-rooms/templates",
+  );
+  return data.templates ?? [];
+}
+
+export interface ClientRoomFromTemplateResult {
+  id: string;
+  folder_id: string;
+  name: string;
+  share_link_token: string;
+  sub_folder_ids: string[];
+}
+
+export async function createClientRoomFromTemplate(
+  template: string,
+  client_name: string,
+): Promise<ClientRoomFromTemplateResult> {
+  const { data } = await client.post<ClientRoomFromTemplateResult>(
+    "/client-rooms/from-template",
+    { template, name: client_name },
+  );
+  return data;
 }
 
 // --- Billing ------------------------------------------------------------

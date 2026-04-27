@@ -13,6 +13,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/kennguy3n/zk-drive/api/middleware"
+	"github.com/kennguy3n/zk-drive/internal/ai"
 	"github.com/kennguy3n/zk-drive/internal/file"
 	kchatpkg "github.com/kennguy3n/zk-drive/internal/kchat"
 	"github.com/kennguy3n/zk-drive/internal/user"
@@ -35,12 +36,16 @@ func requireAdmin(w http.ResponseWriter, r *http.Request) bool {
 // thin — it delegates to kchat.RoomService and translates service
 // errors into HTTP status codes.
 type Handler struct {
-	rooms *kchatpkg.RoomService
+	rooms   *kchatpkg.RoomService
+	summary *ai.SummaryService
 }
 
-// NewHandler returns a new Handler backed by the given RoomService.
-func NewHandler(rooms *kchatpkg.RoomService) *Handler {
-	return &Handler{rooms: rooms}
+// NewHandler returns a new Handler backed by the given RoomService
+// and (optionally) SummaryService. A nil summary service makes the
+// /rooms/{id}/summary endpoint return 503 so deployments that want
+// the rest of the KChat surface without AI can still boot.
+func NewHandler(rooms *kchatpkg.RoomService, summary *ai.SummaryService) *Handler {
+	return &Handler{rooms: rooms, summary: summary}
 }
 
 // RegisterRoutes mounts every route the handler serves on r. The
@@ -53,6 +58,7 @@ func (h *Handler) RegisterRoutes(r chi.Router) {
 	r.Get("/rooms/{id}", h.GetRoom)
 	r.Delete("/rooms/{id}", h.DeleteRoom)
 	r.Post("/rooms/{id}/sync-members", h.SyncMembers)
+	r.Post("/rooms/{id}/summary", h.RoomSummary)
 	r.Post("/attachments/upload-url", h.AttachmentUploadURL)
 	r.Post("/attachments/confirm", h.AttachmentConfirm)
 }
@@ -278,6 +284,44 @@ func (h *Handler) AttachmentConfirm(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, res)
+}
+
+// RoomSummary returns a rule-based scaffold summary of the files in
+// the folder mapped to the room. Strict-ZK folders return 403 —
+// the server has no plaintext and refuses to hallucinate one.
+func (h *Handler) RoomSummary(w http.ResponseWriter, r *http.Request) {
+	workspaceID, ok := middleware.WorkspaceIDFromContext(r.Context())
+	if !ok {
+		http.Error(w, "unauthenticated", http.StatusUnauthorized)
+		return
+	}
+	if h.summary == nil {
+		http.Error(w, "summary service unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	id, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		http.Error(w, "invalid id", http.StatusBadRequest)
+		return
+	}
+	mapping, err := h.rooms.Get(r.Context(), workspaceID, id)
+	if err != nil {
+		writeServiceError(w, err)
+		return
+	}
+	summary, err := h.summary.Summarize(r.Context(), workspaceID, mapping.FolderID)
+	if err != nil {
+		switch {
+		case errors.Is(err, ai.ErrStrictZKForbidden):
+			http.Error(w, err.Error(), http.StatusForbidden)
+		case errors.Is(err, ai.ErrFolderNotFound):
+			http.Error(w, err.Error(), http.StatusNotFound)
+		default:
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+		}
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"summary": summary})
 }
 
 // writeJSON encodes payload to w with the given status code. Cloned
