@@ -1,0 +1,71 @@
+name: Lighthouse PWA
+
+on:
+  pull_request:
+    paths:
+      - "frontend/**"
+      - ".github/workflows/lighthouse.yml"
+  push:
+    branches: [main]
+    paths:
+      - "frontend/**"
+      - ".github/workflows/lighthouse.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  lighthouse:
+    name: Lighthouse PWA score >= 80
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build production bundle
+        run: npm run build
+
+      # Lighthouse v12 removed the PWA category, so pin to v11 for the score.
+      - name: Install Lighthouse + static server
+        run: npm install --no-save lighthouse@11 serve@14 wait-on@7
+
+      - name: Serve built app
+        run: |
+          npx serve -s dist -l 4173 > /tmp/serve.log 2>&1 &
+          npx wait-on http://127.0.0.1:4173/
+
+      - name: Run Lighthouse PWA audit
+        run: |
+          npx lighthouse http://127.0.0.1:4173/drive \
+            --only-categories=pwa \
+            --chrome-flags="--headless --no-sandbox --disable-gpu" \
+            --output=json --output-path=/tmp/lh-pwa.json \
+            --quiet
+
+      - name: Assert PWA score >= 80
+        run: |
+          score=$(node -e "console.log(Math.round(require('/tmp/lh-pwa.json').categories.pwa.score * 100))")
+          echo "Lighthouse PWA score: $score"
+          if [ "$score" -lt 80 ]; then
+            echo "::error::Lighthouse PWA score $score is below threshold of 80"
+            exit 1
+          fi
+
+      - name: Upload Lighthouse report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: lighthouse-pwa-report
+          path: /tmp/lh-pwa.json
