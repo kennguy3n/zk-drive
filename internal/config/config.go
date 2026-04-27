@@ -57,6 +57,14 @@ type Config struct {
 	// on freshly provisioned workspaces. Defaults to
 	// "b2c_pooled_default" to mirror the migration default.
 	FabricDefaultPlacementRef string
+
+	// StaticDir, when non-empty, makes the server serve a single-page
+	// app (typically the Vite-built `frontend/dist`) on every request
+	// that doesn't match an `/api` route or `/healthz`. Missing files
+	// fall back to `index.html` so client-side routes (`/drive`,
+	// `/login`, ...) work on a hard refresh. Leaving it empty keeps
+	// the server API-only, which is the production deployment shape.
+	StaticDir string
 }
 
 // Load reads configuration from environment variables and returns a populated
@@ -91,6 +99,7 @@ func Load() (*Config, error) {
 		FabricConsoleAdminToken: os.Getenv("FABRIC_CONSOLE_ADMIN_TOKEN"),
 		FabricBucketTemplate:    getEnvDefault("FABRIC_BUCKET_TEMPLATE", "zk-drive-{tenant}"),
 		FabricDefaultPlacementRef: getEnvDefault("FABRIC_DEFAULT_PLACEMENT_REF", "b2c_pooled_default"),
+		StaticDir:                 os.Getenv("STATIC_DIR"),
 	}
 
 	var missing []string
