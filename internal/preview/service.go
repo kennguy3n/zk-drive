@@ -76,7 +76,8 @@ func (s *Service) SetHTTPClient(c *http.Client) { s.httpc = c }
 func IsSupportedMime(mime string) bool {
 	m := strings.ToLower(strings.TrimSpace(mime))
 	switch m {
-	case "image/png", "image/jpeg", "image/jpg", "image/gif":
+	case "image/png", "image/jpeg", "image/jpg", "image/gif",
+		"application/pdf":
 		return true
 	}
 	return false
@@ -99,9 +100,18 @@ func (s *Service) Generate(ctx context.Context, fileID, versionID uuid.UUID) (*P
 		return nil, fmt.Errorf("download source: %w", err)
 	}
 
-	img, _, err := image.Decode(bytes.NewReader(srcBytes))
-	if err != nil {
-		return nil, fmt.Errorf("decode source: %w", err)
+	var img image.Image
+	switch strings.ToLower(strings.TrimSpace(meta.mimeType)) {
+	case "application/pdf":
+		img, err = renderPDFFirstPage(ctx, srcBytes)
+		if err != nil {
+			return nil, err
+		}
+	default:
+		img, _, err = image.Decode(bytes.NewReader(srcBytes))
+		if err != nil {
+			return nil, fmt.Errorf("decode source: %w", err)
+		}
 	}
 
 	thumb := resize(img, ThumbnailSize, ThumbnailSize)

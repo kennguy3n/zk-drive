@@ -15,8 +15,21 @@ RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /out/server 
 RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /out/worker ./cmd/worker
 
 # ---- Runtime stage ----
-FROM gcr.io/distroless/static-debian12:nonroot AS runtime
+# debian:bookworm-slim (instead of distroless static) so the worker
+# can shell out to pdftoppm (poppler-utils) for PDF preview rendering.
+# poppler-utils is GPL but used only as an external subprocess by the
+# worker, so it does not affect the proprietary licence of the Go
+# binaries copied in below.
+FROM debian:bookworm-slim AS runtime
 WORKDIR /app
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        ca-certificates \
+        poppler-utils \
+    && rm -rf /var/lib/apt/lists/* \
+    && groupadd --system --gid 65532 nonroot \
+    && useradd --system --uid 65532 --gid 65532 --home-dir /app nonroot
 
 COPY --from=builder /out/server /app/server
 COPY --from=builder /out/worker /app/worker
