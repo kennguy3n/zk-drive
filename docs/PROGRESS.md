@@ -1118,9 +1118,16 @@ Checklist:
       Redis-backed sliding window. `REDIS_URL` env var.
 - [ ] WebSocket real-time notifications: `api/ws/handler.go`,
       Redis pub/sub broadcast, frontend `useNotifications` hook.
-- [ ] LLM-backed AI summaries: `internal/ai/llm.go` with OpenAI
-      implementation behind `LLMClient` interface. Fallback to
-      rule-based scaffold when `LLM_API_KEY` is unset.
+- [ ] LLM-backed AI summaries: `internal/ai/llm.go` with a
+      **local-only** Ollama-compatible client behind the `LLMClient`
+      interface. Default model `qwen2.5:1.5b` (Apache-2.0
+      open-weights, ~1 GB on disk, runs CPU-only on a 4 GB host).
+      Privacy posture forbids any external-API fallback — the
+      `OllamaURL` host must be loopback / RFC1918 / `.local` /
+      `.internal` / `.cluster.local`, enforced at boot. When
+      `OLLAMA_URL` is unset the service stays on the rule-based
+      scaffold (no network call ever leaves the box). Configured
+      via `OLLAMA_URL` and `OLLAMA_MODEL` env vars.
 - [ ] PDF preview support: `internal/preview/pdf.go` renders page 1
       to PNG thumbnail. Office doc support deferred.
 - [ ] Decision gate: a paying customer can sign up via Stripe
@@ -1138,7 +1145,7 @@ Checklist:
 | 5 | Playwright e2e stabilization (remove `continue-on-error`, real specs) | CI e2e gates on pass |
 | 6 | Redis/Valkey session store + distributed rate limiting | `TestRateLimitAcrossReplicas` + `TestSessionRevocation` |
 | 7 | WebSocket real-time notifications (`api/ws/handler.go` + Redis pub/sub) | `TestWSReceivesFileUploadEvent` |
-| 8 | LLM-backed AI summaries (`internal/ai/llm.go` + OpenAI) | `TestLLMSummaryFallsBackToScaffold` unit test |
+| 8 | LLM-backed AI summaries (`internal/ai/llm.go` + local Ollama, default `qwen2.5:1.5b`, no external APIs) | `TestThreadSummaryUsesLocalLLMWhenConfigured` + `TestThreadSummaryFallsBackWhenLocalLLMErrors` integration tests + `TestNewOllamaClientRejectsPublicEndpoint` privacy-guardrail unit test |
 | 9 | PDF preview support (`internal/preview/pdf.go`) | `TestPDFPreviewGeneration` unit test |
 | 10 | Phase 5 decision gate (`tests/integration/phase5_gate_test.go`) | CI green on `main` |
 
@@ -1153,7 +1160,7 @@ Checklist:
   - No PWA shell: no `manifest.webmanifest`, no `vite-plugin-pwa`, no service worker in `frontend/`. PWA-first decision recorded in `docs/MOBILE_EVALUATION.md`.
   - No Redis/Valkey session store: no `internal/session/` directory. In-memory rate limiter from Phase 3 is the only implementation.
   - No WebSocket handler: no `api/ws/` directory. Notifications are REST-only (`GET /api/notifications`).
-  - No LLM client: `internal/ai/service.go` is a rule-based scaffold. No OpenAI SDK or `LLMClient` interface in source.
+  - No LLM client: `internal/ai/service.go` is a rule-based scaffold. No `LLMClient` interface in source. (Resolved in this PR: `internal/ai/llm.go` adds an Ollama-backed `LLMClient` whose constructor refuses any non-local endpoint, so the only way to enable an LLM is to run an open-weights model on the operator's own infrastructure.)
   - No PDF preview: `internal/preview/` handles images only (stdlib decoders + `golang.org/x/image`). No `pdf.go`.
   - No `React.lazy` code splitting in `frontend/`.
   - `.github/workflows/` — Playwright e2e workflow was moved to `workflow_dispatch` (sprint 5); `continue-on-error` grep returns 0 matches.

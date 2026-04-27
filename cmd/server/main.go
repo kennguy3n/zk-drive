@@ -303,6 +303,16 @@ func run() error {
 		wiring.KChatObjectKey,
 	)
 	summarySvc := ai.NewSummaryService(pool)
+	if cfg.OllamaURL != "" {
+		llm, err := ai.NewOllamaClient(cfg.OllamaURL, cfg.OllamaModel)
+		if err != nil {
+			return fmt.Errorf("ai/ollama: %w", err)
+		}
+		summarySvc = summarySvc.WithLLM(llm)
+		log.Printf("ai: local LLM enabled (endpoint=%s model=%s)", cfg.OllamaURL, llm.Model())
+	} else {
+		log.Printf("ai: OLLAMA_URL not set, AI summaries use rule-based scaffold (no external API calls)")
+	}
 	kchatHandler := apikchat.NewHandler(kchatSvc, summarySvc)
 
 	r := chi.NewRouter()

@@ -138,6 +138,18 @@ func setupEnv(t *testing.T) *testEnv {
 		wiring.KChatObjectKey,
 	)
 	summarySvc := ai.NewSummaryService(pool)
+	// When the test sets OLLAMA_URL via t.Setenv (e.g. against an
+	// httptest.Server) the harness mirrors cmd/server/main.go and
+	// wires the local LLM. Without it, summaries stay on the
+	// rule-based scaffold so unrelated tests don't accidentally
+	// depend on a daemon being up.
+	if endpoint := os.Getenv("OLLAMA_URL"); endpoint != "" {
+		llm, err := ai.NewOllamaClient(endpoint, os.Getenv("OLLAMA_MODEL"))
+		if err != nil {
+			t.Fatalf("ai/ollama: %v", err)
+		}
+		summarySvc = summarySvc.WithLLM(llm)
+	}
 	kchatHandler := apikchat.NewHandler(kchatSvc, summarySvc)
 
 	r := chi.NewRouter()
