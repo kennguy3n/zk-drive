@@ -227,6 +227,12 @@ func run() error {
 		MicrosoftRedirectURL:  cfg.MicrosoftRedirectURL,
 	}).WithAudit(auditSvc)
 	billingSvc := billing.NewService(billing.NewPostgresRepository(pool))
+	stripeWebhookHandler := billing.NewStripeWebhookHandler(billingSvc, cfg.StripeWebhookSecret, cfg.StripePriceTierMap)
+	if cfg.StripeWebhookSecret != "" {
+		log.Printf("billing: stripe webhook signature verification enabled")
+	} else {
+		log.Printf("billing: STRIPE_WEBHOOK_SECRET not set, /api/webhooks/stripe will reject all requests")
+	}
 	driveHandler := drive.NewHandler(pool, wsSvc, folderSvc, fileSvc, userSvc, storageClient, permissionSvc, activitySvc).
 		WithStorageFactory(storageFactory).
 		WithSharing(sharingSvc).
@@ -369,6 +375,12 @@ func run() error {
 		// checks run in the sharing service.
 		r.Get("/share-links/{token}", driveHandler.ResolveShareLink)
 		r.Post("/share-links/{token}", driveHandler.ResolveShareLink)
+
+		// Stripe billing webhook — deliberately outside the auth
+		// middleware group. Stripe authenticates itself via the
+		// Stripe-Signature header rather than a JWT, which the
+		// handler verifies against STRIPE_WEBHOOK_SECRET.
+		r.Post("/webhooks/stripe", stripeWebhookHandler.HandleWebhook)
 	})
 
 	srv := &http.Server{
