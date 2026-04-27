@@ -614,6 +614,17 @@ export async function updatePlacement(policy: PlacementPolicy): Promise<void> {
   await client.put("/admin/placement", policy);
 }
 
+// --- CMK (Phase 4) ------------------------------------------------------
+
+export async function fetchCMK(): Promise<{ cmk_uri: string }> {
+  const { data } = await client.get<{ cmk_uri: string }>("/admin/cmk");
+  return data;
+}
+
+export async function updateCMK(cmk_uri: string): Promise<void> {
+  await client.put("/admin/cmk", { cmk_uri });
+}
+
 // --- Billing ------------------------------------------------------------
 
 export interface BillingUsageSummary {

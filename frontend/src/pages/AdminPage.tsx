@@ -53,6 +53,9 @@ export default function AdminPage() {
           <Link to="/admin/placement" style={{ marginRight: 16 }}>
             Placement
           </Link>
+          <Link to="/admin/encryption" style={{ marginRight: 16 }}>
+            Encryption
+          </Link>
           <Link to="/billing" style={{ marginRight: 16 }}>
             Billing
           </Link>
