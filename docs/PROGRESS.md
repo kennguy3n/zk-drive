@@ -2,8 +2,8 @@
 
 - **Project**: ZK Drive
 - **License**: Proprietary — All Rights Reserved.
-- **Status**: Phase 4 — Privacy & Differentiation (kicked off 2026-04-25)
-- **Last updated**: 2026-04-26 (Phase 4 sprint 9 closed: all 10 next-10 tasks landed; Phase 4 decision gate closed)
+- **Status**: Phase 5 — Launch & Revenue (kicked off 2026-04-27)
+- **Last updated**: 2026-04-27 (Phase 4 closed; Phase 5 kicked off with 10-task sprint plan)
 
 This document is a phase-gated tracker. Each phase has an explicit
 checklist and a decision gate. Do not skip to the next phase until
@@ -443,7 +443,7 @@ Checklist:
 
 ## Phase 4: Privacy & Differentiation (Weeks 15–22)
 
-**Status**: `IN PROGRESS`
+**Status**: `COMPLETE`
 
 **Decisions / Deferrals (2026-04-25, Phase 4 kickoff)**:
 
@@ -1085,6 +1085,62 @@ Checklist:
 | 8 | [x] Frontend: client-room template picker in file-browser toolbar — `TemplateDialog` in `FileBrowserPage.tsx` | Manual QA |
 | 9 | [x] Phase 4 decision-gate e2e test — `tests/integration/phase4_gate_test.go` (strict-ZK + KChat + template) | `TestPhase4DecisionGate` integration test |
 | 10 | [x] Close Phase 4 decision gate — marked `[x]` in this revision | CI green on `main` |
+
+---
+
+## Phase 5: Launch & Revenue (Weeks 23–30)
+
+**Status**: `IN PROGRESS`
+
+**Goal**: turn the feature-complete product into a revenue-generating,
+production-grade SaaS. Wire Stripe for real payments, ship the PWA
+shell for mobile, add Redis-backed sessions and WebSocket
+notifications for multi-replica readiness, stabilize the e2e suite,
+and upgrade the AI scaffold to LLM-backed summaries.
+
+Checklist:
+
+- [ ] Stripe webhook wiring: `POST /api/webhooks/stripe` handling
+      checkout, subscription, and invoice events. Auto-provision
+      `workspace_plans` rows. `internal/billing/stripe.go`.
+- [ ] Stripe Checkout + Customer Portal: `POST /api/billing/checkout-session`,
+      `GET /api/billing/portal-session`. Frontend upgrade/manage buttons
+      in `BillingPage.tsx`.
+- [ ] PWA shell: `vite-plugin-pwa`, `manifest.webmanifest`, service
+      worker with Workbox precaching, "Install app" button.
+      `frontend/`.
+- [ ] Frontend code splitting: `React.lazy()` + `Suspense` for admin
+      pages. Target < 150kB gzip initial bundle.
+- [ ] Playwright e2e stabilization: remove `continue-on-error`,
+      real guest-access spec, strict-ZK spec. `.github/workflows/e2e.yml`.
+- [ ] Redis/Valkey session store + distributed rate limiting:
+      `internal/session/redis.go`, `api/middleware/ratelimit.go`
+      Redis-backed sliding window. `REDIS_URL` env var.
+- [ ] WebSocket real-time notifications: `api/ws/handler.go`,
+      Redis pub/sub broadcast, frontend `useNotifications` hook.
+- [ ] LLM-backed AI summaries: `internal/ai/llm.go` with OpenAI
+      implementation behind `LLMClient` interface. Fallback to
+      rule-based scaffold when `LLM_API_KEY` is unset.
+- [ ] PDF preview support: `internal/preview/pdf.go` renders page 1
+      to PNG thumbnail. Office doc support deferred.
+- [ ] Decision gate: a paying customer can sign up via Stripe
+      Checkout, install the PWA on mobile, receive real-time
+      WebSocket notifications, and see PDF previews.
+
+### Next 10 Tasks (Phase 5, sprint 10)
+
+| # | Task | Test Gate |
+|---|------|-----------|
+| 1 | Stripe webhook wiring (`internal/billing/stripe.go` + `POST /api/webhooks/stripe`) | `TestStripeWebhookProvisionsPlan` + `TestStripeSignatureRejection` |
+| 2 | Stripe Checkout + Customer Portal flow (frontend BillingPage upgrade) | Manual QA: Checkout → webhook → plan row |
+| 3 | PWA shell (`vite-plugin-pwa`, manifest, service worker, install prompt) | Lighthouse PWA > 80 |
+| 4 | Frontend code splitting (`React.lazy` for admin pages) | Initial bundle < 150kB gzip |
+| 5 | Playwright e2e stabilization (remove `continue-on-error`, real specs) | CI e2e gates on pass |
+| 6 | Redis/Valkey session store + distributed rate limiting | `TestRateLimitAcrossReplicas` + `TestSessionRevocation` |
+| 7 | WebSocket real-time notifications (`api/ws/handler.go` + Redis pub/sub) | `TestWSReceivesFileUploadEvent` |
+| 8 | LLM-backed AI summaries (`internal/ai/llm.go` + OpenAI) | `TestLLMSummaryFallsBackToScaffold` unit test |
+| 9 | PDF preview support (`internal/preview/pdf.go`) | `TestPDFPreviewGeneration` unit test |
+| 10 | Phase 5 decision gate (`tests/integration/phase5_gate_test.go`) | CI green on `main` |
 
 ---
 
