@@ -8,13 +8,16 @@ import PlacementPage from "./pages/PlacementPage";
 import EncryptionPage from "./pages/EncryptionPage";
 import KChatRoomsPage from "./pages/KChatRoomsPage";
 import RequireAuth from "./components/RequireAuth";
+import InstallPrompt from "./components/InstallPrompt";
 
 // App-level routing. Unauthenticated visitors hit /login; everyone else
 // lands in the file browser at /drive. The :folderId variant lets us keep
 // the current folder in the URL so refreshes / back-navigation work.
 export default function App() {
   return (
-    <Routes>
+    <>
+      <InstallPrompt />
+      <Routes>
       <Route path="/login" element={<LoginPage />} />
       <Route path="/signup" element={<SignupPage />} />
       <Route
@@ -75,6 +78,7 @@ export default function App() {
       />
       <Route path="/" element={<Navigate to="/drive" replace />} />
       <Route path="*" element={<Navigate to="/drive" replace />} />
-    </Routes>
+      </Routes>
+    </>
   );
 }
