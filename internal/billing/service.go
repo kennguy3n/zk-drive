@@ -50,6 +50,20 @@ func (s *Service) UpsertPlan(ctx context.Context, p *Plan) (*Plan, error) {
 	return s.repo.UpsertPlan(ctx, p)
 }
 
+// UpdateTier changes only the tier on a workspace's plan, preserving
+// any admin-configured per-workspace limit overrides. Used by the
+// Stripe webhook so a routine subscription event can't silently
+// clear an admin-set override.
+func (s *Service) UpdateTier(ctx context.Context, workspaceID uuid.UUID, tier string) (*Plan, error) {
+	if s == nil {
+		return nil, errors.New("billing service not configured")
+	}
+	if !IsValidTier(tier) {
+		return nil, errors.New("billing: invalid tier")
+	}
+	return s.repo.UpdateTier(ctx, workspaceID, tier)
+}
+
 // CheckStorageQuota returns ErrQuotaExceeded when adding
 // additionalBytes to the workspace's current storage would push it
 // past the plan's MaxStorageBytes.

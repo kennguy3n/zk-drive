@@ -17,6 +17,7 @@ import (
 type Repository interface {
 	GetPlan(ctx context.Context, workspaceID uuid.UUID) (*Plan, error)
 	UpsertPlan(ctx context.Context, p *Plan) (*Plan, error)
+	UpdateTier(ctx context.Context, workspaceID uuid.UUID, tier string) (*Plan, error)
 	RecordEvent(ctx context.Context, workspaceID uuid.UUID, eventType string, bytes int64) error
 	GetStorageUsed(ctx context.Context, workspaceID uuid.UUID) (int64, error)
 	GetBandwidthUsedThisMonth(ctx context.Context, workspaceID uuid.UUID) (int64, error)
@@ -88,6 +89,36 @@ RETURNING id, workspace_id, tier, max_storage_bytes, max_users,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("upsert plan: %w", err)
+	}
+	return out, nil
+}
+
+// UpdateTier changes only the tier column on a workspace's plan
+// row, leaving any admin-configured per-workspace limit overrides
+// (max_storage_bytes, max_users, max_bandwidth_bytes_monthly)
+// untouched. Used by the Stripe webhook so a routine subscription
+// event doesn't silently null out custom limits.
+//
+// When no row exists yet the row is created with NULL limits, which
+// is the same behaviour as the admin "create plan" flow with no
+// overrides — the per-tier defaults from TierDefaults apply.
+func (r *PostgresRepository) UpdateTier(ctx context.Context, workspaceID uuid.UUID, tier string) (*Plan, error) {
+	const q = `
+INSERT INTO workspace_plans (workspace_id, tier)
+VALUES ($1, $2)
+ON CONFLICT (workspace_id) DO UPDATE SET
+    tier = EXCLUDED.tier,
+    updated_at = now()
+RETURNING id, workspace_id, tier, max_storage_bytes, max_users,
+          max_bandwidth_bytes_monthly, created_at, updated_at`
+	out := &Plan{}
+	err := r.pool.QueryRow(ctx, q, workspaceID, tier).Scan(
+		&out.ID, &out.WorkspaceID, &out.Tier,
+		&out.MaxStorageBytes, &out.MaxUsers, &out.MaxBandwidthBytesMonthly,
+		&out.CreatedAt, &out.UpdatedAt,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("update tier: %w", err)
 	}
 	return out, nil
 }

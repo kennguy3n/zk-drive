@@ -19,19 +19,22 @@ import (
 // signature can be verified.
 const stripeMaxBodyBytes = int64(64 * 1024)
 
-// stripeUpserter is the subset of *Service the webhook handler
+// stripeTierUpdater is the subset of *Service the webhook handler
 // needs. Splitting it out keeps the tests honest — they swap in a
-// fake without spinning up Postgres.
-type stripeUpserter interface {
-	UpsertPlan(ctx context.Context, p *Plan) (*Plan, error)
+// fake without spinning up Postgres. The webhook only ever needs
+// to change the tier; per-workspace limit overrides set by an admin
+// must be preserved across Stripe events.
+type stripeTierUpdater interface {
+	UpdateTier(ctx context.Context, workspaceID uuid.UUID, tier string) (*Plan, error)
 }
 
 // StripeWebhookHandler turns Stripe subscription lifecycle events
-// into UpsertPlan calls against the billing service. It is mounted
-// outside the auth middleware group because Stripe authenticates
-// itself via the Stripe-Signature header rather than a JWT.
+// into Service.UpdateTier calls against the billing service. It is
+// mounted outside the auth middleware group because Stripe
+// authenticates itself via the Stripe-Signature header rather than
+// a JWT.
 type StripeWebhookHandler struct {
-	svc          stripeUpserter
+	svc          stripeTierUpdater
 	secret       string
 	priceTierMap map[string]string
 }
@@ -167,11 +170,12 @@ func (h *StripeWebhookHandler) tierFromSubscription(sub *stripe.Subscription) st
 	return ""
 }
 
+// upsert applies the resolved tier to the workspace's plan row
+// without touching any per-workspace limit overrides. Stripe events
+// only ever speak in tiers; the admin panel remains the source of
+// truth for custom limits.
 func (h *StripeWebhookHandler) upsert(ctx context.Context, workspaceID uuid.UUID, tier string) error {
-	_, err := h.svc.UpsertPlan(ctx, &Plan{
-		WorkspaceID: workspaceID,
-		Tier:        tier,
-	})
+	_, err := h.svc.UpdateTier(ctx, workspaceID, tier)
 	return err
 }
 
