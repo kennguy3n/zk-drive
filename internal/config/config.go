@@ -40,6 +40,12 @@ type Config struct {
 	RateLimitPerUser      int
 	RateLimitPerWorkspace int
 
+	// RedisURL switches the rate limiter and session store from
+	// in-memory state to a Redis-backed implementation so limits and
+	// session revocation work across replicas. When empty, the
+	// in-memory implementations are used (single-replica behaviour).
+	RedisURL string
+
 	// FabricConsoleURL is the base URL of the zk-object-fabric console
 	// API (e.g. "https://console.fabric.example.com"). When empty,
 	// signup falls back to the static S3_* env vars and per-workspace
@@ -111,6 +117,7 @@ func Load() (*Config, error) {
 		MicrosoftRedirectURL:  os.Getenv("MICROSOFT_REDIRECT_URL"),
 		RateLimitPerUser:        parseIntDefault(os.Getenv("RATE_LIMIT_PER_USER"), 0),
 		RateLimitPerWorkspace:   parseIntDefault(os.Getenv("RATE_LIMIT_PER_WORKSPACE"), 0),
+		RedisURL:                os.Getenv("REDIS_URL"),
 		FabricConsoleURL:        os.Getenv("FABRIC_CONSOLE_URL"),
 		FabricConsoleAdminToken: os.Getenv("FABRIC_CONSOLE_ADMIN_TOKEN"),
 		FabricBucketTemplate:    getEnvDefault("FABRIC_BUCKET_TEMPLATE", "zk-drive-{tenant}"),
