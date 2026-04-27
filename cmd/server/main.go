@@ -23,6 +23,7 @@ import (
 	"github.com/kennguy3n/zk-drive/api/auth"
 	"github.com/kennguy3n/zk-drive/api/drive"
 	"github.com/kennguy3n/zk-drive/api/middleware"
+	"github.com/kennguy3n/zk-drive/api/ws"
 	"github.com/kennguy3n/zk-drive/internal/activity"
 	"github.com/kennguy3n/zk-drive/internal/ai"
 	"github.com/kennguy3n/zk-drive/internal/audit"
@@ -161,9 +162,10 @@ func run() error {
 	}
 
 	// Optional Redis client. When REDIS_URL is set, the rate
-	// limiter and session store switch to a shared backend so
-	// both behave correctly behind multiple replicas. When unset,
-	// the in-memory implementations are used (single-replica).
+	// limiter, session store, and WebSocket pub/sub switch to a
+	// shared backend so all three behave correctly behind multiple
+	// replicas. When unset, the in-memory / single-process
+	// implementations are used.
 	var redisClient *redis.Client
 	var sessionStore *session.RedisSessionStore
 	if cfg.RedisURL != "" {
@@ -178,10 +180,10 @@ func run() error {
 			redisClient = nil
 		} else {
 			sessionStore = session.NewRedisSessionStore(redisClient)
-			log.Printf("redis: connected to %s, rate limiter and session store backed by Redis", cfg.RedisURL)
+			log.Printf("redis: connected to %s, rate limiter, session store, and ws pub/sub backed by Redis", cfg.RedisURL)
 		}
 	} else {
-		log.Printf("redis: REDIS_URL not set, using in-memory rate limiter (single-replica only)")
+		log.Printf("redis: REDIS_URL not set, using in-memory rate limiter and single-process ws (single-replica only)")
 	}
 	_ = sessionStore // session store is wired into auth handlers in a follow-up
 
@@ -198,7 +200,30 @@ func run() error {
 		})
 	}
 
-	notificationSvc := notification.NewService(notification.NewPostgresRepository(pool))
+	// WebSocket hub fans real-time notification events to connected
+	// clients. The hub itself is always in-process; when redisClient
+	// is non-nil we additionally subscribe to ws:* so notifications
+	// produced on any replica reach every replica's clients. The
+	// notification service receives the publisher and is nil-safe,
+	// so a misconfigured Redis still leaves the rest of the API
+	// working — we just log and fall back to local fan-out.
+	hub := ws.NewHub()
+	go hub.Run(ctx)
+	wsHandler := ws.NewHandler(hub)
+
+	var notificationPublisher notification.WSPublisher = notification.NewLocalPublisher(hub)
+	if redisClient != nil {
+		rp := notification.NewRedisPublisher(redisClient)
+		notificationPublisher = rp
+		go func() {
+			if err := rp.Subscribe(ctx, hub); err != nil && err != context.Canceled {
+				log.Printf("redis: ws subscribe loop exited: %v", err)
+			}
+		}()
+	}
+
+	notificationSvc := notification.NewService(notification.NewPostgresRepository(pool)).
+		WithPublisher(notificationPublisher)
 	previewRepo := preview.NewPostgresRepository(pool)
 	auditSvc := audit.NewService(audit.NewPostgresRepository(pool))
 	defer auditSvc.Close()
@@ -291,6 +316,17 @@ func run() error {
 				r.Post("/logout", authHandler.Logout)
 				r.Post("/refresh", authHandler.Refresh)
 			})
+		})
+
+		// WebSocket endpoint runs behind the auth middleware so the
+		// hub gets (workspaceID, userID) from JWT claims, but
+		// deliberately *outside* the rate limiter / tenant guard
+		// group: long-lived connections must not be charged per
+		// frame, and TenantGuard's HTTP-method assumptions trip on
+		// the upgrade handshake.
+		r.Group(func(r chi.Router) {
+			r.Use(middleware.AuthMiddleware(cfg.JWTSecret))
+			r.Get("/ws", wsHandler.ServeWS)
 		})
 
 		r.Group(func(r chi.Router) {
