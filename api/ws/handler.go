@@ -53,12 +53,28 @@ type Event struct {
 // Client wraps a single WebSocket connection with a buffered send
 // channel. Exposed so callers (notably tests) can build a Client out
 // of an arbitrary *websocket.Conn without going through ServeWS.
+//
+// done is closed exactly once when the client is removed from the
+// hub; the writePump and any concurrent BroadcastJSON select on it
+// to bail out instead of writing into a closed send channel. This
+// is the standard "closed-channel-as-broadcast" pattern: send is
+// never closed (so we can never panic on send), and a closeOnce
+// guards the close itself against double-close races between
+// removeClient, closeAll, and the inline fallback in Unregister.
 type Client struct {
 	hub         *Hub
 	conn        *websocket.Conn
 	workspaceID uuid.UUID
 	userID      uuid.UUID
 	send        chan []byte
+	done        chan struct{}
+	closeOnce   sync.Once
+}
+
+// shutdown closes c.done at most once. Safe to call from any
+// goroutine; subsequent calls are no-ops.
+func (c *Client) shutdown() {
+	c.closeOnce.Do(func() { close(c.done) })
 }
 
 // clientKey scopes the hub's client map to (workspace, user). Two
@@ -118,29 +134,37 @@ func (h *Hub) addClient(c *Client) {
 
 func (h *Hub) removeClient(c *Client) {
 	h.mu.Lock()
-	defer h.mu.Unlock()
 	key := clientKey{c.workspaceID, c.userID}
 	set, ok := h.clients[key]
 	if !ok {
+		h.mu.Unlock()
 		return
 	}
-	if _, ok := set[c]; ok {
-		delete(set, c)
-		close(c.send)
-	}
+	delete(set, c)
 	if len(set) == 0 {
 		delete(h.clients, key)
 	}
+	h.mu.Unlock()
+	// shutdown is idempotent (sync.Once) so unrelated callers
+	// racing through removeClient / closeAll never double-close
+	// c.done. Crucially we never close c.send: BroadcastJSON would
+	// panic on send-after-close. The writePump drains c.send when
+	// it sees c.done.
+	c.shutdown()
 }
 
 func (h *Hub) closeAll() {
 	h.mu.Lock()
-	defer h.mu.Unlock()
+	victims := make([]*Client, 0, len(h.clients))
 	for key, set := range h.clients {
 		for c := range set {
-			close(c.send)
+			victims = append(victims, c)
 		}
 		delete(h.clients, key)
+	}
+	h.mu.Unlock()
+	for _, c := range victims {
+		c.shutdown()
 	}
 }
 
@@ -151,7 +175,8 @@ func (h *Hub) Register(c *Client) {
 }
 
 // Unregister removes c from the hub and signals the writePump to
-// exit (by closing the send channel).
+// exit (by closing c.done — see the Client doc for why we never
+// close c.send directly).
 func (h *Hub) Unregister(c *Client) {
 	select {
 	case h.unregister <- c:
@@ -186,6 +211,12 @@ func (h *Hub) ClientCount(workspaceID, userID uuid.UUID) int {
 // BroadcastJSON pushes an already-encoded JSON payload to every
 // client for (workspaceID, userID). Useful when the encoded bytes
 // were produced upstream (e.g. relayed from Redis pub/sub).
+//
+// The send select includes c.done as a sibling case so a client
+// torn down concurrently with this loop is silently skipped instead
+// of blocking forever (or, before the c.done refactor, panicking on
+// a closed send channel). Slow consumers — those whose send buffer
+// is full — are unregistered so the next broadcast does not retry.
 func (h *Hub) BroadcastJSON(workspaceID, userID uuid.UUID, payload []byte) {
 	h.mu.RLock()
 	set := h.clients[clientKey{workspaceID, userID}]
@@ -197,6 +228,10 @@ func (h *Hub) BroadcastJSON(workspaceID, userID uuid.UUID, payload []byte) {
 	for _, c := range targets {
 		select {
 		case c.send <- payload:
+		case <-c.done:
+			// Client was unregistered between the snapshot and the
+			// send. Skip; whoever closed c.done already handled
+			// removal from the map.
 		default:
 			// Slow consumer; drop and unregister. The unregister
 			// chan is buffered, but we use a non-blocking send to
@@ -216,6 +251,7 @@ func NewClient(hub *Hub, conn *websocket.Conn, workspaceID, userID uuid.UUID) *C
 		workspaceID: workspaceID,
 		userID:      userID,
 		send:        make(chan []byte, sendBufferSize),
+		done:        make(chan struct{}),
 	}
 }
 
@@ -261,13 +297,16 @@ func (c *Client) writePump() {
 	}()
 	for {
 		select {
-		case msg, ok := <-c.send:
+		case <-c.done:
+			// Hub asked us to disconnect. Send a close frame and
+			// exit; any unsent payloads still sitting in c.send
+			// are dropped by design (the database row is the
+			// source of truth — clients re-fetch on reconnect).
 			_ = c.conn.SetWriteDeadline(time.Now().Add(writeWait))
-			if !ok {
-				// Hub closed the channel: send a close frame and exit.
-				_ = c.conn.WriteMessage(websocket.CloseMessage, []byte{})
-				return
-			}
+			_ = c.conn.WriteMessage(websocket.CloseMessage, []byte{})
+			return
+		case msg := <-c.send:
+			_ = c.conn.SetWriteDeadline(time.Now().Add(writeWait))
 			if err := c.conn.WriteMessage(websocket.TextMessage, msg); err != nil {
 				return
 			}

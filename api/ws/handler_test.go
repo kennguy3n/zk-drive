@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -108,6 +109,69 @@ func TestWSReceivesFileUploadEvent(t *testing.T) {
 	if payload["id"] != "file-1" || payload["name"] != "report.pdf" {
 		t.Fatalf("payload mismatch: %v (raw=%s)", payload, string(raw))
 	}
+}
+
+// TestBroadcastRaceWithDisconnect spams Broadcast on one goroutine
+// while a second goroutine repeatedly registers and unregisters
+// clients for the same (workspaceID, userID) pair. Run with
+// `go test -race` it pins the regression that closing c.send while
+// BroadcastJSON had already snapshotted the target set used to
+// panic with "send on closed channel". With the c.done refactor in
+// place the test should complete cleanly.
+func TestBroadcastRaceWithDisconnect(t *testing.T) {
+	t.Parallel()
+
+	hub := ws.NewHub()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go hub.Run(ctx)
+
+	workspaceID := uuid.New()
+	userID := uuid.New()
+
+	stop := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Add(2)
+
+	// Producer: hammer Broadcast; never blocks.
+	go func() {
+		defer wg.Done()
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			_ = hub.Broadcast(workspaceID, userID, ws.Event{
+				Type:    "race",
+				Payload: map[string]any{"n": 1},
+			})
+		}
+	}()
+
+	// Consumer churn: register/unregister synthetic clients with
+	// no live connection. We feed them a bare *websocket.Conn=nil
+	// and avoid Start() (which spawns read/write pumps that would
+	// panic on the nil conn). Using ws.NewClient + Hub.Register is
+	// enough to reproduce the original race.
+	go func() {
+		defer wg.Done()
+		for i := 0; i < 200; i++ {
+			c := ws.NewClient(hub, nil, workspaceID, userID)
+			hub.Register(c)
+			// Yield so the hub's Run loop has a chance to drain
+			// the register channel before we tear down again.
+			time.Sleep(50 * time.Microsecond)
+			hub.Unregister(c)
+		}
+	}()
+
+	// Run the producer for a fixed budget then shut down. 250 ms
+	// is enough to hit the race on every prior reproduction; we
+	// extend slightly so loaded CI hosts still cover the window.
+	time.Sleep(500 * time.Millisecond)
+	close(stop)
+	wg.Wait()
 }
 
 // TestServeWSRejectsUnauthenticated asserts that ServeWS returns 401
