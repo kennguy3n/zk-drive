@@ -670,6 +670,39 @@ export async function syncKChatMembers(
   return data;
 }
 
+// --- Client-room templates (Phase 4) -----------------------------------
+
+export interface ClientRoomTemplate {
+  name: string;
+  sub_folders: string[];
+}
+
+export async function fetchClientRoomTemplates(): Promise<ClientRoomTemplate[]> {
+  const { data } = await client.get<{ templates: ClientRoomTemplate[] }>(
+    "/client-rooms/templates",
+  );
+  return data.templates ?? [];
+}
+
+export interface ClientRoomFromTemplateResult {
+  id: string;
+  folder_id: string;
+  name: string;
+  share_link_token: string;
+  sub_folder_ids: string[];
+}
+
+export async function createClientRoomFromTemplate(
+  template: string,
+  client_name: string,
+): Promise<ClientRoomFromTemplateResult> {
+  const { data } = await client.post<ClientRoomFromTemplateResult>(
+    "/client-rooms/from-template",
+    { template, name: client_name },
+  );
+  return data;
+}
+
 // --- Billing ------------------------------------------------------------
 
 export interface BillingUsageSummary {

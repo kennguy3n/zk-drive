@@ -10,12 +10,15 @@ import {
   bulkDelete,
   bulkDownload,
   bulkMove,
+  createClientRoomFromTemplate,
   createFolder,
   deleteFile,
   deleteFolder,
+  fetchClientRoomTemplates,
   getFolderContents,
   listFolders,
   renameFile,
+  type ClientRoomTemplate,
   type FileItem,
   type Folder,
 } from "../api/client";
@@ -44,6 +47,7 @@ export default function FileBrowserPage() {
   const [shareTarget, setShareTarget] = useState<ShareTarget | null>(null);
   const [selectedFiles, setSelectedFiles] = useState<Set<string>>(new Set());
   const [createFolderOpen, setCreateFolderOpen] = useState(false);
+  const [templateDialogOpen, setTemplateDialogOpen] = useState(false);
 
   const toggleSelect = useCallback((id: string) => {
     setSelectedFiles((prev) => {
@@ -111,6 +115,11 @@ export default function FileBrowserPage() {
           <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
             <SearchBar />
             <button onClick={handleCreateFolder} style={btn}>New folder</button>
+            {isAdmin ? (
+              <button onClick={() => setTemplateDialogOpen(true)} style={btn}>
+                Create from template
+              </button>
+            ) : null}
             <UploadButton folderID={currentFolderID} onUploaded={() => refresh()} />
             {isAdmin ? (
               <>
@@ -280,6 +289,15 @@ export default function FileBrowserPage() {
           }}
         />
       ) : null}
+      {templateDialogOpen ? (
+        <TemplateDialog
+          onClose={() => setTemplateDialogOpen(false)}
+          onCreated={(folderID) => {
+            setTemplateDialogOpen(false);
+            nav(`/drive/folder/${folderID}`);
+          }}
+        />
+      ) : null}
     </div>
   );
 }
@@ -399,6 +417,77 @@ function CreateFolderDialog({
           <button type="submit">Create</button>
         </div>
       </form>
+    </Modal>
+  );
+}
+
+function TemplateDialog({
+  onClose,
+  onCreated,
+}: {
+  onClose: () => void;
+  onCreated: (folderID: string) => void;
+}) {
+  const [templates, setTemplates] = useState<ClientRoomTemplate[]>([]);
+  const [error, setError] = useState<string | null>(null);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    (async () => {
+      try {
+        setTemplates(await fetchClientRoomTemplates());
+      } catch (e) {
+        setError(String((e as Error)?.message ?? e));
+      } finally {
+        setLoading(false);
+      }
+    })();
+  }, []);
+
+  const pick = async (name: string) => {
+    const clientName = prompt("Client name for this room:");
+    if (!clientName || !clientName.trim()) return;
+    try {
+      const r = await createClientRoomFromTemplate(name, clientName.trim());
+      onCreated(r.folder_id);
+    } catch (e) {
+      setError(String((e as Error)?.message ?? e));
+    }
+  };
+
+  return (
+    <Modal onClose={onClose} title="Create from template">
+      {loading ? <p>Loading…</p> : null}
+      {error ? <p style={{ color: "#b91c1c" }}>{error}</p> : null}
+      <div
+        style={{
+          display: "grid",
+          gap: 12,
+          gridTemplateColumns: "repeat(auto-fill, minmax(200px, 1fr))",
+        }}
+      >
+        {templates.map((t) => (
+          <button
+            key={t.name}
+            onClick={() => pick(t.name)}
+            style={{
+              textAlign: "left",
+              padding: 12,
+              border: "1px solid #e5e7eb",
+              background: "white",
+              borderRadius: 6,
+              cursor: "pointer",
+            }}
+          >
+            <div style={{ fontWeight: 600, textTransform: "capitalize" }}>{t.name}</div>
+            <ul style={{ margin: "8px 0 0 16px", padding: 0, fontSize: 12, color: "#4b5563" }}>
+              {t.sub_folders.map((s) => (
+                <li key={s}>{s}</li>
+              ))}
+            </ul>
+          </button>
+        ))}
+      </div>
     </Modal>
   );
 }
