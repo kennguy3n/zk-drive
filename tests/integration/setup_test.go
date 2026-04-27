@@ -22,6 +22,7 @@ import (
 	"github.com/kennguy3n/zk-drive/api/auth"
 	"github.com/kennguy3n/zk-drive/api/drive"
 	"github.com/kennguy3n/zk-drive/api/middleware"
+	"github.com/kennguy3n/zk-drive/api/ws"
 	"github.com/kennguy3n/zk-drive/internal/activity"
 	"github.com/kennguy3n/zk-drive/internal/ai"
 	"github.com/kennguy3n/zk-drive/internal/audit"
@@ -105,7 +106,21 @@ func setupEnv(t *testing.T) *testEnv {
 	previewRepo := preview.NewPostgresRepository(pool)
 	auditSvc := audit.NewService(audit.NewPostgresRepository(pool))
 	retentionSvc := retention.NewService(retention.NewPostgresRepository(pool), pool)
-	billingSvc := billing.NewService(billing.NewPostgresRepository(pool))
+	billingRepo := billing.NewPostgresRepository(pool)
+	billingSvc := billing.NewService(billingRepo)
+	// Stripe service is wired without secrets so the integration
+	// harness exercises the real route registrations: the webhook
+	// route returns 400 (signature missing/invalid) instead of 404,
+	// and the admin checkout/portal routes return 501 (not 404).
+	// Tests that need real Stripe behaviour swap in a fake API.
+	stripeService := billing.NewStripeService(billingSvc, billingRepo, "", "", nil)
+
+	// WebSocket hub mirrors cmd/server/main.go's wiring so the gate
+	// tests can dial /api/ws and verify the upgrade succeeds.
+	hubCtx, hubCancel := context.WithCancel(context.Background())
+	hub := ws.NewHub()
+	go hub.Run(hubCtx)
+	wsHandler := ws.NewHandler(hub)
 
 	authHandler := auth.NewHandler(pool, userSvc, wsSvc, testJWTSecret).WithAudit(auditSvc)
 	driveHandler := drive.NewHandler(pool, wsSvc, folderSvc, fileSvc, userSvc, storageClient, permissionSvc, activitySvc).
@@ -123,6 +138,7 @@ func setupEnv(t *testing.T) *testEnv {
 	provisioner := fabric.NewProvisioner(pool, fabric.Config{})
 	adminHandler := admin.NewHandler(pool, userSvc, auditSvc, retentionSvc).
 		WithBilling(billingSvc).
+		WithStripe(stripeService).
 		WithFabric(nil, provisioner, nil)
 
 	// KChat service: same wiring as cmd/server/main.go, with a fallback
@@ -153,6 +169,23 @@ func setupEnv(t *testing.T) *testEnv {
 				r.Post("/refresh", authHandler.Refresh)
 			})
 		})
+
+		// WebSocket endpoint mirrors cmd/server/main.go: behind the
+		// auth middleware (so the hub gets workspace + user IDs from
+		// JWT claims) but outside the rate limiter / tenant guard
+		// group, since long-lived connections must not be charged
+		// per-frame and TenantGuard's HTTP-method assumptions trip on
+		// the upgrade handshake.
+		r.Group(func(r chi.Router) {
+			r.Use(middleware.AuthMiddleware(testJWTSecret))
+			r.Get("/ws", wsHandler.ServeWS)
+		})
+
+		// Stripe webhook is deliberately outside the auth middleware
+		// — Stripe authenticates itself via the Stripe-Signature
+		// header rather than a JWT.
+		r.Post("/webhooks/stripe", stripeService.HandleWebhook)
+
 		r.Group(func(r chi.Router) {
 			r.Use(middleware.AuthMiddleware(testJWTSecret))
 			r.Use(middleware.TenantGuard())
@@ -243,6 +276,9 @@ func setupEnv(t *testing.T) *testEnv {
 	env := &testEnv{t: t, pool: pool, server: srv, storage: storageClient, provisioner: provisioner}
 	t.Cleanup(func() {
 		srv.Close()
+		// Stop the WS hub goroutine before closing the pool so
+		// no further Broadcasts can race against shutdown.
+		hubCancel()
 		// Close activity / audit before the pool so any final drain
 		// writes still find a live connection; otherwise the worker
 		// goroutine leaks and blocks shutdown of the test binary.
