@@ -1,10 +1,11 @@
 // Package preview generates thumbnail previews for uploaded file
-// versions. The initial implementation supports only image types
-// (PNG / JPEG / GIF / WebP-via-stdlib) using pure-Go decoders and
-// the BSD-3-Clause x/image resampler. PDF / office document support is
-// planned for a later sprint and will shell out to ImageMagick
-// (Apache-2.0) and LibreOffice headless (MPL-2.0); both are acceptable
-// for a proprietary product when used as external tools.
+// versions. Image types (PNG / JPEG / GIF) are decoded in-process
+// with pure-Go stdlib decoders and resampled via the BSD-3-Clause
+// x/image resampler. PDF support shells out to pdftoppm from
+// poppler-utils (GPL — used as a subprocess, not linked, so it does
+// not affect the proprietary build). Office document support is
+// still planned for a later sprint and will shell out to LibreOffice
+// headless (MPL-2.0).
 //
 // Preview objects are uploaded to the same zk-object-fabric bucket as
 // the source file under the key
