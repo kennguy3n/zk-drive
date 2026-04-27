@@ -581,6 +581,39 @@ export async function deleteRetentionPolicy(id: string): Promise<void> {
   await client.delete(`/admin/retention-policies/${id}`);
 }
 
+// --- Placement (Phase 4) -----------------------------------------------
+
+// PlacementPolicy mirrors internal/fabric.Policy. Only the subset the
+// admin UI actually edits is modelled; other fields (tenant, cache
+// location) round-trip through JSON unchanged on PUT because we send
+// the entire payload we received on GET.
+export interface PlacementPolicy {
+  tenant?: string;
+  bucket?: string;
+  policy: {
+    encryption: {
+      mode: string;
+      kms?: string;
+    };
+    placement: {
+      provider: string[];
+      region?: string[];
+      country?: string[];
+      storage_class?: string[];
+      cache_location?: string;
+    };
+  };
+}
+
+export async function fetchPlacement(): Promise<PlacementPolicy> {
+  const { data } = await client.get<PlacementPolicy>("/admin/placement");
+  return data;
+}
+
+export async function updatePlacement(policy: PlacementPolicy): Promise<void> {
+  await client.put("/admin/placement", policy);
+}
+
 // --- Billing ------------------------------------------------------------
 
 export interface BillingUsageSummary {
