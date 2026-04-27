@@ -17,72 +17,78 @@ const KChatRoomsPage = lazy(() => import("./pages/KChatRoomsPage"));
 // App-level routing. Unauthenticated visitors hit /login; everyone else
 // lands in the file browser at /drive. The :folderId variant lets us keep
 // the current folder in the URL so refreshes / back-navigation work.
+//
+// InstallPrompt sits OUTSIDE Suspense so its captured beforeinstallprompt
+// event survives lazy-route transitions (the browser only fires that event
+// once per page load).
 export default function App() {
   return (
-    <Suspense fallback={<div>Loading...</div>}>
+    <>
       <InstallPrompt />
-      <Routes>
-        <Route path="/login" element={<LoginPage />} />
-        <Route path="/signup" element={<SignupPage />} />
-        <Route
-          path="/drive"
-          element={
-            <RequireAuth>
-              <FileBrowserPage />
-            </RequireAuth>
-          }
-        />
-        <Route
-          path="/drive/folder/:folderId"
-          element={
-            <RequireAuth>
-              <FileBrowserPage />
-            </RequireAuth>
-          }
-        />
-        <Route
-          path="/admin"
-          element={
-            <RequireAuth>
-              <AdminPage />
-            </RequireAuth>
-          }
-        />
-        <Route
-          path="/billing"
-          element={
-            <RequireAuth>
-              <BillingPage />
-            </RequireAuth>
-          }
-        />
-        <Route
-          path="/admin/placement"
-          element={
-            <RequireAuth>
-              <PlacementPage />
-            </RequireAuth>
-          }
-        />
-        <Route
-          path="/admin/encryption"
-          element={
-            <RequireAuth>
-              <EncryptionPage />
-            </RequireAuth>
-          }
-        />
-        <Route
-          path="/admin/kchat"
-          element={
-            <RequireAuth>
-              <KChatRoomsPage />
-            </RequireAuth>
-          }
-        />
-        <Route path="/" element={<Navigate to="/drive" replace />} />
-        <Route path="*" element={<Navigate to="/drive" replace />} />
-      </Routes>
-    </Suspense>
+      <Suspense fallback={<div>Loading...</div>}>
+        <Routes>
+          <Route path="/login" element={<LoginPage />} />
+          <Route path="/signup" element={<SignupPage />} />
+          <Route
+            path="/drive"
+            element={
+              <RequireAuth>
+                <FileBrowserPage />
+              </RequireAuth>
+            }
+          />
+          <Route
+            path="/drive/folder/:folderId"
+            element={
+              <RequireAuth>
+                <FileBrowserPage />
+              </RequireAuth>
+            }
+          />
+          <Route
+            path="/admin"
+            element={
+              <RequireAuth>
+                <AdminPage />
+              </RequireAuth>
+            }
+          />
+          <Route
+            path="/billing"
+            element={
+              <RequireAuth>
+                <BillingPage />
+              </RequireAuth>
+            }
+          />
+          <Route
+            path="/admin/placement"
+            element={
+              <RequireAuth>
+                <PlacementPage />
+              </RequireAuth>
+            }
+          />
+          <Route
+            path="/admin/encryption"
+            element={
+              <RequireAuth>
+                <EncryptionPage />
+              </RequireAuth>
+            }
+          />
+          <Route
+            path="/admin/kchat"
+            element={
+              <RequireAuth>
+                <KChatRoomsPage />
+              </RequireAuth>
+            }
+          />
+          <Route path="/" element={<Navigate to="/drive" replace />} />
+          <Route path="*" element={<Navigate to="/drive" replace />} />
+        </Routes>
+      </Suspense>
+    </>
   );
 }
