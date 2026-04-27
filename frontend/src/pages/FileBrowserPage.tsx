@@ -43,6 +43,7 @@ export default function FileBrowserPage() {
   const [error, setError] = useState<string | null>(null);
   const [shareTarget, setShareTarget] = useState<ShareTarget | null>(null);
   const [selectedFiles, setSelectedFiles] = useState<Set<string>>(new Set());
+  const [createFolderOpen, setCreateFolderOpen] = useState(false);
 
   const toggleSelect = useCallback((id: string) => {
     setSelectedFiles((prev) => {
@@ -84,11 +85,8 @@ export default function FileBrowserPage() {
     setSelectedFiles(new Set());
   }, [currentFolderID]);
 
-  const handleCreateFolder = async () => {
-    const name = prompt("New folder name:");
-    if (!name || !name.trim()) return;
-    await createFolder({ name: name.trim(), parent_folder_id: currentFolderID });
-    refresh();
+  const handleCreateFolder = () => {
+    setCreateFolderOpen(true);
   };
 
   const handleDeleteFolder = async (id: string) => {
@@ -159,7 +157,12 @@ export default function FileBrowserPage() {
                     alignItems: "center",
                   }}
                 >
-                  <Link to={`/drive/folder/${f.id}`}>{f.name}</Link>
+                  <span style={{ display: "flex", alignItems: "center", gap: 6, minWidth: 0 }}>
+                    <Link to={`/drive/folder/${f.id}`} style={{ overflow: "hidden", textOverflow: "ellipsis" }}>
+                      {f.name}
+                    </Link>
+                    <EncryptionBadge mode={f.encryption_mode} />
+                  </span>
                   <div style={{ display: "flex", gap: 6 }}>
                     <button
                       onClick={() => setShareTarget({ type: "folder", value: f })}
@@ -267,6 +270,174 @@ export default function FileBrowserPage() {
       {shareTarget ? (
         <ShareDialog resource={shareTarget} onClose={() => setShareTarget(null)} />
       ) : null}
+      {createFolderOpen ? (
+        <CreateFolderDialog
+          parentID={currentFolderID}
+          onClose={() => setCreateFolderOpen(false)}
+          onCreated={() => {
+            setCreateFolderOpen(false);
+            refresh();
+          }}
+        />
+      ) : null}
+    </div>
+  );
+}
+
+// EncryptionBadge displays a small pill next to the folder name
+// indicating whether the folder is server-processable (managed) or
+// strict zero-knowledge. Unknown / missing modes fall back to the
+// neutral "managed" rendering so pre-Phase 4 rows stay clean.
+function EncryptionBadge({ mode }: { mode?: string }) {
+  const isStrict = mode === "strict_zk";
+  return (
+    <span
+      title={
+        isStrict
+          ? "Strict zero-knowledge: end-to-end encrypted, no server-side processing."
+          : "Managed encrypted: server-side preview, search, and virus scanning enabled."
+      }
+      style={{
+        fontSize: 10,
+        padding: "1px 6px",
+        borderRadius: 999,
+        background: isStrict ? "#fee2e2" : "#dcfce7",
+        color: isStrict ? "#991b1b" : "#166534",
+        whiteSpace: "nowrap",
+      }}
+    >
+      {isStrict ? "strict-ZK" : "managed"}
+    </span>
+  );
+}
+
+function CreateFolderDialog({
+  parentID,
+  onClose,
+  onCreated,
+}: {
+  parentID: string | null;
+  onClose: () => void;
+  onCreated: () => void;
+}) {
+  const [name, setName] = useState("");
+  const [mode, setMode] = useState<"managed_encrypted" | "strict_zk">("managed_encrypted");
+  const [error, setError] = useState<string | null>(null);
+
+  const submit = async () => {
+    setError(null);
+    if (!name.trim()) return;
+    try {
+      await createFolder({
+        name: name.trim(),
+        parent_folder_id: parentID,
+        encryption_mode: mode,
+      });
+      onCreated();
+    } catch (e) {
+      setError(String((e as Error)?.message ?? e));
+    }
+  };
+
+  return (
+    <Modal onClose={onClose} title="New folder">
+      <form
+        onSubmit={(e) => {
+          e.preventDefault();
+          submit();
+        }}
+        style={{ display: "grid", gap: 12 }}
+      >
+        <label style={{ display: "grid", gap: 4 }}>
+          <span>Name</span>
+          <input value={name} onChange={(e) => setName(e.target.value)} autoFocus required />
+        </label>
+        <fieldset style={{ border: "1px solid #e5e7eb", borderRadius: 6, padding: 12 }}>
+          <legend style={{ fontSize: 13, color: "#6b7280" }}>Encryption mode</legend>
+          <label style={{ display: "block", marginBottom: 8 }}>
+            <input
+              type="radio"
+              name="encmode"
+              value="managed_encrypted"
+              checked={mode === "managed_encrypted"}
+              onChange={() => setMode("managed_encrypted")}
+            />{" "}
+            Managed Encrypted (default)
+          </label>
+          <label style={{ display: "block" }}>
+            <input
+              type="radio"
+              name="encmode"
+              value="strict_zk"
+              checked={mode === "strict_zk"}
+              onChange={() => setMode("strict_zk")}
+            />{" "}
+            Strict Zero-Knowledge
+          </label>
+          {mode === "strict_zk" ? (
+            <div
+              style={{
+                marginTop: 8,
+                padding: 8,
+                background: "#fef3c7",
+                border: "1px solid #fde68a",
+                fontSize: 12,
+                color: "#92400e",
+                borderRadius: 4,
+              }}
+            >
+              Strict-ZK disables server-side previews, full-text search, and virus
+              scanning. Files are end-to-end encrypted.
+            </div>
+          ) : null}
+        </fieldset>
+        {error ? <p style={{ color: "#b91c1c" }}>{error}</p> : null}
+        <div style={{ display: "flex", justifyContent: "flex-end", gap: 8 }}>
+          <button type="button" onClick={onClose}>
+            Cancel
+          </button>
+          <button type="submit">Create</button>
+        </div>
+      </form>
+    </Modal>
+  );
+}
+
+function Modal({
+  onClose,
+  title,
+  children,
+}: {
+  onClose: () => void;
+  title: string;
+  children: React.ReactNode;
+}) {
+  return (
+    <div
+      style={{
+        position: "fixed",
+        inset: 0,
+        background: "rgba(15, 23, 42, 0.35)",
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+        zIndex: 30,
+      }}
+      onClick={onClose}
+    >
+      <div
+        onClick={(e) => e.stopPropagation()}
+        style={{
+          background: "white",
+          padding: 20,
+          borderRadius: 8,
+          minWidth: 420,
+          maxWidth: 640,
+        }}
+      >
+        <h3 style={{ marginTop: 0 }}>{title}</h3>
+        {children}
+      </div>
     </div>
   );
 }

@@ -54,6 +54,9 @@ export interface Folder {
   path: string;
   created_at: string;
   updated_at: string;
+  // Encryption mode is optional in the response for pre-Phase 4
+  // clients; current folders default to "managed_encrypted".
+  encryption_mode?: string;
 }
 
 export interface FileItem {
@@ -138,6 +141,7 @@ export async function getFolder(id: string): Promise<{ folder: Folder; children:
 export async function createFolder(input: {
   name: string;
   parent_folder_id?: string | null;
+  encryption_mode?: string;
 }): Promise<Folder> {
   const { data } = await client.post<Folder>("/folders", input);
   return data;
