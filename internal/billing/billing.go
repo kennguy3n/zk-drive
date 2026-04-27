@@ -57,8 +57,13 @@ type Plan struct {
 	MaxStorageBytes          *int64    `json:"max_storage_bytes,omitempty"`
 	MaxUsers                 *int      `json:"max_users,omitempty"`
 	MaxBandwidthBytesMonthly *int64    `json:"max_bandwidth_bytes_monthly,omitempty"`
-	CreatedAt                time.Time `json:"created_at"`
-	UpdatedAt                time.Time `json:"updated_at"`
+	// StripeCustomerID is set after the workspace's first successful
+	// Stripe Checkout completion. UpsertPlan preserves the existing
+	// value when this field is nil so a webhook-driven plan change
+	// doesn't accidentally clear the linkage.
+	StripeCustomerID *string   `json:"stripe_customer_id,omitempty"`
+	CreatedAt        time.Time `json:"created_at"`
+	UpdatedAt        time.Time `json:"updated_at"`
 }
 
 // UsageEvent is one row of the usage_events ledger.
