@@ -50,6 +50,35 @@ func (s *Service) UpsertPlan(ctx context.Context, p *Plan) (*Plan, error) {
 	return s.repo.UpsertPlan(ctx, p)
 }
 
+// UpdateTier changes only the tier on a workspace's plan, preserving
+// any admin-configured per-workspace limit overrides. Used by the
+// Stripe webhook so a routine subscription event can't silently
+// clear an admin-set override.
+func (s *Service) UpdateTier(ctx context.Context, workspaceID uuid.UUID, tier string) (*Plan, error) {
+	if s == nil {
+		return nil, errors.New("billing service not configured")
+	}
+	if !IsValidTier(tier) {
+		return nil, errors.New("billing: invalid tier")
+	}
+	return s.repo.UpdateTier(ctx, workspaceID, tier)
+}
+
+// SetStripeCustomerID persists the Stripe customer ID on a
+// workspace's plan row without touching tier or any admin-configured
+// limit overrides. Called from the Stripe webhook on
+// `checkout.session.completed` so the admin portal-session endpoint
+// can later reuse the customer.
+func (s *Service) SetStripeCustomerID(ctx context.Context, workspaceID uuid.UUID, customerID string) error {
+	if s == nil {
+		return errors.New("billing service not configured")
+	}
+	if customerID == "" {
+		return errors.New("billing: stripe customer id required")
+	}
+	return s.repo.SetStripeCustomerID(ctx, workspaceID, customerID)
+}
+
 // CheckStorageQuota returns ErrQuotaExceeded when adding
 // additionalBytes to the workspace's current storage would push it
 // past the plan's MaxStorageBytes.

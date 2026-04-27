@@ -22,6 +22,11 @@ jobs:
           check-latest: true
           cache: true
 
+      # poppler-utils provides pdftoppm, used by the preview service to
+      # rasterise PDFs. Required by internal/preview unit tests.
+      - name: Install poppler-utils
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends poppler-utils
+
       - name: Go build
         run: go build ./...
 

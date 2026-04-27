@@ -1,11 +1,13 @@
-name: E2E
+name: E2E Tests
 
-# The Playwright suite is expensive and requires a running stack. We
-# keep it on-demand via workflow_dispatch so the default PR pipeline
-# stays fast and green; trigger manually from the GitHub Actions tab
-# when validating a release branch.
+# E2E gates merge: it must pass on PRs into main and on direct pushes
+# to main. Do not add `continue-on-error: true` to any step in this
+# workflow — the whole point is to fail loudly on regressions.
 on:
-  workflow_dispatch:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
 
 permissions:
   contents: read
@@ -18,71 +20,76 @@ jobs:
       postgres:
         image: postgres:16
         env:
-          POSTGRES_USER: zkdrive
-          POSTGRES_PASSWORD: zkdrive
-          POSTGRES_DB: zk-drive
+          POSTGRES_DB: zkdrive_test
+          POSTGRES_USER: test
+          POSTGRES_PASSWORD: test
         ports:
           - 5432:5432
         options: >-
-          --health-cmd "pg_isready -U zkdrive -d zk-drive"
-          --health-interval 5s
+          --health-cmd pg_isready
+          --health-interval 10s
           --health-timeout 5s
-          --health-retries 10
-    env:
-      DATABASE_URL: postgres://zkdrive:zkdrive@localhost:5432/zk-drive?sslmode=disable
-      JWT_SECRET: test-jwt-secret-32chars-xxxxxxxxxx
-      LISTEN_ADDR: ":8080"
+          --health-retries 5
     steps:
       - uses: actions/checkout@v4
 
-      - name: Set up Go
-        uses: actions/setup-go@v5
+      - uses: actions/setup-go@v5
         with:
-          go-version: '1.22'
-          check-latest: true
-          cache: true
+          go-version: "1.22"
 
-      - name: Set up Node
-        uses: actions/setup-node@v4
+      - uses: actions/setup-node@v4
         with:
-          node-version: '20'
-          cache: 'npm'
+          node-version: "20"
+          cache: "npm"
           cache-dependency-path: frontend/package-lock.json
 
-      - name: Install frontend dependencies
+      - name: Build backend
+        run: go build -o bin/server ./cmd/server
+
+      - name: Install frontend deps
         working-directory: frontend
         run: npm ci
 
-      - name: Install Playwright browsers
+      - name: Build frontend
+        working-directory: frontend
+        run: npm run build
+
+      - name: Start server
+        run: |
+          nohup ./bin/server > server.log 2>&1 &
+          echo $! > server.pid
+          # Wait for /healthz so the SPA + API are ready before
+          # Playwright starts navigating. If the server crashes early
+          # we surface its log to make CI failures debuggable.
+          for i in $(seq 1 60); do
+            if curl -fsS http://localhost:8080/healthz > /dev/null; then
+              echo "server is up"
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "server failed to start within 60s" >&2
+          cat server.log >&2 || true
+          exit 1
+        env:
+          DATABASE_URL: postgres://test:test@localhost:5432/zkdrive_test?sslmode=disable
+          JWT_SECRET: test-secret
+          MIGRATIONS_DIR: migrations
+          LISTEN_ADDR: ":8080"
+          STATIC_DIR: frontend/dist
+
+      - name: Install Playwright
         working-directory: frontend
         run: npx playwright install --with-deps chromium
 
-      - name: Build backend
-        run: go build -o /tmp/zk-drive ./cmd/server
-
-      - name: Apply migrations
-        run: |
-          for f in migrations/*.up.sql; do
-            psql "$DATABASE_URL" -f "$f"
-          done
-
-      - name: Start backend
-        run: /tmp/zk-drive &
-        env:
-          DATABASE_URL: ${{ env.DATABASE_URL }}
-          JWT_SECRET: ${{ env.JWT_SECRET }}
-          LISTEN_ADDR: ${{ env.LISTEN_ADDR }}
-
-      - name: Start frontend dev server
+      - name: Run Playwright tests
         working-directory: frontend
-        run: npx vite --port 5173 &
+        run: npx playwright test
 
-      - name: Wait for services
-        run: |
-          npx wait-on http://localhost:8080/healthz http://localhost:5173 --timeout 60000 || true
-
-      - name: Run Playwright
-        working-directory: frontend
-        run: npm run test:e2e
-        env:
-          E2E_BASE_URL: http://localhost:5173
+      - name: Upload Playwright report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report
+          path: frontend/playwright-report
+          if-no-files-found: ignore

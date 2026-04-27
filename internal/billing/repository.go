@@ -17,6 +17,8 @@ import (
 type Repository interface {
 	GetPlan(ctx context.Context, workspaceID uuid.UUID) (*Plan, error)
 	UpsertPlan(ctx context.Context, p *Plan) (*Plan, error)
+	UpdateTier(ctx context.Context, workspaceID uuid.UUID, tier string) (*Plan, error)
+	SetStripeCustomerID(ctx context.Context, workspaceID uuid.UUID, customerID string) error
 	RecordEvent(ctx context.Context, workspaceID uuid.UUID, eventType string, bytes int64) error
 	GetStorageUsed(ctx context.Context, workspaceID uuid.UUID) (int64, error)
 	GetBandwidthUsedThisMonth(ctx context.Context, workspaceID uuid.UUID) (int64, error)
@@ -99,6 +101,62 @@ RETURNING id, workspace_id, tier, max_storage_bytes, max_users,
 		return nil, fmt.Errorf("upsert plan: %w", err)
 	}
 	return out, nil
+}
+
+// UpdateTier changes only the tier column on a workspace's plan
+// row, leaving any admin-configured per-workspace limit overrides
+// (max_storage_bytes, max_users, max_bandwidth_bytes_monthly)
+// untouched. Used by the Stripe webhook so a routine subscription
+// event doesn't silently null out custom limits.
+//
+// When no row exists yet the row is created with NULL limits, which
+// is the same behaviour as the admin "create plan" flow with no
+// overrides — the per-tier defaults from TierDefaults apply.
+func (r *PostgresRepository) UpdateTier(ctx context.Context, workspaceID uuid.UUID, tier string) (*Plan, error) {
+	const q = `
+INSERT INTO workspace_plans (workspace_id, tier)
+VALUES ($1, $2)
+ON CONFLICT (workspace_id) DO UPDATE SET
+    tier = EXCLUDED.tier,
+    updated_at = now()
+RETURNING id, workspace_id, tier, max_storage_bytes, max_users,
+          max_bandwidth_bytes_monthly, stripe_customer_id, created_at, updated_at`
+	out := &Plan{}
+	err := r.pool.QueryRow(ctx, q, workspaceID, tier).Scan(
+		&out.ID, &out.WorkspaceID, &out.Tier,
+		&out.MaxStorageBytes, &out.MaxUsers, &out.MaxBandwidthBytesMonthly,
+		&out.StripeCustomerID,
+		&out.CreatedAt, &out.UpdatedAt,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("update tier: %w", err)
+	}
+	return out, nil
+}
+
+// SetStripeCustomerID writes only the stripe_customer_id column on
+// a workspace's plan row, leaving tier and any admin-configured
+// limit overrides untouched. Used by the Stripe webhook to capture
+// the customer ID created during a Checkout flow so the admin
+// portal-session endpoint can later look it up.
+//
+// When no row exists yet the row is seeded with the free tier and
+// NULL limits — the same shape the admin "create plan with no
+// overrides" flow produces.
+func (r *PostgresRepository) SetStripeCustomerID(ctx context.Context, workspaceID uuid.UUID, customerID string) error {
+	if customerID == "" {
+		return errors.New("billing: stripe customer id required")
+	}
+	const q = `
+INSERT INTO workspace_plans (workspace_id, tier, stripe_customer_id)
+VALUES ($1, $2, $3)
+ON CONFLICT (workspace_id) DO UPDATE SET
+    stripe_customer_id = EXCLUDED.stripe_customer_id,
+    updated_at = now()`
+	if _, err := r.pool.Exec(ctx, q, workspaceID, TierFree, customerID); err != nil {
+		return fmt.Errorf("set stripe customer id: %w", err)
+	}
+	return nil
 }
 
 // RecordEvent appends a usage_events row.

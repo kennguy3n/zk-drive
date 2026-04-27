@@ -23,11 +23,15 @@ import (
 // signature can be verified.
 const stripeMaxBodyBytes = int64(64 * 1024)
 
-// stripeUpserter is the subset of *Service the webhook handler
-// needs. Splitting it out keeps the tests honest — they swap in a
-// fake without spinning up Postgres.
-type stripeUpserter interface {
-	UpsertPlan(ctx context.Context, p *Plan) (*Plan, error)
+// stripeBillingService is the subset of *Service the webhook handler
+// needs. The webhook only ever changes the tier (per-workspace limit
+// overrides set by an admin must be preserved across Stripe events),
+// and may also persist a customer ID so the admin portal flow can
+// look it up. Splitting it out keeps the tests honest — they swap
+// in a fake without spinning up Postgres.
+type stripeBillingService interface {
+	UpdateTier(ctx context.Context, workspaceID uuid.UUID, tier string) (*Plan, error)
+	SetStripeCustomerID(ctx context.Context, workspaceID uuid.UUID, customerID string) error
 }
 
 // stripePlanReader is the optional read-side dependency used by the
@@ -82,7 +86,7 @@ func (l *liveStripeAPI) NewPortalSession(p *stripe.BillingPortalSessionParams) (
 // when the SDK is unconfigured so the HTTP layer can map them to
 // 501 Not Implemented.
 type StripeService struct {
-	svc          stripeUpserter
+	svc          stripeBillingService
 	reader       stripePlanReader
 	secret       string
 	priceTierMap map[string]string
@@ -133,7 +137,7 @@ func NewStripeWebhookHandler(svc *Service, secret string, priceTierMap map[strin
 }
 
 func newStripeService(
-	svc *Service,
+	svc stripeBillingService,
 	reader stripePlanReader,
 	webhookSecret, secretKey string,
 	priceTierMap map[string]string,
@@ -243,7 +247,7 @@ func (h *StripeService) handleCheckoutCompleted(ctx context.Context, event *stri
 		return errors.New("billing/stripe: checkout.session.completed missing valid tier metadata")
 	}
 	customerID := customerIDFromCheckoutSession(&checkoutSession)
-	return h.upsert(ctx, workspaceID, tier, customerID)
+	return h.applyTierAndCustomer(ctx, workspaceID, tier, customerID)
 }
 
 func (h *StripeService) handleSubscriptionUpdated(ctx context.Context, event *stripe.Event) error {
@@ -259,7 +263,7 @@ func (h *StripeService) handleSubscriptionUpdated(ctx context.Context, event *st
 	if !IsValidTier(tier) {
 		return errors.New("billing/stripe: customer.subscription.updated could not resolve tier")
 	}
-	return h.upsert(ctx, workspaceID, tier, customerIDFromSubscription(&sub))
+	return h.applyTierAndCustomer(ctx, workspaceID, tier, customerIDFromSubscription(&sub))
 }
 
 func (h *StripeService) handleSubscriptionDeleted(ctx context.Context, event *stripe.Event) error {
@@ -271,7 +275,7 @@ func (h *StripeService) handleSubscriptionDeleted(ctx context.Context, event *st
 	if err != nil {
 		return err
 	}
-	return h.upsert(ctx, workspaceID, TierFree, customerIDFromSubscription(&sub))
+	return h.applyTierAndCustomer(ctx, workspaceID, TierFree, customerIDFromSubscription(&sub))
 }
 
 // tierFromSubscription resolves a tier from the first subscription
@@ -296,16 +300,20 @@ func (h *StripeService) tierFromSubscription(sub *stripe.Subscription) string {
 	return ""
 }
 
-func (h *StripeService) upsert(ctx context.Context, workspaceID uuid.UUID, tier string, customerID string) error {
-	plan := &Plan{
-		WorkspaceID: workspaceID,
-		Tier:        tier,
+// applyTierAndCustomer flips the workspace's tier and (optionally)
+// records the Stripe customer ID. It deliberately uses two narrow
+// writes — UpdateTier and SetStripeCustomerID — instead of a single
+// UpsertPlan so admin-configured per-workspace limit overrides
+// (max_storage_bytes, max_users, max_bandwidth_bytes_monthly) are
+// never touched by a Stripe event.
+func (h *StripeService) applyTierAndCustomer(ctx context.Context, workspaceID uuid.UUID, tier string, customerID string) error {
+	if _, err := h.svc.UpdateTier(ctx, workspaceID, tier); err != nil {
+		return err
 	}
-	if customerID != "" {
-		plan.StripeCustomerID = &customerID
+	if customerID == "" {
+		return nil
 	}
-	_, err := h.svc.UpsertPlan(ctx, plan)
-	return err
+	return h.svc.SetStripeCustomerID(ctx, workspaceID, customerID)
 }
 
 // CreateCheckoutSession provisions a Stripe Checkout session for
