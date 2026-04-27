@@ -731,4 +731,38 @@ export async function updateBillingPlan(input: {
   return data;
 }
 
+// Stripe Checkout / Customer Portal --------------------------------------
+//
+// Both endpoints return a Stripe-hosted URL that the caller is expected
+// to send the browser to (window.location.assign). The backend creates
+// the session on Stripe's side and tags it with `metadata.workspace_id`
+// + `metadata.tier` so the webhook handler can resolve the plan when
+// Checkout completes.
+
+export interface StripeSessionResponse {
+  url: string;
+}
+
+export async function createCheckoutSession(input: {
+  tier: string;
+  success_url: string;
+  cancel_url: string;
+}): Promise<StripeSessionResponse> {
+  const { data } = await client.post<StripeSessionResponse>(
+    "/admin/billing/checkout-session",
+    input,
+  );
+  return data;
+}
+
+export async function createPortalSession(input: {
+  return_url: string;
+}): Promise<StripeSessionResponse> {
+  const { data } = await client.post<StripeSessionResponse>(
+    "/admin/billing/portal-session",
+    input,
+  );
+  return data;
+}
+
 export default client;

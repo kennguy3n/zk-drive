@@ -186,12 +186,24 @@ func run() error {
 		MicrosoftClientSecret: cfg.MicrosoftClientSecret,
 		MicrosoftRedirectURL:  cfg.MicrosoftRedirectURL,
 	}).WithAudit(auditSvc)
-	billingSvc := billing.NewService(billing.NewPostgresRepository(pool))
-	stripeWebhookHandler := billing.NewStripeWebhookHandler(billingSvc, cfg.StripeWebhookSecret, cfg.StripePriceTierMap)
+	billingRepo := billing.NewPostgresRepository(pool)
+	billingSvc := billing.NewService(billingRepo)
+	stripeService := billing.NewStripeService(
+		billingSvc,
+		billingRepo,
+		cfg.StripeWebhookSecret,
+		cfg.StripeSecretKey,
+		cfg.StripePriceTierMap,
+	)
 	if cfg.StripeWebhookSecret != "" {
 		log.Printf("billing: stripe webhook signature verification enabled")
 	} else {
 		log.Printf("billing: STRIPE_WEBHOOK_SECRET not set, /api/webhooks/stripe will reject all requests")
+	}
+	if cfg.StripeSecretKey != "" {
+		log.Printf("billing: stripe checkout / portal session creation enabled")
+	} else {
+		log.Printf("billing: STRIPE_SECRET_KEY not set, /api/admin/billing/{checkout,portal}-session will respond 501")
 	}
 	driveHandler := drive.NewHandler(pool, wsSvc, folderSvc, fileSvc, userSvc, storageClient, permissionSvc, activitySvc).
 		WithStorageFactory(storageFactory).
@@ -212,6 +224,7 @@ func run() error {
 	}
 	adminHandler := admin.NewHandler(pool, userSvc, auditSvc, retentionSvc).
 		WithBilling(billingSvc).
+		WithStripe(stripeService).
 		WithFabric(fabricClient, provisioner, storageFactory)
 
 	kchatSvc := kchat.NewRoomService(
@@ -349,7 +362,7 @@ func run() error {
 		// middleware group. Stripe authenticates itself via the
 		// Stripe-Signature header rather than a JWT, which the
 		// handler verifies against STRIPE_WEBHOOK_SECRET.
-		r.Post("/webhooks/stripe", stripeWebhookHandler.HandleWebhook)
+		r.Post("/webhooks/stripe", stripeService.HandleWebhook)
 	})
 
 	srv := &http.Server{

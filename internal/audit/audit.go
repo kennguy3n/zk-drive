@@ -31,6 +31,8 @@ const (
 	ActionRetentionPolicyUpsert = "retention.policy_upsert"
 	ActionRetentionPolicyDelete = "retention.policy_delete"
 	ActionAdminBillingUpdate    = "admin.billing_update"
+	ActionAdminBillingCheckout  = "admin.billing_checkout_session"
+	ActionAdminBillingPortal    = "admin.billing_portal_session"
 )
 
 // Entry mirrors a single audit_log row. ActorID is nullable because

@@ -51,6 +51,7 @@ type Handler struct {
 	audit       *audit.Service
 	retention   *retention.Service
 	billing     *billing.Service
+	stripe      *billing.StripeService
 	fabric      FabricClient
 	provisioner *fabric.Provisioner
 	storeFactory *storage.ClientFactory
@@ -99,6 +100,8 @@ func (h *Handler) RegisterRoutes(r chi.Router) {
 	r.Delete("/retention-policies/{id}", h.DeleteRetentionPolicy)
 	r.Get("/billing/usage", h.BillingUsage)
 	r.Put("/billing/plan", h.UpdateBillingPlan)
+	r.Post("/billing/checkout-session", h.CreateCheckoutSession)
+	r.Post("/billing/portal-session", h.CreatePortalSession)
 	r.Get("/placement", h.GetPlacement)
 	r.Put("/placement", h.PutPlacement)
 	r.Get("/cmk", h.GetCMK)

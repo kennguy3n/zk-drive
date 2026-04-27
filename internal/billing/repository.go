@@ -39,13 +39,14 @@ func NewPostgresRepository(pool *pgxpool.Pool) *PostgresRepository {
 func (r *PostgresRepository) GetPlan(ctx context.Context, workspaceID uuid.UUID) (*Plan, error) {
 	const q = `
 SELECT id, workspace_id, tier, max_storage_bytes, max_users,
-       max_bandwidth_bytes_monthly, created_at, updated_at
+       max_bandwidth_bytes_monthly, stripe_customer_id, created_at, updated_at
 FROM workspace_plans
 WHERE workspace_id = $1`
 	p := &Plan{}
 	err := r.pool.QueryRow(ctx, q, workspaceID).Scan(
 		&p.ID, &p.WorkspaceID, &p.Tier,
 		&p.MaxStorageBytes, &p.MaxUsers, &p.MaxBandwidthBytesMonthly,
+		&p.StripeCustomerID,
 		&p.CreatedAt, &p.UpdatedAt,
 	)
 	if err != nil {
@@ -61,18 +62,24 @@ WHERE workspace_id = $1`
 // on the input clear the per-workspace override (so the per-tier
 // default applies again).
 func (r *PostgresRepository) UpsertPlan(ctx context.Context, p *Plan) (*Plan, error) {
+	// stripe_customer_id is preserved on conflict when the caller
+	// passes nil so a webhook-driven tier change doesn't blow away an
+	// existing customer linkage. All other override columns mirror
+	// the input directly — passing nil is the documented way to
+	// clear an override.
 	const q = `
 INSERT INTO workspace_plans
-    (id, workspace_id, tier, max_storage_bytes, max_users, max_bandwidth_bytes_monthly)
-VALUES (COALESCE($1, uuid_generate_v4()), $2, $3, $4, $5, $6)
+    (id, workspace_id, tier, max_storage_bytes, max_users, max_bandwidth_bytes_monthly, stripe_customer_id)
+VALUES (COALESCE($1, uuid_generate_v4()), $2, $3, $4, $5, $6, $7)
 ON CONFLICT (workspace_id) DO UPDATE SET
     tier = EXCLUDED.tier,
     max_storage_bytes = EXCLUDED.max_storage_bytes,
     max_users = EXCLUDED.max_users,
     max_bandwidth_bytes_monthly = EXCLUDED.max_bandwidth_bytes_monthly,
+    stripe_customer_id = COALESCE(EXCLUDED.stripe_customer_id, workspace_plans.stripe_customer_id),
     updated_at = now()
 RETURNING id, workspace_id, tier, max_storage_bytes, max_users,
-          max_bandwidth_bytes_monthly, created_at, updated_at`
+          max_bandwidth_bytes_monthly, stripe_customer_id, created_at, updated_at`
 	out := &Plan{}
 	var idArg *uuid.UUID
 	if p.ID != uuid.Nil {
@@ -81,9 +88,11 @@ RETURNING id, workspace_id, tier, max_storage_bytes, max_users,
 	err := r.pool.QueryRow(ctx, q,
 		idArg, p.WorkspaceID, p.Tier,
 		p.MaxStorageBytes, p.MaxUsers, p.MaxBandwidthBytesMonthly,
+		p.StripeCustomerID,
 	).Scan(
 		&out.ID, &out.WorkspaceID, &out.Tier,
 		&out.MaxStorageBytes, &out.MaxUsers, &out.MaxBandwidthBytesMonthly,
+		&out.StripeCustomerID,
 		&out.CreatedAt, &out.UpdatedAt,
 	)
 	if err != nil {
