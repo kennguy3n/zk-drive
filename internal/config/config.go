@@ -87,6 +87,16 @@ type Config struct {
 	// `price_123:starter,price_456:business`. Empty values fall
 	// through to the price object's metadata.tier field.
 	StripePriceTierMap map[string]string
+
+	// Local on-device LLM. When OLLAMA_URL is set the AI summary
+	// service routes through the daemon at that address (default
+	// 127.0.0.1:11434, the standard Ollama port) using the model
+	// named in OLLAMA_MODEL (default qwen2.5:1.5b). When unset, the
+	// summary service stays on the deterministic rule-based
+	// scaffold — there is no external-API fallback by design, the
+	// product never sends file content to a third-party LLM.
+	OllamaURL   string
+	OllamaModel string
 }
 
 // Load reads configuration from environment variables and returns a populated
@@ -126,6 +136,8 @@ func Load() (*Config, error) {
 		StripeWebhookSecret:       os.Getenv("STRIPE_WEBHOOK_SECRET"),
 		StripeSecretKey:           os.Getenv("STRIPE_SECRET_KEY"),
 		StripePriceTierMap:        parsePriceTierMap(os.Getenv("STRIPE_PRICE_TIER_MAP")),
+		OllamaURL:                 os.Getenv("OLLAMA_URL"),
+		OllamaModel:               os.Getenv("OLLAMA_MODEL"),
 	}
 
 	var missing []string
