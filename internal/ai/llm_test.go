@@ -81,6 +81,32 @@ func TestOllamaClientGenerate5xxIsError(t *testing.T) {
 	}
 }
 
+// TestOllamaClientGenerateRejectsDoneFalse pins the streaming-
+// misconfiguration guard: if the daemon ignores Stream:false and
+// returns NDJSON, the first chunk we decode has Done:false and a
+// partial Response. Generate must surface that as an error so
+// SummaryService falls back to the scaffold rather than serve a
+// half-finished summary.
+func TestOllamaClientGenerateRejectsDoneFalse(t *testing.T) {
+	t.Parallel()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(ollamaGenerateResponse{Response: "Quarterly", Done: false})
+	}))
+	defer srv.Close()
+
+	client, err := NewOllamaClient(srv.URL, "")
+	if err != nil {
+		t.Fatalf("NewOllamaClient: %v", err)
+	}
+	_, err = client.Generate(context.Background(), "anything")
+	if err == nil {
+		t.Fatal("expected error on done=false, got nil")
+	}
+	if !strings.Contains(err.Error(), "done=false") {
+		t.Errorf("error should mention done=false: %v", err)
+	}
+}
+
 // TestOllamaClientGenerateEmptyResponseIsError ensures a 200 with
 // an empty completion is not silently passed through — the caller
 // would think the LLM agreed there was nothing to say.

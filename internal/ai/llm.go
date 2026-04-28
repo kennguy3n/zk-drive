@@ -118,9 +118,12 @@ type ollamaGenerateRequest struct {
 }
 
 // ollamaGenerateResponse matches the non-streaming response shape.
-// Done == false would only appear under streaming mode; we still
-// decode it so a misconfigured server (Stream:true ignored) doesn't
-// silently feed back a half-finished summary.
+// Done is true on the final (and only) chunk in non-streaming mode.
+// If a misconfigured daemon ignores Stream:false and returns NDJSON
+// instead, json.Decode here only consumes the first chunk — which
+// has Done:false and a partial Response. Generate explicitly
+// rejects that case so a half-finished summary never reaches the
+// caller.
 type ollamaGenerateResponse struct {
 	Response string `json:"response"`
 	Done     bool   `json:"done"`
@@ -159,6 +162,12 @@ func (c *OllamaClient) Generate(ctx context.Context, prompt string) (string, err
 	if err := json.NewDecoder(resp.Body).Decode(&decoded); err != nil {
 		return "", fmt.Errorf("ai/ollama: decode response: %w", err)
 	}
+	if !decoded.Done {
+		// Daemon returned a streaming chunk despite Stream:false.
+		// Treat as an error so SummaryService falls back to the
+		// scaffold rather than surfacing a partial summary.
+		return "", errors.New("ai/ollama: response has done=false (possible streaming misconfiguration)")
+	}
 	out := strings.TrimSpace(decoded.Response)
 	if out == "" {
 		return "", errors.New("ai/ollama: empty response")
@@ -187,7 +196,8 @@ func assertLocalEndpoint(raw string) error {
 	}
 	// Symbolic hostnames: only allow names that obviously refer to
 	// the local box or an operator-controlled internal zone.
-	if ip := net.ParseIP(host); ip == nil {
+	ip := net.ParseIP(host)
+	if ip == nil {
 		lower := strings.ToLower(host)
 		if lower == "localhost" ||
 			strings.HasSuffix(lower, ".local") ||
@@ -196,12 +206,11 @@ func assertLocalEndpoint(raw string) error {
 			return nil
 		}
 		return fmt.Errorf("%w: host %q is not loopback / .local / .internal", ErrLLMRefusedNonLocal, host)
-	} else {
-		if ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() {
-			return nil
-		}
-		return fmt.Errorf("%w: host %s is publicly routable", ErrLLMRefusedNonLocal, ip.String())
 	}
+	if ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() {
+		return nil
+	}
+	return fmt.Errorf("%w: host %s is publicly routable", ErrLLMRefusedNonLocal, ip.String())
 }
 
 // BuildSummaryPrompt is the prompt template SummaryService passes to
