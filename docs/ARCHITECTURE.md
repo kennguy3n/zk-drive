@@ -2,9 +2,8 @@
 
 **License**: Proprietary — All Rights Reserved.
 
-> Status: Phase 1 — Foundation (in progress). This document describes
-> the target architecture. See [PROGRESS.md](PROGRESS.md) for build
-> status and [PROPOSAL.md](PROPOSAL.md) for product strategy.
+> Status: Phase 5 — Launch & Revenue (complete). See
+> [PROGRESS.md](PROGRESS.md) for build status.
 
 ---
 
