@@ -198,8 +198,8 @@ zk-drive/
 
 ## Project status
 
-- **Current phase**: Phase 1 — Foundation (in progress).
-- **Tracker**: [docs/PROGRESS.md](docs/PROGRESS.md).
+- **Current phase**: Phase 5 — Launch & Revenue (complete).
+- **Tracker**: [docs/PROGRESS.md](docs/PROGRESS.md) for build status.
 - **Technical proposal**: [docs/PROPOSAL.md](docs/PROPOSAL.md).
 - **Architecture**: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
