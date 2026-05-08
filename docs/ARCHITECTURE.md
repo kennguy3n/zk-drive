@@ -27,7 +27,7 @@ flowchart TD
 
     subgraph Edge["Edge / API layer"]
         API["HTTPS API"]
-        WS["WebSocket (notifications)"]
+        WS["WebSocket<br/>(notifications)"]
         Auth["Auth / session"]
         MW["Rate limit /<br/>tenant guard"]
     end
@@ -38,18 +38,23 @@ flowchart TD
         ShareSvc["Sharing service"]
         PermSvc["Permission service"]
         SearchSvc["Search service"]
+        BillSvc["Billing service<br/>(quota + Stripe)"]
+        NotifSvc["Notification service"]
         PreviewW["Preview worker"]
         ScanW["Scan worker"]
+        IndexW["Index worker"]
+        ClassifyW["Classify worker"]
         RetW["Retention worker"]
     end
 
     subgraph Data["Data stores"]
         PG["Postgres<br/>(metadata)"]
-        Redis["Redis / Valkey<br/>(sessions / cache)"]
+        Redis["Redis / Valkey<br/>(sessions, rate limit,<br/>notification pub/sub)"]
         NATS["NATS JetStream<br/>(async jobs)"]
     end
 
     Fabric["zk-object-fabric<br/>(S3 API, encrypted storage)"]
+    Stripe["Stripe<br/>(checkout, portal, webhooks)"]
 
     Web --> API
     Mobile --> API
@@ -64,22 +69,35 @@ flowchart TD
     MW --> ShareSvc
     MW --> PermSvc
     MW --> SearchSvc
+    MW --> BillSvc
+    MW --> NotifSvc
 
     FileSvc --> PG
     FolderSvc --> PG
     ShareSvc --> PG
     PermSvc --> PG
     SearchSvc --> PG
+    BillSvc --> PG
+    NotifSvc --> PG
 
     Auth --> Redis
+    MW --> Redis
+    NotifSvc --> Redis
+    WS --> Redis
     FileSvc --> NATS
     NATS --> PreviewW
     NATS --> ScanW
+    NATS --> IndexW
+    NATS --> ClassifyW
     NATS --> RetW
+
+    BillSvc <-->|"checkout / portal"| Stripe
+    Stripe -.->|"webhook events"| API
 
     FileSvc -->|"presigned URLs"| Fabric
     PreviewW -->|"read via gateway<br/>write derived objects"| Fabric
     ScanW -->|"read via gateway"| Fabric
+    IndexW -->|"read via gateway"| Fabric
     RetW -->|"archive writes"| Fabric
     Web -.->|"direct PUT / GET"| Fabric
     Mobile -.->|"direct PUT / GET"| Fabric
@@ -187,6 +205,10 @@ authenticated session; tenant resolution happens in middleware.
 - `GET /api/files/:id/versions`
 - `POST /api/files/:id/restore/:version_id`
 - `GET /api/files/:id/download-url` — returns a presigned GET URL.
+- `GET /api/files/:id/preview-url` — returns a presigned GET URL
+  for the derived preview object (PNG thumbnail). Returns 404 when
+  no preview has been generated yet (e.g. unsupported mime type, or
+  strict-ZK folder).
 
 ### 3.5 Sharing
 
@@ -207,6 +229,98 @@ authenticated session; tenant resolution happens in middleware.
 - `DELETE /api/admin/users/:id`
 - `GET /api/admin/audit-log`
 - `GET /api/admin/storage-usage`
+- `GET /api/admin/billing/plan` — current plan tier and limits.
+- `PUT /api/admin/billing/plan` — manual tier override (e.g. for
+  internal accounts; production tier changes flow through Stripe).
+- `POST /api/admin/billing/checkout-session` — mints a Stripe
+  Checkout session for the requested tier.
+- `POST /api/admin/billing/portal-session` — mints a Stripe
+  Customer Portal session so the workspace owner can manage their
+  subscription.
+- `GET /api/admin/placement` / `PUT /api/admin/placement` —
+  workspace placement policy (provider / region / country /
+  storage class), proxied to zk-object-fabric after local validation
+  via `placement_policy.Policy.Validate()`.
+- `GET /api/admin/cmk` / `PUT /api/admin/cmk` — customer-managed
+  key URI (`arn:aws:kms:`, `kms://`, `vault://`, `transit://`, or
+  empty for gateway-default), validated by
+  `internal/crypto/cmk.go` and best-effort forwarded to the fabric
+  console via `fabric.Client.PutCMK`.
+- `GET /api/admin/retention-policies` / `POST /api/admin/retention-policies`
+  / `PUT /api/admin/retention-policies/:id` /
+  `DELETE /api/admin/retention-policies/:id` — workspace + folder
+  retention rules with archive / delete thresholds.
+
+All admin routes are gated by an `AdminOnly` middleware that
+requires `users.role == 'admin'`.
+
+### 3.8 KChat Integration
+
+KChat-specific endpoints live under `/api/kchat`. See
+`api/kchat/handler.go` for the full surface.
+
+- `POST /api/kchat/rooms` — map a KChat room ID to a freshly
+  provisioned room folder (admin only).
+- `GET /api/kchat/rooms` — list every mapping in the workspace.
+- `GET /api/kchat/rooms/:id` — fetch a single mapping.
+- `DELETE /api/kchat/rooms/:id` — remove the mapping (the backing
+  folder is left intact; admin only).
+- `POST /api/kchat/rooms/:id/sync-members` — reconcile the room's
+  member list against the folder's user grants (admin only).
+- `POST /api/kchat/attachments/upload-url` — mint a presigned PUT
+  URL keyed by `{workspace_id}/{file_id}/{version_id}` scoped to
+  the room folder.
+- `POST /api/kchat/attachments/confirm` — promote a previously
+  minted upload URL into a `FileVersion` after validating the
+  object-key prefix.
+- `POST /api/kchat/rooms/:id/summary` — return a rule-based (or
+  local-LLM-backed) summary of the files in the mapped folder.
+  Strict-ZK folders return `403` via `ai.ErrStrictZKForbidden`.
+
+### 3.9 WebSocket Notifications
+
+- `GET /api/ws` — WebSocket upgrade endpoint for real-time
+  notifications. The middleware chain populates
+  `(workspaceID, userID)` from the JWT before the upgrade so an
+  unauthenticated request is rejected with `401`. See
+  `api/ws/handler.go` for the Hub + read/write pump implementation.
+
+### 3.10 Webhooks
+
+- `POST /api/webhooks/stripe` — Stripe event ingestion. Verifies
+  the `Stripe-Signature` header against `STRIPE_WEBHOOK_SECRET`,
+  caps the request body at 64 KiB, and updates `workspace_plans`
+  rows for `checkout.session.completed`, `customer.subscription.*`,
+  and `invoice.*` events. See `internal/billing/stripe.go`.
+
+### 3.11 Client Rooms
+
+Client rooms are dedicated shared folders for external
+collaboration (agencies, accounting, legal, construction, clinic
+verticals). They pair a folder with a share link and optional
+pre-configured sub-folder structure.
+
+- `POST /api/client-rooms` — create an ad-hoc client room (folder
+  + share link bundle).
+- `GET /api/client-rooms` — list client rooms in the workspace.
+- `GET /api/client-rooms/:id` — fetch a single room.
+- `DELETE /api/client-rooms/:id` — delete the room and its
+  backing share link.
+- `GET /api/client-rooms/templates` — list available templates
+  (agency, accounting, legal, construction, clinic).
+- `POST /api/client-rooms/from-template` — create a room from a
+  named template; `ClientRoomService.CreateFromTemplate`
+  provisions the matching sub-folder layout under the room folder.
+
+### 3.12 Notifications
+
+- `GET /api/notifications` — list notifications for the current
+  user, unread first. Server-side pagination via `limit` /
+  `offset`.
+- `POST /api/notifications/:id/read` — mark a single notification
+  read.
+- `POST /api/notifications/read-all` — mark every notification
+  for the current user read.
 
 ---
 
@@ -417,39 +531,328 @@ Each folder carries an `encryption_mode` column stored in the
 
 ---
 
-## 10. Deployment Architecture
+## 10. WebSocket & Real-Time Notifications
 
-### 10.1 Phase 1 — SME SaaS MVP
+Real-time notifications (share-link created, guest invite accepted,
+scan quarantine, file upload, permission changes) are delivered to
+live web clients over WebSocket. The transport sits behind
+`api/ws/handler.go` and the `notification` service publishes events
+on both the in-process hub and Redis pub/sub.
 
-- Single region.
-- Pooled tenants on shared infrastructure.
-- Managed Postgres (RDS or equivalent).
-- zk-object-fabric Phase 1 storage (Wasabi via Linode gateway).
-- Single API + WebSocket server (Go binary).
-- Single NATS cluster for async jobs.
-- Single Redis / Valkey instance for sessions.
-- **Target SLA: 99.5 – 99.9%.**
+### 10.1 Hub
 
-### 10.2 Phase 2 — Business SaaS
+`api/ws.Hub` keeps a per-`(workspaceID, userID)` set of WebSocket
+clients. Each client owns a bounded send channel; slow consumers
+are unregistered (and the connection closed) instead of stalling
+the broadcaster. Auth + tenant guard run before the upgrade so the
+upgraded connection is already bound to a workspace and user.
 
-- Multi-AZ Postgres with automated failover.
-- Standby region for backup and DR.
-- NATS HA with multi-node cluster.
-- Object-storage DR via zk-object-fabric placement policies.
-- Audit log retention and queryability.
-- **Target SLA: 99.9%.**
+### 10.2 Multi-replica fan-out via Redis pub/sub
 
-### 10.3 Phase 3 — Secure / Regulated
+In a multi-replica deployment a notification produced on replica A
+still needs to reach the live WebSocket connections held by
+replica B. The notification service therefore publishes every event
+on a Redis pub/sub channel (`internal/notification/publisher.go`);
+every replica subscribes and re-broadcasts to its local hub via
+`Hub.BroadcastJSON`. Single-replica deployments work transparently
+because the same publisher also dispatches directly to the
+in-process hub.
 
-- Dedicated logical tenant (isolated Postgres schema or dedicated DB
-  per customer).
-- Customer-managed key (CMK) mode enabled.
-- Data residency controls exposed in the admin UI.
-- Stronger audit logging, admin access approval, retention policies.
-- Optional BYOC on zk-object-fabric dedicated cells.
-- **Target SLA: 99.9 – 99.95%.**
+### 10.3 Frontend
 
-Each phase is additive: Phase 2 keeps Phase 1's SME MVP running on
-the same codebase, and Phase 3 keeps both Phase 1 and Phase 2
-customers running on the same codebase. The deployment footprint
-grows; the application does not fork.
+The frontend opens a single WebSocket connection on login through
+the `useNotifications` hook, falls back to REST polling of
+`/api/notifications` if the upgrade fails, and surfaces unread
+badges in the top bar.
+
+---
+
+## 11. Session & Rate Limiting
+
+ZK Drive started with stateless JWT sessions and an in-memory
+rate-limiter token bucket; both broke as soon as the server ran
+with more than one replica. Phase 5 introduced a Redis-backed
+implementation of each so sessions can be revoked centrally and
+rate limits stay correct under horizontal scaling.
+
+### 11.1 Session store
+
+`internal/session/redis.go` records every session in Redis as
+`ws:{workspaceID}:session:{sessionID}` with a secondary user-index
+set (`ws:{workspaceID}:user_sessions:{userID}`) so admin
+"force sign-out" flows can wipe every session for an identity
+without scanning the keyspace. Keys are namespaced by
+`workspace_id` per §9 to keep multi-tenant isolation honest.
+
+### 11.2 Distributed rate limiter
+
+`api/middleware/ratelimit_redis.go` is a sliding-window counter
+implemented as a Lua script that runs atomically on the Redis
+server. The script:
+
+1. `INCR` the per-`(workspace_id, user_id)` counter and apply the
+   user budget; rejects above-budget requests immediately.
+2. `INCR` the per-`workspace_id` counter and apply the workspace
+   budget; refunds the user counter (`DECR`) on workspace denial
+   so a noisy neighbour cannot starve the whole workspace.
+3. Returns `{status, user_count, ws_count}` so the middleware can
+   set `Retry-After` and `X-RateLimit-*` headers correctly.
+
+When `REDIS_URL` is unset, both the session store and the rate
+limiter fall back to the in-memory implementations from earlier
+phases. This keeps `go test -short` and local dev cheap and means
+single-replica deployments still function without standing up
+Redis. Production deployments are expected to set `REDIS_URL`.
+
+---
+
+## 12. Billing & Stripe Integration
+
+Billing is two-sided: ZK Drive itself enforces per-workspace
+storage / user / bandwidth quotas, and Stripe is the source of
+truth for which plan tier the workspace currently has. Both halves
+live under `internal/billing/`.
+
+### 12.1 Quota enforcement
+
+`workspace_plans` (migration 016) stores the per-workspace tier and
+overridable limits. `usage_events` is an append-only ledger of
+storage / bandwidth / user-added events. The quota checkers
+(`CheckStorageQuota`, `CheckUserQuota`, `CheckBandwidthQuota`) read
+current-state counters (`files`, `users`, month-to-date sum of
+bandwidth events) rather than replaying the full ledger, and run
+before mutating endpoints (upload URL minting, user invites).
+
+### 12.2 Stripe webhook
+
+`internal/billing/stripe.go` verifies the `Stripe-Signature` header
+against `STRIPE_WEBHOOK_SECRET`, caps the request body at 64 KiB,
+and routes `checkout.session.completed`,
+`customer.subscription.*`, and `invoice.*` events to
+`Service.UpdateTier` (which preserves any per-workspace tier
+override an admin set out-of-band) and `Service.SetStripeCustomerID`.
+`workspace_plans.stripe_customer_id` (migration 023) lets the
+admin checkout / portal flows look up an existing customer.
+
+### 12.3 Checkout + Customer Portal
+
+`POST /api/admin/billing/checkout-session` mints a Stripe Checkout
+session for the requested tier; `POST
+/api/admin/billing/portal-session` mints a Customer Portal session
+so the workspace owner can manage their subscription, payment
+methods, and invoices. The frontend `BillingPage.tsx` exposes both
+behind upgrade / manage buttons.
+
+---
+
+## 13. KChat Integration Architecture
+
+KChat is a separate B2B team chat product that uses ZK Drive as
+its storage backbone. The dependency is **one-directional**: KChat
+depends on ZK Drive, but ZK Drive does not depend on KChat. The
+integration surface is the REST API documented in §3.8 plus the
+shared zk-object-fabric S3 API.
+
+### 13.1 Service + repository
+
+`internal/kchat/` holds the integration logic. `RoomService`
+coordinates folder creation, permission grants, and attachment
+metadata; `RoomFolderRepository` persists the mapping rows. The
+package uses small interfaces (`FolderCreator`, `PermissionGranter`,
+`FileCreator`) instead of importing `internal/folder`,
+`internal/permission`, and `internal/file` directly, so the
+coupling stays one-way.
+
+### 13.2 Room-folder mapping
+
+Migration 021 creates `kchat_room_folders` with a unique constraint
+on `(workspace_id, kchat_room_id)`. Creating a mapping provisions a
+dedicated room folder under the workspace root, grants the caller
+admin on it, and records the row. Deleting the mapping removes
+only the row — the backing folder is intentionally retained so
+operators keep the uploaded files even after the chat room is
+gone.
+
+### 13.3 Permission sync
+
+`RoomService.SyncMembers` is idempotent: it indexes every existing
+`user`-type grant on the folder, revokes anything not in the
+desired set, and adds or upgrades the rest. Guest grants are
+left alone so KChat sync never clobbers an out-of-band guest
+invite.
+
+### 13.4 Attachment metadata
+
+`AttachmentUploadURL` resolves the room's folder, creates the
+file metadata row up front, and mints a presigned PUT keyed by
+`{workspace_id}/{file_id}/{version_id}`. `ConfirmAttachment`
+validates the object-key prefix before flipping the file's
+current-version pointer, so a malicious caller cannot graft an
+arbitrary key onto someone else's file row.
+
+---
+
+## 14. AI & Classification
+
+AI features are limited to managed-encrypted folders by design:
+the server has no plaintext access to strict-ZK content, so any AI
+path that would summarise or classify file content explicitly
+refuses for strict-ZK folders.
+
+### 14.1 Thread / room summary
+
+`internal/ai/service.go` is a rule-based scaffold that assembles a
+fixed-format summary from folder file names and any indexed
+`content_text`. It is the path of last resort; it never makes
+network calls.
+
+`internal/ai/llm.go` is an Ollama-compatible local-LLM client
+behind the `LLMClient` interface. The default model is
+`qwen2.5:1.5b` (Apache-2.0 weights, ~1 GB on disk, runs CPU-only
+on a 4 GB host). The constructor refuses any non-loopback /
+non-RFC1918 endpoint at boot — sending file or chat content to a
+third-party API would silently undo the zero-knowledge contract
+the rest of the product enforces. When `OLLAMA_URL` is unset, the
+summary service stays on the rule-based scaffold and never makes
+a network call.
+
+Strict-ZK folders return `ErrStrictZKForbidden`, which the handler
+layer maps to `403 Forbidden`.
+
+Configuration:
+
+- `OLLAMA_URL` — endpoint for the local Ollama daemon (default
+  `http://127.0.0.1:11434`). Must be loopback / RFC1918 / `.local`
+  / `.internal` / `.cluster.local`; constructors reject anything
+  else.
+- `OLLAMA_MODEL` — model identifier (default `qwen2.5:1.5b`).
+
+### 14.2 File classification
+
+`internal/classify/service.go` is a small rule-based classifier
+that labels a file row as `image` / `invoice` / `contract` /
+`document` / `other` based on filename and mime type. The label
+is persisted to `files.classification` (migration 022). The
+worker subscribes to `drive.classify.file` (added to the
+`DRIVE_JOBS` NATS stream); strict-ZK files are skipped at the
+worker boundary so the data plane is never touched.
+
+---
+
+## 15. Preview Pipeline
+
+Previews are generated by a NATS-driven worker and stored as
+derived objects in zk-object-fabric.
+
+### 15.1 Image previews
+
+`internal/preview/preview.go` is a pure-Go pipeline: stdlib
+`image/png`, `image/jpeg`, and `image/gif` decoders feed the
+BSD-3-Clause `golang.org/x/image/draw` bilinear resampler at a
+256 px target bounding box. Output is always PNG. The 100 MiB
+source cap prevents pathologically large uploads from OOM'ing the
+worker.
+
+### 15.2 PDF previews
+
+`internal/preview/pdf.go` rasterises page 1 of a PDF by shelling
+out to `pdftoppm` from poppler-utils (GPL — used as a subprocess,
+not linked, so the proprietary build is unaffected). The PDF is
+written to a temp file, `pdftoppm` produces a PNG next to it, the
+PNG is decoded with the stdlib image package, and both temp files
+are removed before the function returns. If `pdftoppm` is not
+installed, the worker treats the job as a graceful skip
+(`ErrUnsupportedMime`) rather than a hard failure.
+
+Office document support (LibreOffice headless / ImageMagick) is
+still deferred — both add packaging surface that needs a dedicated
+design pass.
+
+### 15.3 Storage layout
+
+Every preview is stored at
+
+```
+{workspace_id}/{file_id}/{version_id}/preview.png
+```
+
+in the same zk-object-fabric bucket as the source file, and a row
+is indexed in `file_previews` so the API can resolve a preview URL
+without scanning the bucket. Strict-ZK files never reach the
+preview worker.
+
+---
+
+## 16. PWA Architecture
+
+The frontend ships as a Progressive Web App so paying SMEs can
+install ZK Drive as a phone-home-screen icon without us having to
+build a separate React Native app.
+
+- **Build integration**: `vite-plugin-pwa` injects the manifest and
+  service worker into the Vite production build.
+- **Manifest**: `manifest.webmanifest` declares name, icons,
+  `display: standalone`, and the theme color.
+- **Service worker**: a Workbox-generated precaching service worker
+  caches the static SPA bundle so cold app launches work offline.
+  API requests stay network-first.
+- **Install prompt**: the `InstallPrompt` component listens for
+  `beforeinstallprompt`, surfaces an "Install app" button, and
+  hides itself once the app is installed.
+
+The PWA-first decision is recorded in
+[MOBILE_EVALUATION.md](MOBILE_EVALUATION.md); a React Native
+investment is deferred behind PWA install metrics.
+
+---
+
+## 17. Deployment Architecture
+
+The deployment surface is shipped as code. There is one Go binary
+for the API server (`cmd/server`), one Go binary for the worker
+bus (`cmd/worker`), and a thin React build for the frontend served
+by the API server.
+
+### 17.1 Local development — `docker-compose.yml`
+
+The top-level `docker-compose.yml` is the one-command local stack:
+
+- `postgres` — Postgres 16 with the `zkdrive` role and `zk-drive`
+  database.
+- `nats` — NATS JetStream broker for the preview / scan / index /
+  classify / retention / archive workers.
+- `clamav` — ClamAV daemon (clamav/clamav:1.3) used by the scan
+  worker over INSTREAM. Not linked into the build; the daemon's
+  GPL-2.0 license stays at the same posture as Postgres.
+- `server` — the API server (`cmd/server`).
+- `worker` — the async worker (`cmd/worker`).
+
+### 17.2 Production compose — `deploy/docker-compose.prod.yml`
+
+`deploy/docker-compose.prod.yml` is the production-shaped compose
+file (managed Postgres / NATS pointed at by env vars, no in-stack
+databases). It is the recommended path for SMEs that don't run a
+Kubernetes cluster.
+
+### 17.3 Kubernetes — `deploy/k8s/`
+
+The `deploy/k8s/` directory holds dev / staging Kubernetes
+manifests:
+
+- `namespace.yaml`
+- `configmap.yaml`
+- `secret.yaml`
+- `server.yaml`
+- `worker.yaml`
+- `postgres.yaml` — single-replica StatefulSet, dev / staging only.
+- `nats.yaml`
+- `clamav.yaml`
+- `ingress.yaml`
+
+The k8s manifests are explicitly dev / staging only: there is no
+HorizontalPodAutoscaler, no PodDisruptionBudget, and the Postgres
+StatefulSet is single-replica. Production is expected to use
+managed Postgres (RDS / Cloud SQL) and managed NATS, with the
+production compose or a customer's existing platform handling the
+app tier. See [`deploy/README.md`](../deploy/README.md) for the
+production deployment guidance.

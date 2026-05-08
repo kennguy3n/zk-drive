@@ -164,36 +164,61 @@ design.
 zk-drive/
   cmd/
     server/              # Main application server
-    worker/              # Async job workers (preview, scan, archive)
+    worker/              # Async job workers (preview, scan, classify, archive)
   api/
-    drive/               # Drive HTTP API handlers
-    auth/                # Authentication and session management
-    sharing/             # Sharing and guest access handlers
-    middleware/          # Rate limiting, tenant resolution, logging
+    admin/               # Admin API handlers (users, audit, billing, placement, CMK)
+    auth/                # Authentication, session management, OAuth2 SSO
+    drive/               # Drive HTTP API handlers (files, folders, bulk ops)
+    kchat/               # KChat integration API (rooms, sync, attachments)
+    middleware/          # Auth, tenant guard, rate limiting (in-memory + Redis)
+    ws/                  # WebSocket real-time notifications
   internal/
-    workspace/           # Workspace and organization logic
-    folder/              # Folder tree and hierarchy
-    file/                # File metadata and versioning
-    permission/          # Permission and role evaluation
-    sharing/             # Share links, guest invites, dropboxes
-    retention/           # Retention policy evaluation and archival
-    preview/             # Preview generation
-    scan/                # Virus scanning integration
-    search/              # Full-text search
+    activity/            # User-facing activity log
+    ai/                  # AI thread summary (rule-based + Ollama LLM)
+    audit/               # Security audit log
+    billing/             # Billing, quota enforcement, Stripe webhooks
+    classify/            # File classification worker
     config/              # Application configuration
+    crypto/              # AES-256-GCM credential encryption, CMK validation
+    database/            # Database connection and helpers
+    fabric/              # zk-object-fabric tenant provisioning and placement
+    file/                # File metadata and versioning
+    folder/              # Folder tree and hierarchy
+    index/               # Content text extraction for FTS
+    jobs/                # NATS JetStream job publisher
+    kchat/               # KChat room-folder service and repository
+    notification/        # In-app + Redis pub/sub notifications
+    permission/          # Permission and role evaluation, inheritance
+    preview/             # Preview generation (images + PDF)
+    retention/           # Retention policy evaluation and cold archival
+    scan/                # Virus scanning (ClamAV INSTREAM)
+    search/              # Full-text search (Postgres FTS)
+    session/             # Redis-backed session store
+    sharing/             # Share links, guest invites, client rooms, templates
+    storage/             # S3 client and per-workspace client factory
+    user/                # User management
+    wiring/              # Shared dependency wiring helpers
+    workspace/           # Workspace and organization logic
   frontend/
+    e2e/                 # Frontend Playwright specs
     src/
-      pages/             # Drive UI, sharing, admin, settings
-      components/        # File browser, upload, preview, sharing dialogs
       api/               # API client
-  migrations/            # Postgres schema migrations
+      components/        # File browser, upload, preview, sharing, search, PWA
+      hooks/             # React hooks (useNotifications, etc.)
+      pages/             # Drive UI, admin, billing, encryption, placement, KChat
+  migrations/            # Postgres schema migrations (001–023)
   tests/
-    integration/         # End-to-end API tests
-    e2e/                 # Playwright browser tests
+    integration/         # Go integration tests (35+ test files, phase gates)
+    e2e/                 # Playwright browser tests + presigned roundtrip
+  deploy/
+    k8s/                 # Kubernetes manifests (dev/staging)
+    docker-compose.prod.yml
+    README.md
   docs/
     PROPOSAL.md
     ARCHITECTURE.md
     PROGRESS.md
+    MOBILE_EVALUATION.md
 ```
 
 ## Project status
@@ -252,6 +277,53 @@ export S3_SECRET_KEY=demo-secret-key
 ZK Drive then generates presigned PUT / GET URLs that clients use to
 move bytes directly to zk-object-fabric — the ZK Drive API server never
 proxies file content.
+
+## Running tests
+
+### Go unit tests
+
+```
+go test -short ./...
+```
+
+### Integration tests (requires Postgres)
+
+```
+docker compose up -d postgres
+export DATABASE_URL=postgres://zkdrive:zkdrive@localhost:5432/zk-drive?sslmode=disable
+export JWT_SECRET=dev-secret
+go test ./tests/integration/ -v
+```
+
+### Integration tests with storage (requires zk-object-fabric)
+
+```
+export S3_ENDPOINT=http://localhost:8080
+export S3_BUCKET=mybucket
+export S3_ACCESS_KEY=demo-access-key
+export S3_SECRET_KEY=demo-secret-key
+go test ./tests/integration/ -v
+```
+
+### Frontend lint and build
+
+```
+cd frontend && npm install && npm run lint && npm run build
+```
+
+### Playwright e2e tests
+
+```
+cd frontend && npx playwright test
+```
+
+## Documentation
+
+- [Technical Proposal](docs/PROPOSAL.md)
+- [Architecture](docs/ARCHITECTURE.md)
+- [Progress Tracker](docs/PROGRESS.md)
+- [Phase Summary](docs/PHASES.md)
+- [Mobile Evaluation](docs/MOBILE_EVALUATION.md)
 
 ## License
 
