@@ -327,4 +327,4 @@ cd frontend && npx playwright test
 
 ## License
 
-Proprietary — All Rights Reserved.
+Proprietary — All Rights Reserved. See [`LICENSE`](LICENSE).
