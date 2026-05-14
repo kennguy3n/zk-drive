@@ -1,9 +1,11 @@
-# ZK Drive — Technical Proposal
+# ZK Drive — Product Overview
 
 **License**: Proprietary — All Rights Reserved.
 
-> Status: Phase 5 — Launch & Revenue (complete). See
-> [PROGRESS.md](PROGRESS.md) for build status.
+This document presents the product positioning, market analysis,
+feature set, and architecture decisions behind ZK Drive: a
+privacy-preserving document management and file collaboration
+platform built on zk-object-fabric.
 
 ---
 
@@ -38,8 +40,8 @@
 - **Key strategic insight**: ZK Drive is an **application layer**,
   not a storage layer. It does not reimplement encryption, caching,
   placement, provider migration, or S3 compatibility. It rides on
-  zk-object-fabric's phase-invariant S3 API and inherits its cost
-  curve — which is what makes the ZK Drive business model work.
+  zk-object-fabric's stable S3 API and inherits its cost curve —
+  which is what makes the ZK Drive business model work.
 
 ### 1.1 Tech stack
 
@@ -55,9 +57,9 @@
   versions, previews, and archives.
 - **Async jobs: NATS JetStream.** Preview, scan, index, retention,
   and archive workers.
-- **Search: Postgres FTS first.** OpenSearch or Meilisearch layered
-  on top only when corpus size or query volume exceeds Postgres FTS
-  capabilities.
+- **Search: Postgres FTS by default.** OpenSearch or Meilisearch is
+  layered on top only when corpus size or query volume exceeds what
+  Postgres FTS can serve.
 
 ---
 
@@ -105,17 +107,18 @@ promise.
 
 ZK Drive **inherits zk-object-fabric's cost curve**:
 
-- **Phase 1** — file content lands on Wasabi via the zk-object-fabric
-  Linode data plane at ~$6.99 / TB-mo, fair-use egress ≤ 1× stored.
-- **Phase 2+** — local DC cells (Ceph RGW) bring the effective cost
+- **Entry tier** — file content lands on Wasabi via the
+  zk-object-fabric Linode data plane at ~$6.99 / TB-mo, with
+  fair-use egress ≤ 1× stored.
+- **Scale tier** — local DC cells (Ceph RGW) bring the effective cost
   below $3 / TB-mo while keeping the S3 API identical.
 - **Pooled org storage** — quota is pooled across the workspace, not
   fixed per seat. A 10-seat Business workspace with 50 GB / user sees
   500 GB of shared pool; nobody hits a personal cap while the
   workspace is under its aggregate limit.
 - **Egress is metered transparently** — no hidden fair-use cliff.
-  Heavy sharing / download patterns flow into the Secure Business or
-  Dedicated / BYOC tier rather than silently degrading.
+  Heavy sharing and download patterns flow into the Secure Business
+  or Dedicated / BYOC tier rather than silently degrading.
 
 ### 2.5 Key insight: the KChat + ZK Drive bundle
 
@@ -150,26 +153,26 @@ suite, and that care about privacy, residency, and governance.
 
 ### 3.2 Core feature set
 
-| Feature                   | Phase 1  | Phase 2 | Phase 3 | Phase 4 |
-| ------------------------- | -------- | ------- | ------- | ------- |
-| Folder / file CRUD        | Yes      | Yes     | Yes     | Yes     |
-| File versioning           | Yes      | Yes     | Yes     | Yes     |
-| Internal sharing          | Basic    | Full    | Full    | Full    |
-| External sharing (links)  | —        | Yes     | Yes     | Yes     |
-| Guest access              | —        | Yes     | Yes     | Yes     |
-| Client rooms / dropbox    | —        | Yes     | Yes     | Yes     |
-| Previews                  | —        | Yes     | Yes     | Yes     |
-| Full-text search          | —        | Yes     | Yes     | Yes     |
-| Virus scanning            | —        | Yes     | Yes     | Yes     |
-| Trash / soft delete       | Yes      | Yes     | Yes     | Yes     |
-| Activity log              | Basic    | Full    | Full    | Full    |
-| Retention policies        | —        | —       | Yes     | Yes     |
-| Admin dashboard           | —        | —       | Yes     | Yes     |
-| SSO (Google / Microsoft)  | —        | —       | Yes     | Yes     |
-| CMK / strict-ZK folders   | —        | —       | —       | Yes     |
-| Data residency controls   | —        | —       | —       | Yes     |
-| KChat integration API     | —        | —       | —       | Yes     |
-| Offline access            | —        | —       | —       | —       |
+| Feature                   | Supported |
+| ------------------------- | --------- |
+| Folder / file CRUD        | Yes       |
+| File versioning           | Yes       |
+| Internal sharing          | Yes       |
+| External sharing (links)  | Yes       |
+| Guest access              | Yes       |
+| Client rooms / dropbox    | Yes       |
+| Previews                  | Yes       |
+| Full-text search          | Yes       |
+| Virus scanning            | Yes       |
+| Trash / soft delete       | Yes       |
+| Activity log              | Yes       |
+| Retention policies        | Yes       |
+| Admin dashboard           | Yes       |
+| SSO (Google / Microsoft)  | Yes       |
+| CMK / strict-ZK folders   | Yes       |
+| Data residency controls   | Yes       |
+| KChat integration API     | Yes       |
+| Offline access            | No        |
 
 ### 3.3 Encryption modes
 
@@ -214,12 +217,12 @@ Tradeoffs to document and enforce in the UI:
 
 | Feature                          | Why to defer                                                                            |
 | -------------------------------- | --------------------------------------------------------------------------------------- |
-| Full office suite                | Google / Microsoft own this; integrate via viewer/preview, do not rebuild               |
-| Real-time collaborative editing  | Huge build cost; integrate OnlyOffice or Collabora in Phase 4+ if demand appears        |
-| Desktop sync client              | Native sync is an ops tax and a security surface; PWA + browser first                    |
-| Video / image editing            | Out of ICP; use previews only                                                           |
-| Unlimited storage tiers          | Dishonest; breaks margin model; incompatible with zk-object-fabric fair-use economics    |
-| Enterprise DLP / legal hold      | Requires heavyweight compliance workstream; address in a future "Enterprise" SKU         |
+| Full office suite                | Google / Microsoft own this; integrate via viewer/preview, do not rebuild.              |
+| Real-time collaborative editing  | Large build cost; integrate OnlyOffice or Collabora if demand appears.                  |
+| Desktop sync client              | Native sync is an ops tax and a security surface; PWA + browser first.                  |
+| Video / image editing            | Out of ICP; use previews only.                                                          |
+| Unlimited storage tiers          | Dishonest; breaks margin model; incompatible with zk-object-fabric fair-use economics.  |
+| Enterprise DLP / legal hold      | Requires a heavyweight compliance workstream; address in a future "Enterprise" SKU.     |
 
 ---
 
@@ -303,11 +306,10 @@ ZK Drive does **not** reimplement:
 - S3 compatibility.
 
 All of the above are owned by zk-object-fabric. This decision is the
-single biggest cost and risk reduction in the ZK Drive plan. If the
-team tried to rebuild these primitives, we would double our
-engineering scope and gain nothing — zk-object-fabric already has
-them and already passes its S3 compliance test suite against every
-adapter.
+single biggest cost and risk reduction in the ZK Drive plan.
+Rebuilding these primitives would double the engineering scope and
+gain nothing — zk-object-fabric already provides them and already
+passes its S3 compliance test suite against every adapter.
 
 ### 5.2 File content never lives in Postgres
 
@@ -348,9 +350,9 @@ concurrent uploads.
 
 ### 5.4 Postgres FTS before dedicated search
 
-Phase 1–2 search runs on Postgres full-text search (`tsvector` /
-`tsquery`). This handles file names, folder names, tags, and text
-extracted from managed-encrypted documents by the index worker.
+Search runs on Postgres full-text search (`tsvector` / `tsquery`).
+This handles file names, folder names, tags, and text extracted from
+managed-encrypted documents by the index worker.
 
 Dedicated search (OpenSearch or Meilisearch) is introduced only when:
 
@@ -360,22 +362,22 @@ Dedicated search (OpenSearch or Meilisearch) is introduced only when:
   example, relevance tuning or faceted search across tenants).
 
 Postgres FTS is free, operationally cheap, and good enough for SME
-workloads. Dedicated search is a real operational investment and
-deferring it until we need it keeps Phase 1–2 small.
+workloads. Dedicated search is a real operational investment;
+deferring it until it is needed keeps the operational surface small.
 
 ### 5.5 NATS JetStream for async jobs
 
 Preview, virus scan, index, retention, and archive jobs run as NATS
 JetStream consumers. Each job type is a separate subject with its own
-worker pool. JetStream gives us:
+worker pool. JetStream provides:
 
 - Durable delivery with ack semantics.
 - Per-subject scaling (many preview workers, few archive workers).
-- Retry and dead-letter semantics without a separate DB.
+- Retry and dead-letter semantics without a separate database.
 - A natural path to extend KChat signals into ZK Drive workers.
 
 Redis streams, Kafka, and RabbitMQ were considered. Kafka is too
-heavy for Phase 1 operational footprint; Redis streams lack the
+heavy for the target operational footprint; Redis streams lack the
 durability guarantees; RabbitMQ adds an unrelated operational
 runtime. NATS is already in the KChat / sn360 operational stack.
 
@@ -390,15 +392,14 @@ runtime. NATS is already in the KChat / sn360 operational stack.
 | Permissions / sharing          | Build      | `internal/permission/`, `internal/sharing/` |
 | Preview generation             | Integrate  | LibreOffice + ImageMagick + FFmpeg          |
 | Virus scanning                 | Integrate  | ClamAV                                      |
-| Search                         | Build      | Postgres FTS (phase 1–2)                    |
+| Search                         | Build      | Postgres FTS                                |
 | Authentication                 | Build      | `api/auth/` (+ OAuth2 for Google / MS SSO)  |
 | Real-time collaboration        | Defer      | Integrate OnlyOffice / Collabora later      |
 | Desktop sync                   | Defer      | —                                           |
 
-"Build" means we own the code and the behavior. "Integrate" means we
-wrap an existing tool or service and do not try to improve on it.
-"Defer" means we explicitly don't build or integrate until a later
-phase.
+"Build" means ZK Drive owns the code and the behavior. "Integrate"
+means ZK Drive wraps an existing tool or service and does not try to
+improve on it. "Defer" means it is explicitly out of initial scope.
 
 ---
 
@@ -445,7 +446,7 @@ onboard a small team but not enough to replace a real plan.
 | --------------------------------------------------- | --------------------------------- | ------------------------------------------------------------------------------------------------------- |
 | zk-object-fabric S3 API stability                   | Hard dependency on upstream       | Pin zk-object-fabric version; run ZK Drive integration tests against the same S3 compliance suite       |
 | Preview compute cost                                | Margin erosion on Business tier   | Queue-based amortization; cap preview size per file; cache rendered previews in derived-object bucket   |
-| Search quality                                      | Poor UX on large workspaces       | Keep Phase 1–2 on Postgres FTS; gate OpenSearch rollout on real metrics, not speculation                |
+| Search quality                                      | Poor UX on large workspaces       | Stay on Postgres FTS by default; gate OpenSearch rollout on real metrics, not speculation               |
 | Guest / external abuse                              | Spam uploads, malware vectors     | Rate limit guest uploads; virus scan before visibility; admin-approved guest invites above a threshold  |
 | Competing with Google / Microsoft                   | Positioning confusion             | Explicit non-goal to ship an office suite; lean into privacy and client-collaboration use cases         |
 | KChat coupling                                      | One product blocks the other      | One-directional dependency (KChat → ZK Drive); ZK Drive ships standalone without KChat installed       |
@@ -455,21 +456,21 @@ onboard a small team but not enough to replace a real plan.
 
 ## 9. What NOT to Build First
 
-The following items are explicitly **out of scope for Phase 1 – 3**.
-They are tempting, but any of them will slow the product down without
+The following items are explicitly **out of initial scope**. They are
+tempting, but any of them will slow the product down without
 materially improving the value proposition.
 
 | Item                                           | Why                                                                                       |
 | ---------------------------------------------- | ----------------------------------------------------------------------------------------- |
 | Full office suite                              | Google / Microsoft own this. Ship a preview viewer, not an editor.                        |
 | Desktop sync client                            | Native sync is an ops tax and a security surface. PWA + browser first; native only later. |
-| Real-time collaborative editing                | Enormous build cost. If demand appears, integrate OnlyOffice / Collabora in Phase 4+.     |
+| Real-time collaborative editing                | Large build cost. If demand appears, integrate OnlyOffice or Collabora.                   |
 | Unlimited storage tiers                        | Dishonest; incompatible with zk-object-fabric fair-use economics; destroys margin.        |
 | Video conferencing                             | Wrong product. KChat covers calls; ZK Drive stores recordings.                            |
 | Enterprise DLP / legal hold / eDiscovery       | Belongs in a future Enterprise SKU with dedicated compliance engineering.                 |
 | Native mobile apps                             | PWA + responsive web first. Reassess only when PWA metrics show adoption loss.            |
-| AI-powered features                            | Available in Phase 4 only, and only in managed encrypted mode where extraction is legal.  |
+| AI-powered features                            | Restricted to managed-encrypted mode where content extraction is legal.                   |
 
-The early product is: a clean drive UI, zk-object-fabric-backed
+The core product is a clean drive UI, zk-object-fabric-backed
 storage, sharing and guest access, previews and scanning, and a
-small admin surface. That is already a viable SME product.
+focused admin surface. That is already a viable SME product.

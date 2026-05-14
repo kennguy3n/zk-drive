@@ -155,10 +155,11 @@ design.
 - **Object storage**: zk-object-fabric S3 API (all file content).
 - **Async jobs**: NATS JetStream (preview, scan, index, retention,
   archive).
-- **Search**: Postgres FTS in Phase 1–2; OpenSearch or Meilisearch if
-  query volume or corpus size exceeds Postgres FTS.
+- **Search**: Postgres full-text search by default; OpenSearch or
+  Meilisearch is layered on top only when query volume or corpus size
+  exceeds what Postgres FTS can serve.
 
-## Target repo structure
+## Repository Structure
 
 ```
 zk-drive/
@@ -206,27 +207,30 @@ zk-drive/
       components/        # File browser, upload, preview, sharing, search, PWA
       hooks/             # React hooks (useNotifications, etc.)
       pages/             # Drive UI, admin, billing, encryption, placement, KChat
-  migrations/            # Postgres schema migrations (001–023)
+  migrations/            # Postgres schema migrations
   tests/
-    integration/         # Go integration tests (35+ test files, phase gates)
+    integration/         # Go integration tests
     e2e/                 # Playwright browser tests + presigned roundtrip
   deploy/
     k8s/                 # Kubernetes manifests (dev/staging)
     docker-compose.prod.yml
     README.md
   docs/
-    PROPOSAL.md
-    ARCHITECTURE.md
-    PROGRESS.md
-    MOBILE_EVALUATION.md
+    PROPOSAL.md          # Product overview
+    ARCHITECTURE.md      # System architecture
+    PHASES.md            # Release history
+    PROGRESS.md          # Changelog
+    MOBILE_EVALUATION.md # Mobile strategy evaluation
 ```
 
-## Project status
+## Status
 
-- **Current phase**: Phase 5 — Launch & Revenue (complete).
-- **Tracker**: [docs/PROGRESS.md](docs/PROGRESS.md) for build status.
-- **Technical proposal**: [docs/PROPOSAL.md](docs/PROPOSAL.md).
-- **Architecture**: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
+Production-ready. ZK Drive ships as a standalone product and is also
+used as the storage backbone for KChat.
+
+See [docs/PROPOSAL.md](docs/PROPOSAL.md) for the product overview and
+[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the system
+architecture.
 
 ## Configuration
 
@@ -319,11 +323,11 @@ cd frontend && npx playwright test
 
 ## Documentation
 
-- [Technical Proposal](docs/PROPOSAL.md)
+- [Product Overview](docs/PROPOSAL.md)
 - [Architecture](docs/ARCHITECTURE.md)
-- [Progress Tracker](docs/PROGRESS.md)
-- [Phase Summary](docs/PHASES.md)
-- [Mobile Evaluation](docs/MOBILE_EVALUATION.md)
+- [Release History](docs/PHASES.md)
+- [Changelog](docs/PROGRESS.md)
+- [Mobile Strategy Evaluation](docs/MOBILE_EVALUATION.md)
 
 ## License
 
