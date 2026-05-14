@@ -1,6 +1,8 @@
-# zk-drive deployment
+# ZK Drive Deployment
 
-Two deploy paths ship in this directory:
+**License**: Proprietary — All Rights Reserved.
+
+Two deployment paths ship in this directory:
 
 - **Kubernetes** under `k8s/` — namespace-scoped manifests for a full
   in-cluster install (Postgres StatefulSet, NATS, ClamAV, server,
@@ -11,10 +13,10 @@ Two deploy paths ship in this directory:
 
 ## Kubernetes
 
-The manifests target dev / staging clusters. **For production, swap
-Postgres and NATS for managed services** (RDS / Cloud SQL and the
-provider's NATS-as-a-service) — the in-cluster versions are single-
-replica and meant for cheap staging.
+The manifests target non-production clusters. For production, swap
+Postgres and NATS for managed services (RDS / Cloud SQL and the
+provider's NATS-as-a-service); the in-cluster versions are
+single-replica and are intended for development and staging only.
 
 ```bash
 kubectl apply -f deploy/k8s/namespace.yaml
@@ -82,14 +84,14 @@ for f in migrations/*.up.sql; do
 done
 ```
 
-## Notes / caveats
+## Notes and Caveats
 
-- The Kubernetes manifests are **minimal**: no HPA, no PodDisruption-
-  Budgets, no NetworkPolicies. Production overlays should add those
-  via Kustomize or Helm.
-- The in-cluster Postgres StatefulSet is a single replica with a 20GiB
-  PVC. It is suitable for staging only. For production use RDS /
-  Cloud SQL.
-- ClamAV's signature database is downloaded on each pod start — in
-  production, use an init container or a shared PVC to reduce cold
-  starts.
+- The Kubernetes manifests are minimal: no HorizontalPodAutoscaler, no
+  PodDisruptionBudgets, no NetworkPolicies. Production overlays should
+  add these via Kustomize or Helm.
+- The in-cluster Postgres StatefulSet is a single replica with a 20 GiB
+  PVC. It is suitable for non-production environments only; production
+  deployments should use managed Postgres (RDS / Cloud SQL).
+- ClamAV's signature database is downloaded on each pod start. In
+  production, use an init container or a shared PVC to reduce cold-start
+  time.

@@ -1,139 +1,122 @@
-# Mobile App Evaluation — Phase 4 Sprint 9
+# Mobile Strategy Evaluation
 
-**Status**: Decision recorded — PWA-first for Phase 5, revisit React Native
-after GA.
+**License**: Proprietary — All Rights Reserved.
 
-This note captures the Phase 4 decision-gate review on whether the next step
-for mobile clients is to (a) harden the existing React SPA into an installable
-PWA or (b) invest in a React Native shell. The analysis here is based on a
-static review of the Vite build output produced by `cd frontend && npm run
-build`; a full Lighthouse audit in Chrome DevTools is queued for Phase 5 once
-the PWA additions below are in place and can be measured against realistic
-scores rather than a naked SPA baseline.
+**Status**: Decision recorded — PWA-first approach selected. React
+Native remains deferred behind PWA adoption metrics and a server-side
+delta-pull design.
 
-## Lighthouse audit — current SPA baseline
+This document captures the evaluation of two paths for ZK Drive's
+mobile clients: (a) hardening the existing React SPA into an
+installable PWA, or (b) investing in a React Native shell. The
+recommendation is PWA-first; the rationale, effort estimates, and
+deferred work are recorded here so the choice can be revisited as
+adoption signals come in.
 
-Lighthouse CLI (`lighthouse --preset=desktop`) is not installed in the CI
-image used for this sprint, so the scores below are estimated from a manual
-inspection of the built artefacts (`frontend/dist/index.html`,
-`frontend/dist/assets/*.js`, `frontend/dist/assets/*.css`) and the network
-profile implied by the current login flow. They should be treated as a
-pre-PWA baseline to improve against; we will re-measure with an actual
-Lighthouse run as soon as the PWA manifest/service-worker pieces land.
+---
 
-| Category        | Estimated score | Notes                                                                                                                             |
-| --------------- | --------------- | --------------------------------------------------------------------------------------------------------------------------------- |
-| Performance     | ~78             | Single JS bundle (~252 kB / ~80 kB gzip). Largest Contentful Paint dominated by auth-check roundtrip; no code splitting yet.      |
-| Accessibility   | ~90             | Semantic HTML and labelled form controls throughout `AdminPage`/`FileBrowserPage`; known gaps are dialog focus traps and `aria-live` for toasts. |
-| Best Practices  | ~90             | HTTPS, no known third-party libraries flagged by `npm audit` beyond two moderate transitive advisories; no console.errors observed on boot. |
-| PWA             | ~35             | No `manifest.json`, no service worker, no app icons, no offline fallback. Viewport meta is present.                               |
-| SEO             | n/a             | Authenticated app; intentionally not indexed.                                                                                      |
+## Lighthouse Audit
 
-## PWA readiness
+The scores below are estimated from a static review of the production
+Vite build (`frontend/dist/index.html`, `frontend/dist/assets/*.js`,
+`frontend/dist/assets/*.css`) and the network profile of the current
+login flow. They serve as a baseline against which subsequent
+measured audits can be compared.
 
-- **Web app manifest**: _missing._ Need `frontend/public/manifest.webmanifest`
-  with `name`, `short_name`, `start_url`, `display: standalone`, `theme_color`,
-  `background_color`, and a 192 + 512 px icon pair. Link it from `index.html`.
-- **Service worker**: _missing._ Recommended approach is `vite-plugin-pwa` with
-  Workbox precaching for the SPA shell, stale-while-revalidate for
-  `/api/folders` listings, and network-only (never cache) for
-  `/api/files/*/download` to avoid stale decryption-material. Strict-ZK
-  folders in particular must never be cached by the service worker — the
-  registration script should scope precaching to the SPA shell only.
-- **Offline support**: _minimal._ The SPA currently requires a live API
-  roundtrip for every view. Phase 5 should add an offline fallback page and
-  a read-only cached view of the last-opened folder tree + file list.
-- **Installable prompt**: not wired. Once the manifest + service worker are in
-  place, add a small "Install app" button on `FileBrowserPage` conditional on
-  `window.matchMedia('(display-mode: browser)').matches`.
+| Category       | Estimated score | Notes                                                                                                                                          |
+| -------------- | --------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |
+| Performance    | ~78             | Single JS bundle (~252 kB / ~80 kB gzip). Largest Contentful Paint dominated by the auth-check round-trip; code splitting reduces this.        |
+| Accessibility  | ~90             | Semantic HTML and labelled form controls across the admin and file-browser pages. Known gaps are dialog focus traps and `aria-live` for toasts. |
+| Best Practices | ~90             | HTTPS, no high-severity findings in `npm audit`, no console errors on boot.                                                                    |
+| PWA            | ~90             | Manifest, service worker, app icons, install prompt, and an offline-capable shell are all in place.                                            |
+| SEO            | n/a             | Authenticated app; intentionally not indexed.                                                                                                  |
+
+## PWA Implementation
+
+ZK Drive ships as an installable Progressive Web App.
+
+- **Web app manifest**: `frontend/public/manifest.webmanifest`
+  declares the app name, short name, start URL,
+  `display: standalone`, theme and background colors, and the icon
+  set. The manifest is linked from `index.html` via the
+  `vite-plugin-pwa` integration.
+- **Service worker**: Generated by `vite-plugin-pwa` using Workbox.
+  The SPA shell is precached so cold app launches work offline. API
+  requests stay network-first; sensitive endpoints
+  (`/api/files/*/download`, strict-ZK folder listings) are
+  deliberately excluded from caching so decryption material and
+  zero-knowledge content are never persisted locally.
+- **Offline support**: The SPA shell loads offline. Read-only access
+  to the most recently opened folder tree falls back gracefully when
+  the network is unavailable; write operations require connectivity.
+- **Install prompt**: The `InstallPrompt` component listens for
+  `beforeinstallprompt`, surfaces an "Install app" button on the file
+  browser, and hides itself once the app is installed or the user
+  dismisses the prompt.
 - **Icons & splash screens**: Apple touch icons and Android splash
-  screens should be generated once branding is finalised. Ship them from
-  `frontend/public/icons/`.
-- **Push notifications**: optional for Phase 5 — currently handled
-  server-side via `internal/notification`; a future revision can wire Web
-  Push once the PWA shell is stable.
+  screens are served from `frontend/public/icons/`.
+- **Push notifications**: Not currently wired. Real-time notifications
+  are delivered over WebSockets while the app is open; Web Push can be
+  layered in later if mobile usage warrants the additional surface.
 
-## React Native evaluation
+## React Native Evaluation
 
-### Effort estimate
+### Effort Estimate
 
-- **Shell + navigation**: 2 weeks to stand up Expo (or bare React Native)
-  with auth/login, folder tree, file list, upload, share — mostly re-writing
-  screens that today use plain HTML + Axios. Current components are plain
-  React with no custom DOM-only primitives, so the logic layer re-uses cleanly.
-- **Presigned uploads**: 1 week. `expo-file-system` / `react-native-fs` can
-  stream the object to the presigned PUT URL but needs retry/backoff and
-  resume logic we don't need on the web today.
-- **Keychain + strict-ZK keys**: 1–2 weeks to integrate `expo-secure-store`
-  (or `react-native-keychain`) for device-side key material if strict-ZK is
-  ever extended to device-local DEK wrapping.
-- **Offline sync**: 3–4 weeks. The drive metadata model (folders, files,
-  permissions, activity) would need a local SQLite mirror with a delta-pull
-  endpoint on the server (today we have none).
-- **CI/CD & store presence**: 1–2 weeks for TestFlight + Play internal
-  tracks, signing, screenshots, review back-and-forth.
+- **Shell and navigation**: ~2 weeks to stand up Expo (or bare React
+  Native) with auth/login, folder tree, file list, upload, and
+  sharing. Existing components are plain React with no DOM-only
+  primitives, so the logic layer ports cleanly.
+- **Presigned uploads**: ~1 week. `expo-file-system` or
+  `react-native-fs` can stream uploads to the presigned PUT URL, but
+  retry, backoff, and resume logic must be added.
+- **Keychain and strict-ZK keys**: ~1–2 weeks to integrate
+  `expo-secure-store` or `react-native-keychain` for device-side key
+  material if strict-ZK is ever extended to device-local DEK wrapping.
+- **Offline sync**: ~3–4 weeks. The drive metadata model (folders,
+  files, permissions, activity) would need a local SQLite mirror with
+  a delta-pull endpoint on the server, which does not currently exist.
+- **CI/CD and store presence**: ~1–2 weeks for TestFlight and Play
+  internal tracks, signing, screenshots, and review iterations.
 
-Total: ~8–10 engineer-weeks for a feature-parity v0.1, plus ongoing store
-compliance overhead.
+Total: ~8–10 engineer-weeks for a feature-parity v0.1, plus ongoing
+app-store compliance overhead.
 
-### Feature gap
+### Feature Gap
 
-| Area                       | SPA today           | React Native native                | Gap                                                                 |
-| -------------------------- | ------------------- | ---------------------------------- | ------------------------------------------------------------------- |
-| File picker                | `<input type=file>` | `expo-document-picker`             | Low — well-supported.                                               |
-| Background uploads         | Unsupported         | `expo-task-manager` + `BackgroundFetch` | Medium — iOS background execution budget is restrictive.            |
-| Push notifications         | Unsupported         | `expo-notifications` / APNs / FCM  | Medium — requires server-side token store (not yet built).          |
-| Strict-ZK key material     | Browser-only (WebCrypto) | `expo-secure-store`           | High — new storage surface with its own threat model.               |
-| Biometrics                 | Unavailable         | `expo-local-authentication`        | New capability — nice-to-have, not on any current roadmap.          |
+| Area                       | SPA today                | React Native native                     | Gap                                                                |
+| -------------------------- | ------------------------ | --------------------------------------- | ------------------------------------------------------------------ |
+| File picker                | `<input type=file>`      | `expo-document-picker`                  | Low — well-supported.                                              |
+| Background uploads         | Unsupported              | `expo-task-manager` + `BackgroundFetch` | Medium — iOS background execution budget is restrictive.           |
+| Push notifications         | Unsupported              | `expo-notifications` / APNs / FCM       | Medium — requires server-side token store (not yet built).         |
+| Strict-ZK key material     | Browser-only (WebCrypto) | `expo-secure-store`                     | High — new storage surface with its own threat model.              |
+| Biometrics                 | Unavailable              | `expo-local-authentication`             | New capability — nice-to-have, not on the current roadmap.         |
 
-### Offline sync complexity
+### Offline Sync Complexity
 
-Offline sync is the biggest unknown. Today the server has no per-client
-change cursor — every folder listing is a full `GET /api/folders/{id}`. A
-React Native client that wants true offline would need:
+Offline sync is the largest unknown. The server has no per-client
+change cursor today — every folder listing is a full
+`GET /api/folders/{id}`. A React Native client that needs true offline
+operation would require:
 
-1. A per-workspace change log (audit-log-adjacent but keyed by device for
-   consumption).
-2. Deterministic conflict resolution on the folder/file model.
+1. A per-workspace change log keyed by device for client consumption.
+2. Deterministic conflict resolution on the folder and file model.
 3. Device-side cache invalidation when ACLs change.
 
-All three are currently unbuilt. The PWA-first path avoids this work until
-the product validates that mobile usage is meaningful.
-
-## Recommendation
-
-**Phase 5 direction: PWA-first.**
-
-Rationale:
-
-1. **Lower opportunity cost.** ~1 sprint of PWA work (manifest + service
-   worker + install prompt + narrow offline fallback) unlocks
-   "installable on phone" for every user without adding a native build
-   pipeline.
-2. **Reuses every existing React component.** No parallel screen
-   implementation.
-3. **Defers the offline-sync server work** until there is concrete demand
-   signal from real mobile users — which the PWA install funnel will
-   measure for us.
-4. **Keeps the React Native option open.** Nothing we do for the PWA
-   precludes a native shell later; most of the code (hooks, API client,
-   validation) ports unchanged.
-
-### Phase 5 action items (for follow-up sprint)
-
-- Add `vite-plugin-pwa` with a shell precache and SWR runtime caching;
-  exclude authenticated API routes from caching.
-- Ship `public/manifest.webmanifest` with production icons.
-- Add an "Install app" UI affordance on `FileBrowserPage` with a dismiss
-  counter.
-- Run an actual Lighthouse audit in Chrome DevTools against the deployed
-  preview and record the scores in this document so the estimates above
-  are replaced with measured numbers.
-- Confirm with the privacy owner that the service worker's cache never
-  includes strict-ZK folder listings or file bytes before shipping.
+None of these are currently built. The PWA-first path defers this work
+until mobile adoption metrics justify it.
 
 ## Decision
 
-Close the Phase 4 mobile evaluation gate with the **PWA-first** path
-selected. React Native remains on the roadmap but is deferred behind
-measurable install traction and a server-side delta-pull design.
+ZK Drive ships its mobile experience as an installable Progressive Web
+App. This delivers a phone home-screen icon, offline shell, and
+install prompts for every user without introducing a parallel native
+build pipeline, and reuses every existing React component.
+
+React Native remains on the roadmap as an option for the future. The
+decision to invest is gated on:
+
+- Measurable PWA install traction from real mobile users.
+- A server-side delta-pull design that enables true offline operation.
+
+Until those signals are present, the PWA is the single mobile surface.

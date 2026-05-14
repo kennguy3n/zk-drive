@@ -2,8 +2,9 @@
 
 **License**: Proprietary — All Rights Reserved.
 
-> Status: Phase 5 — Launch & Revenue (complete). See
-> [PROGRESS.md](PROGRESS.md) for build status.
+This document describes the system architecture of ZK Drive: the data
+model, API surface, async pipelines, encryption integration with
+zk-object-fabric, and the deployment topology.
 
 ---
 
@@ -407,10 +408,10 @@ the workers do not have the plaintext.
 
 ## 6. Search Architecture
 
-### 6.1 Phase 1 — Postgres FTS
+### 6.1 Default — Postgres FTS
 
-Phase 1 search runs entirely on Postgres FTS using `tsvector` /
-`tsquery`. Indexed fields:
+Search runs on Postgres FTS using `tsvector` / `tsquery`. Indexed
+fields:
 
 - File names.
 - Folder names.
@@ -421,14 +422,14 @@ Phase 1 search runs entirely on Postgres FTS using `tsvector` /
 Postgres FTS is cheap, operationally free (already in the stack), and
 good enough for the SME query mix.
 
-### 6.2 Phase 2+ — OpenSearch / Meilisearch
+### 6.2 Optional dedicated tier — OpenSearch / Meilisearch
 
 A dedicated search tier is introduced only when Postgres FTS cannot
 hit the latency target (~500 ms p95) or the corpus exceeds a few
 million documents per workspace. The dedicated tier runs as a
 consumer of `drive.search.index` events alongside Postgres FTS, not
-as a replacement. Postgres FTS stays as the source of truth for file
-/ folder name search.
+as a replacement. Postgres FTS remains the source of truth for file
+and folder name search.
 
 ### 6.3 Strict-ZK files
 
@@ -524,10 +525,11 @@ Each folder carries an `encryption_mode` column stored in the
 - **Redis key prefixing** — session and cache keys are namespaced by
   `workspace_id` so a Redis misread cannot leak across tenants.
 - **Object key namespace** — zk-object-fabric is organized either
-  bucket-per-workspace (Phase 1 / 2, simpler placement) or
-  prefix-per-workspace within a shared bucket (Phase 3+ when
-  bucket counts matter). Either way, the object key is derived from
-  the workspace ID and is not trusted from the client.
+  bucket-per-workspace (the simpler layout, used for single-workspace
+  and small multi-tenant deployments) or prefix-per-workspace within a
+  shared bucket (used at scale when bucket counts matter). Either way,
+  the object key is derived from the workspace ID and is not trusted
+  from the client.
 
 ---
 
@@ -569,11 +571,11 @@ badges in the top bar.
 
 ## 11. Session & Rate Limiting
 
-ZK Drive started with stateless JWT sessions and an in-memory
-rate-limiter token bucket; both broke as soon as the server ran
-with more than one replica. Phase 5 introduced a Redis-backed
-implementation of each so sessions can be revoked centrally and
-rate limits stay correct under horizontal scaling.
+Production deployments use a Redis-backed session store and a
+Redis-backed distributed rate limiter so sessions can be revoked
+centrally and rate limits stay correct across multiple API replicas.
+In-memory fallbacks are available for single-replica deployments and
+local development.
 
 ### 11.1 Session store
 
@@ -599,10 +601,10 @@ server. The script:
    set `Retry-After` and `X-RateLimit-*` headers correctly.
 
 When `REDIS_URL` is unset, both the session store and the rate
-limiter fall back to the in-memory implementations from earlier
-phases. This keeps `go test -short` and local dev cheap and means
-single-replica deployments still function without standing up
-Redis. Production deployments are expected to set `REDIS_URL`.
+limiter fall back to in-memory implementations. This keeps
+`go test -short` and local development cheap, and lets single-replica
+deployments run without standing up Redis. Production deployments are
+expected to set `REDIS_URL`.
 
 ---
 
@@ -786,8 +788,8 @@ preview worker.
 ## 16. PWA Architecture
 
 The frontend ships as a Progressive Web App so paying SMEs can
-install ZK Drive as a phone-home-screen icon without us having to
-build a separate React Native app.
+install ZK Drive as a phone home-screen icon without requiring a
+separate React Native build.
 
 - **Build integration**: `vite-plugin-pwa` injects the manifest and
   service worker into the Vite production build.
@@ -802,7 +804,7 @@ build a separate React Native app.
 
 The PWA-first decision is recorded in
 [MOBILE_EVALUATION.md](MOBILE_EVALUATION.md); a React Native
-investment is deferred behind PWA install metrics.
+investment remains deferred behind PWA install metrics.
 
 ---
 
