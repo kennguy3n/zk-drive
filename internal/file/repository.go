@@ -15,6 +15,14 @@ import (
 // exist within the supplied workspace.
 var ErrNotFound = errors.New("file not found")
 
+// ErrVersionConflict is returned by insertVersionTx when a row with
+// the requested version UUID already exists but belongs to a
+// different file or carries a different object_key. A legitimate
+// retry of ConfirmUpload always re-submits the (versionID, fileID,
+// objectKey) triple it was given by UploadURL, so a mismatch
+// signals either a UUID forge attempt or a programming error.
+var ErrVersionConflict = errors.New("file version conflicts with existing row")
+
 // ErrTagAlreadyExists is returned when AddTag would violate the
 // (file_id, tag) unique constraint. Distinct from ErrNotFound so the
 // HTTP layer can map it to 409 Conflict.
@@ -259,8 +267,27 @@ WHERE workspace_id = $1 AND id = $2 AND deleted_at IS NULL`
 	return tx.Commit(ctx)
 }
 
-// insertVersionTx verifies file ownership and inserts a new version row,
-// atomically computing the next version number via INSERT ... SELECT.
+// insertVersionTx verifies file ownership and inserts a new version
+// row, atomically computing the next version number via INSERT ...
+// SELECT. The insert is idempotent on the primary key: when a row
+// with the requested v.ID already exists, the existing row is
+// re-fetched into `v` and the call returns nil — making
+// ConfirmUpload safe to retry across network interruptions or
+// client crashes without creating duplicate version rows pointing
+// at the same S3 object.
+//
+// Idempotency is bounded by identity: the existing row must belong
+// to the same FileID and carry the same ObjectKey the caller is
+// confirming. A mismatch (different file_id or object_key) yields
+// ErrVersionConflict — that case can only arise from a UUID forge
+// attempt or a serious programming error, so we fail closed rather
+// than silently coalescing two different uploads.
+//
+// On the idempotent path, size_bytes / checksum / created_by /
+// version_number etc. are reloaded from the stored row. We do NOT
+// honour the retry caller's claimed size or checksum — the original
+// commit is authoritative — so a retry cannot mutate the recorded
+// upload metadata.
 func insertVersionTx(ctx context.Context, tx pgx.Tx, workspaceID uuid.UUID, v *FileVersion) error {
 	if v.ID == uuid.Nil {
 		v.ID = uuid.New()
@@ -275,10 +302,39 @@ func insertVersionTx(ctx context.Context, tx pgx.Tx, workspaceID uuid.UUID, v *F
 	const q = `
 INSERT INTO file_versions (id, file_id, version_number, object_key, size_bytes, checksum, created_by)
 SELECT $1, $2, COALESCE(MAX(version_number), 0) + 1, $3, $4, $5, $6 FROM file_versions WHERE file_id = $2
+ON CONFLICT (id) DO NOTHING
 RETURNING version_number, created_at, COALESCE(scan_status, ''), COALESCE(scan_detail, ''), scanned_at`
-	if err := tx.QueryRow(ctx, q, v.ID, v.FileID, v.ObjectKey, v.SizeBytes, v.Checksum, v.CreatedBy).
-		Scan(&v.VersionNumber, &v.CreatedAt, &v.ScanStatus, &v.ScanDetail, &v.ScannedAt); err != nil {
+	err := tx.QueryRow(ctx, q, v.ID, v.FileID, v.ObjectKey, v.SizeBytes, v.Checksum, v.CreatedBy).
+		Scan(&v.VersionNumber, &v.CreatedAt, &v.ScanStatus, &v.ScanDetail, &v.ScannedAt)
+	if err == nil {
+		return nil
+	}
+	if !errors.Is(err, pgx.ErrNoRows) {
 		return fmt.Errorf("insert file version: %w", err)
+	}
+
+	// Conflict: a row with this id already exists. Re-fetch it,
+	// verify (file_id, object_key) match what the caller asked for,
+	// and populate v from the stored row so the surrounding
+	// ConfirmVersion transaction updates files.size_bytes /
+	// current_version_id to the *original* values (not whatever
+	// the retrying client claimed).
+	var (
+		storedFileID    uuid.UUID
+		storedObjectKey string
+	)
+	const reQ = `
+SELECT file_id, object_key, version_number, size_bytes, checksum, created_by, created_at,
+       COALESCE(scan_status, ''), COALESCE(scan_detail, ''), scanned_at
+FROM file_versions WHERE id = $1`
+	if err := tx.QueryRow(ctx, reQ, v.ID).Scan(
+		&storedFileID, &storedObjectKey, &v.VersionNumber, &v.SizeBytes, &v.Checksum, &v.CreatedBy, &v.CreatedAt,
+		&v.ScanStatus, &v.ScanDetail, &v.ScannedAt,
+	); err != nil {
+		return fmt.Errorf("re-fetch existing version: %w", err)
+	}
+	if storedFileID != v.FileID || storedObjectKey != v.ObjectKey {
+		return ErrVersionConflict
 	}
 	return nil
 }
