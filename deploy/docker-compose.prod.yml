@@ -53,7 +53,7 @@ services:
 
   zk-drive-server:
     image: ghcr.io/kennguy3n/zk-drive:${APP_VERSION:-0.1.0}
-    command: ["server"]
+    entrypoint: ["/app/server"]
     restart: unless-stopped
     depends_on:
       postgres:
@@ -84,7 +84,7 @@ services:
 
   zk-drive-worker:
     image: ghcr.io/kennguy3n/zk-drive:${APP_VERSION:-0.1.0}
-    command: ["worker"]
+    entrypoint: ["/app/worker"]
     restart: unless-stopped
     depends_on:
       postgres:

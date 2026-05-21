@@ -16,7 +16,7 @@ spec:
       containers:
         - name: worker
           image: ghcr.io/kennguy3n/zk-drive:0.1.0
-          args: ["worker"]
+          command: ["/app/worker"]
           envFrom:
             - configMapRef:
                 name: zk-drive-config

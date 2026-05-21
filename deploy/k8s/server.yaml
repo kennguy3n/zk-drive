@@ -29,7 +29,7 @@ spec:
       containers:
         - name: server
           image: ghcr.io/kennguy3n/zk-drive:0.1.0
-          args: ["server"]
+          command: ["/app/server"]
           envFrom:
             - configMapRef:
                 name: zk-drive-config
