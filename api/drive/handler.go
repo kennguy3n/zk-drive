@@ -934,7 +934,8 @@ func (h *Handler) ConfirmUpload(w http.ResponseWriter, r *http.Request) {
 	// enforces the full canonical shape (three UUIDs, strict
 	// equality on the leading two, no traversal chars, no NUL,
 	// no backslashes).
-	if _, err := storage.ValidateObjectKey(req.ObjectKey, workspaceID, f.ID); err != nil {
+	versionID, err := storage.ValidateObjectKey(req.ObjectKey, workspaceID, f.ID)
+	if err != nil {
 		http.Error(w, "object_key does not belong to this file", http.StatusForbidden)
 		return
 	}
@@ -950,7 +951,19 @@ func (h *Handler) ConfirmUpload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Pin the version row's primary key to the UUID embedded in the
+	// object_key the client just confirmed. UploadURL generated the
+	// versionID, signed it into the S3 key, and handed both back to
+	// the client; storing the same UUID in file_versions.id keeps
+	// the database row, the S3 object, and any audit / activity log
+	// entries referring to "version_id" in lock-step. Without this,
+	// insertVersionTx would mint a fresh uuid.New(), creating a
+	// permanent mismatch between the object key's version segment
+	// and the DB row id — harmless today (downloads use the stored
+	// object_key string) but a real source of confusion in audit
+	// logs and any future code that round-trips through versionID.
 	v := &file.FileVersion{
+		ID:        versionID,
 		FileID:    f.ID,
 		ObjectKey: req.ObjectKey,
 		SizeBytes: req.SizeBytes,

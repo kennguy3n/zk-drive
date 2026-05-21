@@ -17,11 +17,15 @@ import (
 // empty-segment escape hatches. The table covers the documented attack
 // vectors plus a happy-path round-trip with storage.NewObjectKey.
 func TestValidateObjectKey(t *testing.T) {
-	workspaceID := uuid.MustParse("11111111-1111-1111-1111-111111111111")
-	fileID := uuid.MustParse("22222222-2222-2222-2222-222222222222")
-	versionID := uuid.MustParse("33333333-3333-3333-3333-333333333333")
-	otherWorkspace := uuid.MustParse("99999999-9999-9999-9999-999999999999")
-	otherFile := uuid.MustParse("88888888-8888-8888-8888-888888888888")
+	// Fixture UUIDs deliberately contain hex letters (a-f) so the
+	// "uppercase rejected" / "hyphenless rejected" cases exercise a
+	// real case-/format-difference rather than rendering identical
+	// to the canonical lowercase form.
+	workspaceID := uuid.MustParse("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")
+	fileID := uuid.MustParse("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb")
+	versionID := uuid.MustParse("cccccccc-cccc-cccc-cccc-cccccccccccc")
+	otherWorkspace := uuid.MustParse("dddddddd-dddd-dddd-dddd-dddddddddddd")
+	otherFile := uuid.MustParse("eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee")
 
 	tests := []struct {
 		name        string
@@ -140,11 +144,28 @@ func TestValidateObjectKey(t *testing.T) {
 			why:    "consecutive slashes flatten in some S3 implementations and could re-introduce traversal",
 		},
 		{
-			name:   "uppercase UUID accepted (uuid.Parse is case-insensitive)",
+			name:   "uppercase UUID rejected (S3 keys are case-sensitive)",
 			key:    strings.ToUpper(storage.NewObjectKey(workspaceID, fileID, versionID)),
-			wantOK: true,
-			why:    "RFC 4122 allows mixed case; uuid.Parse normalises, so the validator must too",
-			wantVersion: versionID,
+			wantOK: false,
+			why:    "uuid.Parse accepts mixed case but NewObjectKey always emits lowercase; an uppercase key would round-trip to a different S3 object and 404 on download",
+		},
+		{
+			name:   "urn:uuid prefix on workspace segment rejected",
+			key:    "urn:uuid:" + workspaceID.String() + "/" + fileID.String() + "/" + versionID.String(),
+			wantOK: false,
+			why:    "uuid.Parse accepts urn:uuid: prefix but it is not canonical and creates a different S3 key",
+		},
+		{
+			name:   "braced UUID on file segment rejected",
+			key:    workspaceID.String() + "/{" + fileID.String() + "}/" + versionID.String(),
+			wantOK: false,
+			why:    "uuid.Parse accepts braced form but NewObjectKey never emits braces",
+		},
+		{
+			name:   "hyphenless UUID on version segment rejected",
+			key:    workspaceID.String() + "/" + fileID.String() + "/" + strings.ReplaceAll(versionID.String(), "-", ""),
+			wantOK: false,
+			why:    "uuid.Parse accepts 32-hex-digit form but NewObjectKey always emits the dashed form",
 		},
 	}
 
