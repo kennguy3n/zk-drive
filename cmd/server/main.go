@@ -324,6 +324,13 @@ func run() error {
 	r.Use(chimw.RealIP)
 	r.Use(chimw.Logger)
 	r.Use(chimw.Recoverer)
+	// Cap incoming request bodies at DefaultMaxBodyBytes (1 MiB). File
+	// bytes do not flow through the API — uploads use presigned URLs
+	// that bypass this handler entirely — so the cap is well above any
+	// expected JSON payload. The Stripe webhook re-wraps its own body
+	// at 64 KiB inside the handler; MaxBytesReader composes correctly,
+	// the inner cap still wins.
+	r.Use(middleware.MaxBodySize(middleware.DefaultMaxBodyBytes))
 
 	r.Get("/healthz", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
