@@ -52,8 +52,8 @@ services:
           memory: 2G
 
   zk-drive-server:
-    image: ghcr.io/kennguy3n/zk-drive:latest
-    command: ["server"]
+    image: ghcr.io/kennguy3n/zk-drive:${APP_VERSION:-0.1.0}
+    entrypoint: ["/app/server"]
     restart: unless-stopped
     depends_on:
       postgres:
@@ -83,8 +83,8 @@ services:
           memory: 512M
 
   zk-drive-worker:
-    image: ghcr.io/kennguy3n/zk-drive:latest
-    command: ["worker"]
+    image: ghcr.io/kennguy3n/zk-drive:${APP_VERSION:-0.1.0}
+    entrypoint: ["/app/worker"]
     restart: unless-stopped
     depends_on:
       postgres:

@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
@@ -45,6 +46,7 @@ import (
 	"github.com/kennguy3n/zk-drive/internal/sharing"
 	"github.com/kennguy3n/zk-drive/internal/storage"
 	"github.com/kennguy3n/zk-drive/internal/user"
+	"github.com/kennguy3n/zk-drive/internal/version"
 	"github.com/kennguy3n/zk-drive/internal/wiring"
 	"github.com/kennguy3n/zk-drive/internal/workspace"
 )
@@ -56,6 +58,8 @@ func main() {
 }
 
 func run() error {
+	log.Printf("zk-drive server version=%s", version.Version)
+
 	cfg, err := config.Load()
 	if err != nil {
 		return err
@@ -322,8 +326,12 @@ func run() error {
 	r.Use(chimw.Recoverer)
 
 	r.Get("/healthz", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte("ok"))
+		_ = json.NewEncoder(w).Encode(map[string]string{
+			"status":  "ok",
+			"version": version.Version,
+		})
 	})
 
 	r.Route("/api", func(r chi.Router) {
