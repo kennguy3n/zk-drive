@@ -52,7 +52,7 @@ services:
           memory: 2G
 
   zk-drive-server:
-    image: ghcr.io/kennguy3n/zk-drive:latest
+    image: ghcr.io/kennguy3n/zk-drive:${APP_VERSION:-0.1.0}
     command: ["server"]
     restart: unless-stopped
     depends_on:
@@ -83,7 +83,7 @@ services:
           memory: 512M
 
   zk-drive-worker:
-    image: ghcr.io/kennguy3n/zk-drive:latest
+    image: ghcr.io/kennguy3n/zk-drive:${APP_VERSION:-0.1.0}
     command: ["worker"]
     restart: unless-stopped
     depends_on:

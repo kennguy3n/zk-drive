@@ -42,6 +42,7 @@ import (
 	"github.com/kennguy3n/zk-drive/internal/scan"
 	"github.com/kennguy3n/zk-drive/internal/sharing"
 	"github.com/kennguy3n/zk-drive/internal/storage"
+	"github.com/kennguy3n/zk-drive/internal/version"
 	"github.com/kennguy3n/zk-drive/internal/wiring"
 )
 
@@ -58,6 +59,8 @@ func main() {
 }
 
 func run() error {
+	log.Printf("zk-drive worker version=%s", version.Version)
+
 	cfg, err := config.Load()
 	if err != nil {
 		return err
