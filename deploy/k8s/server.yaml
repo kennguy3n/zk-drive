@@ -28,7 +28,7 @@ spec:
     spec:
       containers:
         - name: server
-          image: ghcr.io/kennguy3n/zk-drive:latest
+          image: ghcr.io/kennguy3n/zk-drive:0.1.0
           args: ["server"]
           envFrom:
             - configMapRef:
