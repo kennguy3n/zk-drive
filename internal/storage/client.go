@@ -205,16 +205,25 @@ func ValidateObjectKey(key string, expectedWorkspace, expectedFile uuid.UUID) (u
 		}
 	}
 
+	// All three segments must be canonical, non-nil UUIDs. uuid.Nil
+	// (00000000-0000-0000-0000-000000000000) is a valid parse target
+	// but a forbidden value here: insertVersionTx and CreateFile
+	// treat v.ID == uuid.Nil as "please mint a fresh UUID", which
+	// would silently overwrite the pinned versionID and break the
+	// "DB row id matches the version segment of the object_key"
+	// invariant ConfirmUpload now relies on. UploadURL only ever
+	// emits non-nil UUIDs, so any caller submitting uuid.Nil is
+	// tampering and must be rejected — fail closed.
 	workspaceID, err := uuid.Parse(parts[0])
-	if err != nil || workspaceID != expectedWorkspace || workspaceID.String() != parts[0] {
+	if err != nil || workspaceID == uuid.Nil || workspaceID != expectedWorkspace || workspaceID.String() != parts[0] {
 		return uuid.Nil, ErrInvalidObjectKey
 	}
 	fileID, err := uuid.Parse(parts[1])
-	if err != nil || fileID != expectedFile || fileID.String() != parts[1] {
+	if err != nil || fileID == uuid.Nil || fileID != expectedFile || fileID.String() != parts[1] {
 		return uuid.Nil, ErrInvalidObjectKey
 	}
 	versionID, err := uuid.Parse(parts[2])
-	if err != nil || versionID.String() != parts[2] {
+	if err != nil || versionID == uuid.Nil || versionID.String() != parts[2] {
 		return uuid.Nil, ErrInvalidObjectKey
 	}
 	return versionID, nil

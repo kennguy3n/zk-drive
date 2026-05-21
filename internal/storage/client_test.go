@@ -167,6 +167,24 @@ func TestValidateObjectKey(t *testing.T) {
 			wantOK: false,
 			why:    "uuid.Parse accepts 32-hex-digit form but NewObjectKey always emits the dashed form",
 		},
+		{
+			name:   "uuid.Nil version rejected (insertVersionTx would silently overwrite)",
+			key:    workspaceID.String() + "/" + fileID.String() + "/" + uuid.Nil.String(),
+			wantOK: false,
+			why:    "v.ID == uuid.Nil triggers a fresh uuid.New() in insertVersionTx, defeating the object-key-to-DB-id pinning invariant",
+		},
+		{
+			name:   "uuid.Nil workspace rejected (defense in depth even if caller passes uuid.Nil expected)",
+			key:    uuid.Nil.String() + "/" + fileID.String() + "/" + versionID.String(),
+			wantOK: false,
+			why:    "uuid.Nil is never a real workspace; reject regardless of what the caller supplies as expectedWorkspace",
+		},
+		{
+			name:   "uuid.Nil file rejected",
+			key:    workspaceID.String() + "/" + uuid.Nil.String() + "/" + versionID.String(),
+			wantOK: false,
+			why:    "uuid.Nil is never a real file id; same fail-closed posture as the version segment",
+		},
 	}
 
 	for _, tt := range tests {
