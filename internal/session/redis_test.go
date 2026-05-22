@@ -214,6 +214,63 @@ func TestRevokeUserTTL(t *testing.T) {
 	}
 }
 
+// TestRevokeUserAtomicMaxUpdate is the regression test for the
+// last-writer-wins race flagged in Devin Review on PR #48: two
+// concurrent revocations could (in principle) land out of order
+// such that an older timestamp overwrites a newer one, moving the
+// cutoff backwards and re-validating tokens an earlier revocation
+// intended to reject.
+//
+// The Lua-script max-update path on RevokeUser eliminates the race:
+// any RevokeUser call with `at` strictly less than the current
+// cutoff is a no-op. We pin that here by writing newer-then-older
+// and asserting the cutoff stays at the newer value.
+func TestRevokeUserAtomicMaxUpdate(t *testing.T) {
+	store, _ := newTestStore(t)
+	ctx := context.Background()
+
+	userID := uuid.New()
+	wsID := uuid.New()
+	base := time.Now().UTC().Truncate(time.Second)
+
+	if err := store.RevokeUser(ctx, wsID, userID, base, time.Hour); err != nil {
+		t.Fatalf("revoke at base: %v", err)
+	}
+	// Older timestamp lands after — must NOT move the cutoff
+	// backwards. Without the Lua guard, this would set the cutoff
+	// to base-1m and tokens issued in [base-1m, base] would no
+	// longer be considered revoked.
+	older := base.Add(-time.Minute)
+	if err := store.RevokeUser(ctx, wsID, userID, older, time.Hour); err != nil {
+		t.Fatalf("revoke at older: %v", err)
+	}
+	// A token with iat = base - 30s was clearly issued before the
+	// original revocation cutoff (base) and must therefore remain
+	// revoked even though we attempted to write `older`.
+	revoked, err := store.IsRevoked(ctx, wsID, userID, base.Add(-30*time.Second))
+	if err != nil {
+		t.Fatalf("is-revoked: %v", err)
+	}
+	if !revoked {
+		t.Fatal("max-update violated: older RevokeUser moved cutoff backwards")
+	}
+
+	// Newer timestamp lands after — must move the cutoff forward.
+	newer := base.Add(time.Minute)
+	if err := store.RevokeUser(ctx, wsID, userID, newer, time.Hour); err != nil {
+		t.Fatalf("revoke at newer: %v", err)
+	}
+	// A token with iat = newer - 30s is now within the revoked
+	// window, while iat = newer + 1s sits beyond the cutoff and
+	// must be considered valid.
+	if r, _ := store.IsRevoked(ctx, wsID, userID, newer.Add(-30*time.Second)); !r {
+		t.Error("post-newer: token before cutoff should be revoked")
+	}
+	if r, _ := store.IsRevoked(ctx, wsID, userID, newer.Add(time.Second)); r {
+		t.Error("post-newer: token after cutoff should NOT be revoked")
+	}
+}
+
 // TestRevokeUserZeroTTLFallsBackToDefault confirms the safety net
 // against a caller accidentally passing ttl=0, which would otherwise
 // SET the key without an EXPIRE and leak it forever.

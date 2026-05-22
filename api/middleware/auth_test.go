@@ -174,6 +174,58 @@ func TestAuthMiddleware_TableDriven(t *testing.T) {
 	}
 }
 
+// slowChecker simulates a Redis call that hangs indefinitely until
+// the call context is cancelled. The middleware should detect the
+// timeout and fail closed (401) within ~SessionCheckTimeout rather
+// than waiting for the full request deadline.
+type slowChecker struct{}
+
+func (slowChecker) IsRevoked(ctx context.Context, _, _ uuid.UUID, _ time.Time) (bool, error) {
+	<-ctx.Done()
+	return false, ctx.Err()
+}
+
+// TestAuthMiddleware_BoundedTimeoutOnSlowChecker pins the production
+// hardening for the "Redis outage causes API hang" failure mode: a
+// hanging IsRevoked call must complete within SessionCheckTimeout
+// (1s) and respond 401, not hold the request for the full client
+// read deadline.
+//
+// Without the bounded context the goroutine would block on the
+// channel receive forever (the slow checker never returns on its
+// own), so a timeout on this test itself is the negative signal —
+// success means the middleware exited fast.
+func TestAuthMiddleware_BoundedTimeoutOnSlowChecker(t *testing.T) {
+	t.Parallel()
+	const secret = "test-secret"
+	token, _, err := IssueToken(secret, uuid.New(), uuid.New(), "admin", time.Hour)
+	if err != nil {
+		t.Fatalf("issue token: %v", err)
+	}
+	h := AuthMiddleware(secret, slowChecker{})(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		t.Error("next handler should not be called when checker times out")
+		w.WriteHeader(http.StatusOK)
+	}))
+	req := httptest.NewRequest(http.MethodGet, "/protected", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	rr := httptest.NewRecorder()
+
+	start := time.Now()
+	h.ServeHTTP(rr, req)
+	elapsed := time.Since(start)
+
+	if rr.Code != http.StatusUnauthorized {
+		t.Errorf("status: got %d, want 401", rr.Code)
+	}
+	// The middleware's deadline is SessionCheckTimeout. Allow a
+	// generous fudge factor for slow CI runners but assert the
+	// upper bound stays well below the standard client read
+	// deadline (30s).
+	if elapsed > SessionCheckTimeout+2*time.Second {
+		t.Errorf("middleware took %v on slow checker; expected to fail closed within ~%v", elapsed, SessionCheckTimeout)
+	}
+}
+
 // TestAuthMiddleware_CheckerOnlyCalledOnce ensures we don't accidentally
 // regress to a code path that calls IsRevoked multiple times per
 // request (which would inflate Redis load on the hot path).

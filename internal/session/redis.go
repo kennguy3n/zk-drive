@@ -75,6 +75,37 @@ func userRevokedKey(workspaceID, userID uuid.UUID) string {
 	return fmt.Sprintf("ws:%s:user_revoked:%s", workspaceID.String(), userID.String())
 }
 
+// revokeUserScript implements an atomic max-update for the per-user
+// revocation cutoff. Without it, two concurrent RevokeUser calls
+// could race such that a stale (earlier) timestamp lands second and
+// moves the cutoff *backwards* — re-validating tokens an earlier
+// revocation intended to reject.
+//
+// The script:
+//
+//  1. GETs the current cutoff (nil if no previous revocation).
+//  2. Iff the new timestamp is greater than what's stored (or no
+//     value is stored yet), SETs the new timestamp with an EXPIRE
+//     equal to the requested TTL.
+//  3. Always refreshes the TTL to the new value when the new
+//     timestamp wins, so a recent revocation extends the key's
+//     lifetime accordingly.
+//
+// We pass the cutoff and TTL as ARGV (numeric) rather than as
+// separate Lua locals so the script stays uniform across go-redis
+// versions and so the EX refresh is part of the same atomic block
+// as the value comparison.
+var revokeUserScript = redis.NewScript(`
+local current = redis.call('GET', KEYS[1])
+local new = tonumber(ARGV[1])
+local ttl = tonumber(ARGV[2])
+if not current or tonumber(current) < new then
+	redis.call('SET', KEYS[1], new, 'EX', ttl)
+	return 1
+end
+return 0
+`)
+
 // Set stores a session hash and registers it in the user's secondary
 // index. The TTL is applied to both keys so an abandoned session
 // expires from the index along with the hash and we never accumulate
@@ -234,12 +265,22 @@ func (s *RedisSessionStore) RevokeUser(ctx context.Context, workspaceID, userID 
 	}
 	cutoff := at.UTC().Unix()
 	key := userRevokedKey(workspaceID, userID)
-	// SET key value EX ttl — single round trip, atomic write +
-	// expiry. We use Set with an explicit TTL rather than SetEX
-	// for symmetry with the rest of the file (TxPipeline + Expire)
-	// because Set on go-redis honours the Expiration field on the
-	// options struct.
-	if err := s.client.Set(ctx, key, cutoff, ttl).Err(); err != nil {
+	// Atomic max-update via Lua: the script only overwrites the
+	// existing cutoff when the new timestamp is strictly greater.
+	// This prevents the (rare but real) race where two concurrent
+	// revocations land out-of-order and a stale earlier timestamp
+	// moves the cutoff backwards, re-validating tokens the earlier
+	// revocation intended to reject.
+	//
+	// EVAL is single-threaded inside Redis, so we get true
+	// atomicity without a CAS retry loop. The TTL is set in the
+	// same script so a winning write also refreshes the expiry.
+	if err := revokeUserScript.Run(ctx, s.client, []string{key}, cutoff, int64(ttl.Seconds())).Err(); err != nil {
+		// redis.Nil is the no-op return path (script ran but the
+		// max-check rejected the write). Treat as success.
+		if errors.Is(err, redis.Nil) {
+			return nil
+		}
 		return fmt.Errorf("redis revoke user: %w", err)
 	}
 	return nil
