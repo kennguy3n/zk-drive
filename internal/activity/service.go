@@ -3,9 +3,12 @@ package activity
 import (
 	"context"
 	"encoding/json"
-	"log"
+	"log/slog"
+
 	"sync"
 	"time"
+
+	"github.com/kennguy3n/zk-drive/internal/logging"
 
 	"github.com/google/uuid"
 )
@@ -64,8 +67,11 @@ func (s *Service) Log(_ context.Context, entry *LogEntry) {
 		return
 	case s.entries <- entry:
 	default:
-		log.Printf("activity: buffer full, dropping entry action=%s resource=%s/%s",
-			entry.Action, entry.ResourceType, entry.ResourceID)
+		slog.Warn("activity buffer full, dropping entry",
+			"action", entry.Action,
+			"resource_type", entry.ResourceType,
+			"resource_id", entry.ResourceID,
+		)
 	}
 }
 
@@ -76,7 +82,7 @@ func (s *Service) LogAction(ctx context.Context, workspaceID, userID uuid.UUID, 
 	if metadata != nil {
 		b, err := json.Marshal(metadata)
 		if err != nil {
-			log.Printf("activity: marshal metadata: %v", err)
+			logging.FromContext(ctx).Error("activity marshal metadata failed", "err", err)
 		} else {
 			raw = b
 		}
@@ -138,7 +144,11 @@ func (s *Service) flush(entry *LogEntry) {
 	ctx, cancel := context.WithTimeout(context.Background(), s.timeout)
 	defer cancel()
 	if err := s.repo.Log(ctx, entry); err != nil {
-		log.Printf("activity: persist failed action=%s resource=%s/%s err=%v",
-			entry.Action, entry.ResourceType, entry.ResourceID, err)
+		slog.Error("activity persist failed",
+			"action", entry.Action,
+			"resource_type", entry.ResourceType,
+			"resource_id", entry.ResourceID,
+			"err", err,
+		)
 	}
 }

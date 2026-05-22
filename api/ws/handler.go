@@ -19,7 +19,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"log"
+	"log/slog"
 	"net/http"
 	"sync"
 	"time"
@@ -66,9 +66,18 @@ type Client struct {
 	conn        *websocket.Conn
 	workspaceID uuid.UUID
 	userID      uuid.UUID
-	send        chan []byte
-	done        chan struct{}
-	closeOnce   sync.Once
+	// logger is a per-connection *slog.Logger pre-bound to
+	// (workspace_id, user_id, component=ws) so the read/write
+	// pumps — which run in their own goroutines without an
+	// HTTP request context — still emit log lines carrying
+	// tenant correlation. Without this, ws errors would land
+	// in the log stream as bare "ws read failed err=..." with
+	// no way to attribute them to a specific tenant/user when
+	// triaging an incident.
+	logger    *slog.Logger
+	send      chan []byte
+	done      chan struct{}
+	closeOnce sync.Once
 }
 
 // shutdown closes c.done at most once. Safe to call from any
@@ -250,8 +259,13 @@ func NewClient(hub *Hub, conn *websocket.Conn, workspaceID, userID uuid.UUID) *C
 		conn:        conn,
 		workspaceID: workspaceID,
 		userID:      userID,
-		send:        make(chan []byte, sendBufferSize),
-		done:        make(chan struct{}),
+		logger: slog.Default().With(
+			"workspace_id", workspaceID.String(),
+			"user_id", userID.String(),
+			"subsystem", "ws",
+		),
+		send: make(chan []byte, sendBufferSize),
+		done: make(chan struct{}),
 	}
 }
 
@@ -282,7 +296,7 @@ func (c *Client) readPump() {
 		if _, _, err := c.conn.NextReader(); err != nil {
 			if !errors.Is(err, websocket.ErrCloseSent) &&
 				!websocket.IsCloseError(err, websocket.CloseNormalClosure, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
-				log.Printf("ws read: %v", err)
+				c.logger.Error("ws read failed", "err", err)
 			}
 			return
 		}

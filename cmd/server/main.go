@@ -4,7 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"log"
+	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
@@ -39,6 +39,7 @@ import (
 	"github.com/kennguy3n/zk-drive/internal/health"
 	"github.com/kennguy3n/zk-drive/internal/kchat"
 	"github.com/kennguy3n/zk-drive/internal/jobs"
+	"github.com/kennguy3n/zk-drive/internal/logging"
 	"github.com/kennguy3n/zk-drive/internal/notification"
 	"github.com/kennguy3n/zk-drive/internal/permission"
 	"github.com/kennguy3n/zk-drive/internal/preview"
@@ -55,12 +56,14 @@ import (
 
 func main() {
 	if err := run(); err != nil {
-		log.Fatalf("server exited: %v", err)
+		slog.Error("server exited", "err", err)
+		os.Exit(1)
 	}
 }
 
 func run() error {
-	log.Printf("zk-drive server version=%s", version.Version)
+	logging.Init("server")
+	slog.Info("zk-drive server starting", "version", version.Version)
 
 	cfg, err := config.Load()
 	if err != nil {
@@ -145,16 +148,16 @@ func run() error {
 		if err != nil {
 			return fmt.Errorf("storage client: %w", err)
 		}
-		log.Printf("storage: fallback presigned-URL client wired to %s (bucket=%s)", cfg.S3Endpoint, cfg.S3Bucket)
+		slog.Info("storage fallback presigned-URL client wired", "endpoint", cfg.S3Endpoint, "bucket", cfg.S3Bucket)
 	} else {
-		log.Printf("storage: S3_ENDPOINT not set; per-workspace credentials must be provisioned via fabric")
+		slog.Info("storage S3_ENDPOINT not set; per-workspace credentials must be provisioned via fabric")
 	}
 
 	credentialCodec, err := cryptopkg.LoadFromEnv()
 	if err != nil {
 		return fmt.Errorf("credential codec: %w", err)
 	}
-	log.Printf("crypto: credential encryption mode=%s", credentialCodec.Mode())
+	slog.Info("crypto credential encryption mode", "mode", credentialCodec.Mode())
 
 	storageFactory := storage.NewClientFactory(pool, storageClient, credentialCodec)
 
@@ -165,9 +168,9 @@ func run() error {
 		Encryptor:        credentialCodec,
 	})
 	if cfg.FabricConsoleURL != "" {
-		log.Printf("fabric: tenant provisioning enabled, console=%s", cfg.FabricConsoleURL)
+		slog.Info("fabric tenant provisioning enabled", "console", cfg.FabricConsoleURL)
 	} else {
-		log.Printf("fabric: console URL not set, signup will skip tenant provisioning")
+		slog.Info("fabric console URL not set, signup will skip tenant provisioning")
 	}
 
 	permissionSvc := permission.NewService(permission.NewPostgresRepository(pool))
@@ -201,16 +204,16 @@ func run() error {
 			nats.ReconnectWait(2*time.Second),
 		)
 		if nerr != nil {
-			log.Printf("nats: connect %s failed, post-upload jobs disabled: %v", natsURL, nerr)
+			slog.Warn("nats connect failed, post-upload jobs disabled", "url", natsURL, "err", nerr)
 		} else {
 			js, jerr := nc.JetStream()
 			if jerr != nil {
-				log.Printf("nats: jetstream context failed: %v", jerr)
+				slog.Warn("nats jetstream context failed", "err", jerr)
 				nc.Close()
 			} else {
 				jobPublisher = jobs.NewPublisher(js)
 				natsConn = nc
-				log.Printf("nats: connected to %s, post-upload jobs enabled", natsURL)
+				slog.Info("nats connected, post-upload jobs enabled", "url", natsURL)
 				defer nc.Drain() //nolint:errcheck // best-effort drain
 			}
 		}
@@ -231,7 +234,7 @@ func run() error {
 		}
 		redisClient = redis.NewClient(opts)
 		if perr := redisClient.Ping(ctx).Err(); perr != nil {
-			log.Printf("redis: ping %s failed, continuing with in-memory fallbacks: %v", cfg.RedisURL, perr)
+			slog.Warn("redis ping failed, continuing with in-memory fallbacks", "url", cfg.RedisURL, "err", perr)
 			// Close the broken client right now so it doesn't
 			// leak between here and the deferred close, then nil
 			// it so downstream code skips Redis-backed features.
@@ -239,10 +242,10 @@ func run() error {
 			redisClient = nil
 		} else {
 			sessionStore = session.NewRedisSessionStore(redisClient)
-			log.Printf("redis: connected to %s, rate limiter, session store, and ws pub/sub backed by Redis", cfg.RedisURL)
+			slog.Info("redis connected, rate limiter, session store, and ws pub/sub backed by Redis", "url", cfg.RedisURL)
 		}
 	} else {
-		log.Printf("redis: REDIS_URL not set, using in-memory rate limiter and single-process ws (single-replica only)")
+		slog.Info("redis REDIS_URL not set, using in-memory rate limiter and single-process ws (single-replica only)")
 	}
 	// sessionStore (when non-nil) is the SessionChecker the auth
 	// middleware consults on every authenticated request to honour
@@ -298,7 +301,7 @@ func run() error {
 		go func() {
 			defer bgGoroutines.Done()
 			if err := rp.Subscribe(ctx, hub); err != nil && err != context.Canceled {
-				log.Printf("redis: ws subscribe loop exited: %v", err)
+				slog.Error("redis ws subscribe loop exited", "err", err)
 			}
 		}()
 	}
@@ -320,11 +323,11 @@ func run() error {
 				return
 			}
 			if _, err := provisioner.Provision(ctx, workspaceID, workspaceName); err != nil {
-				log.Printf("fabric: provision workspace=%s: %v", workspaceID, err)
+				slog.Error("fabric provision workspace failed", "workspace_id", workspaceID, "err", err)
 				return
 			}
 			storageFactory.Invalidate(workspaceID)
-			log.Printf("fabric: provisioned workspace=%s", workspaceID)
+			slog.Info("fabric provisioned workspace", "workspace_id", workspaceID)
 		})
 	if sessionStore != nil {
 		authHandler = authHandler.WithSessionRevoker(sessionStore)
@@ -347,14 +350,14 @@ func run() error {
 		cfg.StripePriceTierMap,
 	)
 	if cfg.StripeWebhookSecret != "" {
-		log.Printf("billing: stripe webhook signature verification enabled")
+		slog.Info("billing stripe webhook signature verification enabled")
 	} else {
-		log.Printf("billing: STRIPE_WEBHOOK_SECRET not set, /api/webhooks/stripe will reject all requests")
+		slog.Warn("billing STRIPE_WEBHOOK_SECRET not set, /api/webhooks/stripe will reject all requests")
 	}
 	if cfg.StripeSecretKey != "" {
-		log.Printf("billing: stripe checkout / portal session creation enabled")
+		slog.Info("billing stripe checkout / portal session creation enabled")
 	} else {
-		log.Printf("billing: STRIPE_SECRET_KEY not set, /api/admin/billing/{checkout,portal}-session will respond 501")
+		slog.Warn("billing STRIPE_SECRET_KEY not set, /api/admin/billing/{checkout,portal}-session will respond 501")
 	}
 	driveHandler := drive.NewHandler(pool, wsSvc, folderSvc, fileSvc, userSvc, storageClient, permissionSvc, activitySvc).
 		WithStorageFactory(storageFactory).
@@ -394,16 +397,25 @@ func run() error {
 			return fmt.Errorf("ai/ollama: %w", err)
 		}
 		summarySvc = summarySvc.WithLLM(llm)
-		log.Printf("ai: local LLM enabled (endpoint=%s model=%s)", cfg.OllamaURL, llm.Model())
+		slog.Info("ai local LLM enabled", "endpoint", cfg.OllamaURL, "model", llm.Model())
 	} else {
-		log.Printf("ai: OLLAMA_URL not set, AI summaries use rule-based scaffold (no external API calls)")
+		slog.Info("ai OLLAMA_URL not set, AI summaries use rule-based scaffold (no external API calls)")
 	}
 	kchatHandler := apikchat.NewHandler(kchatSvc, summarySvc)
 
 	r := chi.NewRouter()
-	r.Use(chimw.RequestID)
+	// chimw.RequestID is intentionally omitted: the request_id
+	// and the request-scoped *slog.Logger are seeded by
+	// logging.AccessLog at the http.Server.Handler boundary
+	// (see srv := &http.Server{Handler: logging.AccessLog(r)}
+	// below). Installing chimw.RequestID here would generate a
+	// SECOND id inside the chi router that diverges from the
+	// one AccessLog already attached, breaking correlation
+	// between the access log line and handler-emitted logs.
+	// AccessLog also writes the chosen id to chimw.RequestIDKey
+	// so handlers calling chimw.GetReqID continue to get the
+	// right value.
 	r.Use(chimw.RealIP)
-	r.Use(chimw.Logger)
 	r.Use(chimw.Recoverer)
 
 	// /healthz is a SHALLOW liveness probe: "the process is alive
@@ -556,16 +568,26 @@ func run() error {
 
 	if cfg.StaticDir != "" {
 		if info, err := os.Stat(cfg.StaticDir); err == nil && info.IsDir() {
-			log.Printf("static: serving SPA assets from %s", cfg.StaticDir)
+			slog.Info("static serving SPA assets", "dir", cfg.StaticDir)
 			r.NotFound(spaHandler(cfg.StaticDir))
 		} else {
-			log.Printf("static: STATIC_DIR=%q is not a readable directory, skipping SPA serving", cfg.StaticDir)
+			slog.Warn("static STATIC_DIR is not a readable directory, skipping SPA serving", "dir", cfg.StaticDir)
 		}
 	}
 
 	srv := &http.Server{
-		Addr:         cfg.ListenAddr,
-		Handler:      r,
+		Addr: cfg.ListenAddr,
+		// logging.AccessLog wraps the entire chi mux so it
+		// observes both routed and unrouted requests. It logs a
+		// single "http request" record per request AFTER the
+		// handler finishes, with the resolved chi route pattern,
+		// response status, byte count, and duration — the
+		// canonical fields dashboards aggregate against.
+		// Installed outside r.Use(...) on purpose: chi doesn't
+		// expose the resolved RoutePattern until after routing,
+		// so the access logger has to sit at the http.Handler
+		// boundary to read it post-dispatch.
+		Handler:      logging.AccessLog(r),
 		ReadTimeout:  15 * time.Second,
 		WriteTimeout: 30 * time.Second,
 		IdleTimeout:  60 * time.Second,
@@ -573,7 +595,7 @@ func run() error {
 
 	errCh := make(chan error, 1)
 	go func() {
-		log.Printf("zk-drive server listening on %s", cfg.ListenAddr)
+		slog.Info("zk-drive server listening", "addr", cfg.ListenAddr)
 		errCh <- srv.ListenAndServe()
 	}()
 
@@ -582,7 +604,7 @@ func run() error {
 
 	select {
 	case sig := <-sigCh:
-		log.Printf("received signal %s, shutting down", sig)
+		slog.Info("received signal, shutting down", "signal", sig.String())
 	case err := <-errCh:
 		if err != nil && err != http.ErrServerClosed {
 			return err

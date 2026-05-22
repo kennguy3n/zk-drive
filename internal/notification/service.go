@@ -3,7 +3,8 @@ package notification
 import (
 	"context"
 	"fmt"
-	"log"
+
+	"github.com/kennguy3n/zk-drive/internal/logging"
 
 	"github.com/google/uuid"
 )
@@ -149,7 +150,7 @@ func (s *Service) create(ctx context.Context, n *Notification) error {
 		Type:    "notification",
 		Payload: n,
 	}); err != nil {
-		log.Printf("notification: ws publish: %v", err)
+		logging.FromContext(ctx).Error("notification ws publish failed", "workspace_id", n.WorkspaceID, "user_id", n.UserID, "err", err)
 	}
 	return nil
 }

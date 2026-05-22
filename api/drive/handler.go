@@ -12,8 +12,10 @@ package drive
 
 import (
 	"context"
-	"log"
+
 	"net/http"
+
+	"github.com/kennguy3n/zk-drive/internal/logging"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -190,7 +192,7 @@ func (h *Handler) notify(ctx context.Context, fn func(*notification.Service) err
 		return
 	}
 	if err := fn(h.notifications); err != nil {
-		log.Printf("notification error: %v", err)
+		logging.FromContext(ctx).Error("drive notification dispatch failed", "err", err)
 	}
 }
 

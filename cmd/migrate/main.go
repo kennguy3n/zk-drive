@@ -29,7 +29,7 @@ package main
 import (
 	"context"
 	"fmt"
-	"log"
+	"log/slog"
 	"os"
 	"os/signal"
 	"syscall"
@@ -37,18 +37,20 @@ import (
 
 	"github.com/kennguy3n/zk-drive/internal/config"
 	"github.com/kennguy3n/zk-drive/internal/database"
+	"github.com/kennguy3n/zk-drive/internal/logging"
 	"github.com/kennguy3n/zk-drive/internal/version"
 )
 
 func main() {
 	if err := run(); err != nil {
-		log.Printf("migrate: %v", err)
+		slog.Error("migrate exited", "err", err)
 		os.Exit(1)
 	}
 }
 
 func run() error {
-	log.Printf("zk-drive migrate version=%s", version.Version)
+	logging.Init("migrate")
+	slog.Info("zk-drive migrate starting", "version", version.Version)
 
 	cfg, err := config.Load()
 	if err != nil {
@@ -74,6 +76,9 @@ func run() error {
 	if err := database.Migrate(ctx, pool, cfg.MigrationsDir); err != nil {
 		return fmt.Errorf("apply migrations: %w", err)
 	}
-	log.Printf("migrate: completed in %s (migrations_dir=%s)", time.Since(start).Round(time.Millisecond), cfg.MigrationsDir)
+	slog.Info("migrate completed",
+		"duration", time.Since(start).Round(time.Millisecond).String(),
+		"migrations_dir", cfg.MigrationsDir,
+	)
 	return nil
 }

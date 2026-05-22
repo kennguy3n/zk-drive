@@ -9,11 +9,13 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
+
 	"net/http"
 	"net/url"
 	"strings"
 	"time"
+
+	"github.com/kennguy3n/zk-drive/internal/logging"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
@@ -263,7 +265,7 @@ func (h *OAuthHandler) callback(w http.ResponseWriter, r *http.Request, c *oauth
 		return
 	}
 	if err := users.UpdateLastLogin(ctx, u.ID, time.Now().UTC()); err != nil && !errors.Is(err, user.ErrNotFound) {
-		log.Printf("sso: update last login: %v", err)
+		logging.FromContext(ctx).Error("sso update last login failed", "err", err)
 	}
 	if h.audit != nil {
 		actor := u.ID

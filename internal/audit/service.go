@@ -3,11 +3,14 @@ package audit
 import (
 	"context"
 	"encoding/json"
-	"log"
+	"log/slog"
+
 	"net/http"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/kennguy3n/zk-drive/internal/logging"
 
 	"github.com/google/uuid"
 )
@@ -60,7 +63,7 @@ func (s *Service) Log(_ context.Context, entry *Entry) {
 		return
 	case s.entries <- entry:
 	default:
-		log.Printf("audit: buffer full, dropping entry action=%s", entry.Action)
+		slog.Warn("audit buffer full, dropping entry", "action", entry.Action)
 	}
 }
 
@@ -80,7 +83,7 @@ func (s *Service) LogAction(
 	if metadata != nil {
 		b, err := json.Marshal(metadata)
 		if err != nil {
-			log.Printf("audit: marshal metadata: %v", err)
+			logging.FromContext(ctx).Error("audit marshal metadata failed", "err", err)
 		} else {
 			raw = b
 		}
@@ -148,7 +151,7 @@ func (s *Service) flush(entry *Entry) {
 	ctx, cancel := context.WithTimeout(context.Background(), s.timeout)
 	defer cancel()
 	if err := s.repo.Log(ctx, entry); err != nil {
-		log.Printf("audit: persist failed action=%s err=%v", entry.Action, err)
+		slog.Error("audit persist failed", "action", entry.Action, "err", err)
 	}
 }
 

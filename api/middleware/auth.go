@@ -10,6 +10,7 @@ import (
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/google/uuid"
 
+	"github.com/kennguy3n/zk-drive/internal/logging"
 	"github.com/kennguy3n/zk-drive/internal/tenantctx"
 )
 
@@ -175,6 +176,27 @@ func AuthMiddleware(secret string, checker SessionChecker) func(http.Handler) ht
 				}
 			}
 			ctx := withClaims(r.Context(), claims)
+			// Layer authenticated identity onto the request-scoped
+			// logger so every handler-emitted log line carries the
+			// tuple (request_id, workspace_id, user_id, role)
+			// without each handler having to pass them through.
+			// Skipped for unauthenticated requests (the bearer
+			// guard above returns 401 before we reach this point),
+			// so the attributes are never set to zero values that
+			// would pollute aggregation queries.
+			//
+			// Enrich (not WithContext) is the right primitive here
+			// because the auth middleware runs INSIDE chi, and the
+			// access log line emitted by logging.AccessLog OUTSIDE
+			// chi must also carry these identity attributes for
+			// operator filtering. Enrich mutates the request-scoped
+			// logger slot in place so the post-dispatch AccessLog
+			// frame sees the enriched logger.
+			ctx = logging.Enrich(ctx,
+				"workspace_id", claims.WorkspaceID.String(),
+				"user_id", claims.UserID.String(),
+				"role", claims.Role,
+			)
 			next.ServeHTTP(w, r.WithContext(ctx))
 		})
 	}

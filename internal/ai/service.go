@@ -22,9 +22,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log"
+
 	"strings"
 	"time"
+
+	"github.com/kennguy3n/zk-drive/internal/logging"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -125,7 +127,7 @@ func (s *SummaryService) Summarize(ctx context.Context, workspaceID, folderID uu
 			// forever. Intentionally one log line per
 			// fallback — we expect this to be rare in
 			// production.
-			log.Printf("ai/summary: local LLM (%s) failed, falling back to scaffold: %v", s.llm.Model(), llmErr)
+			logging.FromContext(ctx).Error("ai summary local LLM failed, falling back to scaffold", "model", s.llm.Model(), "err", llmErr)
 		}
 	}
 
