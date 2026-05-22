@@ -180,6 +180,13 @@ func (s *Service) ReadyHandler() http.HandlerFunc {
 			body.Status = "not_ready"
 		}
 		w.Header().Set("Content-Type", "application/json")
+		// Defence-in-depth against intermediary caches. The standard
+		// k8s kubelet hits the pod directly and never caches, but
+		// some mesh / sidecar setups (e.g. Envoy-as-PEP, Cloudflare
+		// for non-k8s deployments) can sit in the path. A stale
+		// cached 200 would mask a real outage; pinning no-cache /
+		// no-store ensures every probe sees fresh dependency state.
+		w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
 		w.WriteHeader(status)
 		_ = json.NewEncoder(w).Encode(body)
 	}

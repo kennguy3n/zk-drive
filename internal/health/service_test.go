@@ -62,6 +62,13 @@ func TestReadyHandlerAllPass(t *testing.T) {
 			t.Errorf("check %q: expected ok, got %q", name, got)
 		}
 	}
+	// Cache-Control must pin no-cache/no-store so an intermediary
+	// (Envoy sidecar, CDN, mesh PEP) can't serve a stale 200 over a
+	// genuinely failing pod. Failing this assertion is what would
+	// allow a real outage to be masked by an upstream cache.
+	if got := rr.Header().Get("Cache-Control"); got != "no-cache, no-store, must-revalidate" {
+		t.Errorf("Cache-Control header: expected no-cache,no-store,must-revalidate; got %q", got)
+	}
 }
 
 func TestReadyHandlerOneFailing(t *testing.T) {

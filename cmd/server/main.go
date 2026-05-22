@@ -544,10 +544,10 @@ func run() error {
 // spaHandler serves a Vite-built single-page app from `dir`. Concrete
 // asset files (JS, CSS, the favicon, ...) are returned verbatim;
 // anything else falls back to `index.html` so client-side routes survive
-// a hard refresh. The `/api` and `/healthz` namespaces are already
-// handled before this NotFound handler runs, so we only see SPA paths
-// here. We deliberately reject `..` traversal to keep the handler safe
-// when STATIC_DIR is a sibling of sensitive files.
+// a hard refresh. The `/api`, `/healthz`, and `/readyz` namespaces are
+// already handled before this NotFound handler runs, so we only see SPA
+// paths here. We deliberately reject `..` traversal to keep the handler
+// safe when STATIC_DIR is a sibling of sensitive files.
 func spaHandler(dir string) http.HandlerFunc {
 	indexPath := filepath.Join(dir, "index.html")
 	return func(w http.ResponseWriter, r *http.Request) {
