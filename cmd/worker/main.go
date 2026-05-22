@@ -22,6 +22,7 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"strconv"
 	"syscall"
 	"time"
 
@@ -38,6 +39,7 @@ import (
 	"github.com/kennguy3n/zk-drive/internal/notification"
 	"github.com/kennguy3n/zk-drive/internal/permission"
 	"github.com/kennguy3n/zk-drive/internal/preview"
+	"github.com/kennguy3n/zk-drive/internal/reconciler"
 	"github.com/kennguy3n/zk-drive/internal/retention"
 	"github.com/kennguy3n/zk-drive/internal/scan"
 	"github.com/kennguy3n/zk-drive/internal/sharing"
@@ -129,6 +131,18 @@ func run() error {
 	// share-link TTLs are generally hours / days.
 	sharingSvc := sharing.NewService(sharing.NewPostgresRepository(pool), wiring.NewPermissionGranter(permission.NewService(permission.NewPostgresRepository(pool))))
 	go runGuestExpirySweep(ctx, sharingSvc, 5*time.Minute)
+
+	// Storage-counter reconciliation (WS-14). Runs inside the worker
+	// process on a configurable cadence so the denormalized
+	// workspaces.storage_used_bytes column converges back to the
+	// canonical SUM(files.size_bytes) over time, even if a future
+	// code path forgets to update it. Default cadence is 60m;
+	// RECONCILE_INTERVAL_MINUTES=0 disables the in-process loop
+	// (deploys that prefer a dedicated K8s CronJob set it to 0 and
+	// schedule /app/reconciler externally).
+	if interval := reconcileInterval(); interval > 0 {
+		go runStorageReconciler(ctx, reconciler.New(pool), interval)
+	}
 
 	natsURL := os.Getenv("NATS_URL")
 	if natsURL == "" {
@@ -349,6 +363,63 @@ func runGuestExpirySweep(ctx context.Context, svc *sharing.Service, interval tim
 			log.Printf("worker: guest expiry sweep failed: %v", err)
 		} else if revoked > 0 {
 			log.Printf("worker: guest expiry sweep revoked %d permissions", revoked)
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+		}
+	}
+}
+
+// reconcileInterval reads RECONCILE_INTERVAL_MINUTES and returns the
+// cadence for the in-process storage counter reconciler. Returns 0
+// when the env var is "0" (operator opt-out, e.g. when a dedicated
+// K8s CronJob owns reconciliation) or when the value fails to parse;
+// the default is 60 minutes — short enough that frontend reads
+// converge to the canonical sum within an hour of any drift event,
+// long enough that the periodic SELECT/UPDATE pair is well below the
+// noise floor of regular database traffic.
+func reconcileInterval() time.Duration {
+	raw := os.Getenv("RECONCILE_INTERVAL_MINUTES")
+	if raw == "" {
+		return 60 * time.Minute
+	}
+	mins, err := strconv.Atoi(raw)
+	if err != nil || mins < 0 {
+		log.Printf("worker: invalid RECONCILE_INTERVAL_MINUTES=%q; defaulting to 60", raw)
+		return 60 * time.Minute
+	}
+	return time.Duration(mins) * time.Minute
+}
+
+// runStorageReconciler drives reconciler.ReconcileAll on a fixed
+// cadence. The first run is delayed 60s after startup so the worker
+// doesn't fight a fresh server's connection-pool warmup, then it
+// fires every `interval`. Errors are logged but do not stop the
+// loop — a single bad SQL execution shouldn't wedge the worker.
+func runStorageReconciler(ctx context.Context, rc *reconciler.Reconciler, interval time.Duration) {
+	select {
+	case <-ctx.Done():
+		return
+	case <-time.After(60 * time.Second):
+	}
+	t := time.NewTicker(interval)
+	defer t.Stop()
+	for {
+		start := time.Now()
+		summary, err := rc.ReconcileAll(ctx)
+		if err != nil {
+			if !errors.Is(err, context.Canceled) {
+				log.Printf("worker: storage reconciler aborted: %v", err)
+			}
+		} else {
+			for _, e := range summary.Errors {
+				log.Printf("worker: reconciler workspace=%s err=%v", e.WorkspaceID, e.Err)
+			}
+			log.Printf("worker: reconciler ran workspaces=%d updated=%d drift_bytes=%d errors=%d duration=%s",
+				summary.Workspaces, summary.Updated, summary.TotalDriftBytes, len(summary.Errors),
+				time.Since(start).Round(time.Millisecond))
 		}
 		select {
 		case <-ctx.Done():

@@ -166,6 +166,7 @@ zk-drive/
   cmd/
     server/              # Main application server
     worker/              # Async job workers (preview, scan, classify, archive)
+    reconciler/          # Out-of-band storage-counter reconciler (CronJob)
   api/
     admin/               # Admin API handlers (users, audit, billing, placement, CMK)
     auth/                # Authentication, session management, OAuth2 SSO
@@ -191,6 +192,7 @@ zk-drive/
     notification/        # In-app + Redis pub/sub notifications
     permission/          # Permission and role evaluation, inheritance
     preview/             # Preview generation (images + PDF)
+    reconciler/          # Recompute denormalized counters (storage_used_bytes)
     retention/           # Retention policy evaluation and cold archival
     scan/                # Virus scanning (ClamAV INSTREAM)
     search/              # Full-text search (Postgres FTS)
