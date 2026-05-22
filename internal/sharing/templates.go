@@ -53,26 +53,44 @@ var builtinTemplates = map[string]Template{
 // when name is not a registered template.
 var ErrUnknownTemplate = errors.New("sharing: unknown template")
 
-// GetTemplate returns the template registered under name. The error
-// is ErrUnknownTemplate when the name is not recognised so callers
-// can map directly to a 404 / 400 response.
+// cloneTemplate returns a deep copy of t so callers cannot corrupt
+// the package-level registry by mutating SubFolders in place. A
+// shallow `tc := t` copies the struct but leaves SubFolders aliased
+// to the underlying array stored in builtinTemplates — a caller
+// doing `tpl.SubFolders[0] = "..."` would silently rewrite the
+// registry for every subsequent request.
+func cloneTemplate(t Template) Template {
+	subs := make([]string, len(t.SubFolders))
+	copy(subs, t.SubFolders)
+	return Template{Name: t.Name, SubFolders: subs}
+}
+
+// GetTemplate returns the template registered under name. The
+// returned *Template is a deep copy — callers may freely mutate its
+// fields, including the SubFolders slice, without affecting the
+// registry or other callers. The error is ErrUnknownTemplate when
+// the name is not recognised so callers can map directly to a
+// 404 / 400 response.
 func GetTemplate(name string) (*Template, error) {
 	t, ok := builtinTemplates[name]
 	if !ok {
 		return nil, ErrUnknownTemplate
 	}
-	tc := t
+	tc := cloneTemplate(t)
 	return &tc, nil
 }
 
-// ListTemplates returns every registered template, sorted by Name
-// ascending. Sorting here (rather than at each call site) keeps the
-// HTTP contract — and any client-side caching keyed on the array —
-// stable, and prevents a future caller from forgetting to sort.
+// ListTemplates returns every registered template as a fresh slice
+// of deep copies, sorted by Name ascending. Sorting here (rather
+// than at each call site) keeps the HTTP contract — and any
+// client-side caching keyed on the array — stable, and prevents a
+// future caller from forgetting to sort. The deep copy means a
+// caller mutating any SubFolders slice (or appending to the outer
+// slice) cannot corrupt the registry.
 func ListTemplates() []Template {
 	out := make([]Template, 0, len(builtinTemplates))
 	for _, t := range builtinTemplates {
-		out = append(out, t)
+		out = append(out, cloneTemplate(t))
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
 	return out
