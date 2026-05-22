@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"log"
 	"net/http"
 	"strings"
 	"time"
@@ -253,6 +254,24 @@ func (h *Handler) Login(w http.ResponseWriter, r *http.Request) {
 		})
 		http.Error(w, "account deactivated", http.StatusForbidden)
 		return
+	}
+	// Rehash-on-login: if the stored hash was created at a lower
+	// bcrypt cost than the current PasswordHashCost (e.g. legacy
+	// users created when the constant was 10, now bumped to 12),
+	// upgrade the hash transparently. This is best-effort — a
+	// failure here is logged but the login still succeeds, because
+	// the cost bump is a defence-in-depth posture rather than a
+	// hard auth requirement.
+	//
+	// Placed AFTER the DeactivatedAt check so a deactivated user
+	// who supplies the correct password doesn't pay the bcrypt-12
+	// CPU cost AND a UPDATE users SET password_hash + updated_at
+	// write only to be immediately rejected with 403. Bumping
+	// updated_at for an account that's about to be denied would
+	// also mislead audit queries that use updated_at as an
+	// activity signal.
+	if err := h.users.MaybeRehashPassword(ctx, u, req.Password); err != nil {
+		log.Printf("auth: rehash-on-login best-effort failed user=%s: %v", u.ID, err)
 	}
 	if err := h.users.UpdateLastLogin(ctx, u.ID, time.Now().UTC()); err != nil && !errors.Is(err, user.ErrNotFound) {
 		// Non-fatal: login still succeeds, but log the failure so we
