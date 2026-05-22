@@ -105,6 +105,16 @@ type Reconciler struct {
 // this is the same application role the server uses, so the RLS
 // bypass branch (app.workspace_id GUC unset → policy bypass)
 // applies and the reconciler can read every workspace's files.
+//
+// RLS dependency: this caller must NOT have a workspace UUID bound
+// to the request ctx (no tenantctx.WithWorkspaceID upstream) so
+// PrepareConn leaves app.workspace_id unset and the
+// app_current_workspace_id() IS NULL branch of the tenant
+// isolation policy fires. Same pattern as cmd/migrate and the
+// other background workers. If migrations/024_row_level_security
+// ever switches from NULL-means-bypass to an explicit bypass
+// token, this caller has to be updated in lockstep or it'll
+// silently see zero workspaces.
 func New(pool *pgxpool.Pool) *Reconciler {
 	return &Reconciler{pool: pool}
 }

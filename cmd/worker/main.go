@@ -445,6 +445,18 @@ func reconcileInterval() time.Duration {
 // doesn't fight a fresh server's connection-pool warmup, then it
 // fires every `interval`. Errors are logged but do not stop the
 // loop — a single bad SQL execution shouldn't wedge the worker.
+//
+// Cadence note: this uses time.NewTicker, so the loop body counts
+// towards the next tick. If ReconcileAll ever exceeds `interval`
+// (would require ~thousands of workspaces × many ms each), the
+// ticker will already have fired and the next iteration starts
+// immediately — runs become back-to-back rather than at-most-once-
+// per-interval. Acceptable here because reconciliation is
+// idempotent (FOR UPDATE row lock + no-op UPDATE on no drift) and
+// the loop body is synchronous so there's never more than one
+// concurrent run. WS-17's reconciler_runtime_seconds metric is the
+// signal for "reconcile is now slower than the configured cadence,
+// time to shard or relax the interval".
 func runStorageReconciler(ctx context.Context, rc *reconciler.Reconciler, interval time.Duration) {
 	select {
 	case <-ctx.Done():
