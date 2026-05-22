@@ -100,10 +100,13 @@ func (a *ArchiveService) ArchiveVersions(ctx context.Context, ids []uuid.UUID) (
 //
 // On context cancellation the returned error joins ctx.Err() with
 // any previously-captured per-item error via errors.Join, so callers
-// keep both the cancellation signal (errors.Is(err, context.Canceled)
-// stays true) AND the diagnostic chain that explains why earlier
-// items failed. When no item failed before the cancel, errors.Join
-// degenerates to ctx.Err() — current behaviour is preserved.
+// keep both the cancellation signal AND the diagnostic chain that
+// explains why earlier items failed. When no item failed before the
+// cancel, errors.Join wraps only ctx.Err() (it does NOT return
+// ctx.Err() identically — a direct `err == context.Canceled`
+// equality check will fail; callers must use
+// `errors.Is(err, context.Canceled)`, which is the idiomatic Go
+// pattern this API expects and which continues to work unchanged).
 func archiveBatch(ctx context.Context, ids []uuid.UUID, archive func(context.Context, uuid.UUID) error) ([]uuid.UUID, error) {
 	var failed []uuid.UUID
 	var firstErr error
