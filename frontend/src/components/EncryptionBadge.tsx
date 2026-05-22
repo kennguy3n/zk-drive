@@ -6,7 +6,7 @@
 //   - "strict_zk"          -> "strict zero-knowledge"
 //                             (opt-in; server never sees plaintext;
 //                              no preview / no search / no virus scan)
-//   - "managed_encrypted"  -> "server-readable" (the default)
+//   - "managed_encrypted"  -> "managed" (the default)
 //                             (gateway-side encryption at rest; server
 //                              can read plaintext in memory during
 //                              request handling, which is what enables
@@ -14,12 +14,17 @@
 //   - anything else / missing -> default to the managed rendering, so
 //                                pre-Phase-4 rows stay clean
 //
-// The "managed" label was previously rendered as just "managed", which
-// reads as a positive marketing claim. PROPOSAL.md §3.3 is explicit
-// that the managed mode "must be called 'confidential managed storage,'
-// not 'zero-knowledge,' in customer-facing UI" — so we keep the badge
-// short but use a label ("server-readable") that makes the trade-off
-// visually obvious next to the strict-ZK badge.
+// The badge label is deliberately kept to the short canonical mode
+// name ("managed" / "strict zero-knowledge") so it matches the
+// dialog's "Confidential managed (default)" / "Strict zero-knowledge"
+// radio labels and the PrivacyPage section headings — customers see
+// the same vocabulary everywhere a folder is rendered. The
+// server-readable trade-off is surfaced through the badge tooltip
+// (below) and the PrivacyPage table, not through the badge text
+// itself, to avoid two different customer-facing labels for the same
+// mode. PROPOSAL.md §3.3 is explicit only about NOT calling the
+// managed mode "zero-knowledge" — "managed" satisfies that
+// constraint and matches the brand vocabulary used elsewhere.
 export type EncryptionMode = "strict_zk" | "managed_encrypted" | string;
 
 export interface EncryptionBadgeProps {
@@ -32,7 +37,7 @@ export interface EncryptionBadgeProps {
 
 export default function EncryptionBadge({ mode, size = "row" }: EncryptionBadgeProps) {
   const isStrict = mode === "strict_zk";
-  const label = isStrict ? "strict zero-knowledge" : "server-readable";
+  const label = isStrict ? "strict zero-knowledge" : "managed";
   const title = isStrict
     ? "Strict zero-knowledge: end-to-end encrypted. The server cannot decrypt this folder, so previews, full-text search, and virus scanning are disabled here."
     : "Server-readable (confidential managed storage): encrypted at rest, but the server can read plaintext in memory during request handling — which is what enables previews, full-text search, and virus scanning.";

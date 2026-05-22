@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import { listFolders, type Folder } from "../api/client";
+import EncryptionBadge from "./EncryptionBadge";
 
 // FolderTree is a one-level tree for Phase 1: it shows the workspace root
 // plus direct children of the current folder. Full recursive tree is a
@@ -56,13 +57,35 @@ export default function FolderTree({ currentFolderID }: { currentFolderID: strin
             <Link
               to={`/drive/folder/${f.id}`}
               style={{
-                display: "block",
+                display: "flex",
+                alignItems: "center",
+                gap: 6,
                 padding: "6px 8px",
                 borderRadius: 4,
                 background: currentFolderID === f.id ? "#eef2ff" : "transparent",
               }}
             >
-              {f.name}
+              <span
+                style={{
+                  flex: 1,
+                  overflow: "hidden",
+                  textOverflow: "ellipsis",
+                  whiteSpace: "nowrap",
+                }}
+              >
+                {f.name}
+              </span>
+              {/*
+                Privacy-mode badge sits at the end of each sidebar row
+                so users can see at a glance which folders are strict-
+                ZK (server-blind) without having to open them. This is
+                the PROPOSAL §3.3 "surface the mode everywhere a
+                folder is rendered" contract: file list + breadcrumb
+                + sidebar. EncryptionBadge falls back to the managed
+                rendering for folders missing the field (pre-Phase-4
+                rows), so the tree still renders cleanly.
+              */}
+              <EncryptionBadge mode={f.encryption_mode} />
             </Link>
           </li>
         ))}

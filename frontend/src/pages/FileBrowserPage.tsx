@@ -397,7 +397,22 @@ function CreateFolderDialog({
             </div>
           ) : null}
           <p style={{ fontSize: 12, color: "#6b7280", margin: "8px 0 0" }}>
-            <Link to="/drive/privacy">Learn how each mode works &rarr;</Link>
+            {/*
+              Opens in a new tab so the in-flight folder name + mode
+              radio selection in this dialog survive the click. A
+              `react-router` <Link> would unmount FileBrowserPage and
+              wipe the dialog state without warning; a plain <a> with
+              target="_blank" leaves the dialog intact, and the new
+              tab still hits the SPA's /drive/privacy route via the
+              client-side router on first nav.
+            */}
+            <a
+              href="/drive/privacy"
+              target="_blank"
+              rel="noopener noreferrer"
+            >
+              Learn how each mode works &rarr;
+            </a>
           </p>
         </fieldset>
         {error ? <p style={{ color: "#b91c1c" }}>{error}</p> : null}
