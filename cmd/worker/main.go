@@ -20,9 +20,11 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"os"
 	"os/signal"
 	"strconv"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -38,6 +40,7 @@ import (
 	"github.com/kennguy3n/zk-drive/internal/index"
 	"github.com/kennguy3n/zk-drive/internal/jobs"
 	"github.com/kennguy3n/zk-drive/internal/logging"
+	"github.com/kennguy3n/zk-drive/internal/metrics"
 	"github.com/kennguy3n/zk-drive/internal/notification"
 	"github.com/kennguy3n/zk-drive/internal/permission"
 	"github.com/kennguy3n/zk-drive/internal/preview"
@@ -170,14 +173,36 @@ func run() error {
 	// RECONCILE_INTERVAL_MINUTES=0 disables the in-process loop
 	// (deploys that prefer a dedicated K8s CronJob set it to 0 and
 	// schedule /app/reconciler externally).
+	// metrics owns a private prometheus.Registry plus the pool
+	// collectors. The worker's HTTP /metrics surface is a tiny
+	// dedicated server on cfg.WorkerMetricsAddr (default :9091)
+	// because the worker binary is otherwise headless — see
+	// startMetricsServer for the contract. metricsSurface is
+	// passed into both the reconciler loop and the NATS
+	// subscribers so worker_jobs_total / reconciler_* land on
+	// the same registry the HTTP server scrapes.
+	metricsSurface := metrics.New()
+	metricsSurface.RegisterPgxPoolCollector(pool)
+
 	if interval := reconcileInterval(); interval > 0 {
 		bgGoroutines.Add(1)
 		rc := reconciler.New(pool)
 		go func() {
 			defer bgGoroutines.Done()
-			runStorageReconciler(ctx, rc, interval)
+			runStorageReconciler(ctx, rc, metricsSurface, interval)
 		}()
 	}
+
+	// Start the metrics HTTP server before NATS so a scraper
+	// observing /healthz on :9091 can confirm the worker is alive
+	// even during the (typically sub-second) NATS connect step.
+	// The returned shutdown closure runs after sigCh fires so
+	// in-flight scrape requests can drain cleanly.
+	shutdownMetrics, err := startMetricsServer(ctx, cfg.WorkerMetricsAddr, metricsSurface, &bgGoroutines)
+	if err != nil {
+		return fmt.Errorf("metrics server: %w", err)
+	}
+	defer shutdownMetrics()
 
 	natsURL := os.Getenv("NATS_URL")
 	if natsURL == "" {
@@ -203,7 +228,7 @@ func run() error {
 		return fmt.Errorf("ensure stream: %w", err)
 	}
 
-	subs, err := subscribeAll(ctx, js, pool, previewSvc, scanSvc, archiveSvc, indexSvc, classifySvc)
+	subs, err := subscribeAll(ctx, js, pool, metricsSurface, previewSvc, scanSvc, archiveSvc, indexSvc, classifySvc)
 	if err != nil {
 		return fmt.Errorf("subscribe: %w", err)
 	}
@@ -216,6 +241,68 @@ func run() error {
 	sig := <-sigCh
 	slog.Info("received signal, shutting down", "signal", sig.String())
 	return nil
+}
+
+// startMetricsServer brings up a tiny HTTP server on listenAddr
+// exposing /metrics + /healthz so an operator can scrape the
+// worker the same way they scrape the main API server. The
+// returned shutdown closure does a graceful 5-second drain on
+// any in-flight scrape requests when the worker exits.
+//
+// listenAddr == "" or "off" disables the server entirely (no
+// listen, no goroutine started, shutdown closure is a no-op).
+// That's the escape hatch for deployments that use a different
+// metrics collection path (e.g. statsd sidecar) or that don't
+// want a second listening port on the worker pod.
+//
+// The /healthz handler here is the worker-side equivalent of
+// the server's /healthz: a shallow "process is alive" check
+// that never pings downstream dependencies. There is
+// intentionally no /readyz here because the worker has no
+// dispatchable traffic to gate — NATS handles its own
+// consumer re-balancing if the worker becomes unhealthy.
+func startMetricsServer(_ context.Context, listenAddr string, m *metrics.Metrics, wg *sync.WaitGroup) (func(), error) {
+	listenAddr = strings.TrimSpace(listenAddr)
+	if listenAddr == "" || strings.EqualFold(listenAddr, "off") {
+		slog.Info("worker metrics server disabled (WORKER_METRICS_ADDR empty or 'off')")
+		return func() {}, nil
+	}
+
+	mux := http.NewServeMux()
+	mux.Handle("/metrics", m.Handler())
+	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"status":"ok","component":"worker","version":"` + version.Version + `"}`))
+	})
+
+	srv := &http.Server{
+		Addr:              listenAddr,
+		Handler:           mux,
+		ReadHeaderTimeout: 5 * time.Second,
+	}
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		slog.Info("worker metrics server listening", "addr", listenAddr)
+		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			slog.Error("worker metrics server exited", "err", err)
+		}
+	}()
+
+	shutdown := func() {
+		// Independent timeout so a stuck scraper can't pin
+		// shutdown past the outer process-exit budget. Five
+		// seconds is enough to flush any in-flight scrape
+		// response (which is single-digit ms in practice).
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := srv.Shutdown(shutdownCtx); err != nil {
+			slog.Error("worker metrics server shutdown failed", "err", err)
+		}
+	}
+	return shutdown, nil
 }
 
 // ensureStream creates or updates the DRIVE_JOBS stream that backs
@@ -245,17 +332,20 @@ func ensureStream(js nats.JetStreamContext) error {
 
 // subscribeAll wires a durable consumer for each subject. Durable
 // names let the worker restart without losing checkpoint state.
-func subscribeAll(ctx context.Context, js nats.JetStreamContext, pool *pgxpool.Pool, previewSvc *preview.Service, scanSvc *scan.Service, archiveSvc *retention.ArchiveService, indexSvc *index.Service, classifySvc *classify.Service) ([]*nats.Subscription, error) {
+// Each metrics.JobHandler is wrapped via InstrumentJob so the
+// (subject, result) labels land on zkdrive_worker_jobs_total and
+// the duration histogram captures wall time per subject.
+func subscribeAll(ctx context.Context, js nats.JetStreamContext, pool *pgxpool.Pool, m *metrics.Metrics, previewSvc *preview.Service, scanSvc *scan.Service, archiveSvc *retention.ArchiveService, indexSvc *index.Service, classifySvc *classify.Service) ([]*nats.Subscription, error) {
 	subjects := []struct {
 		subject string
 		durable string
 		handler nats.MsgHandler
 	}{
-		{jobs.SubjectPreview, "drive-preview", previewHandler(ctx, pool, previewSvc)},
-		{jobs.SubjectScan, "drive-scan", scanHandler(ctx, pool, scanSvc)},
-		{jobs.SubjectIndex, "drive-index", indexHandler(ctx, pool, indexSvc)},
-		{jobs.SubjectArchive, "drive-archive", archiveHandler(ctx, archiveSvc)},
-		{jobs.SubjectClassify, "drive-classify", classifyHandler(ctx, pool, classifySvc)},
+		{jobs.SubjectPreview, "drive-preview", m.InstrumentJob(jobs.SubjectPreview, previewHandler(ctx, pool, previewSvc))},
+		{jobs.SubjectScan, "drive-scan", m.InstrumentJob(jobs.SubjectScan, scanHandler(ctx, pool, scanSvc))},
+		{jobs.SubjectIndex, "drive-index", m.InstrumentJob(jobs.SubjectIndex, indexHandler(ctx, pool, indexSvc))},
+		{jobs.SubjectArchive, "drive-archive", m.InstrumentJob(jobs.SubjectArchive, archiveHandler(ctx, archiveSvc))},
+		{jobs.SubjectClassify, "drive-classify", m.InstrumentJob(jobs.SubjectClassify, classifyHandler(ctx, pool, classifySvc))},
 	}
 	var subs []*nats.Subscription
 	for _, s := range subjects {
@@ -281,26 +371,29 @@ func unsubscribeAll(subs []*nats.Subscription) {
 }
 
 // previewHandler decodes the FileJob envelope and runs the preview
-// service. Unsupported mime types (ErrUnsupportedMime) ack without
-// error because the file is simply not previewable; every other
-// failure Nak's so NATS redelivers on the next AckWait cycle.
-func previewHandler(ctx context.Context, pool *pgxpool.Pool, svc *preview.Service) nats.MsgHandler {
-	return func(msg *nats.Msg) {
+// service. Unsupported mime types (ErrUnsupportedMime) ack and
+// return JobResult "skip" because the file is simply not previewable;
+// every other failure Nak's ("error") so NATS redelivers on the next
+// AckWait cycle. Returning the JobResult lets metrics.InstrumentJob
+// emit the right (subject, result) label tuple — see
+// internal/metrics/worker.go for the contract.
+func previewHandler(ctx context.Context, pool *pgxpool.Pool, svc *preview.Service) metrics.JobHandler {
+	return func(msg *nats.Msg) metrics.JobResult {
 		var job jobs.FileJob
 		if err := json.Unmarshal(msg.Data, &job); err != nil {
 			slog.Error("worker malformed preview payload", "err", err)
 			_ = msg.Term()
-			return
+			return metrics.JobResultDropped
 		}
 		if isStrictZK(ctx, pool, job.FileID) {
 			slog.Info("worker skipping strict-zk file (preview)", "file_id", job.FileID, "version_id", job.VersionID)
 			_ = msg.Ack()
-			return
+			return metrics.JobResultSkip
 		}
 		if svc == nil {
 			slog.Warn("worker preview skipped (no storage client)", "file_id", job.FileID, "version_id", job.VersionID)
 			_ = msg.Ack()
-			return
+			return metrics.JobResultSkip
 		}
 		jobCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
 		defer cancel()
@@ -309,14 +402,15 @@ func previewHandler(ctx context.Context, pool *pgxpool.Pool, svc *preview.Servic
 			if errors.Is(err, preview.ErrUnsupportedMime) {
 				slog.Info("worker preview unsupported mime", "file_id", job.FileID, "version_id", job.VersionID)
 				_ = msg.Ack()
-				return
+				return metrics.JobResultSkip
 			}
 			slog.Error("worker preview failed", "file_id", job.FileID, "version_id", job.VersionID, "err", err)
 			_ = msg.Nak()
-			return
+			return metrics.JobResultError
 		}
 		slog.Info("worker preview ok", "file_id", job.FileID, "version_id", job.VersionID, "key", p.ObjectKey)
 		_ = msg.Ack()
+		return metrics.JobResultOK
 	}
 }
 
@@ -325,23 +419,23 @@ func previewHandler(ctx context.Context, pool *pgxpool.Pool, svc *preview.Servic
 // failures (pending — typically clamd connectivity errors) are Nak'd
 // so NATS redelivers on the next AckWait cycle. The final status is
 // persisted to file_versions so operators can audit results via SQL.
-func scanHandler(ctx context.Context, pool *pgxpool.Pool, svc *scan.Service) nats.MsgHandler {
-	return func(msg *nats.Msg) {
+func scanHandler(ctx context.Context, pool *pgxpool.Pool, svc *scan.Service) metrics.JobHandler {
+	return func(msg *nats.Msg) metrics.JobResult {
 		var job jobs.FileJob
 		if err := json.Unmarshal(msg.Data, &job); err != nil {
 			slog.Error("worker malformed scan payload", "err", err)
 			_ = msg.Term()
-			return
+			return metrics.JobResultDropped
 		}
 		if isStrictZK(ctx, pool, job.FileID) {
 			slog.Info("worker skipping strict-zk file (scan)", "file_id", job.FileID, "version_id", job.VersionID)
 			_ = msg.Ack()
-			return
+			return metrics.JobResultSkip
 		}
 		if svc == nil {
 			slog.Warn("worker scan skipped (no storage client)", "file_id", job.FileID, "version_id", job.VersionID)
 			_ = msg.Ack()
-			return
+			return metrics.JobResultSkip
 		}
 		jobCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
 		defer cancel()
@@ -349,10 +443,11 @@ func scanHandler(ctx context.Context, pool *pgxpool.Pool, svc *scan.Service) nat
 		if err != nil {
 			slog.Error("worker scan error", "file_id", job.FileID, "version_id", job.VersionID, "err", err)
 			_ = msg.Nak()
-			return
+			return metrics.JobResultError
 		}
 		slog.Info("worker scan complete", "status", v.Status, "file_id", job.FileID, "version_id", job.VersionID, "detail", v.Detail)
 		_ = msg.Ack()
+		return metrics.JobResultOK
 	}
 }
 
@@ -360,28 +455,29 @@ func scanHandler(ctx context.Context, pool *pgxpool.Pool, svc *scan.Service) nat
 // the cold archive key pattern, then stamps archived_at on the row.
 // Missing storage client -> ack and move on (the same pattern as
 // preview/scan).
-func archiveHandler(ctx context.Context, svc *retention.ArchiveService) nats.MsgHandler {
-	return func(msg *nats.Msg) {
+func archiveHandler(ctx context.Context, svc *retention.ArchiveService) metrics.JobHandler {
+	return func(msg *nats.Msg) metrics.JobResult {
 		var job jobs.FileJob
 		if err := json.Unmarshal(msg.Data, &job); err != nil {
 			slog.Error("worker malformed archive payload", "err", err)
 			_ = msg.Term()
-			return
+			return metrics.JobResultDropped
 		}
 		if svc == nil {
 			slog.Warn("worker archive skipped (no storage client)", "file_id", job.FileID, "version_id", job.VersionID)
 			_ = msg.Ack()
-			return
+			return metrics.JobResultSkip
 		}
 		jobCtx, cancel := context.WithTimeout(ctx, 10*time.Minute)
 		defer cancel()
 		if err := svc.ArchiveVersion(jobCtx, job.VersionID); err != nil {
 			slog.Error("worker archive failed", "file_id", job.FileID, "version_id", job.VersionID, "err", err)
 			_ = msg.Nak()
-			return
+			return metrics.JobResultError
 		}
 		slog.Info("worker archive ok", "file_id", job.FileID, "version_id", job.VersionID)
 		_ = msg.Ack()
+		return metrics.JobResultOK
 	}
 }
 
@@ -460,7 +556,7 @@ func reconcileInterval() time.Duration {
 // concurrent run. WS-17's reconciler_runtime_seconds metric is the
 // signal for "reconcile is now slower than the configured cadence,
 // time to shard or relax the interval".
-func runStorageReconciler(ctx context.Context, rc *reconciler.Reconciler, interval time.Duration) {
+func runStorageReconciler(ctx context.Context, rc *reconciler.Reconciler, m *metrics.Metrics, interval time.Duration) {
 	select {
 	case <-ctx.Done():
 		return
@@ -471,6 +567,7 @@ func runStorageReconciler(ctx context.Context, rc *reconciler.Reconciler, interv
 	for {
 		start := time.Now()
 		summary, err := rc.ReconcileAll(ctx)
+		m.RecordReconcilerRun(summary, err, start)
 		// Surface per-workspace errors + run summary regardless of
 		// the function-level err, mirroring cmd/reconciler. When a
 		// transient enumeration failure aborts a run with err !=
@@ -514,66 +611,68 @@ func runStorageReconciler(ctx context.Context, rc *reconciler.Reconciler, interv
 // back to the original logging-only behaviour so cold-start setups
 // (no S3_ENDPOINT) still drain the subject and don't queue up
 // JetStream messages.
-func indexHandler(ctx context.Context, pool *pgxpool.Pool, svc *index.Service) nats.MsgHandler {
-	return func(msg *nats.Msg) {
+func indexHandler(ctx context.Context, pool *pgxpool.Pool, svc *index.Service) metrics.JobHandler {
+	return func(msg *nats.Msg) metrics.JobResult {
 		var job jobs.FileJob
 		if err := json.Unmarshal(msg.Data, &job); err != nil {
 			slog.Error("worker malformed index payload", "err", err)
 			_ = msg.Term()
-			return
+			return metrics.JobResultDropped
 		}
 		if isStrictZK(ctx, pool, job.FileID) {
 			slog.Info("worker skipping strict-zk file (index)", "file_id", job.FileID, "version_id", job.VersionID)
 			_ = msg.Ack()
-			return
+			return metrics.JobResultSkip
 		}
 		if svc == nil {
 			slog.Warn("worker index acked (no storage)", "file_id", job.FileID, "version_id", job.VersionID)
 			_ = msg.Ack()
-			return
+			return metrics.JobResultSkip
 		}
 		jobCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
 		defer cancel()
 		if err := svc.IndexFile(jobCtx, job.FileID, job.VersionID); err != nil {
 			slog.Error("worker index failed", "file_id", job.FileID, "version_id", job.VersionID, "err", err)
 			_ = msg.Nak()
-			return
+			return metrics.JobResultError
 		}
 		slog.Info("worker index ok", "file_id", job.FileID, "version_id", job.VersionID)
 		_ = msg.Ack()
+		return metrics.JobResultOK
 	}
 }
 
 // classifyHandler decodes the FileJob envelope and runs the
 // classification service. Strict-ZK files skip + ack so the server
 // never writes a label derived from plaintext it does not hold.
-func classifyHandler(ctx context.Context, pool *pgxpool.Pool, svc *classify.Service) nats.MsgHandler {
-	return func(msg *nats.Msg) {
+func classifyHandler(ctx context.Context, pool *pgxpool.Pool, svc *classify.Service) metrics.JobHandler {
+	return func(msg *nats.Msg) metrics.JobResult {
 		var job jobs.FileJob
 		if err := json.Unmarshal(msg.Data, &job); err != nil {
 			slog.Error("worker malformed classify payload", "err", err)
 			_ = msg.Term()
-			return
+			return metrics.JobResultDropped
 		}
 		if isStrictZK(ctx, pool, job.FileID) {
 			slog.Info("worker skipping strict-zk file (classify)", "file_id", job.FileID, "version_id", job.VersionID)
 			_ = msg.Ack()
-			return
+			return metrics.JobResultSkip
 		}
 		if svc == nil {
 			slog.Warn("worker classify acked (no pool)", "file_id", job.FileID, "version_id", job.VersionID)
 			_ = msg.Ack()
-			return
+			return metrics.JobResultSkip
 		}
 		jobCtx, cancel := context.WithTimeout(ctx, 1*time.Minute)
 		defer cancel()
 		if err := svc.Classify(jobCtx, job.FileID); err != nil {
 			slog.Error("worker classify failed", "file_id", job.FileID, "version_id", job.VersionID, "err", err)
 			_ = msg.Nak()
-			return
+			return metrics.JobResultError
 		}
 		slog.Info("worker classify ok", "file_id", job.FileID, "version_id", job.VersionID)
 		_ = msg.Ack()
+		return metrics.JobResultOK
 	}
 }
 

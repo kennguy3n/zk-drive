@@ -297,6 +297,7 @@ allow-list the storage gateway origin and stage CSP rollouts:
 | `SECURITY_HEADERS_CSP_REPORT_ONLY`    | `false`  | When `true`, the policy emits under `Content-Security-Policy-Report-Only` instead of enforcing — browsers report violations but do not block. Use during the first rollout, then flip to `false`. |
 | `SECURITY_HEADERS_CSP_REPORT_URI`     | empty    | When set, appended as `report-uri <value>` to the CSP value. Browsers POST violation reports there.            |
 | `SECURITY_HEADERS_DISABLE_HSTS`       | `false`  | When `true`, skips `Strict-Transport-Security`. Use for local HTTP development only; keep `false` in production. |
+| `WORKER_METRICS_ADDR`                 | `:9091`  | Listen address for the **worker** binary's dedicated `/metrics` + `/healthz` HTTP server. Set to `off` (or empty) to disable. The server binary serves `/metrics` on the main `LISTEN_ADDR` and ignores this. The reconciler binary is short-lived and does not export metrics — see [Observability](#observability) below. |
 
 ### Quick start with the zk-object-fabric Docker demo
 
@@ -316,13 +317,69 @@ proxies file content.
 
 ## Deploying
 
-ZK Drive ships three binaries from a single container image:
+ZK Drive ships four binaries from a single container image:
 
 - `/app/migrate` — applies pending SQL migrations to the database and exits.
 - `/app/server` — the HTTP API server. Refuses to start if migrations are out
   of date (see `internal/database.MinRequiredMigrationVersion`).
 - `/app/worker` — the JetStream consumer / job runner. Same migration
-  precondition as the server.
+  precondition as the server. Also drives the in-process storage-counter
+  reconciler on `RECONCILE_INTERVAL_MINUTES` (default 60).
+- `/app/reconciler` — one-shot CronJob for storage-counter reconciliation.
+  Deploys that prefer dedicated CronJob scheduling set the worker's
+  `RECONCILE_INTERVAL_MINUTES=0` and run `/app/reconciler` externally.
+
+### Observability
+
+Every long-running binary exposes a Prometheus scrape surface:
+
+| Binary | Endpoint | Default address | Toggle |
+| ------ | -------- | --------------- | ------ |
+| `/app/server` | `/metrics` on the main HTTP port | `:8080` (via `LISTEN_ADDR`) | always on |
+| `/app/worker` | `/metrics` on a dedicated port | `:9091` | `WORKER_METRICS_ADDR` (set to `off` or empty to disable) |
+| `/app/reconciler` | _none — one-shot_ | n/a | K8s Job status is the alerting signal; the worker's in-process reconciler exports the same metric family |
+
+Exported series (under the `zkdrive_` prefix):
+
+- `zkdrive_http_requests_total{method, route, status}` — counter
+- `zkdrive_http_request_duration_seconds{method, route}` — histogram
+- `zkdrive_http_in_flight_requests` — gauge
+- `zkdrive_worker_jobs_total{subject, result}` — counter (`result` ∈ `ok|skip|error|dropped`)
+- `zkdrive_worker_job_duration_seconds{subject}` — histogram
+- `zkdrive_reconciler_runs_total{result}` — counter
+- `zkdrive_reconciler_workspaces_scanned_total` — counter
+- `zkdrive_reconciler_workspaces_updated_total` — counter
+- `zkdrive_reconciler_drift_bytes_total` — counter
+- `zkdrive_reconciler_workspace_errors_total` — counter
+- `zkdrive_reconciler_run_duration_seconds` — histogram
+- `zkdrive_db_pool_*` — pgxpool live stats (total / acquired / idle / max / acquire count / acquire duration)
+- `zkdrive_redis_pool_*` — go-redis client pool stats (server only — worker does not use Redis directly today)
+- `go_*` / `process_*` — runtime + process collectors from `prometheus/client_golang`
+
+Example Prometheus scrape config (drop into `prometheus.yml`):
+
+```yaml
+scrape_configs:
+  - job_name: zk-drive-server
+    metrics_path: /metrics
+    static_configs:
+      - targets: ['zk-drive-server:8080']
+  - job_name: zk-drive-worker
+    metrics_path: /metrics
+    static_configs:
+      - targets: ['zk-drive-worker:9091']
+```
+
+The `/metrics` endpoint is intentionally **unauthenticated**: the Go runtime
+and pool collectors expose modest internal state appropriate for an operator
+metrics network but not for the public internet. Production deployments MUST
+firewall `/metrics` off via a Network Policy or ingress allow-list. The
+server pod's `LISTEN_ADDR` is typically exposed publicly behind a TLS
+ingress; if you don't split `/metrics` onto a separate listener, your
+ingress controller must explicitly block `/metrics` from external traffic.
+Splitting onto a separate port (e.g. by reverse-proxying everything except
+`/metrics` from the public ingress) is the simpler posture and matches the
+worker binary's default of `:9091`.
 
 The migrate binary must run **before** the server / worker pods are rolled out.
 On Kubernetes this is wired as a Job (see `deploy/k8s/migrate-job.yaml`) and

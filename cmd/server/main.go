@@ -40,6 +40,7 @@ import (
 	"github.com/kennguy3n/zk-drive/internal/kchat"
 	"github.com/kennguy3n/zk-drive/internal/jobs"
 	"github.com/kennguy3n/zk-drive/internal/logging"
+	"github.com/kennguy3n/zk-drive/internal/metrics"
 	"github.com/kennguy3n/zk-drive/internal/notification"
 	"github.com/kennguy3n/zk-drive/internal/permission"
 	"github.com/kennguy3n/zk-drive/internal/preview"
@@ -403,6 +404,16 @@ func run() error {
 	}
 	kchatHandler := apikchat.NewHandler(kchatSvc, summarySvc)
 
+	// metrics owns a private prometheus.Registry, the HTTP
+	// middleware, and the pgxpool / redis pool collectors.
+	// /metrics is mounted at the root alongside /healthz and
+	// /readyz so an operator scraping the server gets the full
+	// triad (liveness + readiness + telemetry) from one process
+	// without an extra port to firewall.
+	metricsSurface := metrics.New()
+	metricsSurface.RegisterPgxPoolCollector(pool)
+	metricsSurface.RegisterRedisPoolCollector(redisClient)
+
 	r := chi.NewRouter()
 	// chimw.RequestID is intentionally omitted: the request_id
 	// and the request-scoped *slog.Logger are seeded by
@@ -429,6 +440,15 @@ func run() error {
 		DisableHSTS:     cfg.SecurityHeadersDisableHSTS,
 	}))
 	r.Use(chimw.Recoverer)
+	// HTTP metrics middleware runs AFTER Recoverer so a recovered
+	// panic still emits a counter increment with status=500 (the
+	// response the Recoverer writes). Placing it BEFORE Recoverer
+	// would leave the middleware staring at a hijacked
+	// ResponseWriter whose status was never set, defeating the
+	// status label. RoutePattern is read off chi.RouteContext
+	// post-dispatch — that's the bounded cardinality guard
+	// documented in internal/metrics/http.go.
+	r.Use(metricsSurface.HTTPMiddleware)
 
 	// /healthz is a SHALLOW liveness probe: "the process is alive
 	// and HTTP is up." It never pings downstream dependencies
@@ -459,6 +479,25 @@ func run() error {
 		},
 		health.DefaultCheckTimeout,
 	).ReadyHandler())
+
+	// /metrics is the Prometheus scrape surface. Includes:
+	//   - go_*  / process_*               (default collectors)
+	//   - zkdrive_http_*                  (server-side HTTP)
+	//   - zkdrive_db_pool_*               (pgxpool live stats)
+	//   - zkdrive_redis_pool_*            (redis client pool, if enabled)
+	//   - zkdrive_worker_* / reconciler_* (only on the worker/reconciler
+	//                                      binaries — those have their
+	//                                      own /metrics surfaces)
+	//
+	// Posture: NOT authenticated. The endpoint is intentionally
+	// public to the operator's metrics network (e.g. the Prometheus
+	// scrape job inside the same VPC). Production deployments MUST
+	// firewall this endpoint off from the public internet via a
+	// Network Policy or Ingress allow-list — Go runtime + pool
+	// stats are modest internal state but should not leak to
+	// untrusted clients. See README "Deploying" for the recommended
+	// posture.
+	r.Get("/metrics", metricsSurface.Handler().ServeHTTP)
 
 	r.Route("/api", func(r chi.Router) {
 		r.Route("/auth", func(r chi.Router) {

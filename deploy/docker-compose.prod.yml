@@ -154,6 +154,17 @@ services:
       # exclusive only to avoid duplicate row-level locking; both
       # are idempotent and converge on the same value.
       RECONCILE_INTERVAL_MINUTES: ${RECONCILE_INTERVAL_MINUTES:-60}
+      # Dedicated /metrics + /healthz HTTP surface for Prometheus
+      # scrape. Bind to all interfaces inside the worker container;
+      # the Compose port mapping below controls host exposure.
+      # Set WORKER_METRICS_ADDR=off to disable entirely.
+      WORKER_METRICS_ADDR: ${WORKER_METRICS_ADDR:-:9091}
+    ports:
+      # Map the worker's metrics port to the host so a Prometheus
+      # running outside the Compose network can scrape. Comment
+      # this out (or change the host port) if you scrape via a
+      # sibling Compose service.
+      - "9091:9091"
     deploy:
       resources:
         limits:

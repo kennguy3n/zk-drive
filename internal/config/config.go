@@ -131,6 +131,18 @@ type Config struct {
 	// `'self' data: blob:`). Thumbnails / previews served from
 	// the storage gateway origin go here.
 	SecurityHeadersCSPImgExtra []string
+
+	// WorkerMetricsAddr is the listen address for the worker
+	// binary's dedicated /metrics HTTP server. Default ":9091"
+	// (one port above the server's default :8080 so a single
+	// host can run both without conflict). Set to "off" or the
+	// empty string to disable the metrics server entirely —
+	// useful for sidecar-only deployments where the operator
+	// uses a different collection path. The server binary
+	// exposes /metrics on its main port (ListenAddr) and does
+	// NOT consult this field. The reconciler binary is short-
+	// lived and does not export metrics; see README.
+	WorkerMetricsAddr string
 }
 
 // Load reads configuration from environment variables and returns a populated
@@ -178,6 +190,8 @@ func Load() (*Config, error) {
 		SecurityHeadersCSPReportURI:    os.Getenv("SECURITY_HEADERS_CSP_REPORT_URI"),
 		SecurityHeadersCSPConnectExtra: parseCSVList(os.Getenv("SECURITY_HEADERS_CSP_CONNECT_EXTRA")),
 		SecurityHeadersCSPImgExtra:     parseCSVList(os.Getenv("SECURITY_HEADERS_CSP_IMG_EXTRA")),
+
+		WorkerMetricsAddr: getEnvDefault("WORKER_METRICS_ADDR", ":9091"),
 	}
 
 	var missing []string

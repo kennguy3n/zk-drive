@@ -23,7 +23,15 @@
 //   - Per-workspace failures do NOT flip the exit code: a single
 //     bad row doesn't trip K8s CronJob alerting for the whole
 //     run; they are surfaced via log output for ad-hoc triage.
-//     WS-17 will swap this for a metrics-based alert.
+//     The metrics-based alerting path (WS-17) flows through the
+//     long-running worker's in-process reconciler invocation —
+//     see internal/metrics.RecordReconcilerRun and the worker's
+//     /metrics endpoint. cmd/reconciler intentionally does NOT
+//     export /metrics because the process exits as soon as the
+//     run completes; no scrape interval would catch it. K8s Job
+//     status (`condition: Failed`) is the alerting signal for
+//     this binary; the pushgateway pattern is deliberately not
+//     introduced to avoid a new operational dependency.
 //   - Exits non-zero in three cases: (a) configuration / pool
 //     connect failure (the run could not start), (b) the
 //     workspaces enumeration query itself failed, and (c) the
