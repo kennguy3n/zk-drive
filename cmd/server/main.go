@@ -657,10 +657,24 @@ func run() error {
 		// expose the resolved RoutePattern until after routing,
 		// so the access logger has to sit at the http.Handler
 		// boundary to read it post-dispatch.
-		Handler:      logging.AccessLog(r),
-		ReadTimeout:  15 * time.Second,
-		WriteTimeout: 30 * time.Second,
-		IdleTimeout:  60 * time.Second,
+		Handler: logging.AccessLog(r),
+		// ReadHeaderTimeout is the first line of defence against
+		// slowloris-style attacks: caps how long a client can
+		// dribble out request headers before the server abandons
+		// the connection. 5s is enough for any well-behaved client
+		// (browsers and curl complete header send in single-digit
+		// ms over normal links) but tight enough that an attacker
+		// holding hundreds of half-open connections can't pin a
+		// goroutine each. ReadTimeout below is the broader cap
+		// covering body read as well — ReadHeaderTimeout is the
+		// narrower, header-only guard go vet / staticcheck prefer
+		// to see explicitly set rather than inferred from
+		// ReadTimeout. Mirrors the worker metrics server pattern
+		// in cmd/worker/main.go:289-302.
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       15 * time.Second,
+		WriteTimeout:      30 * time.Second,
+		IdleTimeout:       60 * time.Second,
 	}
 
 	errCh := make(chan error, 1)
