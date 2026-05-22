@@ -97,12 +97,19 @@ func (a *ArchiveService) ArchiveVersions(ctx context.Context, ids []uuid.UUID) (
 // *ArchiveService receiver so unit tests can exercise the iteration,
 // error-collection, and cancellation semantics without standing up a
 // real database or S3 client.
+//
+// On context cancellation the returned error joins ctx.Err() with
+// any previously-captured per-item error via errors.Join, so callers
+// keep both the cancellation signal (errors.Is(err, context.Canceled)
+// stays true) AND the diagnostic chain that explains why earlier
+// items failed. When no item failed before the cancel, errors.Join
+// degenerates to ctx.Err() — current behaviour is preserved.
 func archiveBatch(ctx context.Context, ids []uuid.UUID, archive func(context.Context, uuid.UUID) error) ([]uuid.UUID, error) {
 	var failed []uuid.UUID
 	var firstErr error
 	for i, id := range ids {
 		if ctx.Err() != nil {
-			return append(failed, ids[i:]...), ctx.Err()
+			return append(failed, ids[i:]...), errors.Join(firstErr, ctx.Err())
 		}
 		if err := archive(ctx, id); err != nil {
 			failed = append(failed, id)

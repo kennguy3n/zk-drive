@@ -17,6 +17,7 @@ func TestArchiveBatchCancellationExcludesSuccessfulItems(t *testing.T) {
 	// would have returned ids[0:] (all four), incorrectly including the
 	// two successes.
 	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 	calls := 0
 	archive := func(_ context.Context, _ uuid.UUID) error {
 		calls++
@@ -52,6 +53,7 @@ func TestArchiveBatchCancellationKeepsFailedItems(t *testing.T) {
 	// returned slice should contain the failed id plus every id not
 	// yet processed (in this case just ids[2]).
 	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 	calls := 0
 	sentinel := errors.New("boom")
 	archive := func(_ context.Context, _ uuid.UUID) error {
@@ -68,7 +70,12 @@ func TestArchiveBatchCancellationKeepsFailedItems(t *testing.T) {
 
 	got, err := archiveBatch(ctx, ids, archive)
 	if !errors.Is(err, context.Canceled) {
-		t.Fatalf("want context.Canceled, got %v", err)
+		t.Fatalf("want errors.Is(context.Canceled), got %v", err)
+	}
+	// errors.Join in the cancel path must preserve the originating
+	// per-item error so callers can still introspect the failure.
+	if !errors.Is(err, sentinel) {
+		t.Fatalf("want errors.Is(sentinel) to be true, got %v", err)
 	}
 	if calls != 2 {
 		t.Fatalf("want archive called 2 times, got %d", calls)
