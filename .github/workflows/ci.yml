@@ -29,10 +29,15 @@ jobs:
       - name: Install poppler-utils
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends poppler-utils
 
+      # golangci-lint must be built with a Go toolchain >= the one
+      # declared in go.mod (currently go 1.25.0). v2.5.0 ships built
+      # with go1.25.1 and satisfies this. Pin the version explicitly
+      # rather than tracking 'latest' so a future golangci-lint
+      # default-rule change can't silently break CI overnight.
       - name: golangci-lint
         uses: golangci/golangci-lint-action@v6
         with:
-          version: v1.61.0
+          version: v2.5.0
           args: --timeout=5m
 
   backend:
