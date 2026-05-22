@@ -17,9 +17,10 @@ import "golang.org/x/crypto/bcrypt"
 //     latency budgets.
 //  2. Existing password hashes are stored with the cost they were
 //     created at, so this only affects newly-hashed passwords. The
-//     auth layer should rehash on next successful login when it
-//     detects an outdated cost (see VerifyPassword in
-//     internal/user/service.go for the rehash-on-login pattern).
+//     auth layer rehashes on next successful login when it detects
+//     an outdated cost — see (*user.Service).MaybeRehashPassword in
+//     internal/user/service.go for the implementation and
+//     api/auth/handler.go's Login handler for the call site.
 const PasswordHashCost = 12
 
 // HashPassword wraps bcrypt.GenerateFromPassword with the package's
