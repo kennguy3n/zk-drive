@@ -6,8 +6,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log/slog"
+
 	"net/http"
+
+	"github.com/kennguy3n/zk-drive/internal/logging"
 
 	"github.com/google/uuid"
 	"github.com/stripe/stripe-go/v81"
@@ -201,7 +203,7 @@ func (h *StripeService) HandleWebhook(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := h.dispatch(r.Context(), &event); err != nil {
-		slog.ErrorContext(r.Context(), "billing stripe dispatch failed", "event_type", event.Type, "event_id", event.ID, "err", err)
+		logging.FromContext(r.Context()).Error("billing stripe dispatch failed", "event_type", event.Type, "event_id", event.ID, "err", err)
 		http.Error(w, "processing failed", http.StatusInternalServerError)
 		return
 	}

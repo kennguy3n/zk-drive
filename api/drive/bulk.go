@@ -6,10 +6,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"log/slog"
+
 	"net/http"
 	"path"
 	"strings"
+
+	"github.com/kennguy3n/zk-drive/internal/logging"
 
 	"github.com/google/uuid"
 
@@ -259,12 +261,12 @@ func (h *Handler) BulkCopy(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		newVersion := &file.FileVersion{
-			ID:         uuid.New(),
-			FileID:     newFile.ID,
-			ObjectKey:  srcVer.ObjectKey,
-			SizeBytes:  srcVer.SizeBytes,
-			Checksum:   srcVer.Checksum,
-			CreatedBy:  userID,
+			ID:        uuid.New(),
+			FileID:    newFile.ID,
+			ObjectKey: srcVer.ObjectKey,
+			SizeBytes: srcVer.SizeBytes,
+			Checksum:  srcVer.Checksum,
+			CreatedBy: userID,
 		}
 		// BulkCopy mints a fresh newVersion.ID per copy operation so
 		// the idempotent-replay branch is unreachable here. Discard
@@ -375,7 +377,7 @@ func (h *Handler) BulkDownload(w http.ResponseWriter, r *http.Request) {
 			// Past the header we can only signal via the zip stream;
 			// return without a partial entry and log server-side so
 			// operators can correlate truncated downloads with a cause.
-			slog.ErrorContext(r.Context(), "drive bulk download: append zip entry failed", "name", it.name, "err", err)
+			logging.FromContext(r.Context()).Error("drive bulk download: append zip entry failed", "name", it.name, "err", err)
 			return
 		}
 	}

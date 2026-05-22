@@ -2,11 +2,13 @@ package middleware
 
 import (
 	"context"
-	"log/slog"
+
 	"math"
 	"net/http"
 	"strconv"
 	"time"
+
+	"github.com/kennguy3n/zk-drive/internal/logging"
 
 	"github.com/google/uuid"
 	"github.com/redis/go-redis/v9"
@@ -162,11 +164,11 @@ func (l *redisRateLimiter) reserve(ctx context.Context, workspaceID, userID uuid
 	if err != nil {
 		// Fail open. Logging here is intentional — a quiet drop
 		// would mask Redis outages from operators.
-		slog.ErrorContext(ctx, "ratelimit_redis script failed, allowing request", "err", err)
+		logging.FromContext(ctx).Error("ratelimit_redis script failed, allowing request", "err", err)
 		return 0
 	}
 	if len(res) < 1 {
-		slog.WarnContext(ctx, "ratelimit_redis script returned no values, allowing request")
+		logging.FromContext(ctx).Warn("ratelimit_redis script returned no values, allowing request")
 		return 0
 	}
 	status, _ := res[0].(int64)
@@ -192,4 +194,3 @@ func rateLimitKey(workspaceID, userID uuid.UUID, window int64) string {
 func workspaceLimitKey(workspaceID uuid.UUID, window int64) string {
 	return "rl:ws:" + workspaceID.String() + ":" + strconv.FormatInt(window, 10)
 }
-

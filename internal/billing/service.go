@@ -3,7 +3,8 @@ package billing
 import (
 	"context"
 	"errors"
-	"log/slog"
+
+	"github.com/kennguy3n/zk-drive/internal/logging"
 
 	"github.com/google/uuid"
 )
@@ -174,7 +175,7 @@ func (s *Service) recordEvent(ctx context.Context, workspaceID uuid.UUID, t stri
 		// Recording is best-effort: a usage write failure must not
 		// fail an otherwise-successful upload / download. Log so an
 		// operator can spot a broken billing pipeline.
-		slog.ErrorContext(ctx, "billing record event failed", "event_type", t, "workspace_id", workspaceID, "err", err)
+		logging.FromContext(ctx).Error("billing record event failed", "event_type", t, "workspace_id", workspaceID, "err", err)
 	}
 }
 
@@ -182,14 +183,14 @@ func (s *Service) recordEvent(ctx context.Context, workspaceID uuid.UUID, t stri
 // Embeds the limits + the live counters so the frontend can render
 // progress bars without a second round-trip.
 type UsageSummary struct {
-	Tier            string `json:"tier"`
-	StorageUsed     int64  `json:"storage_used_bytes"`
-	StorageLimit    int64  `json:"storage_limit_bytes"`
-	BandwidthUsed   int64  `json:"bandwidth_used_bytes_month"`
-	BandwidthLimit  int64  `json:"bandwidth_limit_bytes_month"`
-	UserCount       int    `json:"user_count"`
-	UserLimit       int    `json:"user_limit"`
-	PlanConfigured  bool   `json:"plan_configured"`
+	Tier           string `json:"tier"`
+	StorageUsed    int64  `json:"storage_used_bytes"`
+	StorageLimit   int64  `json:"storage_limit_bytes"`
+	BandwidthUsed  int64  `json:"bandwidth_used_bytes_month"`
+	BandwidthLimit int64  `json:"bandwidth_limit_bytes_month"`
+	UserCount      int    `json:"user_count"`
+	UserLimit      int    `json:"user_limit"`
+	PlanConfigured bool   `json:"plan_configured"`
 }
 
 // GetUsageSummary aggregates current usage and the effective limits
@@ -222,13 +223,13 @@ func (s *Service) GetUsageSummary(ctx context.Context, workspaceID uuid.UUID) (U
 		return UsageSummary{}, err
 	}
 	return UsageSummary{
-		Tier:            limits.Tier,
-		StorageUsed:     storage,
-		StorageLimit:    limits.MaxStorageBytes,
-		BandwidthUsed:   bandwidth,
-		BandwidthLimit:  limits.MaxBandwidthBytesMonthly,
-		UserCount:       users,
-		UserLimit:       limits.MaxUsers,
-		PlanConfigured:  plan != nil,
+		Tier:           limits.Tier,
+		StorageUsed:    storage,
+		StorageLimit:   limits.MaxStorageBytes,
+		BandwidthUsed:  bandwidth,
+		BandwidthLimit: limits.MaxBandwidthBytesMonthly,
+		UserCount:      users,
+		UserLimit:      limits.MaxUsers,
+		PlanConfigured: plan != nil,
 	}, nil
 }

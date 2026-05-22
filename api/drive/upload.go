@@ -4,8 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"log/slog"
+
 	"net/http"
+
+	"github.com/kennguy3n/zk-drive/internal/logging"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
@@ -309,13 +311,13 @@ func (h *Handler) publishPostUploadJobs(ctx context.Context, fileID, versionID u
 		return
 	}
 	if err := h.jobs.PublishPreview(ctx, fileID, versionID); err != nil {
-		slog.ErrorContext(ctx, "drive publish preview job failed", "file_id", fileID, "version_id", versionID, "err", err)
+		logging.FromContext(ctx).Error("drive publish preview job failed", "file_id", fileID, "version_id", versionID, "err", err)
 	}
 	if err := h.jobs.PublishScan(ctx, fileID, versionID); err != nil {
-		slog.ErrorContext(ctx, "drive publish scan job failed", "file_id", fileID, "version_id", versionID, "err", err)
+		logging.FromContext(ctx).Error("drive publish scan job failed", "file_id", fileID, "version_id", versionID, "err", err)
 	}
 	if err := h.jobs.PublishIndex(ctx, fileID, versionID); err != nil {
-		slog.ErrorContext(ctx, "drive publish index job failed", "file_id", fileID, "version_id", versionID, "err", err)
+		logging.FromContext(ctx).Error("drive publish index job failed", "file_id", fileID, "version_id", versionID, "err", err)
 	}
 }
 

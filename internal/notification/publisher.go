@@ -4,8 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"log/slog"
+
 	"strings"
+
+	"github.com/kennguy3n/zk-drive/internal/logging"
 
 	"github.com/google/uuid"
 	"github.com/redis/go-redis/v9"
@@ -127,7 +129,7 @@ func (p *RedisPublisher) Subscribe(ctx context.Context, bc LocalBroadcaster) err
 			}
 			workspaceID, userID, err := parseChannel(msg.Channel)
 			if err != nil {
-				slog.WarnContext(ctx, "ws redis drop message: invalid channel", "channel", msg.Channel, "err", err)
+				logging.FromContext(ctx).Warn("ws redis drop message: invalid channel", "channel", msg.Channel, "err", err)
 				continue
 			}
 			bc.BroadcastJSON(workspaceID, userID, []byte(msg.Payload))

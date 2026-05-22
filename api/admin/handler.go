@@ -8,11 +8,13 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"log/slog"
+
 	"net/http"
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/kennguy3n/zk-drive/internal/logging"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
@@ -46,14 +48,14 @@ type FabricClient interface {
 // optional: when a service is nil the corresponding route returns 501
 // so the rest of the admin surface keeps functioning.
 type Handler struct {
-	pool        *pgxpool.Pool
-	users       *user.Service
-	audit       *audit.Service
-	retention   *retention.Service
-	billing     *billing.Service
-	stripe      *billing.StripeService
-	fabric      FabricClient
-	provisioner *fabric.Provisioner
+	pool         *pgxpool.Pool
+	users        *user.Service
+	audit        *audit.Service
+	retention    *retention.Service
+	billing      *billing.Service
+	stripe       *billing.StripeService
+	fabric       FabricClient
+	provisioner  *fabric.Provisioner
 	storeFactory *storage.ClientFactory
 }
 
@@ -278,9 +280,9 @@ func (h *Handler) PutCMK(w http.ResponseWriter, r *http.Request) {
 	if h.fabric != nil {
 		tenantID, terr := h.provisioner.LookupTenantID(r.Context(), workspaceID)
 		if terr != nil {
-			slog.ErrorContext(r.Context(), "admin.PutCMK lookup tenant id failed", "workspace_id", workspaceID, "err", terr)
+			logging.FromContext(r.Context()).Error("admin.PutCMK lookup tenant id failed", "workspace_id", workspaceID, "err", terr)
 		} else if perr := h.fabric.PutCMK(r.Context(), tenantID, uri); perr != nil {
-			slog.ErrorContext(r.Context(), "admin.PutCMK fabric console update failed", "workspace_id", workspaceID, "tenant_id", tenantID, "err", perr)
+			logging.FromContext(r.Context()).Error("admin.PutCMK fabric console update failed", "workspace_id", workspaceID, "tenant_id", tenantID, "err", perr)
 		}
 	}
 	if h.storeFactory != nil {

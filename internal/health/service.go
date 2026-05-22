@@ -29,10 +29,12 @@ package health
 import (
 	"context"
 	"encoding/json"
-	"log/slog"
+
 	"net/http"
 	"sync"
 	"time"
+
+	"github.com/kennguy3n/zk-drive/internal/logging"
 )
 
 // DefaultCheckTimeout is the per-check timeout applied by Service
@@ -170,7 +172,7 @@ func (s *Service) ReadyHandler() http.HandlerFunc {
 		// operator-visible response ("fail") can be correlated to a
 		// full error in the logs.
 		for _, f := range failures {
-			slog.ErrorContext(r.Context(), "readyz check failed", "name", f.name, "err", f.err)
+			logging.FromContext(r.Context()).Error("readyz check failed", "name", f.name, "err", f.err)
 		}
 
 		status := http.StatusOK

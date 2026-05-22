@@ -4,8 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"log/slog"
+
 	"sync"
 	"time"
+
+	"github.com/kennguy3n/zk-drive/internal/logging"
 
 	"github.com/google/uuid"
 )
@@ -79,7 +82,7 @@ func (s *Service) LogAction(ctx context.Context, workspaceID, userID uuid.UUID, 
 	if metadata != nil {
 		b, err := json.Marshal(metadata)
 		if err != nil {
-			slog.ErrorContext(ctx, "activity marshal metadata failed", "err", err)
+			logging.FromContext(ctx).Error("activity marshal metadata failed", "err", err)
 		} else {
 			raw = b
 		}

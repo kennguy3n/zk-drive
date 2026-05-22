@@ -566,3 +566,133 @@ func TestMiddlewareIsNoOpWhenAccessLogAlreadyRan(t *testing.T) {
 		}
 	}
 }
+
+// TestClientIPMatchesChiRealIPPrecedence pins the contract that
+// the access log's remote_addr field follows the same header
+// precedence (True-Client-IP → X-Real-IP → X-Forwarded-For →
+// RemoteAddr) that chi's middleware.RealIP applies inside the
+// router. Without that alignment, the access log line outside chi
+// and the audit log line inside chi would report different
+// remote_addr values for the same request and dashboard joins on
+// remote_addr would silently fail to match.
+func TestClientIPMatchesChiRealIPPrecedence(t *testing.T) {
+	cases := []struct {
+		name       string
+		headers    map[string]string
+		remoteAddr string
+		want       string
+	}{
+		{
+			name:    "true-client-ip wins over x-real-ip and xff",
+			headers: map[string]string{"True-Client-IP": "9.9.9.9", "X-Real-IP": "1.1.1.1", "X-Forwarded-For": "2.2.2.2,3.3.3.3"},
+			want:    "9.9.9.9",
+		},
+		{
+			name:    "x-real-ip wins over xff when true-client-ip absent",
+			headers: map[string]string{"X-Real-IP": "1.1.1.1", "X-Forwarded-For": "2.2.2.2,3.3.3.3"},
+			want:    "1.1.1.1",
+		},
+		{
+			name:    "xff first entry when true-client-ip / x-real-ip absent",
+			headers: map[string]string{"X-Forwarded-For": "2.2.2.2, 3.3.3.3"},
+			want:    "2.2.2.2",
+		},
+		{
+			name:       "remoteaddr fallback strips port",
+			remoteAddr: "10.0.0.5:54321",
+			want:       "10.0.0.5",
+		},
+		{
+			name:       "remoteaddr fallback strips ipv6 brackets",
+			remoteAddr: "[2001:db8::1]:54321",
+			want:       "2001:db8::1",
+		},
+		{
+			name:       "remoteaddr fallback handles ipv6 loopback",
+			remoteAddr: "[::1]:5",
+			want:       "::1",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, "/x", nil)
+			for k, v := range tc.headers {
+				req.Header.Set(k, v)
+			}
+			if tc.remoteAddr != "" {
+				req.RemoteAddr = tc.remoteAddr
+			} else {
+				req.RemoteAddr = ""
+			}
+			if got := clientIP(req); got != tc.want {
+				t.Errorf("clientIP() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestSanitizeRequestIDRejectsHostileInputs pins the contract
+// that an externally-supplied X-Request-Id is only accepted when
+// it's bounded in length AND consists of printable ASCII. A
+// header carrying a megabyte of bytes — or embedded newlines that
+// would break JSON line framing in downstream log aggregators —
+// gets dropped on the floor and AccessLog generates a fresh UUID
+// instead. Defense-in-depth against log-storage amplification and
+// log-injection.
+func TestSanitizeRequestIDRejectsHostileInputs(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{"empty rejected", "", ""},
+		{"too long rejected", strings.Repeat("a", maxRequestIDLen+1), ""},
+		{"newline rejected", "abc\ndef", ""},
+		{"carriage return rejected", "abc\rdef", ""},
+		{"tab rejected", "abc\tdef", ""},
+		{"space rejected", "abc def", ""},
+		{"non-ascii rejected", "abc\xc3\xa9def", ""},
+		{"null byte rejected", "abc\x00def", ""},
+		{"uuid v4 accepted", "550e8400-e29b-41d4-a716-446655440000", "550e8400-e29b-41d4-a716-446655440000"},
+		{"hex trace id accepted", "0af7651916cd43dd8448eb211c80319c", "0af7651916cd43dd8448eb211c80319c"},
+		{"slash-delimited vendor id accepted", "abc/def-123", "abc/def-123"},
+		{"exactly maxlen accepted", strings.Repeat("a", maxRequestIDLen), strings.Repeat("a", maxRequestIDLen)},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := sanitizeRequestID(tc.in); got != tc.want {
+				t.Errorf("sanitizeRequestID(%q) = %q, want %q", tc.in, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestAccessLogDropsHostileRequestIDAndGeneratesFresh pins the
+// integration contract: a hostile X-Request-Id (over-long, or
+// containing control characters) must not appear in the emitted
+// JSON record. AccessLog falls back to a freshly-generated UUID
+// so log lines still carry SOMETHING usable for correlation.
+func TestAccessLogDropsHostileRequestIDAndGeneratesFresh(t *testing.T) {
+	var buf bytes.Buffer
+	prev := slog.Default()
+	defer slog.SetDefault(prev)
+	slog.SetDefault(slog.New(slog.NewJSONHandler(&buf, nil)))
+
+	wrapped := AccessLog(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	hostile := strings.Repeat("a", maxRequestIDLen+1)
+	req := httptest.NewRequest(http.MethodGet, "/x", nil)
+	req.Header.Set("X-Request-Id", hostile)
+	rec := httptest.NewRecorder()
+	wrapped.ServeHTTP(rec, req)
+
+	out := buf.String()
+	if strings.Contains(out, hostile) {
+		t.Fatalf("hostile X-Request-Id leaked into log output: %s", out)
+	}
+	if !strings.Contains(out, `"request_id":`) {
+		t.Fatalf("access log line missing request_id field: %s", out)
+	}
+}

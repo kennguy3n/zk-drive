@@ -345,7 +345,7 @@ func AccessLog(next http.Handler) http.Handler {
 		// inside chi that AccessLog couldn't see) — we set
 		// chimw.RequestIDKey ourselves so chimw.GetReqID
 		// continues to work for any handler that calls it.
-		reqID := r.Header.Get("X-Request-Id")
+		reqID := sanitizeRequestID(r.Header.Get("X-Request-Id"))
 		if reqID == "" {
 			reqID = uuid.NewString()
 		}
@@ -409,7 +409,7 @@ func withRequestScopedLogger(ctx context.Context, r *http.Request, base *slog.Lo
 	reqID := ""
 	if rid := chimw.GetReqID(ctx); rid != "" {
 		reqID = rid
-	} else if rid := r.Header.Get("X-Request-Id"); rid != "" {
+	} else if rid := sanitizeRequestID(r.Header.Get("X-Request-Id")); rid != "" {
 		reqID = rid
 		ctx = context.WithValue(ctx, chimw.RequestIDKey, reqID)
 	} else {
@@ -424,14 +424,23 @@ func withRequestScopedLogger(ctx context.Context, r *http.Request, base *slog.Lo
 	))
 }
 
-// clientIP returns the request's remote IP, preferring the first
-// entry in X-Forwarded-For when present (we sit behind a
-// load-balancer / reverse proxy in every production deployment).
-// Falls back to RemoteAddr without the port suffix and IPv6
-// brackets stripped — matching the format internal/audit/service.go
-// uses so dashboards can join on remote_addr across the access
-// log and the audit log without IPv6-specific string munging.
+// clientIP returns the request's remote IP using the same
+// precedence chi's middleware.RealIP applies
+// (True-Client-IP → X-Real-IP → X-Forwarded-For → RemoteAddr).
+// Matching that order ensures the access log's `remote_addr`
+// matches what downstream handlers see after chi.RealIP has
+// rewritten r.RemoteAddr, so a dashboard `WHERE remote_addr =
+// '...'` query joins consistently across the access log and the
+// audit log regardless of which header the upstream proxy uses
+// (Cloudflare emits True-Client-IP, nginx is often configured
+// for X-Real-IP, AWS ALB / GCP LB / Fastly use X-Forwarded-For).
 func clientIP(r *http.Request) string {
+	if tcip := r.Header.Get("True-Client-IP"); tcip != "" {
+		return strings.TrimSpace(tcip)
+	}
+	if xrip := r.Header.Get("X-Real-IP"); xrip != "" {
+		return strings.TrimSpace(xrip)
+	}
 	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
 		if i := strings.IndexByte(xff, ','); i > 0 {
 			return strings.TrimSpace(xff[:i])
@@ -452,4 +461,38 @@ func clientIP(r *http.Request) string {
 	host = strings.TrimPrefix(host, "[")
 	host = strings.TrimSuffix(host, "]")
 	return host
+}
+
+// maxRequestIDLen caps the X-Request-Id header value before it
+// is embedded in every log line for the request. Without a cap,
+// a malicious or buggy upstream could send a multi-megabyte
+// header that gets amplified into every record — inflating log
+// storage costs and slowing log ingestion. 256 bytes is more
+// than enough for the formats every real correlation system
+// uses (UUIDv4 = 36, Honeycomb trace-id = 32, Datadog = 19,
+// AWS X-Ray = 35, W3C traceparent value = 55).
+const maxRequestIDLen = 256
+
+// sanitizeRequestID validates an externally-supplied X-Request-Id
+// before we accept it as the request correlation id. The id must
+// be ≤ maxRequestIDLen bytes and consist only of printable ASCII
+// (excluding whitespace and control characters) — strict enough
+// to prevent log-injection via embedded newlines / JSON quote
+// characters / shell metacharacters in operator copy-paste, and
+// loose enough to accept every real-world format we've seen
+// (UUIDs, hex trace ids, base64 trace ids, slash-delimited
+// vendor formats). Returns "" when the header is missing,
+// over-long, or contains disallowed bytes — callers fall back to
+// uuid.NewString() in that case.
+func sanitizeRequestID(raw string) string {
+	if raw == "" || len(raw) > maxRequestIDLen {
+		return ""
+	}
+	for i := 0; i < len(raw); i++ {
+		c := raw[i]
+		if c < 0x21 || c > 0x7e {
+			return ""
+		}
+	}
+	return raw
 }

@@ -3,8 +3,10 @@ package sharing
 import (
 	"context"
 	"errors"
-	"log/slog"
+
 	"sort"
+
+	"github.com/kennguy3n/zk-drive/internal/logging"
 
 	"github.com/google/uuid"
 )
@@ -126,7 +128,7 @@ func (s *ClientRoomService) CreateFromTemplate(ctx context.Context, workspaceID,
 			// caller to clean up an already-public room. Operators
 			// can re-create missing sub-folders through the regular
 			// folder API.
-			slog.ErrorContext(ctx, "sharing CreateFromTemplate: create sub-folder failed", "sub_folder", name, "room_id", room.ID, "err", ferr)
+			logging.FromContext(ctx).Error("sharing CreateFromTemplate: create sub-folder failed", "sub_folder", name, "room_id", room.ID, "err", ferr)
 			continue
 		}
 		subIDs = append(subIDs, fref.ID)
