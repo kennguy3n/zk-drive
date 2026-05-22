@@ -74,10 +74,52 @@ func ParseToken(secret, raw string) (*Claims, error) {
 	return claims, nil
 }
 
+// SessionChecker is consulted by AuthMiddleware on every authenticated
+// request to honour out-of-band revocations (logout, password reset,
+// admin force-sign-out) without rotating the JWT signing secret.
+//
+// IsRevoked returns true when a token with the given (workspaceID,
+// userID, issuedAt) tuple has been revoked. Transport-level errors
+// must be returned to the caller verbatim — the middleware fails
+// closed on err != nil so a flaky Redis cannot silently degrade
+// revocation to a no-op.
+//
+// `issuedAt` is the JWT's `iat` claim; implementations compare it
+// against a per-user cutoff stored when the user logs out or has
+// their sessions force-revoked.
+type SessionChecker interface {
+	IsRevoked(ctx context.Context, workspaceID, userID uuid.UUID, issuedAt time.Time) (bool, error)
+}
+
+// SessionCheckTimeout is the upper bound on how long AuthMiddleware
+// will wait for a SessionChecker.IsRevoked call before giving up and
+// failing closed.
+//
+// Healthy Redis (sub-millisecond latency) never approaches this
+// bound, but a partial outage — packet loss, half-open TCP
+// connections, an overloaded node — can leave a Redis call blocked
+// indefinitely on the request's context. Without a bound, every
+// authenticated request would hang for the full client read deadline,
+// effectively taking down the API surface on a slow-Redis incident
+// even though the request would have failed closed anyway.
+//
+// 1 second is comfortably above the p99.99 of every well-behaved
+// Redis deployment we've measured, while still keeping the
+// worst-case auth latency on a Redis incident inside the typical
+// HTTP client timeout.
+const SessionCheckTimeout = 1 * time.Second
+
 // AuthMiddleware returns a middleware that validates a Bearer JWT in the
 // Authorization header and injects the parsed identity into the request
 // context. Requests without a valid token receive HTTP 401.
-func AuthMiddleware(secret string) func(http.Handler) http.Handler {
+//
+// When checker is non-nil, AuthMiddleware additionally calls
+// checker.IsRevoked after signature/expiry validation passes; a
+// revoked token (or any error from the checker) also yields HTTP 401.
+// Passing nil keeps the previous stateless-JWT behaviour and is
+// retained for tests and the (deprecated) in-memory deployment path
+// where Redis isn't wired.
+func AuthMiddleware(secret string, checker SessionChecker) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			header := r.Header.Get("Authorization")
@@ -90,6 +132,40 @@ func AuthMiddleware(secret string) func(http.Handler) http.Handler {
 			if err != nil {
 				http.Error(w, "invalid token", http.StatusUnauthorized)
 				return
+			}
+			if checker != nil {
+				// The JWT carries IssuedAt as a *jwt.NumericDate
+				// (second-precision Unix time). When the claim is
+				// missing entirely we treat the token as
+				// pre-revocation-era: there's no iat to compare
+				// against a cutoff, so we conservatively fail
+				// closed.
+				if claims.IssuedAt == nil {
+					http.Error(w, "token missing iat", http.StatusUnauthorized)
+					return
+				}
+				// Bound the IsRevoked call so a partial Redis
+				// outage (half-open connections, packet loss)
+				// cannot hang every authenticated request for
+				// the client's full read deadline. We still fail
+				// closed when the check errors — the timeout
+				// just makes the failure fast and observable
+				// instead of a silent stall. See
+				// SessionCheckTimeout docs.
+				checkCtx, cancel := context.WithTimeout(r.Context(), SessionCheckTimeout)
+				revoked, ierr := checker.IsRevoked(checkCtx, claims.WorkspaceID, claims.UserID, claims.IssuedAt.Time)
+				cancel()
+				if ierr != nil {
+					// Fail closed on store unreachable. Without
+					// this the revocation guarantee would silently
+					// vanish behind a single Redis outage.
+					http.Error(w, "revocation check failed", http.StatusUnauthorized)
+					return
+				}
+				if revoked {
+					http.Error(w, "token revoked", http.StatusUnauthorized)
+					return
+				}
 			}
 			ctx := withClaims(r.Context(), claims)
 			next.ServeHTTP(w, r.WithContext(ctx))

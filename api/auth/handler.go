@@ -25,6 +25,24 @@ import (
 // tenant provisioning) fail. Callers wire this with WithPostSignupHook.
 type PostSignupHook func(ctx context.Context, workspaceID uuid.UUID, workspaceName string)
 
+// SessionRevoker is the small subset of session.RedisSessionStore the
+// auth handler needs: it extends middleware.SessionChecker (which
+// already declares IsRevoked) with the write-side RevokeUser hook so
+// Logout can record per-user cutoffs. Embedding the middleware
+// interface — rather than redeclaring IsRevoked here — means a
+// signature change in one place propagates everywhere via the type
+// system, eliminating the silent-drift hazard a duplicated method
+// declaration would carry.
+//
+// Pulled behind its own interface (rather than depending directly on
+// session.RedisSessionStore) so tests can substitute an in-memory
+// implementation without spinning up Redis and so api/auth keeps a
+// no-cycle dependency on internal/session.
+type SessionRevoker interface {
+	middleware.SessionChecker
+	RevokeUser(ctx context.Context, workspaceID, userID uuid.UUID, at time.Time, ttl time.Duration) error
+}
+
 // Handler serves authentication HTTP endpoints.
 type Handler struct {
 	pool       *pgxpool.Pool
@@ -33,6 +51,7 @@ type Handler struct {
 	audit      *audit.Service
 	jwtSecret  string
 	postSignup PostSignupHook
+	sessions   SessionRevoker
 }
 
 // NewHandler constructs a Handler from the user and workspace services. The
@@ -53,6 +72,17 @@ func (h *Handler) WithAudit(svc *audit.Service) *Handler {
 // errors do not affect the HTTP response — see PostSignupHook docs.
 func (h *Handler) WithPostSignupHook(hook PostSignupHook) *Handler {
 	h.postSignup = hook
+	return h
+}
+
+// WithSessionRevoker wires the session store so Logout actually
+// invalidates tokens. When nil (the test harness path, single-process
+// dev mode), Logout is a no-op beyond the audit log entry — matching
+// the pre-WS-1 stateless-JWT behaviour. Production wiring in
+// cmd/server installs the Redis-backed store unconditionally when
+// REDIS_URL is configured.
+func (h *Handler) WithSessionRevoker(s SessionRevoker) *Handler {
+	h.sessions = s
 	return h
 }
 
@@ -240,23 +270,120 @@ func (h *Handler) Login(w http.ResponseWriter, r *http.Request) {
 	writeToken(w, h.jwtSecret, u.ID, u.WorkspaceID, u.Role)
 }
 
-// Logout is a no-op for stateless JWTs — the client discards the token. The
-// endpoint still responds 200 so clients can treat logout uniformly.
+// Logout records a per-user revocation cutoff in the session store
+// so every token currently issued for the caller — including the
+// one they just used to authenticate this request — is rejected by
+// AuthMiddleware on subsequent requests. The endpoint still responds
+// 204 even when the session store is unwired or fails, so clients
+// can treat logout uniformly: the worst case (store unreachable) is
+// that the JWT remains valid until its natural TTL elapses, which
+// is the pre-WS-1 stateless behaviour.
+//
+// We pass middleware.TokenTTL as the cutoff key's TTL so the
+// underlying redis entry self-cleans after no token it could revoke
+// remains valid. Without this the user_revoked: keys would
+// accumulate forever for every logout in the system.
 func (h *Handler) Logout(w http.ResponseWriter, r *http.Request) {
-	if claims, ok := middleware.ClaimsFromContext(r.Context()); ok {
-		actor := claims.UserID
-		h.logAudit(r.Context(), claims.WorkspaceID, &actor, audit.ActionLogout, r, nil)
+	claims, ok := middleware.ClaimsFromContext(r.Context())
+	if !ok {
+		// Defence-in-depth: production routes /logout behind
+		// AuthMiddleware so this branch is normally unreachable —
+		// the middleware would have already returned 401. We keep
+		// the fallback so a future route that mounts Logout outside
+		// the middleware group doesn't NPE on a nil claims pointer.
+		// 204 (not 401) is the safer response in that case: the
+		// client treats logout as fire-and-forget, and we'd rather
+		// confirm than crash.
+		w.WriteHeader(http.StatusNoContent)
+		return
 	}
+	actor := claims.UserID
+	if h.sessions != nil {
+		// Bound the RevokeUser call the same way AuthMiddleware
+		// and Refresh bound their reads: a partial Redis stall
+		// would otherwise hang /auth/logout for the server's
+		// full WriteTimeout (30s) — and a hung logout endpoint
+		// is the worst possible failure mode for a user trying
+		// to terminate a possibly-compromised session. Fast
+		// failure plus the audit-trail recovery path is the
+		// right tradeoff.
+		revokeCtx, cancel := context.WithTimeout(r.Context(), middleware.SessionCheckTimeout)
+		err := h.sessions.RevokeUser(revokeCtx, claims.WorkspaceID, claims.UserID, time.Now().UTC(), middleware.TokenTTL)
+		cancel()
+		if err != nil {
+			// Best-effort: log via audit but don't 500. The client
+			// already considers itself logged out; surfacing 500
+			// here would leave it confused. The audit trail is the
+			// recovery mechanism if a store outage masked a real
+			// revocation we needed to enforce.
+			h.logAudit(r.Context(), claims.WorkspaceID, &actor, audit.ActionLogout, r, map[string]any{
+				"result": "store_error",
+				"error":  err.Error(),
+			})
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+	}
+	h.logAudit(r.Context(), claims.WorkspaceID, &actor, audit.ActionLogout, r, nil)
 	w.WriteHeader(http.StatusNoContent)
 }
 
 // Refresh issues a new JWT with a fresh expiry for an already-authenticated
 // user.
+//
+// We consult the session store before minting the new token to close
+// the narrow race where: (a) the user calls Logout at time T, (b)
+// Logout's RevokeUser hits Redis a few ms later, (c) a request that
+// was already in flight with the about-to-be-revoked JWT lands on
+// /auth/refresh before the cutoff is durable. AuthMiddleware would
+// have let the request through (its check ran against the prior
+// cutoff), and a naive Refresh handler would happily mint a new JWT
+// from claims belonging to a now-revoked session. The extra check
+// here means a Refresh inside the race window is rejected even
+// though the gating middleware already let the request reach the
+// handler.
 func (h *Handler) Refresh(w http.ResponseWriter, r *http.Request) {
 	claims, ok := middleware.ClaimsFromContext(r.Context())
 	if !ok {
 		http.Error(w, "unauthenticated", http.StatusUnauthorized)
 		return
+	}
+	if h.sessions != nil {
+		// Mirror AuthMiddleware's missing-iat handling: when a
+		// revoker is wired, a token without an iat claim cannot
+		// be checked against the cutoff and must be rejected
+		// rather than silently bypassing the gate. The current
+		// production wiring already enforces this in the
+		// middleware before the handler runs, but a future
+		// route that mounts Refresh outside the middleware
+		// group (or a code path that constructs the handler
+		// directly in tests) would otherwise mint a fresh
+		// long-lived JWT without a revocation check.
+		if claims.IssuedAt == nil {
+			http.Error(w, "token missing iat", http.StatusUnauthorized)
+			return
+		}
+		// Bound the IsRevoked call the same way AuthMiddleware
+		// does. Without this matching timeout, a partial Redis
+		// outage that recovers just long enough for the
+		// middleware's 1-second-bounded check to succeed could
+		// still hang the Refresh handler for the full server
+		// WriteTimeout — re-introducing the exact failure mode
+		// the middleware timeout was designed to prevent.
+		checkCtx, cancel := context.WithTimeout(r.Context(), middleware.SessionCheckTimeout)
+		revoked, err := h.sessions.IsRevoked(checkCtx, claims.WorkspaceID, claims.UserID, claims.IssuedAt.Time)
+		cancel()
+		if err != nil {
+			// Fail closed: a Refresh that cannot verify revocation
+			// status must not mint a longer-lived token. The client
+			// can retry once the store recovers.
+			http.Error(w, "revocation check failed", http.StatusUnauthorized)
+			return
+		}
+		if revoked {
+			http.Error(w, "token revoked", http.StatusUnauthorized)
+			return
+		}
 	}
 	writeToken(w, h.jwtSecret, claims.UserID, claims.WorkspaceID, claims.Role)
 }

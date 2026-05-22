@@ -189,7 +189,23 @@ func run() error {
 	} else {
 		log.Printf("redis: REDIS_URL not set, using in-memory rate limiter and single-process ws (single-replica only)")
 	}
-	_ = sessionStore // session store is wired into auth handlers in a follow-up
+	// sessionStore (when non-nil) is the SessionChecker the auth
+	// middleware consults on every authenticated request to honour
+	// out-of-band revocations (logout, password reset, admin
+	// force-sign-out). The auth handler also uses it to (a) record
+	// per-user logout cutoffs and (b) consult them on Refresh.
+	//
+	// Both bindings go through `if sessionStore != nil` rather than
+	// passing the typed-nil pointer straight into the interface
+	// variable / setter — Go's "typed nil interface" trap would
+	// otherwise leave h.sessions != nil but its method calls
+	// panicking on a nil receiver. nil when REDIS_URL is unset —
+	// in that (single-process dev) mode tokens behave like stateless
+	// JWTs and only expire on their natural TTL.
+	var sessionChecker middleware.SessionChecker
+	if sessionStore != nil {
+		sessionChecker = sessionStore
+	}
 
 	rateLimiter := func() func(http.Handler) http.Handler {
 		if redisClient != nil {
@@ -249,6 +265,9 @@ func run() error {
 			storageFactory.Invalidate(workspaceID)
 			log.Printf("fabric: provisioned workspace=%s", workspaceID)
 		})
+	if sessionStore != nil {
+		authHandler = authHandler.WithSessionRevoker(sessionStore)
+	}
 	oauthHandler := auth.NewOAuthHandler(authHandler, auth.OAuthConfig{
 		GoogleClientID:        cfg.GoogleClientID,
 		GoogleClientSecret:    cfg.GoogleClientSecret,
@@ -344,7 +363,7 @@ func run() error {
 			})
 
 			r.Group(func(r chi.Router) {
-				r.Use(middleware.AuthMiddleware(cfg.JWTSecret))
+				r.Use(middleware.AuthMiddleware(cfg.JWTSecret, sessionChecker))
 				r.Post("/logout", authHandler.Logout)
 				r.Post("/refresh", authHandler.Refresh)
 			})
@@ -357,12 +376,12 @@ func run() error {
 		// frame, and TenantGuard's HTTP-method assumptions trip on
 		// the upgrade handshake.
 		r.Group(func(r chi.Router) {
-			r.Use(middleware.AuthMiddleware(cfg.JWTSecret))
+			r.Use(middleware.AuthMiddleware(cfg.JWTSecret, sessionChecker))
 			r.Get("/ws", wsHandler.ServeWS)
 		})
 
 		r.Group(func(r chi.Router) {
-			r.Use(middleware.AuthMiddleware(cfg.JWTSecret))
+			r.Use(middleware.AuthMiddleware(cfg.JWTSecret, sessionChecker))
 			r.Use(middleware.TenantGuard())
 			r.Use(rateLimiter())
 
@@ -425,7 +444,7 @@ func run() error {
 		})
 
 		r.Route("/admin", func(r chi.Router) {
-			r.Use(middleware.AuthMiddleware(cfg.JWTSecret))
+			r.Use(middleware.AuthMiddleware(cfg.JWTSecret, sessionChecker))
 			r.Use(middleware.TenantGuard())
 			r.Use(middleware.AdminOnly())
 			r.Use(rateLimiter())
@@ -433,7 +452,7 @@ func run() error {
 		})
 
 		r.Route("/kchat", func(r chi.Router) {
-			r.Use(middleware.AuthMiddleware(cfg.JWTSecret))
+			r.Use(middleware.AuthMiddleware(cfg.JWTSecret, sessionChecker))
 			r.Use(middleware.TenantGuard())
 			r.Use(rateLimiter())
 			kchatHandler.RegisterRoutes(r)
