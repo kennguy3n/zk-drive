@@ -89,6 +89,12 @@ type SecurityHeadersOptions struct {
 //     directive prevents an attacker from MITM-ing a
 //     subdomain (e.g. api.example.com vs. example.com).
 //
+//     The same DisableHSTS knob also suppresses CSP's
+//     `upgrade-insecure-requests` so local plain-HTTP
+//     development isn't broken by a browser that decides to
+//     upgrade fetches on a trustworthy-but-plain-HTTP origin
+//     (the behaviour for localhost is implementation defined).
+//
 //   - X-Content-Type-Options: nosniff
 //     Stops MIME-sniffing-based XSS where the browser
 //     re-interprets a JSON response as HTML if the
@@ -193,12 +199,20 @@ const defaultPermissionsPolicy = "accelerometer=(), " +
 // directives are emitted in stable order so the header value
 // hash is reproducible across boots (useful for some CDN cache
 // keys and the hash-based PWA precache).
+//
+// All operator-supplied origins go through sanitiseCSPOrigin
+// before interpolation. A fat-fingered env var like
+// `https://gw.example.com; script-src 'unsafe-inline'` would
+// otherwise inject a sibling directive that weakens the policy
+// — env-var content is operator-controlled (not an external
+// attack vector), but a paste mishap shouldn't be able to
+// flip script-src to unsafe-inline silently.
 func buildCSP(opts SecurityHeadersOptions) string {
 	connect := []string{"'self'", "wss:", "ws:"}
-	connect = append(connect, opts.CSPConnectExtra...)
+	connect = append(connect, sanitiseCSPOrigins(opts.CSPConnectExtra)...)
 
 	img := []string{"'self'", "data:", "blob:"}
-	img = append(img, opts.CSPImgExtra...)
+	img = append(img, sanitiseCSPOrigins(opts.CSPImgExtra)...)
 
 	directives := []string{
 		"default-src 'self'",
@@ -211,14 +225,91 @@ func buildCSP(opts SecurityHeadersOptions) string {
 		"form-action 'self'",
 		"base-uri 'self'",
 		"object-src 'none'",
-		// upgrade-insecure-requests: a browser-visible signal
-		// to rewrite any accidental http:// resource link in
-		// our HTML to https://, providing belt-and-suspenders
-		// on top of HSTS for first-load requests.
-		"upgrade-insecure-requests",
 	}
-	if strings.TrimSpace(opts.CSPReportURI) != "" {
-		directives = append(directives, "report-uri "+strings.TrimSpace(opts.CSPReportURI))
+	// upgrade-insecure-requests is gated on !DisableHSTS so it
+	// doesn't break local plain-HTTP development. localhost is
+	// a "potentially trustworthy origin" per the W3C spec, and
+	// browser behaviour for upgrade-insecure-requests on a
+	// trustworthy-but-plain-HTTP origin is implementation
+	// defined — Chrome at one point rewrote all sub-resource
+	// fetches to https:// regardless. Tying this directive to
+	// the same flag operators flip for local HTTP avoids the
+	// surprise: if you're running over HTTP you almost
+	// certainly do NOT want the browser silently upgrading
+	// every request.
+	if !opts.DisableHSTS {
+		directives = append(directives, "upgrade-insecure-requests")
+	}
+	if uri := sanitiseCSPReportURI(opts.CSPReportURI); uri != "" {
+		directives = append(directives, "report-uri "+uri)
 	}
 	return strings.Join(directives, "; ")
+}
+
+// sanitiseCSPOrigins drops any entries that contain characters
+// that would break out of the current CSP directive: `;` ends
+// the directive (and starts a new one), `,` separates policies
+// in a multi-policy header, whitespace acts as a token
+// separator within a directive, and ASCII control bytes have
+// no business in a header. We DROP offending entries rather
+// than escape them because there is no escape mechanism in the
+// CSP grammar — a corrupted origin can't be safely repaired,
+// so the only safe outcome is to omit it (the resulting
+// blocked-resource error in the operator's browser is the
+// signal that the env var is wrong).
+func sanitiseCSPOrigins(in []string) []string {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(in))
+	for _, s := range in {
+		s = strings.TrimSpace(s)
+		if s == "" {
+			continue
+		}
+		// Check the trimmed value for INTERNAL separators —
+		// leading/trailing whitespace is OK (a stray space
+		// in a comma-separated env var is operator typo,
+		// not injection), but a space INSIDE the origin
+		// would break the directive.
+		if containsCSPSeparator(s) {
+			continue
+		}
+		out = append(out, s)
+	}
+	return out
+}
+
+// sanitiseCSPReportURI applies the same rules as
+// sanitiseCSPOrigins but to a single string. Returns the
+// trimmed input, or "" if the input contained a separator that
+// would break out of the directive — in which case we suppress
+// the report-uri directive entirely instead of emitting a
+// half-broken value.
+func sanitiseCSPReportURI(s string) string {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return ""
+	}
+	if containsCSPSeparator(s) {
+		return ""
+	}
+	return s
+}
+
+func containsCSPSeparator(s string) bool {
+	for _, r := range s {
+		switch {
+		case r == ';' || r == ',':
+			return true
+		case r <= 0x20 || r == 0x7f:
+			// Whitespace (space, tab, CR, LF, ...) and
+			// DEL — all of these either separate tokens
+			// inside a CSP directive or are smuggled-
+			// header characters that shouldn't appear in
+			// an origin.
+			return true
+		}
+	}
+	return false
 }

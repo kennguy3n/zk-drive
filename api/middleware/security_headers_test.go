@@ -149,10 +149,13 @@ func TestSecurityHeadersCSPConnectAndImgExtraMergedIn(t *testing.T) {
 }
 
 // TestSecurityHeadersDisableHSTSOmitsHSTSKeepsRest pins that
-// the DisableHSTS knob ONLY suppresses Strict-Transport-Security
-// — it does not affect any other header. Used by local HTTP
-// development where HSTS would lock the developer's browser
-// into requiring HTTPS for localhost for a year.
+// the DisableHSTS knob suppresses Strict-Transport-Security
+// AND the CSP `upgrade-insecure-requests` directive — both
+// would break local plain-HTTP development (HSTS locks the
+// browser into HTTPS-only for a year; upgrade-insecure-requests
+// on a "potentially trustworthy" localhost origin is
+// implementation-defined and could rewrite all fetches to
+// https://). Every other header still emits.
 func TestSecurityHeadersDisableHSTSOmitsHSTSKeepsRest(t *testing.T) {
 	wrapped := SecurityHeaders(SecurityHeadersOptions{DisableHSTS: true})(passthroughHandler())
 
@@ -166,8 +169,90 @@ func TestSecurityHeadersDisableHSTSOmitsHSTSKeepsRest(t *testing.T) {
 	if rec.Header().Get("X-Frame-Options") != "DENY" {
 		t.Errorf("X-Frame-Options not set when DisableHSTS=true")
 	}
-	if rec.Header().Get("Content-Security-Policy") == "" {
+	csp := rec.Header().Get("Content-Security-Policy")
+	if csp == "" {
 		t.Errorf("CSP not set when DisableHSTS=true")
+	}
+	if strings.Contains(csp, "upgrade-insecure-requests") {
+		t.Errorf("CSP contains upgrade-insecure-requests despite DisableHSTS=true (would break local plain-HTTP); got %s", csp)
+	}
+}
+
+// TestSecurityHeadersUpgradeInsecureRequestsEmittedWhenHSTSEnabled
+// pins the inverse: when HSTS is enabled (production default),
+// the CSP carries `upgrade-insecure-requests` so a stale
+// http:// link in our markup gets transparently upgraded by
+// the browser. This is the belt-and-suspenders companion to
+// HSTS on the first-load request.
+func TestSecurityHeadersUpgradeInsecureRequestsEmittedWhenHSTSEnabled(t *testing.T) {
+	wrapped := SecurityHeaders(SecurityHeadersOptions{})(passthroughHandler())
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/x", nil)
+	wrapped.ServeHTTP(rec, req)
+
+	csp := rec.Header().Get("Content-Security-Policy")
+	if !strings.Contains(csp, "upgrade-insecure-requests") {
+		t.Errorf("CSP missing upgrade-insecure-requests in default (HSTS-enabled) mode; got %s", csp)
+	}
+}
+
+// TestSecurityHeadersCSPExtrasRejectInjection pins that an
+// operator who fat-fingers an env var with a semicolon, comma,
+// or whitespace doesn't get CSP-directive injection. A value
+// like `https://gw.example.com; script-src 'unsafe-inline'`
+// would otherwise silently flip script-src to unsafe-inline.
+// Offending entries are dropped (no escape mechanism in the
+// CSP grammar; the browser console error from the resulting
+// blocked-resource is the signal that the env var is wrong).
+func TestSecurityHeadersCSPExtrasRejectInjection(t *testing.T) {
+	wrapped := SecurityHeaders(SecurityHeadersOptions{
+		CSPConnectExtra: []string{
+			"https://gw.example.com",                          // legit
+			"https://evil.example.com; script-src 'unsafe-inline'", // semicolon injection
+			"https://comma.example.com, default-src *",        // comma injection
+			"https://whitespace example.com",                  // whitespace injection
+			"  https://trimmed.example.com  ",                 // legit after trim
+		},
+		CSPImgExtra: []string{
+			"https://img.example.com",
+			"https://bad.example.com\n; img-src *",            // newline injection
+		},
+		CSPReportURI: "https://csp.example.com/report; script-src 'unsafe-inline'",
+	})(passthroughHandler())
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/x", nil)
+	wrapped.ServeHTTP(rec, req)
+
+	csp := rec.Header().Get("Content-Security-Policy")
+	// connect-src kept legit values, dropped injectors.
+	if !strings.Contains(csp, "https://gw.example.com") {
+		t.Errorf("CSP dropped legit connect origin; got %s", csp)
+	}
+	if !strings.Contains(csp, "https://trimmed.example.com") {
+		t.Errorf("CSP dropped legit trimmed connect origin; got %s", csp)
+	}
+	// img-src kept legit, dropped injector.
+	if !strings.Contains(csp, "https://img.example.com") {
+		t.Errorf("CSP dropped legit img origin; got %s", csp)
+	}
+	// CRITICAL: none of the injection attempts landed.
+	for _, bad := range []string{
+		"https://evil.example.com",
+		"script-src 'unsafe-inline'",
+		"default-src *",
+		"img-src *",
+		"https://comma.example.com",
+		"https://whitespace example.com",
+		"https://bad.example.com",
+		// The report-uri value also contained an injection;
+		// it must be suppressed entirely.
+		"https://csp.example.com/report",
+	} {
+		if strings.Contains(csp, bad) {
+			t.Errorf("CSP injection landed: %q present in policy %s", bad, csp)
+		}
 	}
 }
 
