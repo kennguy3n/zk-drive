@@ -9,6 +9,8 @@ import (
 	"github.com/alicebob/miniredis/v2"
 	"github.com/google/uuid"
 	"github.com/redis/go-redis/v9"
+
+	"github.com/kennguy3n/zk-drive/internal/tenantctx"
 )
 
 // newTestRedis returns a fresh in-process miniredis and a connected
@@ -31,7 +33,7 @@ func newTestRedis(t *testing.T) (*miniredis.Miniredis, *redis.Client) {
 func authedRequest(userID, workspaceID uuid.UUID) *http.Request {
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
 	ctx := context.WithValue(req.Context(), userIDContextKey, userID)
-	ctx = context.WithValue(ctx, workspaceIDContextKey, workspaceID)
+	ctx = tenantctx.WithWorkspaceID(ctx, workspaceID)
 	return req.WithContext(ctx)
 }
 
