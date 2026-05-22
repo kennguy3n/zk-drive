@@ -161,10 +161,17 @@ services:
       WORKER_METRICS_ADDR: ${WORKER_METRICS_ADDR:-:9091}
     ports:
       # Map the worker's metrics port to the host so a Prometheus
-      # running outside the Compose network can scrape. Comment
-      # this out (or change the host port) if you scrape via a
-      # sibling Compose service.
-      - "9091:9091"
+      # running outside the Compose network can scrape. Bind to
+      # 127.0.0.1 only — matches the file's stated invariant (see
+      # the header comment at lines 4-6) that all listening ports
+      # sit behind a host-level reverse proxy and are never
+      # directly reachable from the public internet. /metrics is
+      # unauthenticated and leaks Go-runtime / pool-stat
+      # internals; the README's "Deploying" section spells out
+      # the firewall posture in detail. Comment this out (or
+      # change the bound interface to host-network if you scrape
+      # via a sibling Compose service on the bridge network).
+      - "127.0.0.1:9091:9091"
     deploy:
       resources:
         limits:

@@ -37,6 +37,26 @@ spec:
           # observed via the subscription itself; if the consumer
           # disconnects the kubelet's restart-on-exit policy recycles
           # the pod.
+          #
+          # IMPORTANT operator coupling: the `ports`, `readinessProbe`
+          # below, and the `prometheus.io/scrape` annotation above all
+          # assume the metrics server is RUNNING — i.e. WORKER_METRICS_ADDR
+          # is unset (default :9091) or set to a non-empty addr. If you
+          # override WORKER_METRICS_ADDR to "" or "off" in the ConfigMap
+          # to disable the metrics server (the documented escape hatch
+          # for sidecar-only or statsd deployments), you MUST also:
+          #   1. Remove the `readinessProbe` block (otherwise the
+          #      kubelet will mark the pod NotReady forever and the
+          #      Deployment will never roll).
+          #   2. Remove the `ports` block (otherwise other manifests
+          #      that select on `metrics` will dangle).
+          #   3. Either remove the `prometheus.io/scrape: "true"`
+          #      annotation or accept that scrape attempts will 404.
+          # The default deployment ships with metrics enabled because
+          # that's the operationally correct posture; the opt-out is
+          # for niche topologies and is intentionally a manifest edit
+          # (not a single env-var toggle) so an operator can't
+          # accidentally cripple the rollout with one ConfigMap change.
           ports:
             - name: metrics
               containerPort: 9091

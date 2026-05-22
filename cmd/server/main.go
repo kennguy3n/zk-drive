@@ -488,14 +488,25 @@ func run() error {
 		health.DefaultCheckTimeout,
 	).ReadyHandler())
 
-	// /metrics is the Prometheus scrape surface. Includes:
+	// /metrics is the Prometheus scrape surface. Series name
+	// inventory (same metric vectors are registered on every
+	// binary via metrics.New, but only some of them have non-zero
+	// observations on each binary):
 	//   - go_*  / process_*               (default collectors)
-	//   - zkdrive_http_*                  (server-side HTTP)
-	//   - zkdrive_db_pool_*               (pgxpool live stats)
-	//   - zkdrive_redis_pool_*            (redis client pool, if enabled)
-	//   - zkdrive_worker_* / reconciler_* (only on the worker/reconciler
-	//                                      binaries — those have their
-	//                                      own /metrics surfaces)
+	//   - zkdrive_http_*                  (server-side HTTP — populated here)
+	//   - zkdrive_db_pool_*               (pgxpool live stats — populated here)
+	//   - zkdrive_redis_pool_*            (redis client pool — populated here, if enabled)
+	//   - zkdrive_worker_*                (registered with zero data here; populated on the worker's :9091 surface)
+	//   - zkdrive_reconciler_*            (registered with zero data here; populated on the worker's :9091 surface, where the in-process reconciler loop runs — the standalone cmd/reconciler binary is one-shot and does NOT export /metrics)
+	//
+	// The unified registration is intentional: it keeps
+	// metrics.New simple (no per-binary constructor matrix) and
+	// makes federation queries portable across binaries. Zero-
+	// valued series are harmless for alerting (no counter
+	// increment, no histogram observations) but mean a scraper
+	// will see the series names on every binary — operators who
+	// want to silence the noise can drop unused families at the
+	// scrape config layer.
 	//
 	// Posture: NOT authenticated. The endpoint is intentionally
 	// public to the operator's metrics network (e.g. the Prometheus

@@ -286,9 +286,20 @@ func startMetricsServer(_ context.Context, listenAddr string, m *metrics.Metrics
 	})
 
 	srv := &http.Server{
-		Addr:              listenAddr,
-		Handler:           mux,
+		Addr:    listenAddr,
+		Handler: mux,
+		// ReadHeaderTimeout caps the slowloris window for headers.
+		// ReadTimeout / WriteTimeout / IdleTimeout follow the same
+		// shape as cmd/server's main HTTP server — defence-in-depth
+		// against slow-read / slow-write DoS in case the metrics
+		// port is ever exposed externally despite the docker-compose
+		// 127.0.0.1 binding and the README's firewall guidance. A
+		// well-behaved Prometheus scraper completes in well under a
+		// second; these ceilings only fire on misbehaviour.
 		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       15 * time.Second,
+		WriteTimeout:      30 * time.Second,
+		IdleTimeout:       60 * time.Second,
 	}
 
 	wg.Add(1)
