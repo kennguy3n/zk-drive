@@ -14,12 +14,18 @@ COPY . .
 ARG APP_VERSION=dev
 RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w -X github.com/kennguy3n/zk-drive/internal/version.Version=${APP_VERSION}" -o /out/server ./cmd/server
 RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w -X github.com/kennguy3n/zk-drive/internal/version.Version=${APP_VERSION}" -o /out/worker ./cmd/worker
-# Standalone migrate binary, shipped in the same image so deploys can
-# run a K8s Job (or Compose service) that does `entrypoint:
+# Standalone migrate binary (WS-11), shipped in the same image so deploys
+# can run a K8s Job (or Compose service) that does `entrypoint:
 # ["/app/migrate"]` before the server / worker pods come up. Keeping
-# all three entrypoints in one image avoids a separate image tag /
-# build pipeline.
+# every entrypoint in one image avoids a separate image tag / build
+# pipeline.
 RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w -X github.com/kennguy3n/zk-drive/internal/version.Version=${APP_VERSION}" -o /out/migrate ./cmd/migrate
+# Standalone reconciler binary (WS-14), shipped in the same image so
+# deploys can run a K8s CronJob (or Compose service) that does
+# `entrypoint: ["/app/reconciler"]` to refresh the denormalized
+# storage_used_bytes counter on the workspaces table. Same
+# one-image-many-entrypoints pattern as the migrate binary above.
+RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w -X github.com/kennguy3n/zk-drive/internal/version.Version=${APP_VERSION}" -o /out/reconciler ./cmd/reconciler
 
 # ---- Runtime stage ----
 # debian:bookworm-slim (instead of distroless static) so the worker
@@ -41,6 +47,7 @@ RUN apt-get update \
 COPY --from=builder /out/server /app/server
 COPY --from=builder /out/worker /app/worker
 COPY --from=builder /out/migrate /app/migrate
+COPY --from=builder /out/reconciler /app/reconciler
 COPY --from=builder /src/migrations /app/migrations
 
 USER nonroot:nonroot

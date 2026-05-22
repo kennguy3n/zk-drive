@@ -1,0 +1,60 @@
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: zk-drive-reconciler
+  namespace: zk-drive
+spec:
+  # Hourly cadence matches the worker's in-process default
+  # (RECONCILE_INTERVAL_MINUTES=60) so a deploy can choose:
+  #   - Run only the in-process loop and disable this CronJob.
+  #   - Run only this CronJob and set RECONCILE_INTERVAL_MINUTES=0
+  #     on the worker Deployment so the two don't fight on a
+  #     row-level lock.
+  # Defaulting to a CronJob (with the worker loop ON) is the safe
+  # belt-and-suspenders choice for a clean install — duplicate
+  # reconciles on a converged workspace are no-ops by design.
+  schedule: "17 * * * *"
+  # Skip a tick if the previous run hasn't finished; the per-workspace
+  # row lock would block the new run anyway and we'd rather alert on
+  # "run took longer than 1h" via missed schedule than queue up
+  # backed-up Pods.
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  startingDeadlineSeconds: 300
+  jobTemplate:
+    spec:
+      # The reconciler can take a few minutes on a large fleet
+      # (every workspace's row is locked + counted sequentially) but
+      # should never legitimately take an hour. activeDeadline trips
+      # well before the next scheduled run so a stuck run doesn't
+      # block the following tick under Forbid concurrency.
+      activeDeadlineSeconds: 1800
+      backoffLimit: 2
+      ttlSecondsAfterFinished: 86400
+      template:
+        spec:
+          # Same image as server/worker/migrate — every entrypoint
+          # ships in one tag (Dockerfile builds /app/reconciler
+          # alongside /app/server and /app/worker).
+          restartPolicy: OnFailure
+          containers:
+            - name: reconciler
+              image: ghcr.io/kennguy3n/zk-drive:0.1.0
+              command: ["/app/reconciler"]
+              envFrom:
+                - configMapRef:
+                    name: zk-drive-config
+                - secretRef:
+                    name: zk-drive-secrets
+              resources:
+                # The reconciler is bound by Postgres latency, not
+                # CPU or memory — it issues a SELECT + an UPDATE
+                # per workspace. Even at 10k workspaces the working
+                # set stays well under 50 MiB.
+                requests:
+                  cpu: 50m
+                  memory: 64Mi
+                limits:
+                  cpu: 500m
+                  memory: 256Mi

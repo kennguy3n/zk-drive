@@ -10,6 +10,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -67,13 +68,48 @@ func run() error {
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
 
 	pool, err := database.Connect(ctx, cfg.DatabaseURL)
 	if err != nil {
+		cancel()
 		return fmt.Errorf("connect postgres: %w", err)
 	}
+	// redisClient is declared here (rather than inline at the Redis
+	// init block below) so the Close defer can be registered in the
+	// right LIFO position relative to the WaitGroup and pool teardown.
+	var redisClient *redis.Client
+	// Defer order matters — defers run LIFO, so the target shutdown
+	// sequence is:
+	//
+	//   1. cancel()              — signals long-running goroutines
+	//                              (WebSocket hub, Redis pubsub loop)
+	//                              to exit.
+	//   2. bgGoroutines.Wait     — blocks until those goroutines have
+	//                              observed ctx.Done() and returned,
+	//                              so no one is mid-Acquire on the
+	//                              pool or mid-Subscribe on Redis.
+	//   3. redisClient.Close()   — closes Redis AFTER the subscribe
+	//                              goroutine has exited; otherwise
+	//                              the goroutine sees "redis: client
+	//                              is closed" before observing
+	//                              ctx.Done() and we log spurious
+	//                              shutdown noise.
+	//   4. pool.Close()          — closes the pool against a fully
+	//                              quiescent set of consumers.
+	//
+	// Registered in reverse of that order. HTTP server shutdown is
+	// handled by srv.Shutdown(shutdownCtx) below — not through this
+	// WaitGroup — because chi handlers may still need pool conns to
+	// flush their in-flight responses.
+	var bgGoroutines sync.WaitGroup
 	defer pool.Close()
+	defer func() {
+		if redisClient != nil {
+			_ = redisClient.Close()
+		}
+	}()
+	defer bgGoroutines.Wait()
+	defer cancel()
 
 	// Migrations are applied out-of-band by the `migrate` binary (a
 	// Kubernetes Job, a Compose service, or an operator command) so
@@ -184,8 +220,9 @@ func run() error {
 	// limiter, session store, and WebSocket pub/sub switch to a
 	// shared backend so all three behave correctly behind multiple
 	// replicas. When unset, the in-memory / single-process
-	// implementations are used.
-	var redisClient *redis.Client
+	// implementations are used. redisClient itself is declared with
+	// the rest of the teardown plumbing further up so the Close defer
+	// runs in the right LIFO position; here we just initialise it.
 	var sessionStore *session.RedisSessionStore
 	if cfg.RedisURL != "" {
 		opts, perr := redis.ParseURL(cfg.RedisURL)
@@ -193,9 +230,12 @@ func run() error {
 			return fmt.Errorf("parse REDIS_URL: %w", perr)
 		}
 		redisClient = redis.NewClient(opts)
-		defer func() { _ = redisClient.Close() }()
 		if perr := redisClient.Ping(ctx).Err(); perr != nil {
 			log.Printf("redis: ping %s failed, continuing with in-memory fallbacks: %v", cfg.RedisURL, perr)
+			// Close the broken client right now so it doesn't
+			// leak between here and the deferred close, then nil
+			// it so downstream code skips Redis-backed features.
+			_ = redisClient.Close()
 			redisClient = nil
 		} else {
 			sessionStore = session.NewRedisSessionStore(redisClient)
@@ -243,14 +283,20 @@ func run() error {
 	// so a misconfigured Redis still leaves the rest of the API
 	// working — we just log and fall back to local fan-out.
 	hub := ws.NewHub()
-	go hub.Run(ctx)
+	bgGoroutines.Add(1)
+	go func() {
+		defer bgGoroutines.Done()
+		hub.Run(ctx)
+	}()
 	wsHandler := ws.NewHandler(hub)
 
 	var notificationPublisher notification.WSPublisher = notification.NewLocalPublisher(hub)
 	if redisClient != nil {
 		rp := notification.NewRedisPublisher(redisClient)
 		notificationPublisher = rp
+		bgGoroutines.Add(1)
 		go func() {
+			defer bgGoroutines.Done()
 			if err := rp.Subscribe(ctx, hub); err != nil && err != context.Canceled {
 				log.Printf("redis: ws subscribe loop exited: %v", err)
 			}

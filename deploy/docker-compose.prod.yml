@@ -129,6 +129,14 @@ services:
       S3_ENDPOINT: ${S3_ENDPOINT}
       S3_ACCESS_KEY: ${S3_ACCESS_KEY}
       S3_SECRET_KEY: ${S3_SECRET_KEY}
+      # Storage-counter reconciliation cadence (WS-14). Docker
+      # Compose has no native CronJob, so the worker's in-process
+      # loop owns reconciliation here. K8s deploys typically set
+      # this to 0 on the worker and schedule the dedicated
+      # reconciler-cronjob.yaml instead — the two modes are
+      # exclusive only to avoid duplicate row-level locking; both
+      # are idempotent and converge on the same value.
+      RECONCILE_INTERVAL_MINUTES: ${RECONCILE_INTERVAL_MINUTES:-60}
     deploy:
       resources:
         limits:

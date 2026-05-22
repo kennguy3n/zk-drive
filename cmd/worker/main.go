@@ -22,6 +22,8 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"strconv"
+	"sync"
 	"syscall"
 	"time"
 
@@ -38,6 +40,7 @@ import (
 	"github.com/kennguy3n/zk-drive/internal/notification"
 	"github.com/kennguy3n/zk-drive/internal/permission"
 	"github.com/kennguy3n/zk-drive/internal/preview"
+	"github.com/kennguy3n/zk-drive/internal/reconciler"
 	"github.com/kennguy3n/zk-drive/internal/retention"
 	"github.com/kennguy3n/zk-drive/internal/scan"
 	"github.com/kennguy3n/zk-drive/internal/sharing"
@@ -67,13 +70,35 @@ func run() error {
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
 
 	pool, err := database.Connect(ctx, cfg.DatabaseURL)
 	if err != nil {
+		cancel()
 		return fmt.Errorf("connect postgres: %w", err)
 	}
+	// Defer order matters — defers run LIFO, so the target shutdown
+	// sequence (relative to each other and to pool.Close) is:
+	//
+	//   1. cancel()          — signals long-running goroutines to
+	//                          stop (runGuestExpirySweep,
+	//                          runStorageReconciler).
+	//   2. bgGoroutines.Wait — blocks until those goroutines have
+	//                          observed ctx.Done() and returned, so
+	//                          no caller is mid-Acquire on the pool.
+	//   3. pool.Close()      — closes the pool against a quiescent
+	//                          set of consumers; no "use of closed
+	//                          connection" log noise.
+	//
+	// We register them in the reverse of that target order. The
+	// NATS defers (nc.Drain, unsubscribeAll) added later run before
+	// cancel() in LIFO order; that is intentional because NATS
+	// Drain processes any in-flight message callbacks (which may
+	// hold pool conns) before we signal the rest of the goroutines
+	// to exit.
+	var bgGoroutines sync.WaitGroup
 	defer pool.Close()
+	defer bgGoroutines.Wait()
+	defer cancel()
 
 	// Same precondition as cmd/server: migrations are owned by the
 	// dedicated migrate binary now, not run inline on worker
@@ -128,7 +153,28 @@ func run() error {
 	// responsibilities. A 5-minute cadence is fine for Phase 3 —
 	// share-link TTLs are generally hours / days.
 	sharingSvc := sharing.NewService(sharing.NewPostgresRepository(pool), wiring.NewPermissionGranter(permission.NewService(permission.NewPostgresRepository(pool))))
-	go runGuestExpirySweep(ctx, sharingSvc, 5*time.Minute)
+	bgGoroutines.Add(1)
+	go func() {
+		defer bgGoroutines.Done()
+		runGuestExpirySweep(ctx, sharingSvc, 5*time.Minute)
+	}()
+
+	// Storage-counter reconciliation (WS-14). Runs inside the worker
+	// process on a configurable cadence so the denormalized
+	// workspaces.storage_used_bytes column converges back to the
+	// canonical SUM(files.size_bytes) over time, even if a future
+	// code path forgets to update it. Default cadence is 60m;
+	// RECONCILE_INTERVAL_MINUTES=0 disables the in-process loop
+	// (deploys that prefer a dedicated K8s CronJob set it to 0 and
+	// schedule /app/reconciler externally).
+	if interval := reconcileInterval(); interval > 0 {
+		bgGoroutines.Add(1)
+		rc := reconciler.New(pool)
+		go func() {
+			defer bgGoroutines.Done()
+			runStorageReconciler(ctx, rc, interval)
+		}()
+	}
 
 	natsURL := os.Getenv("NATS_URL")
 	if natsURL == "" {
@@ -338,9 +384,18 @@ func archiveHandler(ctx context.Context, svc *retention.ArchiveService) nats.Msg
 
 // runGuestExpirySweep periodically revokes expired guest permission
 // rows. The first sweep runs 30 seconds after startup so the worker
-// doesn't race the server's migration pass on cold start.
+// doesn't race the server's migration pass on cold start. The
+// initial delay is a cancellable select rather than time.Sleep so
+// SIGTERM during the 30-second warm-up returns immediately — the
+// goroutine is now WaitGroup-tracked (bgGoroutines.Wait() blocks
+// pool teardown on it returning), and a plain time.Sleep would
+// delay graceful shutdown by up to 30s.
 func runGuestExpirySweep(ctx context.Context, svc *sharing.Service, interval time.Duration) {
-	time.Sleep(30 * time.Second)
+	select {
+	case <-ctx.Done():
+		return
+	case <-time.After(30 * time.Second):
+	}
 	t := time.NewTicker(interval)
 	defer t.Stop()
 	for {
@@ -349,6 +404,90 @@ func runGuestExpirySweep(ctx context.Context, svc *sharing.Service, interval tim
 			log.Printf("worker: guest expiry sweep failed: %v", err)
 		} else if revoked > 0 {
 			log.Printf("worker: guest expiry sweep revoked %d permissions", revoked)
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+		}
+	}
+}
+
+// reconcileInterval reads RECONCILE_INTERVAL_MINUTES and returns the
+// cadence for the in-process storage counter reconciler. Returns 0
+// only when the env var parses to a zero integer ("0", "00", "+0",
+// etc.) — the documented operator opt-out for deploys where a
+// dedicated K8s CronJob owns reconciliation. The default (used when
+// the env var is unset, an empty string, or fails to parse) is 60
+// minutes: short enough that frontend reads converge to the
+// canonical sum within an hour of any drift event, long enough that
+// the periodic SELECT/UPDATE pair is well below the noise floor of
+// regular database traffic. Falling back to the default on parse
+// failure (rather than disabling) is the conservative choice: a
+// typo'd value silently disabling a safety-net reconciler is the
+// worse outcome, and duplicate runs against a dedicated CronJob are
+// idempotent (row-level lock + no-op UPDATE when there's no drift).
+func reconcileInterval() time.Duration {
+	raw := os.Getenv("RECONCILE_INTERVAL_MINUTES")
+	if raw == "" {
+		return 60 * time.Minute
+	}
+	mins, err := strconv.Atoi(raw)
+	if err != nil || mins < 0 {
+		log.Printf("worker: invalid RECONCILE_INTERVAL_MINUTES=%q; defaulting to 60", raw)
+		return 60 * time.Minute
+	}
+	return time.Duration(mins) * time.Minute
+}
+
+// runStorageReconciler drives reconciler.ReconcileAll on a fixed
+// cadence. The first run is delayed 60s after startup so the worker
+// doesn't fight a fresh server's connection-pool warmup, then it
+// fires every `interval`. Errors are logged but do not stop the
+// loop — a single bad SQL execution shouldn't wedge the worker.
+//
+// Cadence note: this uses time.NewTicker, so the loop body counts
+// towards the next tick. If ReconcileAll ever exceeds `interval`
+// (would require ~thousands of workspaces × many ms each), the
+// ticker will already have fired and the next iteration starts
+// immediately — runs become back-to-back rather than at-most-once-
+// per-interval. Acceptable here because reconciliation is
+// idempotent (FOR UPDATE row lock + no-op UPDATE on no drift) and
+// the loop body is synchronous so there's never more than one
+// concurrent run. WS-17's reconciler_runtime_seconds metric is the
+// signal for "reconcile is now slower than the configured cadence,
+// time to shard or relax the interval".
+func runStorageReconciler(ctx context.Context, rc *reconciler.Reconciler, interval time.Duration) {
+	select {
+	case <-ctx.Done():
+		return
+	case <-time.After(60 * time.Second):
+	}
+	t := time.NewTicker(interval)
+	defer t.Stop()
+	for {
+		start := time.Now()
+		summary, err := rc.ReconcileAll(ctx)
+		// Surface per-workspace errors + run summary regardless of
+		// the function-level err, mirroring cmd/reconciler. When a
+		// transient enumeration failure aborts a run with err !=
+		// nil but the loop still has 50 workspaces of partial data,
+		// dropping that data on the floor makes the next on-caller
+		// reach for `kubectl logs --previous` instead of the
+		// current run's output. The context.Canceled branch stays
+		// quiet (shutdown is expected, and the partial summary on
+		// shutdown is rarely actionable) but every other err path
+		// gets the full summary.
+		for _, e := range summary.Errors {
+			log.Printf("worker: reconciler workspace=%s err=%v", e.WorkspaceID, e.Err)
+		}
+		if err == nil || !errors.Is(err, context.Canceled) {
+			log.Printf("worker: reconciler ran workspaces=%d updated=%d drift_bytes=%d errors=%d duration=%s",
+				summary.Workspaces, summary.Updated, summary.TotalDriftBytes, len(summary.Errors),
+				time.Since(start).Round(time.Millisecond))
+		}
+		if err != nil && !errors.Is(err, context.Canceled) {
+			log.Printf("worker: storage reconciler aborted: %v", err)
 		}
 		select {
 		case <-ctx.Done():
