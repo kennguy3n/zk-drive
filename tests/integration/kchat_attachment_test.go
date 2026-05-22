@@ -165,3 +165,89 @@ func TestKChatAttachmentUpload(t *testing.T) {
 		t.Errorf("unmapped room: expected 404, got %d", status)
 	}
 }
+
+// TestKChatAttachmentConfirmRejectsTraversalKeys exercises the
+// path-traversal defence on the KChat attachment confirm endpoint.
+// Before WS-3 the kchat service used a `strings.HasPrefix` check
+// matching the bug in the main drive ConfirmUpload handler: a key
+// like `<workspace>/<file>/../../other-tenant/secret` satisfied the
+// prefix yet still resolved to a foreign S3 object once a presigned
+// URL was generated for it. The fix routes the validation through
+// the same `storage.ValidateObjectKey` (via an injected
+// `ObjectKeyValidator` to preserve kchat's package independence)
+// so both code paths share one canonical-form enforcement.
+//
+// We assert each adversarial shape returns 400 (the kchat handler's
+// ErrObjectKeyMismatch mapping) and never lets the request reach
+// the file repository.
+func TestKChatAttachmentConfirmRejectsTraversalKeys(t *testing.T) {
+	env := setupEnv(t)
+	tok := env.signupAndLogin("Pen", "pen@example.com", "Pen", "hunter2hunter2")
+
+	const roomID = "kchat-att-traversal"
+	status, body := env.httpRequest(http.MethodPost, "/api/kchat/rooms", tok.Token, map[string]string{
+		"kchat_room_id": roomID,
+	})
+	if status != http.StatusCreated {
+		t.Fatalf("create room: status=%d body=%s", status, string(body))
+	}
+
+	status, body = env.httpRequest(http.MethodPost, "/api/kchat/attachments/upload-url", tok.Token,
+		map[string]any{
+			"kchat_room_id": roomID,
+			"filename":      "secret.pdf",
+			"mime_type":     "application/pdf",
+			"size_bytes":    1024,
+		})
+	if status != http.StatusOK {
+		t.Fatalf("upload-url: status=%d body=%s", status, string(body))
+	}
+	var u struct {
+		UploadID  uuid.UUID `json:"upload_id"`
+		ObjectKey string    `json:"object_key"`
+	}
+	env.decodeJSON(body, &u)
+
+	// All four shapes share the same prefix as the canonical key
+	// minted above (workspace_uuid + "/" + file_uuid + "/") so a
+	// naive HasPrefix check would let them through. The canonical
+	// validator rejects each one.
+	canonicalPrefix := tok.WorkspaceID + "/" + u.UploadID.String() + "/"
+	cases := []struct {
+		name string
+		key  string
+	}{
+		{"trailing_dotdot_traversal", canonicalPrefix + uuid.NewString() + "/../../other-tenant/secret"},
+		{"dotdot_segment_after_prefix", canonicalPrefix + "../other-tenant/secret"},
+		{"null_byte_in_version_segment", canonicalPrefix + uuid.NewString() + "\x00.bak"},
+		{"backslash_separator_after_prefix", canonicalPrefix + uuid.NewString() + "\\..\\other"},
+		{"non_uuid_version_segment", canonicalPrefix + "not-a-uuid"},
+		{"extra_trailing_segment", canonicalPrefix + uuid.NewString() + "/extra"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			s, b := env.httpRequest(http.MethodPost, "/api/kchat/attachments/confirm", tok.Token,
+				map[string]any{
+					"file_id":    u.UploadID.String(),
+					"object_key": c.key,
+					"size_bytes": 1024,
+				})
+			if s != http.StatusBadRequest {
+				t.Fatalf("forged key %q: expected 400, got %d body=%s", c.key, s, string(b))
+			}
+		})
+	}
+
+	// Sanity check: the canonical key still confirms fine — we
+	// didn't accidentally break the happy path.
+	s, b := env.httpRequest(http.MethodPost, "/api/kchat/attachments/confirm", tok.Token,
+		map[string]any{
+			"file_id":    u.UploadID.String(),
+			"object_key": u.ObjectKey,
+			"checksum":   "sha256:abcd",
+			"size_bytes": 1024,
+		})
+	if s != http.StatusOK {
+		t.Fatalf("canonical confirm regressed: status=%d body=%s", s, string(b))
+	}
+}

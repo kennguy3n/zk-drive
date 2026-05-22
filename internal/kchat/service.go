@@ -54,10 +54,18 @@ type PermissionView struct {
 // for the attachment flow. The room service creates the file
 // metadata row up front so the client can reference a stable file
 // ID when it later confirms the upload.
+//
+// ConfirmVersion takes the version UUID as a parameter so the
+// caller can pin the file_versions row id to the UUID embedded in
+// the validated object_key — keeping the DB row id, the S3 object,
+// and any audit log entries that refer to "version_id" in lock-
+// step. A zero versionID instructs the adapter to mint a fresh
+// UUID itself (legacy behaviour, retained so test stubs that
+// don't go through the validator path still work).
 type FileCreator interface {
 	Create(ctx context.Context, workspaceID, folderID uuid.UUID, name, mimeType string, createdBy uuid.UUID) (FileRef, error)
 	GetByID(ctx context.Context, workspaceID, fileID uuid.UUID) (FileRef, error)
-	ConfirmVersion(ctx context.Context, workspaceID, fileID uuid.UUID, objectKey, checksum string, sizeBytes int64, createdBy uuid.UUID) (FileVersionRef, error)
+	ConfirmVersion(ctx context.Context, workspaceID, fileID, versionID uuid.UUID, objectKey, checksum string, sizeBytes int64, createdBy uuid.UUID) (FileVersionRef, error)
 }
 
 // FileRef is the minimum a FileCreator returns: an ID + folder so the
@@ -94,17 +102,34 @@ type PresignResolver interface {
 // storage.NewObjectKey).
 type ObjectKeyFactory func(workspaceID, fileID, versionID uuid.UUID) string
 
+// ObjectKeyValidator verifies that a client-supplied object_key
+// matches the canonical `<workspace>/<file>/<version>` shape
+// produced by ObjectKeyFactory and is scoped to the expected
+// workspace + file. It returns the parsed version UUID on success
+// so the kchat service can thread it into the FileVersion row id
+// (matching the invariant the main drive ConfirmUpload handler
+// enforces).
+//
+// Pulling validation behind a function type — rather than
+// importing storage directly here — preserves the kchat package's
+// freedom from drive-package dependencies (the wiring layer
+// supplies the concrete `storage.ValidateObjectKey` implementation).
+// Tests can pass a stub that accepts any key when they need to
+// exercise the rest of the flow without S3 keys.
+type ObjectKeyValidator func(key string, expectedWorkspace, expectedFile uuid.UUID) (uuid.UUID, error)
+
 // RoomService owns the KChat room mapping lifecycle plus the helpers
 // that drive permission sync and attachment uploads. All inputs are
 // validated up front; all writes are workspace-scoped.
 type RoomService struct {
-	repo        Repository
-	folders     FolderCreator
-	permissions PermissionGranter
-	files       FileCreator
-	presign     PresignResolver
-	keyFactory  ObjectKeyFactory
-	now         func() time.Time
+	repo         Repository
+	folders      FolderCreator
+	permissions  PermissionGranter
+	files        FileCreator
+	presign      PresignResolver
+	keyFactory   ObjectKeyFactory
+	keyValidator ObjectKeyValidator
+	now          func() time.Time
 
 	// uploadExpiry controls the validity window for presigned PUT URLs
 	// minted by AttachmentUploadURL. Defaults to 15 minutes (matching
@@ -113,18 +138,29 @@ type RoomService struct {
 }
 
 // NewRoomService builds a RoomService. folders and permissions are
-// required for the mapping + permission-sync paths; files / presign /
-// keyFactory are only required by the attachment flow and may be nil
-// in tests that exercise mapping-only behaviour.
-func NewRoomService(repo Repository, folders FolderCreator, permissions PermissionGranter, files FileCreator, presign PresignResolver, keyFactory ObjectKeyFactory) *RoomService {
+// required for the mapping + permission-sync paths.
+//
+// files / presign / keyFactory / keyValidator drive the attachment
+// flow. They are conceptually optional in the sense that the
+// mapping-only methods (Create, MapRoom, SyncMembers, etc.) don't
+// touch them — tests exercising only mapping behaviour may pass
+// nil for each. However, if *any* of these four is non-nil the
+// caller is expected to wire the full set; a partial wiring
+// (e.g. files + keyFactory but no keyValidator) would let the
+// attachment confirm path fall back to a weaker check on a
+// client-supplied object_key, and that's exactly the footgun WS-3
+// closes. Production wiring (cmd/server/main.go) and the
+// integration test harness both install all four.
+func NewRoomService(repo Repository, folders FolderCreator, permissions PermissionGranter, files FileCreator, presign PresignResolver, keyFactory ObjectKeyFactory, keyValidator ObjectKeyValidator) *RoomService {
 	return &RoomService{
-		repo:        repo,
-		folders:     folders,
-		permissions: permissions,
-		files:       files,
-		presign:     presign,
-		keyFactory:  keyFactory,
-		now:         time.Now,
+		repo:         repo,
+		folders:      folders,
+		permissions:  permissions,
+		files:        files,
+		presign:      presign,
+		keyFactory:   keyFactory,
+		keyValidator: keyValidator,
+		now:          time.Now,
 	}
 }
 
@@ -412,11 +448,27 @@ func (s *RoomService) ConfirmAttachment(ctx context.Context, workspaceID, fileID
 	if err != nil {
 		return nil, err
 	}
-	expectedPrefix := workspaceID.String() + "/" + f.ID.String() + "/"
-	if !strings.HasPrefix(objectKey, expectedPrefix) {
+	// Validate the full canonical shape of the client-supplied
+	// object_key — not just the prefix. A HasPrefix check accepts
+	// keys like "<workspace>/<file>/../../other-tenant/secret"
+	// which would slip past the prefix guard yet still resolve to
+	// a foreign object once a presigned URL is generated for it.
+	// ObjectKeyValidator enforces the exact three-UUID form, rejects
+	// "..", NUL, backslashes, non-canonical UUID forms, and uuid.Nil.
+	//
+	// keyValidator is mandatory on the attachment flow: NewRoomService
+	// doc-comments that callers wiring `files` must also wire
+	// `keyValidator`, and missing it here is a wiring bug that we
+	// surface explicitly rather than falling back to a weaker check
+	// on attacker-controlled input.
+	if s.keyValidator == nil {
+		return nil, errors.New("kchat: object_key validator not configured")
+	}
+	versionID, vErr := s.keyValidator(objectKey, workspaceID, f.ID)
+	if vErr != nil {
 		return nil, fmt.Errorf("%w %s", ErrObjectKeyMismatch, fileID)
 	}
-	v, err := s.files.ConfirmVersion(ctx, workspaceID, f.ID, objectKey, checksum, sizeBytes, createdBy)
+	v, err := s.files.ConfirmVersion(ctx, workspaceID, f.ID, versionID, objectKey, checksum, sizeBytes, createdBy)
 	if err != nil {
 		return nil, fmt.Errorf("confirm version: %w", err)
 	}

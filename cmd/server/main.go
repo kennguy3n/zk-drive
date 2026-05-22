@@ -305,6 +305,7 @@ func run() error {
 		wiring.NewKChatFileCreator(fileSvc),
 		wiring.NewKChatPresignResolver(storageFactory),
 		wiring.KChatObjectKey,
+		wiring.KChatObjectKeyValidator,
 	)
 	summarySvc := ai.NewSummaryService(pool)
 	if cfg.OllamaURL != "" {

@@ -152,6 +152,7 @@ func setupEnv(t *testing.T) *testEnv {
 		wiring.NewKChatFileCreator(fileSvc),
 		wiring.NewKChatPresignResolver(kchatStorageFactory),
 		wiring.KChatObjectKey,
+		wiring.KChatObjectKeyValidator,
 	)
 	summarySvc := ai.NewSummaryService(pool)
 	// When the test sets OLLAMA_URL via t.Setenv (e.g. against an
