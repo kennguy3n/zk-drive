@@ -456,17 +456,26 @@ func runStorageReconciler(ctx context.Context, rc *reconciler.Reconciler, interv
 	for {
 		start := time.Now()
 		summary, err := rc.ReconcileAll(ctx)
-		if err != nil {
-			if !errors.Is(err, context.Canceled) {
-				log.Printf("worker: storage reconciler aborted: %v", err)
-			}
-		} else {
-			for _, e := range summary.Errors {
-				log.Printf("worker: reconciler workspace=%s err=%v", e.WorkspaceID, e.Err)
-			}
+		// Surface per-workspace errors + run summary regardless of
+		// the function-level err, mirroring cmd/reconciler. When a
+		// transient enumeration failure aborts a run with err !=
+		// nil but the loop still has 50 workspaces of partial data,
+		// dropping that data on the floor makes the next on-caller
+		// reach for `kubectl logs --previous` instead of the
+		// current run's output. The context.Canceled branch stays
+		// quiet (shutdown is expected, and the partial summary on
+		// shutdown is rarely actionable) but every other err path
+		// gets the full summary.
+		for _, e := range summary.Errors {
+			log.Printf("worker: reconciler workspace=%s err=%v", e.WorkspaceID, e.Err)
+		}
+		if err == nil || !errors.Is(err, context.Canceled) {
 			log.Printf("worker: reconciler ran workspaces=%d updated=%d drift_bytes=%d errors=%d duration=%s",
 				summary.Workspaces, summary.Updated, summary.TotalDriftBytes, len(summary.Errors),
 				time.Since(start).Round(time.Millisecond))
+		}
+		if err != nil && !errors.Is(err, context.Canceled) {
+			log.Printf("worker: storage reconciler aborted: %v", err)
 		}
 		select {
 		case <-ctx.Done():
