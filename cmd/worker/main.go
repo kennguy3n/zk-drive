@@ -75,6 +75,15 @@ func run() error {
 	}
 	defer pool.Close()
 
+	// Same precondition as cmd/server: migrations are owned by the
+	// dedicated migrate binary now, not run inline on worker
+	// startup. Failing fast here ensures a worker doesn't begin
+	// consuming jobs against a stale schema (which would emit
+	// cryptic "column does not exist" errors for every job).
+	if err := database.RequireMinMigrationVersion(ctx, pool); err != nil {
+		return fmt.Errorf("startup precondition: %w", err)
+	}
+
 	// Storage client is optional: if the worker is started without
 	// S3_ENDPOINT it can only log incoming jobs (same placeholder
 	// behaviour as before). In production the server and worker share

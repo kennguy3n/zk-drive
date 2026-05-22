@@ -249,7 +249,7 @@ Optional:
 | Variable         | Default        | Purpose                                                     |
 | ---------------- | -------------- | ----------------------------------------------------------- |
 | `LISTEN_ADDR`    | `:8080`        | HTTP listen address.                                        |
-| `MIGRATIONS_DIR` | `migrations`   | Path to SQL migrations run at startup.                      |
+| `MIGRATIONS_DIR` | `migrations`   | Path to SQL migrations applied by the `migrate` binary (read-only by `server` / `worker`). |
 
 Storage (zk-object-fabric S3 gateway) — all four are required together:
 
@@ -281,6 +281,32 @@ export S3_SECRET_KEY=demo-secret-key
 ZK Drive then generates presigned PUT / GET URLs that clients use to
 move bytes directly to zk-object-fabric — the ZK Drive API server never
 proxies file content.
+
+## Deploying
+
+ZK Drive ships three binaries from a single container image:
+
+- `/app/migrate` — applies pending SQL migrations to the database and exits.
+- `/app/server` — the HTTP API server. Refuses to start if migrations are out
+  of date (see `internal/database.MinRequiredMigrationVersion`).
+- `/app/worker` — the JetStream consumer / job runner. Same migration
+  precondition as the server.
+
+The migrate binary must run **before** the server / worker pods are rolled out.
+On Kubernetes this is wired as a Job (see `deploy/k8s/migrate-job.yaml`) and
+on Compose as a `service_completed_successfully` dependency (see
+`deploy/docker-compose.prod.yml`). The migrate binary acquires a Postgres
+advisory lock keyed on a fixed 64-bit constant so concurrent invocations
+(e.g. two Job pods during a blue/green deploy) serialise safely.
+
+For a manual one-off:
+
+```
+docker run --rm \
+  -e DATABASE_URL=postgres://zkdrive:...@host:5432/zkdrive \
+  -e JWT_SECRET=unused-but-required \
+  ghcr.io/kennguy3n/zk-drive:<version> /app/migrate
+```
 
 ## Running tests
 
