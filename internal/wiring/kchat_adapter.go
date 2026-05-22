@@ -109,19 +109,30 @@ func (a KChatFileAdapter) GetByID(ctx context.Context, workspaceID, fileID uuid.
 
 // ConfirmVersion translates the high-level confirm call back into a
 // *file.FileVersion and forwards to file.Service.ConfirmVersion.
-func (a KChatFileAdapter) ConfirmVersion(ctx context.Context, workspaceID, fileID uuid.UUID, objectKey, checksum string, sizeBytes int64, createdBy uuid.UUID) (kchat.FileVersionRef, error) {
+//
+// The kchat service supplies a non-zero versionID extracted from the
+// validated object_key; pinning v.ID to that value keeps the DB row
+// id, the S3 object key's version segment, and any audit log entry
+// that references the version in lock-step (matching the invariant
+// the main drive ConfirmUpload handler enforces). When the kchat
+// service passes uuid.Nil — the legacy validator-less path — we
+// fall through and let the file repository mint a fresh UUID, so
+// older callers still work without alignment of the DB row id and
+// the object key.
+//
+// We discard the `fresh` boolean returned by file.Service.ConfirmVersion:
+// the KChat ingest pipeline has its own deduplication upstream and
+// emits its own activity log regardless of whether the version row
+// was just inserted or already existed.
+func (a KChatFileAdapter) ConfirmVersion(ctx context.Context, workspaceID, fileID, versionID uuid.UUID, objectKey, checksum string, sizeBytes int64, createdBy uuid.UUID) (kchat.FileVersionRef, error) {
 	v := &file.FileVersion{
+		ID:        versionID,
 		FileID:    fileID,
 		ObjectKey: objectKey,
 		SizeBytes: sizeBytes,
 		Checksum:  checksum,
 		CreatedBy: createdBy,
 	}
-	// Server-internal KChat attachments mint a fresh v.ID via
-	// uuid.New() on every call so the idempotent-replay branch in
-	// ConfirmVersion is unreachable from here; discard the `fresh`
-	// boolean. The KChat ingest path has its own deduplication
-	// upstream and never wants to suppress its own activity logs.
 	if _, err := a.Service.ConfirmVersion(ctx, workspaceID, v); err != nil {
 		return kchat.FileVersionRef{}, err
 	}
@@ -165,4 +176,14 @@ func (c kchatPresignClient) GenerateUploadURL(ctx context.Context, objectKey, co
 // to kchat.NewRoomService.
 func KChatObjectKey(workspaceID, fileID, versionID uuid.UUID) string {
 	return storage.NewObjectKey(workspaceID, fileID, versionID)
+}
+
+// KChatObjectKeyValidator is the storage.ValidateObjectKey wrapper,
+// exposed here so cmd/server / tests can pass a function value of
+// the right type to kchat.NewRoomService. The kchat package cannot
+// import storage directly without creating a layering inversion
+// (storage is a primitive that kchat sits above), so the validator
+// is supplied as a function value at wire-up time.
+func KChatObjectKeyValidator(key string, expectedWorkspace, expectedFile uuid.UUID) (uuid.UUID, error) {
+	return storage.ValidateObjectKey(key, expectedWorkspace, expectedFile)
 }
