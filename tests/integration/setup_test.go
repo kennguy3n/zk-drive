@@ -31,6 +31,7 @@ import (
 	"github.com/kennguy3n/zk-drive/internal/fabric"
 	"github.com/kennguy3n/zk-drive/internal/file"
 	"github.com/kennguy3n/zk-drive/internal/folder"
+	"github.com/kennguy3n/zk-drive/internal/health"
 	"github.com/kennguy3n/zk-drive/internal/kchat"
 	"github.com/kennguy3n/zk-drive/internal/notification"
 	"github.com/kennguy3n/zk-drive/internal/permission"
@@ -191,6 +192,28 @@ func setupEnv(t *testing.T) *testEnv {
 
 	r := chi.NewRouter()
 	r.Use(chimw.Recoverer)
+
+	// Mirror production wiring for the readiness probe. Postgres is
+	// the only fully-live dependency in the integration harness —
+	// the fake S3 endpoint is reachable as a presign target but does
+	// NOT serve HeadBucket, so registering a real StorageChecker
+	// against it would yield spurious 503s. Instead we register
+	// NewStorageChecker(nil) on purpose: that exercises the
+	// constructor's typed-nil short-circuit (the path that broke in
+	// production when cfg.S3Endpoint was unset, fixed by passing the
+	// concrete *storage.Client through the constructor rather than
+	// upcasting to the storageProbe interface) and pins it as an
+	// integration-level regression. Redis and NATS are similarly
+	// wired as nil to exercise the optional-dep contract end-to-end.
+	r.Get("/readyz", health.NewService(
+		[]health.Checker{
+			health.NewPostgresChecker(pool),
+			health.NewStorageChecker(nil),
+			health.NewRedisChecker(nil),
+			health.NewNATSChecker(nil),
+		},
+		health.DefaultCheckTimeout,
+	).ReadyHandler())
 
 	r.Route("/api", func(r chi.Router) {
 		r.Route("/auth", func(r chi.Router) {

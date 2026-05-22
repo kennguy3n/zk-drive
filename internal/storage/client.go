@@ -40,8 +40,15 @@ type Config struct {
 // Client wraps an s3.PresignClient scoped to a single bucket. It only
 // generates URLs; the actual PUT / GET bytes flow directly between the
 // caller and the zk-object-fabric gateway.
+//
+// The underlying *s3.Client is also retained so the API server can
+// reach the gateway directly for health-check purposes (HeadBucket),
+// which exercises both network reachability and credential validity
+// in one call — something the presign path cannot do because it
+// signs URLs locally without contacting the gateway.
 type Client struct {
 	bucket  string
+	s3      *s3.Client
 	presign *s3.PresignClient
 }
 
@@ -89,8 +96,42 @@ func NewClient(cfg Config) (*Client, error) {
 
 	return &Client{
 		bucket:  cfg.Bucket,
+		s3:      s3Client,
 		presign: s3.NewPresignClient(s3Client),
 	}, nil
+}
+
+// HealthCheck verifies the storage backend is reachable and the
+// configured credentials still authorise access to the bucket. It
+// issues a HeadBucket against the configured zk-object-fabric
+// endpoint with the supplied context's deadline.
+//
+// Returns nil when the bucket responds successfully. Returns the
+// wrapped error otherwise — callers (e.g. /readyz) should treat any
+// non-nil result as "not ready" since presigned URLs minted while
+// the gateway is unreachable would 5xx from the client side.
+//
+// IAM requirements: HeadBucket maps to the s3:ListBucket action in
+// AWS IAM (per the AWS S3 API reference) and the bucket-level READ
+// capability in Ceph RGW / MinIO. A presign-only credential scoped
+// only to s3:GetObject + s3:PutObject is NOT sufficient — it will
+// return 403 here and /readyz will then report storage as failed.
+// When provisioning IAM for production, grant s3:ListBucket on the
+// bucket ARN (not the object ARN) alongside the existing presign
+// permissions. Cost-wise HeadBucket is a Tier-1 (cheap) request in
+// AWS pricing and is well within the free tier even for sub-second
+// readiness-probe cadence.
+func (c *Client) HealthCheck(ctx context.Context) error {
+	if c == nil || c.s3 == nil {
+		return errors.New("storage: client not initialised")
+	}
+	_, err := c.s3.HeadBucket(ctx, &s3.HeadBucketInput{
+		Bucket: aws.String(c.bucket),
+	})
+	if err != nil {
+		return fmt.Errorf("storage health check: %w", err)
+	}
+	return nil
 }
 
 // GenerateUploadURL returns a presigned PUT URL for the given object key.
