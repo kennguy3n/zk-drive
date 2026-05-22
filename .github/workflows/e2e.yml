@@ -86,6 +86,17 @@ jobs:
           MIGRATIONS_DIR: migrations
           LISTEN_ADDR: ":8080"
           STATIC_DIR: frontend/dist
+          # The file-upload Playwright spec mocks the storage
+          # gateway's PUT endpoint at http://127.0.0.1:9 (an
+          # unrouteable origin; Playwright's page.route()
+          # synthesises the response). The browser-level CSP
+          # check runs BEFORE page.route() intercepts, so
+          # connect-src must allow that origin or the PUT is
+          # blocked with `Refused to connect`. Same mechanism
+          # operators use in production to allow-list the real
+          # fabric storage gateway origin — exercising the
+          # documented knob in CI is the best regression guard.
+          SECURITY_HEADERS_CSP_CONNECT_EXTRA: http://127.0.0.1:9
 
       - name: Install Playwright
         working-directory: frontend
