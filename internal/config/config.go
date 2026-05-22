@@ -138,9 +138,12 @@ type Config struct {
 	// host can run both without conflict). Set to "off" or the
 	// empty string to disable the metrics server entirely —
 	// useful for sidecar-only deployments where the operator
-	// uses a different collection path. The server binary
-	// exposes /metrics on its main port (ListenAddr) and does
-	// NOT consult this field. The reconciler binary is short-
+	// uses a different collection path. "Unset" and "explicitly
+	// empty" are distinct: an unset env var falls back to the
+	// default :9091, while WORKER_METRICS_ADDR= (explicit empty)
+	// is the documented disable. The server binary exposes
+	// /metrics on its main port (ListenAddr) and does NOT
+	// consult this field. The reconciler binary is short-
 	// lived and does not export metrics; see README.
 	WorkerMetricsAddr string
 }
@@ -191,7 +194,12 @@ func Load() (*Config, error) {
 		SecurityHeadersCSPConnectExtra: parseCSVList(os.Getenv("SECURITY_HEADERS_CSP_CONNECT_EXTRA")),
 		SecurityHeadersCSPImgExtra:     parseCSVList(os.Getenv("SECURITY_HEADERS_CSP_IMG_EXTRA")),
 
-		WorkerMetricsAddr: getEnvDefault("WORKER_METRICS_ADDR", ":9091"),
+		// WorkerMetricsAddr uses LookupEnv (not getEnvDefault) so the
+		// documented contract holds: unset → default :9091; explicitly
+		// empty (WORKER_METRICS_ADDR=) → disabled. getEnvDefault would
+		// collapse both into the default, breaking the operator's
+		// expectation that `=` disables the server.
+		WorkerMetricsAddr: workerMetricsAddrFromEnv(),
 	}
 
 	var missing []string
@@ -228,6 +236,21 @@ func getEnvDefault(key, def string) string {
 		return v
 	}
 	return def
+}
+
+// workerMetricsAddrFromEnv distinguishes "unset" (fall back to the
+// default :9091) from "explicitly empty" (disable the worker metrics
+// server entirely). getEnvDefault collapses both into the default,
+// which silently breaks the documented `WORKER_METRICS_ADDR=`
+// escape hatch — operators who follow the README and unset/empty
+// the variable to disable the server would still get :9091. Using
+// LookupEnv preserves the distinction.
+func workerMetricsAddrFromEnv() string {
+	v, ok := os.LookupEnv("WORKER_METRICS_ADDR")
+	if !ok {
+		return ":9091"
+	}
+	return v
 }
 
 // parsePriceTierMap parses a comma-separated list of

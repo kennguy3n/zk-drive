@@ -271,9 +271,18 @@ func startMetricsServer(_ context.Context, listenAddr string, m *metrics.Metrics
 	mux := http.NewServeMux()
 	mux.Handle("/metrics", m.Handler())
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
+		// Use json.NewEncoder rather than string concatenation
+		// so the response is guaranteed valid JSON even if a
+		// future -ldflags injection embeds quotes / control
+		// characters in version.Version. Mirrors the server's
+		// /healthz handler in cmd/server/main.go.
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte(`{"status":"ok","component":"worker","version":"` + version.Version + `"}`))
+		_ = json.NewEncoder(w).Encode(map[string]string{
+			"status":    "ok",
+			"component": "worker",
+			"version":   version.Version,
+		})
 	})
 
 	srv := &http.Server{

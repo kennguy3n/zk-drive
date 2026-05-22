@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
+	chimw "github.com/go-chi/chi/v5/middleware"
 	"github.com/nats-io/nats.go"
 	"github.com/prometheus/client_golang/prometheus"
 	dto "github.com/prometheus/client_model/go"
@@ -132,6 +133,48 @@ func TestHTTPMiddleware_NotMatchedLabel(t *testing.T) {
 	})
 	if got != 3 {
 		t.Errorf("zkdrive_http_requests_total{route=not_matched} = %v; want 3", got)
+	}
+}
+
+// TestHTTPMiddleware_RecordsOnPanic pins the post-fix invariant
+// for the Recoverer ordering: when the chain is
+// HTTPMiddleware(Recoverer(handler)) and the handler panics, the
+// counter must still increment with status="500" (Recoverer writes
+// the 500 through the wrapped writer) AND the in-flight gauge
+// must decrement back to zero. The pre-fix ordering
+// (Recoverer outer) silently dropped panicked requests from the
+// metrics surface — this test guards against a regression to that.
+func TestHTTPMiddleware_RecordsOnPanic(t *testing.T) {
+	m := metrics.New()
+	r := chi.NewRouter()
+	r.Use(m.HTTPMiddleware)
+	r.Use(chimw.Recoverer)
+	r.Get("/boom", func(_ http.ResponseWriter, _ *http.Request) {
+		panic("synthetic panic in handler")
+	})
+
+	// Recoverer logs the stack to its default print sink. We can't
+	// silence that cleanly across versions, so just accept the
+	// noise — the assertions below are what matter.
+	req := httptest.NewRequest(http.MethodGet, "/boom", nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("Recoverer status = %d, want 500", w.Code)
+	}
+
+	got := counterValue(t, m.Registry, "zkdrive_http_requests_total", map[string]string{
+		"method": "GET",
+		"route":  "/boom",
+		"status": "500",
+	})
+	if got != 1 {
+		t.Errorf("zkdrive_http_requests_total{status=500} = %v; want 1", got)
+	}
+
+	if g := gaugeValue(t, m.Registry, "zkdrive_http_in_flight_requests"); g != 0 {
+		t.Errorf("in-flight gauge = %v after panicked request, want 0", g)
 	}
 }
 

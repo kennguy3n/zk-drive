@@ -39,14 +39,31 @@ func (m *Metrics) Handler() http.Handler {
 // the wrapped handler returns — that's what gives us the bounded-
 // cardinality route label.
 //
+// Placement vs. chi's Recoverer: HTTPMiddleware MUST be registered
+// BEFORE chimw.Recoverer in r.Use(...) so that the resulting chain
+// is HTTPMiddleware(Recoverer(handler)). With that ordering:
+//
+//  1. HTTPMiddleware wraps the response writer in `ww` and passes
+//     `ww` down the chain — Recoverer receives `ww` and writes its
+//     500-on-panic response through it, so `ww.Status()` correctly
+//     reflects the 500 by the time HTTPMiddleware reads it.
+//  2. If a panic ever escapes Recoverer (e.g. http.ErrAbortHandler,
+//     which Recoverer re-panics by design), the deferred emission
+//     below still runs so the counter + histogram fire with whatever
+//     status `ww` saw last — better than the call vanishing entirely.
+//
+// The reversed ordering (Recoverer outer, HTTPMiddleware inner) is
+// a latent bug: Recoverer writes the 500 to the original `w` (not
+// `ww`, which it never sees), and on top of that the post-dispatch
+// emission below was unreachable on panic. The defer pattern here
+// belts-and-braces against future re-ordering accidents.
+//
 // Important: this middleware MUST run inside chi (i.e. attached
 // via r.Use, not wrapping the chi mux from the outside) for
 // RoutePattern() to return a non-empty value on matched routes.
 // chi resolves the route pattern in-place on the RouteContext
 // during its own tree walk; an outer middleware sees the same
 // RouteContext after dispatch and can read RoutePattern() then.
-// Either placement works for matched routes, but inside chi is
-// more conventional in this codebase.
 //
 // Unmatched paths (chi NotFoundHandler — 404s) report
 // RoutePattern() = "" — we coerce to the literal string
@@ -66,17 +83,26 @@ func (m *Metrics) HTTPMiddleware(next http.Handler) http.Handler {
 		ww := chimw.NewWrapResponseWriter(w, r.ProtoMajor)
 
 		m.httpInFlightRequests.Inc()
-		defer m.httpInFlightRequests.Dec()
-
 		start := time.Now()
+
+		// Emit counters + histogram in a defer so a panic
+		// escaping the inner handler (or Recoverer re-panicking
+		// http.ErrAbortHandler) still records the request. The
+		// status read here reflects whatever Recoverer (or the
+		// handler) wrote to ww before the panic unwound; if
+		// nothing was written the wrap reports 200 by default,
+		// which is correct for hijacked WebSocket / SSE handlers
+		// that don't call WriteHeader.
+		defer func() {
+			m.httpInFlightRequests.Dec()
+			dur := time.Since(start).Seconds()
+			route := routeLabel(r)
+			status := strconv.Itoa(ww.Status())
+			m.httpRequestsTotal.WithLabelValues(r.Method, route, status).Inc()
+			m.httpRequestDuration.WithLabelValues(r.Method, route).Observe(dur)
+		}()
+
 		next.ServeHTTP(ww, r)
-		dur := time.Since(start).Seconds()
-
-		route := routeLabel(r)
-		status := strconv.Itoa(ww.Status())
-
-		m.httpRequestsTotal.WithLabelValues(r.Method, route, status).Inc()
-		m.httpRequestDuration.WithLabelValues(r.Method, route).Observe(dur)
 	})
 }
 

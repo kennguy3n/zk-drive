@@ -1,6 +1,7 @@
 package config
 
 import (
+	"os"
 	"strings"
 	"testing"
 )
@@ -30,6 +31,7 @@ func requireEnv(t *testing.T, envs map[string]string) {
 		"SECURITY_HEADERS_DISABLE_HSTS", "SECURITY_HEADERS_CSP_REPORT_ONLY",
 		"SECURITY_HEADERS_CSP_REPORT_URI", "SECURITY_HEADERS_CSP_CONNECT_EXTRA",
 		"SECURITY_HEADERS_CSP_IMG_EXTRA",
+		"WORKER_METRICS_ADDR",
 	}
 	for _, k := range keys {
 		t.Setenv(k, "")
@@ -258,6 +260,43 @@ func TestLoadParsesRateLimits(t *testing.T) {
 	}
 	if cfg.RateLimitPerWorkspace != 500 {
 		t.Fatalf("RateLimitPerWorkspace=%d, want 500", cfg.RateLimitPerWorkspace)
+	}
+}
+
+// TestWorkerMetricsAddrFromEnv pins the documented contract:
+// unset → default :9091, explicitly empty → disabled (passed through
+// untouched for startMetricsServer to interpret), "off" → disabled
+// (likewise untouched), anything else → as provided. The earlier
+// getEnvDefault implementation collapsed unset and explicitly-empty
+// into the default, breaking the documented `WORKER_METRICS_ADDR=`
+// escape hatch — this test guards against a regression to that.
+func TestWorkerMetricsAddrFromEnv(t *testing.T) {
+	tests := []struct {
+		name   string
+		set    bool
+		value  string
+		want   string
+	}{
+		{name: "unset_falls_back_to_default", set: false, want: ":9091"},
+		{name: "explicit_empty_is_passed_through", set: true, value: "", want: ""},
+		{name: "off_is_passed_through", set: true, value: "off", want: "off"},
+		{name: "explicit_addr_is_passed_through", set: true, value: ":9192", want: ":9192"},
+		{name: "whitespace_is_passed_through_for_helper_to_trim", set: true, value: "  ", want: "  "},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.set {
+				t.Setenv("WORKER_METRICS_ADDR", tc.value)
+			} else {
+				if err := os.Unsetenv("WORKER_METRICS_ADDR"); err != nil {
+					t.Fatalf("Unsetenv: %v", err)
+				}
+			}
+			got := workerMetricsAddrFromEnv()
+			if got != tc.want {
+				t.Errorf("workerMetricsAddrFromEnv() = %q, want %q", got, tc.want)
+			}
+		})
 	}
 }
 

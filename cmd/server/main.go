@@ -439,16 +439,24 @@ func run() error {
 		CSPImgExtra:     cfg.SecurityHeadersCSPImgExtra,
 		DisableHSTS:     cfg.SecurityHeadersDisableHSTS,
 	}))
-	r.Use(chimw.Recoverer)
-	// HTTP metrics middleware runs AFTER Recoverer so a recovered
-	// panic still emits a counter increment with status=500 (the
-	// response the Recoverer writes). Placing it BEFORE Recoverer
-	// would leave the middleware staring at a hijacked
-	// ResponseWriter whose status was never set, defeating the
-	// status label. RoutePattern is read off chi.RouteContext
+	// HTTP metrics middleware runs BEFORE Recoverer so the
+	// resulting chain is HTTPMiddleware(Recoverer(handler)).
+	// HTTPMiddleware wraps the response writer in a chi
+	// WrapResponseWriter and threads that wrapped writer down
+	// to Recoverer, so Recoverer's 500-on-panic response is
+	// observed via the wrapper and the post-dispatch metric
+	// emission sees status="500". The reversed ordering would
+	// leave Recoverer writing 500 to the original (unwrapped)
+	// writer, which is invisible to ww.Status() — silently
+	// dropping panicked requests from the metrics surface.
+	// HTTPMiddleware additionally emits its counters from a
+	// defer so even a panic that escapes Recoverer (e.g.
+	// http.ErrAbortHandler, which Recoverer re-panics) still
+	// records. RoutePattern is read off chi.RouteContext
 	// post-dispatch — that's the bounded cardinality guard
 	// documented in internal/metrics/http.go.
 	r.Use(metricsSurface.HTTPMiddleware)
+	r.Use(chimw.Recoverer)
 
 	// /healthz is a SHALLOW liveness probe: "the process is alive
 	// and HTTP is up." It never pings downstream dependencies
