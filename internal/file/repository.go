@@ -279,6 +279,30 @@ func (r *PostgresRepository) ConfirmVersion(ctx context.Context, workspaceID uui
 	if err != nil {
 		return false, err
 	}
+	if !fresh {
+		// Idempotent replay: the original confirm's transaction
+		// already advanced files.current_version_id and size_bytes
+		// to the correct values atomically with the version row
+		// insert. Re-issuing the UPDATE here would be unsafe in two
+		// distinct ways:
+		//
+		//   1. Version regression — between the original confirm and
+		//      this retry, another caller may have advanced
+		//      current_version_id to a newer version (V2). Blindly
+		//      resetting it back to v.ID (V1) would silently roll
+		//      back the file pointer and overwrite size_bytes with
+		//      V1's size, discarding V2's changes.
+		//
+		//   2. Spurious updated_at — even when no concurrent V2
+		//      exists, re-running the UPDATE bumps updated_at = now()
+		//      for no logical change, polluting last-modified
+		//      timestamps that downstream sync clients rely on for
+		//      change detection.
+		//
+		// Both issues are resolved by simply not running the UPDATE
+		// on the replay path. The first commit already did it.
+		return false, tx.Commit(ctx)
+	}
 	const setQ = `
 UPDATE files SET current_version_id = $3, size_bytes = $4, updated_at = now()
 WHERE workspace_id = $1 AND id = $2 AND deleted_at IS NULL`
@@ -292,7 +316,7 @@ WHERE workspace_id = $1 AND id = $2 AND deleted_at IS NULL`
 	if err := tx.Commit(ctx); err != nil {
 		return false, err
 	}
-	return fresh, nil
+	return true, nil
 }
 
 // insertVersionTx verifies file ownership and inserts a new version
