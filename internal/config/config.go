@@ -97,6 +97,35 @@ type Config struct {
 	// product never sends file content to a third-party LLM.
 	OllamaURL   string
 	OllamaModel string
+
+	// Browser security headers (CSP / HSTS / etc.) emitted on
+	// every response by api/middleware.SecurityHeaders. The
+	// middleware ships a safe default policy; these env vars
+	// are knobs operators reach for during rollout or when
+	// integrating the storage gateway origin.
+	//
+	// SecurityHeadersDisableHSTS skips Strict-Transport-Security.
+	// Useful for local HTTP development; should remain false in
+	// production where TLS terminates at the ingress.
+	SecurityHeadersDisableHSTS bool
+	// SecurityHeadersCSPReportOnly emits the policy under
+	// Content-Security-Policy-Report-Only instead of enforcing.
+	// Use during initial rollout to confirm the report stream
+	// is clean before flipping the switch.
+	SecurityHeadersCSPReportOnly bool
+	// SecurityHeadersCSPReportURI is appended as `report-uri`
+	// to the CSP value. Browsers POST violation reports there.
+	SecurityHeadersCSPReportURI string
+	// SecurityHeadersCSPConnectExtra is a comma-separated list
+	// of additional origins to allow in `connect-src` (on top of
+	// `'self' wss: ws:`). The fabric storage gateway URL goes
+	// here — required so presigned-URL uploads / downloads land.
+	SecurityHeadersCSPConnectExtra []string
+	// SecurityHeadersCSPImgExtra is a comma-separated list of
+	// additional origins to allow in `img-src` (on top of
+	// `'self' data: blob:`). Thumbnails / previews served from
+	// the storage gateway origin go here.
+	SecurityHeadersCSPImgExtra []string
 }
 
 // Load reads configuration from environment variables and returns a populated
@@ -138,6 +167,12 @@ func Load() (*Config, error) {
 		StripePriceTierMap:        parsePriceTierMap(os.Getenv("STRIPE_PRICE_TIER_MAP")),
 		OllamaURL:                 os.Getenv("OLLAMA_URL"),
 		OllamaModel:               os.Getenv("OLLAMA_MODEL"),
+
+		SecurityHeadersDisableHSTS:     parseBoolDefault(os.Getenv("SECURITY_HEADERS_DISABLE_HSTS"), false),
+		SecurityHeadersCSPReportOnly:   parseBoolDefault(os.Getenv("SECURITY_HEADERS_CSP_REPORT_ONLY"), false),
+		SecurityHeadersCSPReportURI:    os.Getenv("SECURITY_HEADERS_CSP_REPORT_URI"),
+		SecurityHeadersCSPConnectExtra: parseCSVList(os.Getenv("SECURITY_HEADERS_CSP_CONNECT_EXTRA")),
+		SecurityHeadersCSPImgExtra:     parseCSVList(os.Getenv("SECURITY_HEADERS_CSP_IMG_EXTRA")),
 	}
 
 	var missing []string
@@ -201,6 +236,42 @@ func parsePriceTierMap(s string) map[string]string {
 			continue
 		}
 		out[priceID] = tier
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+// parseBoolDefault parses the common boolean env-var values
+// ("1", "true", "yes", "on") case-insensitively. Anything else
+// (including the empty string) falls through to def, which
+// keeps a typo from silently flipping a security knob.
+func parseBoolDefault(s string, def bool) bool {
+	s = strings.ToLower(strings.TrimSpace(s))
+	switch s {
+	case "1", "true", "yes", "on":
+		return true
+	case "0", "false", "no", "off":
+		return false
+	default:
+		return def
+	}
+}
+
+// parseCSVList splits a comma-separated env-var value into a
+// trimmed slice, dropping empty entries. Returns nil for empty
+// input so the caller's omit-empty default kicks in.
+func parseCSVList(s string) []string {
+	if strings.TrimSpace(s) == "" {
+		return nil
+	}
+	parts := strings.Split(s, ",")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		if p = strings.TrimSpace(p); p != "" {
+			out = append(out, p)
+		}
 	}
 	if len(out) == 0 {
 		return nil

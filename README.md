@@ -268,6 +268,19 @@ metadata-only endpoints, but `/api/files/upload-url`,
 with `501 Not Implemented`. If `S3_ENDPOINT` is set, the bucket, access
 key, and secret key must also be set; otherwise startup fails.
 
+Browser security headers (CSP / HSTS / X-Frame-Options / etc.) are
+emitted on every response by `api/middleware.SecurityHeaders`. The
+defaults are safe for a same-origin SPA; these knobs are how operators
+allow-list the storage gateway origin and stage CSP rollouts:
+
+| Variable                              | Default  | Purpose                                                                                                       |
+| ------------------------------------- | -------- | ------------------------------------------------------------------------------------------------------------- |
+| `SECURITY_HEADERS_CSP_CONNECT_EXTRA`  | empty    | Comma-separated origins added to CSP `connect-src` on top of `'self' wss: ws:`. Put the **public** URL the browser sees for the fabric storage gateway here so direct-to-storage uploads / downloads land. |
+| `SECURITY_HEADERS_CSP_IMG_EXTRA`      | empty    | Comma-separated origins added to CSP `img-src` on top of `'self' data: blob:`. Same gateway origin if thumbnails are served from it. |
+| `SECURITY_HEADERS_CSP_REPORT_ONLY`    | `false`  | When `true`, the policy emits under `Content-Security-Policy-Report-Only` instead of enforcing — browsers report violations but do not block. Use during the first rollout, then flip to `false`. |
+| `SECURITY_HEADERS_CSP_REPORT_URI`     | empty    | When set, appended as `report-uri <value>` to the CSP value. Browsers POST violation reports there.            |
+| `SECURITY_HEADERS_DISABLE_HSTS`       | `false`  | When `true`, skips `Strict-Transport-Security`. Use for local HTTP development only; keep `false` in production. |
+
 ### Quick start with the zk-object-fabric Docker demo
 
 When running alongside zk-object-fabric's Docker demo, point ZK Drive

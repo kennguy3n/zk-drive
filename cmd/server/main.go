@@ -416,6 +416,18 @@ func run() error {
 	// so handlers calling chimw.GetReqID continue to get the
 	// right value.
 	r.Use(chimw.RealIP)
+	// SecurityHeaders runs BEFORE Recoverer so a panic in a
+	// downstream handler still produces a 500 page with the
+	// hardened header set — the Recoverer otherwise writes its
+	// own response and we'd lose CSP / HSTS / X-Frame-Options
+	// on the exact responses an attacker is most likely to probe.
+	r.Use(middleware.SecurityHeaders(middleware.SecurityHeadersOptions{
+		CSPReportOnly:   cfg.SecurityHeadersCSPReportOnly,
+		CSPReportURI:    cfg.SecurityHeadersCSPReportURI,
+		CSPConnectExtra: cfg.SecurityHeadersCSPConnectExtra,
+		CSPImgExtra:     cfg.SecurityHeadersCSPImgExtra,
+		DisableHSTS:     cfg.SecurityHeadersDisableHSTS,
+	}))
 	r.Use(chimw.Recoverer)
 
 	// /healthz is a SHALLOW liveness probe: "the process is alive
