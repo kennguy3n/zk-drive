@@ -93,7 +93,7 @@ const migrateAdvisoryLockKey int64 = 0x5a4b44524956534D // 'ZKDRIVSM' ASCII
 // optionally consumes). The migrate binary is allowed to run against
 // any older state — its job is to bring the database up to HEAD; only
 // the server/worker binaries gate on this.
-const MinRequiredMigrationVersion = "024_row_level_security"
+const MinRequiredMigrationVersion = "025_orphan_upload_tracking"
 
 // ErrMigrationsOutOfDate is returned by RequireMinMigrationVersion when
 // the database is missing one or more migrations that the binary

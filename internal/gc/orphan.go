@@ -293,39 +293,46 @@ func (s *GCService) GCWorkspace(ctx context.Context, workspaceID uuid.UUID) (Res
 		default:
 		}
 
-		// Storage delete first: if the object is still there
-		// we want to reclaim the bytes before we lose the key
-		// from the metadata side. If DeleteObject fails (e.g.
-		// transient gateway 5xx), we still proceed to delete
-		// the row so the next GC tick doesn't keep re-trying
-		// the same dead key forever — see the Result doc
-		// comment for the operational contract.
-		if deleter != nil {
-			if err := deleter.DeleteObject(ctx, o.ObjectKey); err == nil {
-				res.ObjectsDeleted++
-			}
-			// Errors are intentionally swallowed here. The
-			// caller's structured-log line will reflect the
-			// metric: ObjectsDeleted < RowsDeleted means the
-			// storage path is unhealthy or the object was
-			// already gone; both cases are operator-visible
-			// via /metrics (zkdrive_gc_objects_deleted_total
-			// vs zkdrive_gc_orphans_deleted_total).
-		}
-
+		// Row delete first (predicate-guarded), THEN storage
+		// delete. Order matters for the confirm-race window:
+		// if a ConfirmUpload landed between the list scan and
+		// the delete, current_version_id is now non-NULL and
+		// the predicate-guarded DELETE matches zero rows ->
+		// ErrNotFound. Treating that as a benign continue
+		// AND skipping the subsequent DeleteObject means a
+		// raced confirm's bytes are never stranded — the
+		// confirmed file keeps the S3 object it points at.
+		// The reverse order (S3 first, row second) would
+		// delete the bytes BEFORE noticing the race and
+		// leave a confirmed file pointing at a missing
+		// object, which is unrecoverable data loss; whereas
+		// "extra orphan S3 object on transient storage
+		// failure" is recoverable via an out-of-band bucket
+		// scrub.
 		if err := s.files.DeletePendingOrphan(ctx, workspaceID, o.FileID); err != nil {
-			// Predicate-guarded DELETE: if a concurrent
-			// ConfirmUpload landed between the list and the
-			// delete, current_version_id is now non-NULL
-			// and the row matches zero rows -> ErrNotFound.
-			// That's not a GC failure, just a benign race;
-			// the row is no longer an orphan.
 			if errors.Is(err, file.ErrNotFound) {
 				continue
 			}
 			return res, fmt.Errorf("delete orphan row %s: %w", o.FileID, err)
 		}
 		res.RowsDeleted++
+
+		// Storage delete second, only after the row was
+		// proven orphan by the predicate-guarded DELETE.
+		// Errors are swallowed: ObjectsDeleted < RowsDeleted
+		// is the operator signal (visible via /metrics:
+		// zkdrive_gc_objects_deleted_total vs
+		// zkdrive_gc_orphans_deleted_total) that the
+		// per-workspace storage path is unhealthy or the
+		// object was already gone. We do not retry on the
+		// next GC tick because the row is gone and the key
+		// is lost; bucket reconciliation is the operator's
+		// out-of-band remediation for that delta.
+		if deleter != nil {
+			if err := deleter.DeleteObject(ctx, o.ObjectKey); err == nil {
+				res.ObjectsDeleted++
+			}
+		}
 	}
 
 	return res, nil

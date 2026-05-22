@@ -26,18 +26,17 @@ func (m *Metrics) RecordGCRun(summary gc.Summary, runErr error, start time.Time)
 	elapsed := time.Since(start).Seconds()
 	m.gcRunDuration.Observe(elapsed)
 
-	if summary.Workspaces > 0 {
-		m.gcWorkspacesScanned.Add(float64(summary.Workspaces))
-	}
-	if summary.OrphansFound > 0 {
-		m.gcOrphansFound.Add(float64(summary.OrphansFound))
-	}
-	if summary.OrphansDeleted > 0 {
-		m.gcOrphansDeleted.Add(float64(summary.OrphansDeleted))
-	}
-	if summary.ObjectsDeleted > 0 {
-		m.gcObjectsDeleted.Add(float64(summary.ObjectsDeleted))
-	}
+	// Unconditional Add() on the loop-counter families: matches
+	// RecordReconcilerRun in this package — prometheus.Counter.Add(0)
+	// is a documented no-op, so a `> 0` guard here would only diverge
+	// from the reconciler's pattern without changing behaviour. The
+	// only guarded family is Errors, mirrored from the reconciler,
+	// where the guard avoids the len() conversion when the run was
+	// clean.
+	m.gcWorkspacesScanned.Add(float64(summary.Workspaces))
+	m.gcOrphansFound.Add(float64(summary.OrphansFound))
+	m.gcOrphansDeleted.Add(float64(summary.OrphansDeleted))
+	m.gcObjectsDeleted.Add(float64(summary.ObjectsDeleted))
 	if n := len(summary.Errors); n > 0 {
 		m.gcWorkspaceErrorsTotal.Add(float64(n))
 	}

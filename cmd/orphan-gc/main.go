@@ -41,6 +41,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -153,14 +154,28 @@ func gcPendingUploadTTL() time.Duration {
 }
 
 // resolver adapts storage.ClientFactory to gc.StorageResolver. Same
-// shape as cmd/worker's helper — duplicated rather than shared
-// because the standalone binary's import surface is intentionally
-// minimal (no NATS, no preview/scan/index/archive services), and a
-// 12-line adapter doesn't justify a separate package.
+// shape as cmd/worker's workerStorageResolver — duplicated rather
+// than shared because the standalone binary's import surface is
+// intentionally minimal (no NATS, no preview/scan/index/archive
+// services), and a 15-line adapter doesn't justify a separate
+// package. The two implementations MUST stay in sync on the
+// ErrNoCredentials triage: it is the only "expected nil" path
+// (workspace has no per-tenant client AND no shared fallback) and
+// must not log; every other error is a real operator signal and
+// MUST be logged — without this branch the standalone binary
+// silently swallows decrypt failures, DB connectivity errors, and
+// misconfigured credential codecs with the only visible symptom
+// being ObjectsDeleted < OrphansDeleted in the run summary log line
+// (cmd/orphan-gc does not export /metrics, so the metric-divergence
+// signal the worker relies on is not available here).
 func resolver(factory *storage.ClientFactory) gc.StorageResolver {
 	return func(ctx context.Context, workspaceID uuid.UUID) gc.StorageDeleter {
 		client, err := factory.ForWorkspace(ctx, workspaceID)
 		if err != nil {
+			if errors.Is(err, storage.ErrNoCredentials) {
+				return nil
+			}
+			slog.Warn("orphan-gc storage lookup failed", "workspace_id", workspaceID, "err", err)
 			return nil
 		}
 		return client

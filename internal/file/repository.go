@@ -154,8 +154,14 @@ WHERE workspace_id = $1 AND id = $2 AND deleted_at IS NULL`
 
 // ListPendingUploadOrphans returns file rows with a recorded pending
 // object key that have not been confirmed by olderThan. The partial
-// index idx_files_pending_orphan pins this query to an index-only
-// scan during steady-state.
+// index idx_files_pending_orphan is keyed on (workspace_id,
+// created_at) with the same WHERE predicates as the query, so Postgres
+// can satisfy the scan via the index without a sequential filter pass
+// over the full files table. Selected columns (id, object_key,
+// created_at) are not all in the index — strictly this is an index
+// scan with heap fetches, not an index-only scan — but the partial
+// predicate keeps the index tiny and the heap fetches scale with the
+// orphan count rather than the workspace's full file population.
 func (r *PostgresRepository) ListPendingUploadOrphans(ctx context.Context, workspaceID uuid.UUID, olderThan time.Time, limit int) ([]*PendingOrphan, error) {
 	if limit <= 0 {
 		limit = 100

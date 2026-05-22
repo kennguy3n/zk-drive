@@ -126,6 +126,14 @@ func TestGCWorkspaceContinuesPastObjectDeleteFailure(t *testing.T) {
 // reconciler treats that as a benign race (the row is no longer an
 // orphan) rather than a per-row failure that would inflate the
 // error counter.
+//
+// Critically, the GC also MUST NOT delete the S3 object in this
+// case: the racing confirm just promoted the row to a real version
+// pointing at exactly that key, so deleting the bytes here would
+// strand a confirmed file. The row-delete-first ordering inside
+// GCWorkspace makes the race detection a precondition for the
+// storage delete, which is the architectural property this test
+// pins.
 func TestGCWorkspaceTreatsConfirmRaceAsBenign(t *testing.T) {
 	orphans := []*file.PendingOrphan{
 		{FileID: uuid.New(), ObjectKey: "ws/file/v1", CreatedAt: time.Now().Add(-10 * 24 * time.Hour)},
@@ -143,10 +151,13 @@ func TestGCWorkspaceTreatsConfirmRaceAsBenign(t *testing.T) {
 	if res.RowsDeleted != 0 {
 		t.Fatalf("RowsDeleted = %d, want 0 (race treated as benign)", res.RowsDeleted)
 	}
-	// Object was still deleted — the GC sees the storage object
-	// regardless of whether the row gets reclaimed this pass.
-	if res.ObjectsDeleted != 1 {
-		t.Fatalf("ObjectsDeleted = %d, want 1", res.ObjectsDeleted)
+	// Critical: the object MUST NOT have been deleted. The raced
+	// confirm now owns this key and the file row points at it.
+	if res.ObjectsDeleted != 0 {
+		t.Fatalf("ObjectsDeleted = %d, want 0 (race must skip storage delete)", res.ObjectsDeleted)
+	}
+	if len(deleter.calls) != 0 {
+		t.Fatalf("DeleteObject was called %d times; expected 0 because the row predicate guard fired", len(deleter.calls))
 	}
 }
 
