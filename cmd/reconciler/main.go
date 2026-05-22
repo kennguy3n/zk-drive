@@ -83,15 +83,26 @@ func run() error {
 	start := time.Now()
 	rc := reconciler.New(pool)
 	summary, err := rc.ReconcileAll(ctx)
-	if err != nil {
-		return fmt.Errorf("reconcile all: %w", err)
-	}
 
+	// Surface per-workspace errors and the run summary BEFORE
+	// deciding on the function-level err. When ctx is cancelled
+	// mid-run (case (c) in the package doc), ReconcileAll returns
+	// ctx.Err() along with a partial summary that still carries
+	// useful operational context — the workspaces it visited
+	// before the signal, the ones that errored, the drift bytes
+	// it managed to reconcile. Logging those *before* the err
+	// return path means a CronJob killed by activeDeadlineSeconds
+	// or a Forbid-concurrency replacement still leaves a readable
+	// trail in `kubectl logs --previous` for the next on-caller.
 	for _, e := range summary.Errors {
 		log.Printf("reconciler: workspace=%s err=%v", e.WorkspaceID, e.Err)
 	}
 	log.Printf("reconciler: completed workspaces=%d updated=%d drift_bytes=%d errors=%d duration=%s",
 		summary.Workspaces, summary.Updated, summary.TotalDriftBytes, len(summary.Errors),
 		time.Since(start).Round(time.Millisecond))
+
+	if err != nil {
+		return fmt.Errorf("reconcile all: %w", err)
+	}
 	return nil
 }

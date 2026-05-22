@@ -23,6 +23,7 @@ import (
 	"os"
 	"os/signal"
 	"strconv"
+	"sync"
 	"syscall"
 	"time"
 
@@ -75,15 +76,28 @@ func run() error {
 		cancel()
 		return fmt.Errorf("connect postgres: %w", err)
 	}
-	// Defer order matters: defers run LIFO, so cancel() must be
-	// registered AFTER pool.Close() to ensure cancel() runs FIRST
-	// during shutdown. That lets long-running goroutines
-	// (runGuestExpirySweep, runStorageReconciler, NATS subscribers)
-	// observe ctx.Done() and exit cleanly BEFORE pool.Close() starts
-	// rejecting new acquires — otherwise we'd see a brief window of
-	// noisy "pool is closed" errors as in-flight goroutines race the
-	// pool teardown.
+	// Defer order matters — defers run LIFO, so the target shutdown
+	// sequence (relative to each other and to pool.Close) is:
+	//
+	//   1. cancel()          — signals long-running goroutines to
+	//                          stop (runGuestExpirySweep,
+	//                          runStorageReconciler).
+	//   2. bgGoroutines.Wait — blocks until those goroutines have
+	//                          observed ctx.Done() and returned, so
+	//                          no caller is mid-Acquire on the pool.
+	//   3. pool.Close()      — closes the pool against a quiescent
+	//                          set of consumers; no "use of closed
+	//                          connection" log noise.
+	//
+	// We register them in the reverse of that target order. The
+	// NATS defers (nc.Drain, unsubscribeAll) added later run before
+	// cancel() in LIFO order; that is intentional because NATS
+	// Drain processes any in-flight message callbacks (which may
+	// hold pool conns) before we signal the rest of the goroutines
+	// to exit.
+	var bgGoroutines sync.WaitGroup
 	defer pool.Close()
+	defer bgGoroutines.Wait()
 	defer cancel()
 
 	// Same precondition as cmd/server: migrations are owned by the
@@ -139,7 +153,11 @@ func run() error {
 	// responsibilities. A 5-minute cadence is fine for Phase 3 —
 	// share-link TTLs are generally hours / days.
 	sharingSvc := sharing.NewService(sharing.NewPostgresRepository(pool), wiring.NewPermissionGranter(permission.NewService(permission.NewPostgresRepository(pool))))
-	go runGuestExpirySweep(ctx, sharingSvc, 5*time.Minute)
+	bgGoroutines.Add(1)
+	go func() {
+		defer bgGoroutines.Done()
+		runGuestExpirySweep(ctx, sharingSvc, 5*time.Minute)
+	}()
 
 	// Storage-counter reconciliation (WS-14). Runs inside the worker
 	// process on a configurable cadence so the denormalized
@@ -150,7 +168,12 @@ func run() error {
 	// (deploys that prefer a dedicated K8s CronJob set it to 0 and
 	// schedule /app/reconciler externally).
 	if interval := reconcileInterval(); interval > 0 {
-		go runStorageReconciler(ctx, reconciler.New(pool), interval)
+		bgGoroutines.Add(1)
+		rc := reconciler.New(pool)
+		go func() {
+			defer bgGoroutines.Done()
+			runStorageReconciler(ctx, rc, interval)
+		}()
 	}
 
 	natsURL := os.Getenv("NATS_URL")
