@@ -34,8 +34,11 @@ jobs:
       # with go1.25.1 and satisfies this. Pin the version explicitly
       # rather than tracking 'latest' so a future golangci-lint
       # default-rule change can't silently break CI overnight.
+      #
+      # NB: golangci-lint v2 requires the v7+ action (the v6 action
+      # only supports v1 binaries).
       - name: golangci-lint
-        uses: golangci/golangci-lint-action@v6
+        uses: golangci/golangci-lint-action@v7
         with:
           version: v2.5.0
           args: --timeout=5m
