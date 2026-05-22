@@ -110,6 +110,17 @@ func NewClient(cfg Config) (*Client, error) {
 // wrapped error otherwise — callers (e.g. /readyz) should treat any
 // non-nil result as "not ready" since presigned URLs minted while
 // the gateway is unreachable would 5xx from the client side.
+//
+// IAM requirements: HeadBucket maps to the s3:ListBucket action in
+// AWS IAM (per the AWS S3 API reference) and the bucket-level READ
+// capability in Ceph RGW / MinIO. A presign-only credential scoped
+// only to s3:GetObject + s3:PutObject is NOT sufficient — it will
+// return 403 here and /readyz will then report storage as failed.
+// When provisioning IAM for production, grant s3:ListBucket on the
+// bucket ARN (not the object ARN) alongside the existing presign
+// permissions. Cost-wise HeadBucket is a Tier-1 (cheap) request in
+// AWS pricing and is well within the free tier even for sub-second
+// readiness-probe cadence.
 func (c *Client) HealthCheck(ctx context.Context) error {
 	if c == nil || c.s3 == nil {
 		return errors.New("storage: client not initialised")

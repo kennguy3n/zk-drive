@@ -193,17 +193,24 @@ func setupEnv(t *testing.T) *testEnv {
 	r := chi.NewRouter()
 	r.Use(chimw.Recoverer)
 
-	// Mirror production wiring for the readiness probe. In the
-	// integration harness only Postgres is a real dependency — the
-	// fake S3 endpoint, miniredis, and absent NATS are all stubs or
-	// short-circuited optional deps, so wiring StorageChecker etc.
-	// would either trigger a HeadBucket against an unreachable URL
-	// (giving spurious 503s) or duplicate the unit-test coverage in
-	// internal/health/checkers_test.go. The production wiring in
-	// cmd/server/main.go DOES register all four checkers.
+	// Mirror production wiring for the readiness probe. Postgres is
+	// the only fully-live dependency in the integration harness —
+	// the fake S3 endpoint is reachable as a presign target but does
+	// NOT serve HeadBucket, so registering a real StorageChecker
+	// against it would yield spurious 503s. Instead we register
+	// NewStorageChecker(nil) on purpose: that exercises the
+	// constructor's typed-nil short-circuit (the path that broke in
+	// production when cfg.S3Endpoint was unset, fixed by passing the
+	// concrete *storage.Client through the constructor rather than
+	// upcasting to the storageProbe interface) and pins it as an
+	// integration-level regression. Redis and NATS are similarly
+	// wired as nil to exercise the optional-dep contract end-to-end.
 	r.Get("/readyz", health.NewService(
 		[]health.Checker{
 			health.NewPostgresChecker(pool),
+			health.NewStorageChecker(nil),
+			health.NewRedisChecker(nil),
+			health.NewNATSChecker(nil),
 		},
 		health.DefaultCheckTimeout,
 	).ReadyHandler())

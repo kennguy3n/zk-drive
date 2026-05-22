@@ -5,29 +5,62 @@ import (
 	"errors"
 	"strings"
 	"testing"
+
+	"github.com/kennguy3n/zk-drive/internal/storage"
 )
 
-// fakeStorageProbe is a minimal in-process storageProbe used to
-// exercise StorageChecker without bringing up the AWS SDK / a real
-// S3 endpoint.
+// fakeStorageProbe is a minimal in-package fake used to exercise
+// StorageChecker.Check error/happy paths without bringing up the
+// AWS SDK or a real S3 endpoint. Tests construct &StorageChecker{}
+// directly (legal in-package) so we don't widen the public API just
+// to swap the probe.
 type fakeStorageProbe struct {
 	err error
 }
 
 func (f *fakeStorageProbe) HealthCheck(_ context.Context) error { return f.err }
 
-func TestStorageCheckerNilProbeReportsOK(t *testing.T) {
+// TestNewStorageCheckerNilClientSurvivesTypedNilTrap pins the
+// architectural invariant that distinguishes NewStorageChecker from
+// a naive interface-typed parameter: passing a nil *storage.Client
+// must be normalised to a genuine nil-interface field so the
+// Check-time short-circuit fires. Without the constructor
+// normalisation, Go would wrap the nil pointer in a non-nil
+// interface and Check would invoke HealthCheck on a nil receiver,
+// returning the "client not initialised" error and breaking
+// readiness for every deployment without S3 configured.
+func TestNewStorageCheckerNilClientSurvivesTypedNilTrap(t *testing.T) {
 	c := NewStorageChecker(nil)
 	if err := c.Check(context.Background()); err != nil {
-		t.Fatalf("nil probe should be OK (optional dep), got %v", err)
+		t.Fatalf("nil client should short-circuit to OK, got %v", err)
+	}
+	if c.probe != nil {
+		t.Fatalf("expected nil interface probe, got %T(%v)", c.probe, c.probe)
 	}
 	if c.Name() != "storage" {
 		t.Fatalf("Name(): expected storage, got %q", c.Name())
 	}
 }
 
+// TestNewStorageCheckerNilTypedClientSurvivesTrap is the explicit
+// regression test for the typed-nil trap. A nil-valued *storage.Client
+// variable (rather than the bare nil literal) is the exact shape
+// production wiring produces when cfg.S3Endpoint is unset.
+func TestNewStorageCheckerNilTypedClientSurvivesTrap(t *testing.T) {
+	var client *storage.Client // typed nil
+	c := NewStorageChecker(client)
+	if err := c.Check(context.Background()); err != nil {
+		t.Fatalf("typed-nil client should short-circuit to OK, got %v", err)
+	}
+	if c.probe != nil {
+		t.Fatalf("constructor failed to collapse typed-nil to nil interface: got %T(%v)", c.probe, c.probe)
+	}
+}
+
 func TestStorageCheckerPropagatesProbeError(t *testing.T) {
-	c := NewStorageChecker(&fakeStorageProbe{err: errors.New("403 forbidden")})
+	// Use the unexported field directly: tests live in the same
+	// package and the storageProbe abstraction is internal.
+	c := &StorageChecker{probe: &fakeStorageProbe{err: errors.New("403 forbidden")}}
 	err := c.Check(context.Background())
 	if err == nil {
 		t.Fatalf("expected error, got nil")
@@ -41,7 +74,7 @@ func TestStorageCheckerPropagatesProbeError(t *testing.T) {
 }
 
 func TestStorageCheckerHappyPath(t *testing.T) {
-	c := NewStorageChecker(&fakeStorageProbe{})
+	c := &StorageChecker{probe: &fakeStorageProbe{}}
 	if err := c.Check(context.Background()); err != nil {
 		t.Fatalf("happy path: expected nil, got %v", err)
 	}

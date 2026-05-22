@@ -8,6 +8,8 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/nats-io/nats.go"
 	"github.com/redis/go-redis/v9"
+
+	"github.com/kennguy3n/zk-drive/internal/storage"
 )
 
 // PostgresChecker probes a pgxpool via its native Ping which acquires
@@ -71,27 +73,50 @@ func (r *RedisChecker) Check(ctx context.Context) error {
 }
 
 // storageProbe is the contract the storage health-check depends on
-// — declared as an interface so this package can be tested without
-// pulling in the AWS SDK in unit tests, and so future storage
-// backends (different gateway, local FS dev mode) can plug in
-// without touching this package.
+// — declared as an unexported interface so tests in this package can
+// substitute a fake without pulling the AWS SDK into the test binary.
+// External callers go through NewStorageChecker, which takes the
+// concrete *storage.Client type to avoid Go's typed-nil interface
+// trap: passing a nil *storage.Client into a storageProbe parameter
+// would yield a non-nil interface value wrapping a nil pointer, which
+// would silently skip the nil short-circuit in Check.
 type storageProbe interface {
 	HealthCheck(ctx context.Context) error
 }
 
-// StorageChecker probes a storage backend via its HealthCheck
-// method. As with RedisChecker, a nil probe is reported as
-// implicitly OK so dev stacks without an S3 gateway don't fail
-// readiness.
+// StorageChecker probes a storage backend via HealthCheck. A nil
+// underlying probe is treated as "storage not configured" (returns
+// OK) so dev stacks without an S3 gateway don't fail readiness.
+//
+// HealthCheck on *storage.Client issues an S3 HeadBucket call. The
+// configured credentials therefore need the s3:ListBucket permission
+// on the bucket — a presign-only IAM scope (s3:GetObject /
+// s3:PutObject) is insufficient and will cause /readyz to always
+// return 503 with a 403 in the response. When using AWS IAM, attach
+// a policy granting s3:ListBucket on the bucket ARN; the equivalent
+// in Ceph RGW / MinIO is the bucket-level READ capability.
 type StorageChecker struct {
 	probe storageProbe
 }
 
-// NewStorageChecker wraps a storage backend that exposes a
-// HealthCheck(ctx) error method. The internal/storage.Client
-// satisfies this interface.
-func NewStorageChecker(probe storageProbe) *StorageChecker {
-	return &StorageChecker{probe: probe}
+// NewStorageChecker wraps the internal/storage.Client. It deliberately
+// accepts the concrete *storage.Client type — not the storageProbe
+// interface — so a nil pointer (the common path when S3 is not
+// configured) is normalised to a nil interface field inside the
+// constructor. Passing a nil *storage.Client directly to a parameter
+// of interface type would otherwise produce the canonical
+// non-nil-interface-wrapping-nil-pointer footgun ("typed nil"), and
+// the Check method's `s.probe == nil` short-circuit would fail to
+// fire — /readyz would then 503 in every deployment without S3.
+//
+// Pass nil to indicate "storage intentionally absent"; the resulting
+// checker reports OK on Check.
+func NewStorageChecker(client *storage.Client) *StorageChecker {
+	if client == nil {
+		// Explicit nil interface assignment so probe == nil holds.
+		return &StorageChecker{probe: nil}
+	}
+	return &StorageChecker{probe: client}
 }
 
 // Name implements Checker.

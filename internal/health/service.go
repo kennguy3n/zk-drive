@@ -33,11 +33,19 @@ import (
 )
 
 // DefaultCheckTimeout is the per-check timeout applied by Service
-// when no explicit timeout is configured. 2 seconds is comfortably
-// below the default k8s readiness probe timeout (1s of HTTP timeout
-// is generous for a dependency ping; the extra budget here covers
-// goroutine scheduling overhead under load).
-const DefaultCheckTimeout = 2 * time.Second
+// when no explicit timeout is configured. 900ms is deliberately just
+// under the default k8s readiness probe timeoutSeconds of 1s, so
+// every individual dependency check has a chance to complete (or be
+// cancelled and reported as failed) before k8s gives up on the whole
+// HTTP response and marks the probe as timed-out.
+//
+// Operators who tune the k8s probe timeoutSeconds upward (e.g. to 3s
+// for environments where a cross-AZ S3 HeadBucket can legitimately
+// take >1s) should pass a matching larger timeout to NewService
+// rather than relying on the default — otherwise the check budget
+// stays at 900ms and a slow-but-healthy dependency will still flap
+// the pod out of the service mesh.
+const DefaultCheckTimeout = 900 * time.Millisecond
 
 // Checker abstracts a single downstream-dependency probe. The Name
 // is used as the JSON key in the readiness response so operators

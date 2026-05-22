@@ -29,8 +29,16 @@ func TestReadyzPassesWithLiveDependencies(t *testing.T) {
 	if resp.Status != "ready" {
 		t.Fatalf("expected status=ready, got %q (body=%s)", resp.Status, string(body))
 	}
-	if got := resp.Checks["postgres"]; got != "ok" {
-		t.Fatalf("postgres check: expected ok, got %q (body=%s)", got, string(body))
+	// All four checkers must report ok. The postgres pool is real;
+	// the other three are deliberately wired with nil dependencies
+	// to exercise the nil-safe short-circuit path. Treating that
+	// short-circuit as "ok" rather than "fail" is the WS-10
+	// invariant — single-process dev stacks (no Redis / NATS / S3)
+	// must NOT be marked as not-ready.
+	for _, name := range []string{"postgres", "storage", "redis", "nats"} {
+		if got := resp.Checks[name]; got != "ok" {
+			t.Errorf("%s check: expected ok, got %q (body=%s)", name, got, string(body))
+		}
 	}
 }
 
