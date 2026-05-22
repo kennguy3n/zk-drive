@@ -2,7 +2,6 @@ package integration
 
 import (
 	"context"
-	"fmt"
 	"net/url"
 	"os"
 	"strings"
@@ -71,8 +70,13 @@ func freshTestDatabase(t *testing.T) string {
 		}
 		defer pool2.Close()
 		// Terminate any lingering connections so DROP succeeds.
-		_, _ = pool2.Exec(ctx2, fmt.Sprintf(
-			"SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = '%s' AND pid <> pg_backend_pid()", name))
+		// pg_stat_activity.datname is a regular column so it accepts
+		// a $1 placeholder (unlike DROP DATABASE which needs the
+		// identifier interpolated and is handled via pgQuoteIdent
+		// below).
+		_, _ = pool2.Exec(ctx2,
+			"SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = $1 AND pid <> pg_backend_pid()",
+			name)
 		if _, err := pool2.Exec(ctx2, "DROP DATABASE IF EXISTS "+pgQuoteIdent(name)); err != nil {
 			t.Logf("cleanup: drop test db %q: %v", name, err)
 		}
