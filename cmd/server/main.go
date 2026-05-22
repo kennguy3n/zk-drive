@@ -67,13 +67,19 @@ func run() error {
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
 
 	pool, err := database.Connect(ctx, cfg.DatabaseURL)
 	if err != nil {
+		cancel()
 		return fmt.Errorf("connect postgres: %w", err)
 	}
+	// Defer order matters: defers run LIFO, so cancel() must be
+	// registered AFTER pool.Close() to ensure cancel() runs FIRST
+	// during shutdown. That lets long-running goroutines (HTTP
+	// server, websocket hub, NATS consumers) observe ctx.Done() and
+	// exit cleanly BEFORE pool.Close() starts rejecting new acquires.
 	defer pool.Close()
+	defer cancel()
 
 	// Migrations are applied out-of-band by the `migrate` binary (a
 	// Kubernetes Job, a Compose service, or an operator command) so
