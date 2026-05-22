@@ -25,6 +25,18 @@ spec:
     metadata:
       labels:
         app: zk-drive-server
+      # Prometheus scrape annotations target the same HTTP port the
+      # public traffic uses. The /metrics endpoint sits behind the
+      # network policy ingress allow-list — see the README's
+      # "Observability" section. If you need to split /metrics onto
+      # a dedicated port (e.g. so the public ingress can drop it
+      # outright), do it via an annotated SecurityHeadersOptions +
+      # a second Listener; today the single-port posture mirrors
+      # the WS-9 logging surface.
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8080"
+        prometheus.io/path: "/metrics"
     spec:
       containers:
         - name: server

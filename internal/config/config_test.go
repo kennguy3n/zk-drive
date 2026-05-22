@@ -1,6 +1,7 @@
 package config
 
 import (
+	"os"
 	"strings"
 	"testing"
 )
@@ -31,6 +32,28 @@ func requireEnv(t *testing.T, envs map[string]string) {
 		"SECURITY_HEADERS_CSP_REPORT_URI", "SECURITY_HEADERS_CSP_CONNECT_EXTRA",
 		"SECURITY_HEADERS_CSP_IMG_EXTRA",
 	}
+	// WORKER_METRICS_ADDR is intentionally NOT included in the keys
+	// list above. t.Setenv(k, "") makes os.LookupEnv return
+	// (value="", ok=true), which workerMetricsAddrFromEnv treats as
+	// "explicitly empty → disabled". If we baseline-cleared it the
+	// same way as the other keys, every test calling requireEnv
+	// would silently see WorkerMetricsAddr="" instead of the
+	// production default :9091, masking any bug in the default
+	// path — exactly the opposite of what the helper exists to do.
+	// Instead, we unset the var here (so Load sees the production
+	// "unset" state) and register a cleanup that restores whatever
+	// value the test runner started with, mirroring t.Setenv's
+	// save/restore semantics. Tests that exercise non-default
+	// values explicitly t.Setenv it themselves.
+	prev, hadPrev := os.LookupEnv("WORKER_METRICS_ADDR")
+	if err := os.Unsetenv("WORKER_METRICS_ADDR"); err != nil {
+		t.Fatalf("Unsetenv WORKER_METRICS_ADDR: %v", err)
+	}
+	t.Cleanup(func() {
+		if hadPrev {
+			_ = os.Setenv("WORKER_METRICS_ADDR", prev)
+		}
+	})
 	for _, k := range keys {
 		t.Setenv(k, "")
 	}
@@ -258,6 +281,82 @@ func TestLoadParsesRateLimits(t *testing.T) {
 	}
 	if cfg.RateLimitPerWorkspace != 500 {
 		t.Fatalf("RateLimitPerWorkspace=%d, want 500", cfg.RateLimitPerWorkspace)
+	}
+}
+
+// TestLoadWorkerMetricsAddrDefault is the system-level counterpart to
+// TestWorkerMetricsAddrFromEnv: it pins that the unset-→-default :9091
+// path actually reaches the Config struct returned by Load(), not just
+// the helper in isolation. requireEnv intentionally leaves
+// WORKER_METRICS_ADDR unset so this test exercises the production
+// default path through Load().
+func TestLoadWorkerMetricsAddrDefault(t *testing.T) {
+	requireEnv(t, map[string]string{
+		"DATABASE_URL": "postgres://x/y",
+		"JWT_SECRET":   "secret",
+	})
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.WorkerMetricsAddr != ":9091" {
+		t.Fatalf("unset WORKER_METRICS_ADDR: Load returned %q, want %q (default)", cfg.WorkerMetricsAddr, ":9091")
+	}
+}
+
+// TestLoadWorkerMetricsAddrExplicitEmpty is the system-level counterpart
+// for the explicitly-empty disable path. WORKER_METRICS_ADDR= (set but
+// empty) must reach Load with the empty string intact, NOT get
+// collapsed to the default.
+func TestLoadWorkerMetricsAddrExplicitEmpty(t *testing.T) {
+	requireEnv(t, map[string]string{
+		"DATABASE_URL": "postgres://x/y",
+		"JWT_SECRET":   "secret",
+	})
+	t.Setenv("WORKER_METRICS_ADDR", "")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.WorkerMetricsAddr != "" {
+		t.Fatalf("explicit-empty WORKER_METRICS_ADDR: Load returned %q, want \"\" (disabled)", cfg.WorkerMetricsAddr)
+	}
+}
+
+// TestWorkerMetricsAddrFromEnv pins the documented contract:
+// unset → default :9091, explicitly empty → disabled (passed through
+// untouched for startMetricsServer to interpret), "off" → disabled
+// (likewise untouched), anything else → as provided. The earlier
+// getEnvDefault implementation collapsed unset and explicitly-empty
+// into the default, breaking the documented `WORKER_METRICS_ADDR=`
+// escape hatch — this test guards against a regression to that.
+func TestWorkerMetricsAddrFromEnv(t *testing.T) {
+	tests := []struct {
+		name   string
+		set    bool
+		value  string
+		want   string
+	}{
+		{name: "unset_falls_back_to_default", set: false, want: ":9091"},
+		{name: "explicit_empty_is_passed_through", set: true, value: "", want: ""},
+		{name: "off_is_passed_through", set: true, value: "off", want: "off"},
+		{name: "explicit_addr_is_passed_through", set: true, value: ":9192", want: ":9192"},
+		{name: "whitespace_is_passed_through_for_helper_to_trim", set: true, value: "  ", want: "  "},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.set {
+				t.Setenv("WORKER_METRICS_ADDR", tc.value)
+			} else {
+				if err := os.Unsetenv("WORKER_METRICS_ADDR"); err != nil {
+					t.Fatalf("Unsetenv: %v", err)
+				}
+			}
+			got := workerMetricsAddrFromEnv()
+			if got != tc.want {
+				t.Errorf("workerMetricsAddrFromEnv() = %q, want %q", got, tc.want)
+			}
+		})
 	}
 }
 

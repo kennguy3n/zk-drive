@@ -154,6 +154,36 @@ services:
       # exclusive only to avoid duplicate row-level locking; both
       # are idempotent and converge on the same value.
       RECONCILE_INTERVAL_MINUTES: ${RECONCILE_INTERVAL_MINUTES:-60}
+      # Dedicated /metrics + /healthz HTTP surface for Prometheus
+      # scrape. Bind to all interfaces inside the worker container;
+      # the Compose port mapping below controls host exposure.
+      # Set WORKER_METRICS_ADDR=off (or empty) to disable entirely.
+      #
+      # IMPORTANT: the substitution uses `-` (dash without colon),
+      # NOT `:-` (colon-dash). Compose's `${VAR:-default}` form
+      # substitutes the default when the variable is unset OR
+      # empty — that would silently collapse the documented
+      # `WORKER_METRICS_ADDR=` disable path back into the :9091
+      # default. The `${VAR-default}` form only substitutes when
+      # the variable is truly unset, so an explicit empty value
+      # in the operator's .env passes through to the worker, and
+      # the worker's own LookupEnv-based parsing then treats it
+      # as "disabled". Same distinction as POSIX shell parameter
+      # expansion.
+      WORKER_METRICS_ADDR: ${WORKER_METRICS_ADDR-:9091}
+    ports:
+      # Map the worker's metrics port to the host so a Prometheus
+      # running outside the Compose network can scrape. Bind to
+      # 127.0.0.1 only — matches the file's stated invariant (see
+      # the header comment at lines 4-6) that all listening ports
+      # sit behind a host-level reverse proxy and are never
+      # directly reachable from the public internet. /metrics is
+      # unauthenticated and leaks Go-runtime / pool-stat
+      # internals; the README's "Deploying" section spells out
+      # the firewall posture in detail. Comment this out (or
+      # change the bound interface to host-network if you scrape
+      # via a sibling Compose service on the bridge network).
+      - "127.0.0.1:9091:9091"
     deploy:
       resources:
         limits:

@@ -40,6 +40,7 @@ import (
 	"github.com/kennguy3n/zk-drive/internal/kchat"
 	"github.com/kennguy3n/zk-drive/internal/jobs"
 	"github.com/kennguy3n/zk-drive/internal/logging"
+	"github.com/kennguy3n/zk-drive/internal/metrics"
 	"github.com/kennguy3n/zk-drive/internal/notification"
 	"github.com/kennguy3n/zk-drive/internal/permission"
 	"github.com/kennguy3n/zk-drive/internal/preview"
@@ -403,6 +404,16 @@ func run() error {
 	}
 	kchatHandler := apikchat.NewHandler(kchatSvc, summarySvc)
 
+	// metrics owns a private prometheus.Registry, the HTTP
+	// middleware, and the pgxpool / redis pool collectors.
+	// /metrics is mounted at the root alongside /healthz and
+	// /readyz so an operator scraping the server gets the full
+	// triad (liveness + readiness + telemetry) from one process
+	// without an extra port to firewall.
+	metricsSurface := metrics.New()
+	metricsSurface.RegisterPgxPoolCollector(pool)
+	metricsSurface.RegisterRedisPoolCollector(redisClient)
+
 	r := chi.NewRouter()
 	// chimw.RequestID is intentionally omitted: the request_id
 	// and the request-scoped *slog.Logger are seeded by
@@ -428,6 +439,23 @@ func run() error {
 		CSPImgExtra:     cfg.SecurityHeadersCSPImgExtra,
 		DisableHSTS:     cfg.SecurityHeadersDisableHSTS,
 	}))
+	// HTTP metrics middleware runs BEFORE Recoverer so the
+	// resulting chain is HTTPMiddleware(Recoverer(handler)).
+	// HTTPMiddleware wraps the response writer in a chi
+	// WrapResponseWriter and threads that wrapped writer down
+	// to Recoverer, so Recoverer's 500-on-panic response is
+	// observed via the wrapper and the post-dispatch metric
+	// emission sees status="500". The reversed ordering would
+	// leave Recoverer writing 500 to the original (unwrapped)
+	// writer, which is invisible to ww.Status() — silently
+	// dropping panicked requests from the metrics surface.
+	// HTTPMiddleware additionally emits its counters from a
+	// defer so even a panic that escapes Recoverer (e.g.
+	// http.ErrAbortHandler, which Recoverer re-panics) still
+	// records. RoutePattern is read off chi.RouteContext
+	// post-dispatch — that's the bounded cardinality guard
+	// documented in internal/metrics/http.go.
+	r.Use(metricsSurface.HTTPMiddleware)
 	r.Use(chimw.Recoverer)
 
 	// /healthz is a SHALLOW liveness probe: "the process is alive
@@ -459,6 +487,36 @@ func run() error {
 		},
 		health.DefaultCheckTimeout,
 	).ReadyHandler())
+
+	// /metrics is the Prometheus scrape surface. Series name
+	// inventory (same metric vectors are registered on every
+	// binary via metrics.New, but only some of them have non-zero
+	// observations on each binary):
+	//   - go_*  / process_*               (default collectors)
+	//   - zkdrive_http_*                  (server-side HTTP — populated here)
+	//   - zkdrive_db_pool_*               (pgxpool live stats — populated here)
+	//   - zkdrive_redis_pool_*            (redis client pool — populated here, if enabled)
+	//   - zkdrive_worker_*                (registered with zero data here; populated on the worker's :9091 surface)
+	//   - zkdrive_reconciler_*            (registered with zero data here; populated on the worker's :9091 surface, where the in-process reconciler loop runs — the standalone cmd/reconciler binary is one-shot and does NOT export /metrics)
+	//
+	// The unified registration is intentional: it keeps
+	// metrics.New simple (no per-binary constructor matrix) and
+	// makes federation queries portable across binaries. Zero-
+	// valued series are harmless for alerting (no counter
+	// increment, no histogram observations) but mean a scraper
+	// will see the series names on every binary — operators who
+	// want to silence the noise can drop unused families at the
+	// scrape config layer.
+	//
+	// Posture: NOT authenticated. The endpoint is intentionally
+	// public to the operator's metrics network (e.g. the Prometheus
+	// scrape job inside the same VPC). Production deployments MUST
+	// firewall this endpoint off from the public internet via a
+	// Network Policy or Ingress allow-list — Go runtime + pool
+	// stats are modest internal state but should not leak to
+	// untrusted clients. See README "Deploying" for the recommended
+	// posture.
+	r.Get("/metrics", metricsSurface.Handler().ServeHTTP)
 
 	r.Route("/api", func(r chi.Router) {
 		r.Route("/auth", func(r chi.Router) {
@@ -599,10 +657,24 @@ func run() error {
 		// expose the resolved RoutePattern until after routing,
 		// so the access logger has to sit at the http.Handler
 		// boundary to read it post-dispatch.
-		Handler:      logging.AccessLog(r),
-		ReadTimeout:  15 * time.Second,
-		WriteTimeout: 30 * time.Second,
-		IdleTimeout:  60 * time.Second,
+		Handler: logging.AccessLog(r),
+		// ReadHeaderTimeout is the first line of defence against
+		// slowloris-style attacks: caps how long a client can
+		// dribble out request headers before the server abandons
+		// the connection. 5s is enough for any well-behaved client
+		// (browsers and curl complete header send in single-digit
+		// ms over normal links) but tight enough that an attacker
+		// holding hundreds of half-open connections can't pin a
+		// goroutine each. ReadTimeout below is the broader cap
+		// covering body read as well — ReadHeaderTimeout is the
+		// narrower, header-only guard go vet / staticcheck prefer
+		// to see explicitly set rather than inferred from
+		// ReadTimeout. Mirrors the worker metrics server pattern
+		// in cmd/worker/main.go:289-302.
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       15 * time.Second,
+		WriteTimeout:      30 * time.Second,
+		IdleTimeout:       60 * time.Second,
 	}
 
 	errCh := make(chan error, 1)
