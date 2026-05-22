@@ -130,6 +130,53 @@ type Metrics struct {
 	// runStorageReconciler comment in cmd/worker that warns when
 	// reconciliation slows below the configured cadence.
 	reconcilerRunDuration prometheus.Histogram
+
+	// gcRunsTotal counts top-level GCService.GCAll invocations,
+	// partitioned by the same result classifier as the
+	// reconciler ('ok', 'error', 'cancelled'). The shared label
+	// vocabulary lets operators reuse the existing reconciler
+	// alert rules verbatim for orphan-object GC.
+	gcRunsTotal *prometheus.CounterVec
+
+	// gcWorkspacesScanned counts how many workspace rows the GC
+	// loop inspected. Identical semantics to the reconciler's
+	// reconcilerWorkspacesScanned counter (no labels; per-error
+	// breakdown lives on gcWorkspaceErrorsTotal).
+	gcWorkspacesScanned prometheus.Counter
+
+	// gcOrphansFound counts every orphan file row the scan returned
+	// across all GC runs. Diverges from gcOrphansDeleted only when a
+	// concurrent ConfirmUpload races the predicate-guarded DELETE
+	// (benign) or when the per-workspace storage delete fails AND
+	// the row delete also fails (rare; surfaces as gcRunsTotal
+	// result=error).
+	gcOrphansFound prometheus.Counter
+
+	// gcOrphansDeleted counts orphan file rows the GC reconciler
+	// successfully reclaimed via DeletePendingOrphan. The gap
+	// (gcOrphansFound - gcOrphansDeleted) is the count of confirm
+	// races and per-row delete errors combined.
+	gcOrphansDeleted prometheus.Counter
+
+	// gcObjectsDeleted counts S3 objects the GC reconciler
+	// successfully removed via storage.DeleteObject. Less than
+	// gcOrphansDeleted is normal (storage unconfigured for a
+	// suspended workspace, or DeleteObject returned a transient
+	// gateway error which the row-delete path tolerates by design).
+	gcObjectsDeleted prometheus.Counter
+
+	// gcWorkspaceErrorsTotal counts per-workspace failures inside
+	// GC runs. Same cardinality discipline as the reconciler
+	// counterpart (no workspace_id label).
+	gcWorkspaceErrorsTotal prometheus.Counter
+
+	// gcRunDuration observes wall time per GCAll invocation.
+	// Tracked separately from the reconciler histogram because the
+	// shape is different: GC runs are dominated by per-orphan
+	// DeleteObject latency (network round-trip per row), whereas
+	// reconciler runs are dominated by per-workspace SUM
+	// (single SQL aggregate per workspace).
+	gcRunDuration prometheus.Histogram
 }
 
 // New constructs a Metrics with a fresh private registry and the
@@ -207,6 +254,42 @@ func New() *Metrics {
 		Buckets: reconcilerRunBuckets,
 	})
 
+	m.gcRunsTotal = auto.NewCounterVec(prometheus.CounterOpts{
+		Name: "zkdrive_gc_runs_total",
+		Help: "Total invocations of the orphan-object GC's GCAll, partitioned by result ('ok', 'error', 'cancelled'). Same label vocabulary as the reconciler so alert rules can be parameterised on the prefix.",
+	}, []string{"result"})
+
+	m.gcWorkspacesScanned = auto.NewCounter(prometheus.CounterOpts{
+		Name: "zkdrive_gc_workspaces_scanned_total",
+		Help: "Cumulative number of workspace rows the orphan GC inspected across all runs.",
+	})
+
+	m.gcOrphansFound = auto.NewCounter(prometheus.CounterOpts{
+		Name: "zkdrive_gc_orphans_found_total",
+		Help: "Cumulative number of orphan presigned uploads the GC scan returned (pre-delete).",
+	})
+
+	m.gcOrphansDeleted = auto.NewCounter(prometheus.CounterOpts{
+		Name: "zkdrive_gc_orphans_deleted_total",
+		Help: "Cumulative number of orphan file rows the GC successfully reclaimed.",
+	})
+
+	m.gcObjectsDeleted = auto.NewCounter(prometheus.CounterOpts{
+		Name: "zkdrive_gc_objects_deleted_total",
+		Help: "Cumulative number of S3 objects the GC successfully removed via storage.DeleteObject. Diverges from gcOrphansDeleted when the per-workspace storage path is unconfigured or transiently failing.",
+	})
+
+	m.gcWorkspaceErrorsTotal = auto.NewCounter(prometheus.CounterOpts{
+		Name: "zkdrive_gc_workspace_errors_total",
+		Help: "Cumulative count of per-workspace failures inside GC runs. NOT labelled by workspace_id (unbounded cardinality); use structured logs for per-workspace investigation.",
+	})
+
+	m.gcRunDuration = auto.NewHistogram(prometheus.HistogramOpts{
+		Name:    "zkdrive_gc_run_duration_seconds",
+		Help:    "Wall time per GCAll invocation. Tracked separately from the reconciler histogram because GC runs are dominated by per-orphan DeleteObject latency.",
+		Buckets: gcRunBuckets,
+	})
+
 	return m
 }
 
@@ -239,4 +322,15 @@ var jobDurationBuckets = []float64{
 // cmd/worker is the signal to shard or relax the interval.
 var reconcilerRunBuckets = []float64{
 	0.01, 0.1, 1, 5, 10, 30, 60, 300, 600, 1800, 3600,
+}
+
+// gcRunBuckets covers the GCAll runtime range. Lowest bucket (10 ms)
+// catches the steady-state path where every workspace has zero
+// orphans (one index-only SELECT per workspace, nothing to delete);
+// highest bucket (6 hours) caps at the default GC cadence — a run
+// that exceeds the cadence is the operational signal that orphans
+// are arriving faster than the GC can reclaim them and the
+// per-workspace limit needs to be raised or the cadence shortened.
+var gcRunBuckets = []float64{
+	0.01, 0.1, 1, 5, 10, 30, 60, 300, 600, 1800, 3600, 21600,
 }

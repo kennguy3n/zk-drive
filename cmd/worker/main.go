@@ -36,8 +36,11 @@ import (
 
 	"github.com/kennguy3n/zk-drive/internal/classify"
 	"github.com/kennguy3n/zk-drive/internal/config"
+	cryptopkg "github.com/kennguy3n/zk-drive/internal/crypto"
 	"github.com/kennguy3n/zk-drive/internal/database"
+	driveFile "github.com/kennguy3n/zk-drive/internal/file"
 	"github.com/kennguy3n/zk-drive/internal/folder"
+	"github.com/kennguy3n/zk-drive/internal/gc"
 	"github.com/kennguy3n/zk-drive/internal/index"
 	"github.com/kennguy3n/zk-drive/internal/jobs"
 	"github.com/kennguy3n/zk-drive/internal/logging"
@@ -209,6 +212,34 @@ func run() error {
 			defer bgGoroutines.Done()
 			runStorageReconciler(ctx, rc, metricsSurface, interval)
 		}()
+	}
+
+	// Orphan-object GC (WS-18). Reclaims S3 objects whose presigned
+	// PUT completed but whose ConfirmUpload never landed. Uses the
+	// same per-workspace storage resolution as the API server so
+	// per-tenant zk-object-fabric buckets are correctly targeted
+	// (otherwise a delete against the shared fallback client would
+	// silently 404 for objects living in per-workspace tenants).
+	// Default cadence is 6 hours; GC_INTERVAL_MINUTES=0 disables
+	// the in-process loop (deploys preferring a dedicated K8s
+	// CronJob set it to 0 and schedule /app/orphan-gc externally).
+	if interval := gcInterval(); interval > 0 {
+		credentialCodec, err := cryptopkg.LoadFromEnv()
+		if err != nil {
+			return fmt.Errorf("credential codec for GC: %w", err)
+		}
+		storageFactory := storage.NewClientFactory(pool, storageClient, credentialCodec)
+		fileRepo := driveFile.NewPostgresRepository(pool)
+		fileSvc := driveFile.NewService(fileRepo)
+		gcSvc := gc.New(pool, fileSvc, workerStorageResolver(storageFactory), gc.WithTTL(gcPendingUploadTTL()))
+		bgGoroutines.Add(1)
+		go func() {
+			defer bgGoroutines.Done()
+			runOrphanGC(ctx, gcSvc, metricsSurface, interval)
+		}()
+		slog.Info("worker orphan-object GC enabled", "interval", interval.String(), "ttl", gcPendingUploadTTL().String())
+	} else {
+		slog.Info("worker orphan-object GC disabled (GC_INTERVAL_MINUTES=0)")
 	}
 
 	// Start the metrics HTTP server before NATS so a scraper
@@ -561,6 +592,129 @@ func runGuestExpirySweep(ctx context.Context, svc *sharing.Service, interval tim
 			slog.Error("worker guest expiry sweep failed", "err", err)
 		} else if revoked > 0 {
 			slog.Info("worker guest expiry sweep revoked permissions", "revoked", revoked)
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+		}
+	}
+}
+
+// gcInterval reads GC_INTERVAL_MINUTES and returns the cadence for
+// the in-process orphan-object GC loop. Returns 0 only when the env
+// var parses to a zero integer (documented opt-out for deploys
+// where a dedicated K8s CronJob owns the GC). Default is 360 minutes
+// (6h): short enough that an orphan from a quota-rejected confirm
+// doesn't accumulate beyond a single trading day, long enough that
+// the periodic DeleteObject round-trips are well below the noise
+// floor of regular S3 traffic. Falling back to the default on
+// parse failure is the conservative choice for the same reason as
+// reconcileInterval.
+func gcInterval() time.Duration {
+	raw := os.Getenv("GC_INTERVAL_MINUTES")
+	if raw == "" {
+		return 360 * time.Minute
+	}
+	mins, err := strconv.Atoi(raw)
+	if err != nil || mins < 0 {
+		slog.Warn("worker invalid GC_INTERVAL_MINUTES; defaulting to 360", "raw", raw)
+		return 360 * time.Minute
+	}
+	return time.Duration(mins) * time.Minute
+}
+
+// gcPendingUploadTTL reads GC_PENDING_UPLOAD_TTL_HOURS and returns
+// the cooldown before a pending upload row is considered an orphan.
+// Default is 168 hours (7 days) to match the trash / recycle-bin
+// window used elsewhere. Operators tightening this below the
+// presigned URL expiry (15 minutes) risks racing a still-uploading
+// client; the package's DefaultPendingUploadTTL doc covers the
+// trade-off. Falling back to the default on parse failure is the
+// conservative choice (a typo'd value silently reclaiming live
+// uploads is the worse outcome).
+func gcPendingUploadTTL() time.Duration {
+	raw := os.Getenv("GC_PENDING_UPLOAD_TTL_HOURS")
+	if raw == "" {
+		return gc.DefaultPendingUploadTTL
+	}
+	hours, err := strconv.Atoi(raw)
+	if err != nil || hours <= 0 {
+		slog.Warn("worker invalid GC_PENDING_UPLOAD_TTL_HOURS; defaulting to 168", "raw", raw)
+		return gc.DefaultPendingUploadTTL
+	}
+	return time.Duration(hours) * time.Hour
+}
+
+// workerStorageResolver adapts a *storage.ClientFactory to the
+// narrow gc.StorageResolver interface. ForWorkspace returns the
+// per-tenant client when a workspace_storage_credentials row
+// exists, otherwise the shared fallback (S3_* env vars). On error
+// — e.g. an unknown DB error during the lookup — the resolver
+// returns nil so the GC skips object deletion for this workspace
+// but still reclaims the metadata row. The structured log line
+// below carries the underlying error for operator triage.
+func workerStorageResolver(factory *storage.ClientFactory) gc.StorageResolver {
+	return func(ctx context.Context, workspaceID uuid.UUID) gc.StorageDeleter {
+		client, err := factory.ForWorkspace(ctx, workspaceID)
+		if err != nil {
+			// ErrNoCredentials is the legitimate "workspace
+			// has no per-tenant client AND no fallback was
+			// configured" path. It's not noisy enough to spam
+			// for every GC run, so only the unexpected branch
+			// gets logged.
+			if errors.Is(err, storage.ErrNoCredentials) {
+				return nil
+			}
+			slog.Warn("worker GC storage lookup failed", "workspace_id", workspaceID, "err", err)
+			return nil
+		}
+		return client
+	}
+}
+
+// runOrphanGC drives GCService.GCAll on a fixed cadence. The first
+// run is delayed 90s after startup so the worker has time to
+// connect NATS + JetStream subscribers (which carry the upload
+// confirmations the GC must NOT race against on a freshly-restarted
+// instance). The 90-second delay is intentionally longer than the
+// reconciler's 60-second delay because the GC's predicate-guarded
+// DELETE is sensitive to confirmation timing and a slower warmup is
+// the cheaper failure mode.
+//
+// Cadence note matches runStorageReconciler: time.NewTicker means
+// the loop body counts towards the next tick. If GCAll ever exceeds
+// `interval` (would require ~thousands of orphans × per-DeleteObject
+// latency), runs become back-to-back rather than at-most-once-per-
+// interval. Acceptable because GCAll is idempotent (predicate guard
+// + DeleteObject idempotency) and the loop body is synchronous.
+func runOrphanGC(ctx context.Context, svc *gc.GCService, m *metrics.Metrics, interval time.Duration) {
+	select {
+	case <-ctx.Done():
+		return
+	case <-time.After(90 * time.Second):
+	}
+	t := time.NewTicker(interval)
+	defer t.Stop()
+	for {
+		start := time.Now()
+		summary, err := svc.GCAll(ctx)
+		m.RecordGCRun(summary, err, start)
+		for _, e := range summary.Errors {
+			slog.Error("worker GC per-workspace failure", "workspace_id", e.WorkspaceID, "err", e.Err)
+		}
+		if err == nil || !errors.Is(err, context.Canceled) {
+			slog.Info("worker orphan GC ran",
+				"workspaces", summary.Workspaces,
+				"orphans_found", summary.OrphansFound,
+				"orphans_deleted", summary.OrphansDeleted,
+				"objects_deleted", summary.ObjectsDeleted,
+				"errors", len(summary.Errors),
+				"duration", time.Since(start).Round(time.Millisecond).String(),
+			)
+		}
+		if err != nil && !errors.Is(err, context.Canceled) {
+			slog.Error("worker orphan GC aborted", "err", err)
 		}
 		select {
 		case <-ctx.Done():

@@ -154,6 +154,19 @@ services:
       # exclusive only to avoid duplicate row-level locking; both
       # are idempotent and converge on the same value.
       RECONCILE_INTERVAL_MINUTES: ${RECONCILE_INTERVAL_MINUTES:-60}
+      # Orphan-object GC cadence (WS-18). Same operational shape
+      # as RECONCILE_INTERVAL_MINUTES: in-process by default under
+      # Compose (no native CronJob); K8s deploys can set this to 0
+      # and schedule cmd/orphan-gc externally via CronJob.
+      GC_INTERVAL_MINUTES: ${GC_INTERVAL_MINUTES:-360}
+      # Cooldown before a presigned-PUT row is considered an
+      # orphan. Default 168 hours (7 days) matches the trash /
+      # recycle-bin retention window so an orphan and an
+      # undeletable trashed file age out on the same operational
+      # clock. Tightening this below the presigned URL expiry
+      # (15 minutes, storage.DefaultPresignExpiry) risks racing a
+      # still-uploading client.
+      GC_PENDING_UPLOAD_TTL_HOURS: ${GC_PENDING_UPLOAD_TTL_HOURS:-168}
       # Dedicated /metrics + /healthz HTTP surface for Prometheus
       # scrape. Bind to all interfaces inside the worker container;
       # the Compose port mapping below controls host exposure.

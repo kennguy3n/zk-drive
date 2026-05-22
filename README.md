@@ -184,6 +184,7 @@ zk-drive/
     server/              # Main application server
     worker/              # Async job workers (preview, scan, classify, archive)
     reconciler/          # Out-of-band storage-counter reconciler (CronJob)
+    orphan-gc/           # Out-of-band orphan-object GC (CronJob)
   api/
     admin/               # Admin API handlers (users, audit, billing, placement, CMK)
     auth/                # Authentication, session management, OAuth2 SSO
@@ -203,6 +204,7 @@ zk-drive/
     fabric/              # zk-object-fabric tenant provisioning and placement
     file/                # File metadata and versioning
     folder/              # Folder tree and hierarchy
+    gc/                  # Orphan-object GC reconciler (presigned-PUT reclaim)
     index/               # Content text extraction for FTS
     jobs/                # NATS JetStream job publisher
     kchat/               # KChat room-folder service and repository
@@ -298,6 +300,8 @@ allow-list the storage gateway origin and stage CSP rollouts:
 | `SECURITY_HEADERS_CSP_REPORT_URI`     | empty    | When set, appended as `report-uri <value>` to the CSP value. Browsers POST violation reports there.            |
 | `SECURITY_HEADERS_DISABLE_HSTS`       | `false`  | When `true`, skips `Strict-Transport-Security`. Use for local HTTP development only; keep `false` in production. |
 | `WORKER_METRICS_ADDR`                 | `:9091`  | Listen address for the **worker** binary's dedicated `/metrics` + `/healthz` HTTP server. Set to `off` (or empty) to disable. The server binary serves `/metrics` on the main `LISTEN_ADDR` and ignores this. The reconciler binary is short-lived and does not export metrics — see [Observability](#observability) below. |
+| `GC_INTERVAL_MINUTES`                 | `360`    | Cadence of the worker's in-process orphan-object GC loop (WS-18). Reclaims S3 objects whose presigned PUT completed but whose ConfirmUpload never landed (quota overage, suspended tenant, network drop). Set to `0` to disable the in-process loop — K8s deploys that prefer dedicated CronJob scheduling set this to 0 and run `/app/orphan-gc` externally. |
+| `GC_PENDING_UPLOAD_TTL_HOURS`         | `168`    | Cooldown applied before a pending-upload row is considered an orphan. Default 7 days matches the trash / recycle-bin retention window. Tightening below the presigned-URL expiry (15 minutes) risks racing a still-uploading client. |
 
 ### Quick start with the zk-object-fabric Docker demo
 
@@ -317,17 +321,22 @@ proxies file content.
 
 ## Deploying
 
-ZK Drive ships four binaries from a single container image:
+ZK Drive ships five binaries from a single container image:
 
 - `/app/migrate` — applies pending SQL migrations to the database and exits.
 - `/app/server` — the HTTP API server. Refuses to start if migrations are out
   of date (see `internal/database.MinRequiredMigrationVersion`).
 - `/app/worker` — the JetStream consumer / job runner. Same migration
   precondition as the server. Also drives the in-process storage-counter
-  reconciler on `RECONCILE_INTERVAL_MINUTES` (default 60).
+  reconciler on `RECONCILE_INTERVAL_MINUTES` (default 60) and the in-process
+  orphan-object GC on `GC_INTERVAL_MINUTES` (default 360).
 - `/app/reconciler` — one-shot CronJob for storage-counter reconciliation.
   Deploys that prefer dedicated CronJob scheduling set the worker's
   `RECONCILE_INTERVAL_MINUTES=0` and run `/app/reconciler` externally.
+- `/app/orphan-gc` — one-shot CronJob for orphan-object reclaim. Reclaims
+  S3 objects from presigned PUTs that completed but were never confirmed.
+  Deploys that prefer dedicated CronJob scheduling set the worker's
+  `GC_INTERVAL_MINUTES=0` and run `/app/orphan-gc` externally.
 
 ### Observability
 
@@ -338,6 +347,7 @@ Every long-running binary exposes a Prometheus scrape surface:
 | `/app/server` | `/metrics` on the main HTTP port | `:8080` (via `LISTEN_ADDR`) | always on |
 | `/app/worker` | `/metrics` on a dedicated port | `:9091` | `WORKER_METRICS_ADDR` (set to `off` or empty to disable) |
 | `/app/reconciler` | _none — one-shot_ | n/a | K8s Job status is the alerting signal; the worker's in-process reconciler exports the same metric family |
+| `/app/orphan-gc` | _none — one-shot_ | n/a | K8s Job status is the alerting signal; the worker's in-process GC loop exports the same metric family |
 
 Exported series (under the `zkdrive_` prefix):
 
@@ -352,6 +362,13 @@ Exported series (under the `zkdrive_` prefix):
 - `zkdrive_reconciler_drift_bytes_total` — counter
 - `zkdrive_reconciler_workspace_errors_total` — counter
 - `zkdrive_reconciler_run_duration_seconds` — histogram
+- `zkdrive_gc_runs_total{result}` — counter (`result` ∈ `ok|error|cancelled`)
+- `zkdrive_gc_workspaces_scanned_total` — counter
+- `zkdrive_gc_orphans_found_total` — counter (orphan presigned uploads the scan returned)
+- `zkdrive_gc_orphans_deleted_total` — counter (orphan rows reclaimed; diverges from `orphans_found` only on confirm-races, which are benign)
+- `zkdrive_gc_objects_deleted_total` — counter (S3 objects deleted; diverges from `orphans_deleted` when per-workspace storage path is unconfigured or transiently failing)
+- `zkdrive_gc_workspace_errors_total` — counter
+- `zkdrive_gc_run_duration_seconds` — histogram
 - `zkdrive_db_pool_*` — pgxpool live stats (total / acquired / idle / max / acquire count / acquire duration)
 - `zkdrive_redis_pool_*` — go-redis client pool stats (server only — worker does not use Redis directly today)
 - `go_*` / `process_*` — runtime + process collectors from `prometheus/client_golang`

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"strings"
+	"time"
 
 	"github.com/google/uuid"
 )
@@ -85,6 +86,35 @@ func (s *Service) Delete(ctx context.Context, workspaceID, fileID uuid.UUID) err
 // ListByFolder returns files in a folder.
 func (s *Service) ListByFolder(ctx context.Context, workspaceID, folderID uuid.UUID) ([]*File, error) {
 	return s.repo.ListFilesByFolder(ctx, workspaceID, folderID)
+}
+
+// SetPendingUploadObjectKey records the presigned-PUT object_key on
+// a file row so the orphan-object GC reconciler can reclaim the S3
+// object if ConfirmUpload never completes. Called from the UploadURL
+// handler immediately after Create + key derivation.
+func (s *Service) SetPendingUploadObjectKey(ctx context.Context, workspaceID, fileID uuid.UUID, key string) error {
+	key = strings.TrimSpace(key)
+	if key == "" {
+		return errors.New("pending upload object key required")
+	}
+	return s.repo.SetPendingUploadObjectKey(ctx, workspaceID, fileID, key)
+}
+
+// ListPendingUploadOrphans returns file rows whose presigned upload was
+// minted before olderThan and which still have no confirmed
+// current_version_id. The orphan-object GC reconciler calls this
+// per-workspace, then issues DeleteObject + DeletePendingOrphan for
+// each entry.
+func (s *Service) ListPendingUploadOrphans(ctx context.Context, workspaceID uuid.UUID, olderThan time.Time, limit int) ([]*PendingOrphan, error) {
+	return s.repo.ListPendingUploadOrphans(ctx, workspaceID, olderThan, limit)
+}
+
+// DeletePendingOrphan removes an orphan file row after the storage
+// object has been (best-effort) deleted. The predicate-guarded SQL
+// in the repository ensures a confirm that landed between the list
+// and the delete cannot have its row deleted out from under it.
+func (s *Service) DeletePendingOrphan(ctx context.Context, workspaceID, fileID uuid.UUID) error {
+	return s.repo.DeletePendingOrphan(ctx, workspaceID, fileID)
 }
 
 // CreateVersion inserts a file version row and updates the file's current

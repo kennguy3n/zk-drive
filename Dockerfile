@@ -26,6 +26,12 @@ RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w -X github.com/ke
 # storage_used_bytes counter on the workspaces table. Same
 # one-image-many-entrypoints pattern as the migrate binary above.
 RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w -X github.com/kennguy3n/zk-drive/internal/version.Version=${APP_VERSION}" -o /out/reconciler ./cmd/reconciler
+# Standalone orphan-object GC binary (WS-18), same pattern as the
+# reconciler. Deploys that prefer a dedicated K8s CronJob (over the
+# in-process loop the worker runs by default) schedule
+# `entrypoint: ["/app/orphan-gc"]` and set GC_INTERVAL_MINUTES=0 on
+# the worker to avoid duplicate runs.
+RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w -X github.com/kennguy3n/zk-drive/internal/version.Version=${APP_VERSION}" -o /out/orphan-gc ./cmd/orphan-gc
 
 # ---- Runtime stage ----
 # debian:bookworm-slim (instead of distroless static) so the worker
@@ -48,6 +54,7 @@ COPY --from=builder /out/server /app/server
 COPY --from=builder /out/worker /app/worker
 COPY --from=builder /out/migrate /app/migrate
 COPY --from=builder /out/reconciler /app/reconciler
+COPY --from=builder /out/orphan-gc /app/orphan-gc
 COPY --from=builder /src/migrations /app/migrations
 
 USER nonroot:nonroot
