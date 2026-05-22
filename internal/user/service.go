@@ -2,11 +2,14 @@ package user
 
 import (
 	"context"
+	"fmt"
 	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"golang.org/x/crypto/bcrypt"
+
+	appcrypto "github.com/kennguy3n/zk-drive/internal/crypto"
 )
 
 // Service wraps the user repository with higher-level operations (password
@@ -59,7 +62,7 @@ func (s *Service) CreateTx(ctx context.Context, tx pgx.Tx, workspaceID uuid.UUID
 }
 
 func buildUser(workspaceID uuid.UUID, email, name, password, role string) (*User, error) {
-	hash, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
+	hash, err := appcrypto.HashPassword(password)
 	if err != nil {
 		return nil, err
 	}
@@ -76,6 +79,43 @@ func buildUser(workspaceID uuid.UUID, email, name, password, role string) (*User
 // hash for the user.
 func (s *Service) VerifyPassword(u *User, password string) error {
 	return bcrypt.CompareHashAndPassword([]byte(u.PasswordHash), []byte(password))
+}
+
+// MaybeRehashPassword upgrades the user's stored bcrypt hash to the
+// current appcrypto.PasswordHashCost if the stored hash was created
+// at a lower cost. Call this AFTER a successful VerifyPassword — it
+// re-hashes the plaintext the caller already verified.
+//
+// This is the rehash-on-login pattern: bumping the cost constant
+// only protects new users until existing users' hashes are upgraded.
+// Without this, a cost bump from 10 to 12 leaves every pre-existing
+// password vulnerable at the old factor until the user manually
+// changes their password.
+//
+// The function is best-effort: any failure (cost-parse error, DB
+// write error, in-flight schema change) is returned to the caller
+// so it can be logged, but callers should NOT propagate this error
+// to the client — the user's login already succeeded and a failed
+// rehash is a silent operational issue, not an auth failure. The
+// in-memory u.PasswordHash is also updated on success so subsequent
+// VerifyPassword calls in the same request use the new hash.
+func (s *Service) MaybeRehashPassword(ctx context.Context, u *User, password string) error {
+	storedCost, err := bcrypt.Cost([]byte(u.PasswordHash))
+	if err != nil {
+		return fmt.Errorf("inspect stored hash cost: %w", err)
+	}
+	if storedCost >= appcrypto.PasswordHashCost {
+		return nil
+	}
+	newHash, err := appcrypto.HashPassword(password)
+	if err != nil {
+		return fmt.Errorf("rehash password: %w", err)
+	}
+	if err := s.repo.UpdatePasswordHash(ctx, u.ID, string(newHash)); err != nil {
+		return fmt.Errorf("persist rehashed password: %w", err)
+	}
+	u.PasswordHash = string(newHash)
+	return nil
 }
 
 // GetByID returns the user with the given id scoped to a workspace.

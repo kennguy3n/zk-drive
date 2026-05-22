@@ -12,6 +12,8 @@ import (
 
 	"github.com/google/uuid"
 	"golang.org/x/crypto/bcrypt"
+
+	appcrypto "github.com/kennguy3n/zk-drive/internal/crypto"
 )
 
 // Errors returned by Service methods. Handlers translate these into HTTP
@@ -102,7 +104,7 @@ func (s *Service) CreateShareLink(ctx context.Context, workspaceID uuid.UUID, re
 		CreatedBy:    createdBy,
 	}
 	if password != "" {
-		hash, herr := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
+		hash, herr := appcrypto.HashPassword(password)
 		if herr != nil {
 			return nil, fmt.Errorf("hash password: %w", herr)
 		}

@@ -28,6 +28,7 @@ type Repository interface {
 	Deactivate(ctx context.Context, workspaceID, userID uuid.UUID, at time.Time) error
 	UpdateRole(ctx context.Context, workspaceID, userID uuid.UUID, role string) error
 	LinkAuthProvider(ctx context.Context, userID uuid.UUID, provider, providerID string) error
+	UpdatePasswordHash(ctx context.Context, userID uuid.UUID, hash string) error
 }
 
 // PostgresRepository is a pgx-backed implementation of Repository.
@@ -195,6 +196,24 @@ func (r *PostgresRepository) LinkAuthProvider(ctx context.Context, userID uuid.U
 		userID, provider, providerID)
 	if err != nil {
 		return fmt.Errorf("link auth provider: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// UpdatePasswordHash overwrites the user's stored bcrypt hash. Used
+// by the rehash-on-login path so a user whose password was originally
+// hashed at an older (cheaper) bcrypt cost transparently has their
+// hash upgraded to the current PasswordHashCost on their next
+// successful login, without forcing a password reset.
+func (r *PostgresRepository) UpdatePasswordHash(ctx context.Context, userID uuid.UUID, hash string) error {
+	tag, err := r.pool.Exec(ctx,
+		`UPDATE users SET password_hash = $2, updated_at = now() WHERE id = $1`,
+		userID, hash)
+	if err != nil {
+		return fmt.Errorf("update password hash: %w", err)
 	}
 	if tag.RowsAffected() == 0 {
 		return ErrNotFound

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"log"
 	"net/http"
 	"strings"
 	"time"
@@ -246,6 +247,16 @@ func (h *Handler) Login(w http.ResponseWriter, r *http.Request) {
 		})
 		http.Error(w, "invalid credentials", http.StatusUnauthorized)
 		return
+	}
+	// Rehash-on-login: if the stored hash was created at a lower
+	// bcrypt cost than the current PasswordHashCost (e.g. legacy
+	// users created when the constant was 10, now bumped to 12),
+	// upgrade the hash transparently. This is best-effort — a
+	// failure here is logged but the login still succeeds, because
+	// the cost bump is a defence-in-depth posture rather than a
+	// hard auth requirement.
+	if err := h.users.MaybeRehashPassword(ctx, u, req.Password); err != nil {
+		log.Printf("auth: rehash-on-login best-effort failed user=%s: %v", u.ID, err)
 	}
 	if u.DeactivatedAt != nil {
 		h.logAudit(ctx, u.WorkspaceID, &u.ID, audit.ActionLogin, r, map[string]any{
