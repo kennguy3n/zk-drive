@@ -11,6 +11,9 @@
 // helpers — those are thin wrappers around WithWorkspaceID /
 // WorkspaceIDFromContext defined here, and exist so handler code
 // doesn't grow a direct dependency on this low-level package.
+// internal/database is the one exception: its pgxpool PrepareConn
+// hook is the bottom half of this contract and would form a cycle
+// if it routed through api/middleware.
 package tenantctx
 
 import (

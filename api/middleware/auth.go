@@ -208,6 +208,19 @@ func WorkspaceIDFromContext(ctx context.Context) (uuid.UUID, bool) {
 	return tenantctx.WorkspaceIDFromContext(ctx)
 }
 
+// WithWorkspaceID returns a child context tagged with workspaceID so
+// downstream handlers (and the pgxpool PrepareConn hook that binds
+// `app.workspace_id` for row-level-security policies) see the tenant
+// scope. It is the public counterpart to WorkspaceIDFromContext and
+// the canonical entry point for handler / service code that needs to
+// attach a workspace id to a context produced outside the JWT auth
+// path (e.g. service-to-service calls, internal admin tools, tests).
+// It delegates to tenantctx.WithWorkspaceID to keep the api/middleware
+// and internal/database packages on the same canonical context key.
+func WithWorkspaceID(ctx context.Context, workspaceID uuid.UUID) context.Context {
+	return tenantctx.WithWorkspaceID(ctx, workspaceID)
+}
+
 // RoleFromContext returns the authenticated user's role within the workspace.
 func RoleFromContext(ctx context.Context) (string, bool) {
 	v, ok := ctx.Value(roleContextKey).(string)
