@@ -89,10 +89,20 @@ func (m *Metrics) HTTPMiddleware(next http.Handler) http.Handler {
 		// escaping the inner handler (or Recoverer re-panicking
 		// http.ErrAbortHandler) still records the request. The
 		// status read here reflects whatever Recoverer (or the
-		// handler) wrote to ww before the panic unwound; if
-		// nothing was written the wrap reports 200 by default,
-		// which is correct for hijacked WebSocket / SSE handlers
-		// that don't call WriteHeader.
+		// handler) wrote to ww before the panic unwound. Note on
+		// the zero-status case: chi's basicWriter.Status() returns
+		// the zero value (0), not 200, when neither WriteHeader
+		// nor Write was called on the wrapper — Write() does
+		// implicitly call WriteHeader(200) via maybeWriteHeader,
+		// but WebSocket / SSE handlers that hijack the connection
+		// (gorilla/websocket Upgrader, the chi Hijacker pathway)
+		// never call Write on the wrapped writer, so ww.Status()
+		// for those calls is 0. That's not a bug — it produces a
+		// single bounded extra label value (status="0") that an
+		// operator can recognise as "hijacked / upgraded
+		// connection" — but the comment used to mis-state it as
+		// "200 by default", which it isn't. The defer fires
+		// regardless of which value Status() reports.
 		defer func() {
 			m.httpInFlightRequests.Dec()
 			dur := time.Since(start).Seconds()

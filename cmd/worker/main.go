@@ -20,6 +20,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -302,11 +303,31 @@ func startMetricsServer(_ context.Context, listenAddr string, m *metrics.Metrics
 		IdleTimeout:       60 * time.Second,
 	}
 
+	// Bind synchronously here (rather than letting srv.ListenAndServe()
+	// do it inside the goroutine) so a bind failure — port already in
+	// use, permission denied on a privileged port, IPv6 address unable
+	// to bind, etc. — surfaces as a startup error the worker can fail
+	// fast on. The previous "log-and-return-nil" pattern silently left
+	// the worker running without metrics; in K8s the readinessProbe
+	// caught it, but in Docker Compose (and any non-k8s deployment) the
+	// failure was invisible past the log line. Operator explicitly
+	// enabled WORKER_METRICS_ADDR, so bind failure here is a hard
+	// configuration error, not something to paper over.
+	ln, err := net.Listen("tcp", listenAddr)
+	if err != nil {
+		return nil, fmt.Errorf("worker metrics server bind on %s: %w", listenAddr, err)
+	}
+
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		slog.Info("worker metrics server listening", "addr", listenAddr)
-		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		slog.Info("worker metrics server listening", "addr", ln.Addr().String())
+		// srv.Serve(ln) consumes the listener; on Shutdown it returns
+		// http.ErrServerClosed. Any other error here is an unexpected
+		// runtime failure (e.g. Accept syscall error) — log loudly but
+		// don't crash the worker, since NATS processing is the
+		// primary workload and shouldn't be tied to scrape availability.
+		if err := srv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			slog.Error("worker metrics server exited", "err", err)
 		}
 	}()
