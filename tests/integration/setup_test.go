@@ -336,7 +336,11 @@ func setupEnv(t *testing.T) *testEnv {
 }
 
 // ResetTables truncates all application tables in a single transaction so
-// tests can share a database without leaking rows.
+// tests can share a database without leaking rows. The miniredis backing
+// the session store is flushed as part of the same reset so revocation
+// cutoffs from a prior test (or sub-test re-using the same testEnv)
+// cannot leak forward and cause confusing 401s on tokens that the new
+// test thought it just issued cleanly.
 func (e *testEnv) ResetTables() {
 	e.t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -350,6 +354,9 @@ func (e *testEnv) ResetTables() {
 		if _, err := e.pool.Exec(ctx, s); err != nil {
 			e.t.Fatalf("reset tables (%q): %v", s, err)
 		}
+	}
+	if e.miniredis != nil {
+		e.miniredis.FlushAll()
 	}
 }
 

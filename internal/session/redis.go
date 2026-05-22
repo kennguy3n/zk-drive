@@ -275,12 +275,10 @@ func (s *RedisSessionStore) RevokeUser(ctx context.Context, workspaceID, userID 
 	// EVAL is single-threaded inside Redis, so we get true
 	// atomicity without a CAS retry loop. The TTL is set in the
 	// same script so a winning write also refreshes the expiry.
+	// The script always returns an integer (1 on write, 0 on no-op),
+	// so we don't need a redis.Nil guard — any non-nil error here is
+	// a transport- or script-level failure.
 	if err := revokeUserScript.Run(ctx, s.client, []string{key}, cutoff, int64(ttl.Seconds())).Err(); err != nil {
-		// redis.Nil is the no-op return path (script ran but the
-		// max-check rejected the write). Treat as success.
-		if errors.Is(err, redis.Nil) {
-			return nil
-		}
 		return fmt.Errorf("redis revoke user: %w", err)
 	}
 	return nil

@@ -26,18 +26,21 @@ import (
 type PostSignupHook func(ctx context.Context, workspaceID uuid.UUID, workspaceName string)
 
 // SessionRevoker is the small subset of session.RedisSessionStore the
-// auth handler needs to (a) record per-user logout cutoffs and (b)
-// consult them on Refresh. Pulled behind an interface so tests can
-// substitute an in-memory implementation without spinning up Redis
-// and so the package keeps the no-cycle dependency on internal/session.
+// auth handler needs: it extends middleware.SessionChecker (which
+// already declares IsRevoked) with the write-side RevokeUser hook so
+// Logout can record per-user cutoffs. Embedding the middleware
+// interface — rather than redeclaring IsRevoked here — means a
+// signature change in one place propagates everywhere via the type
+// system, eliminating the silent-drift hazard a duplicated method
+// declaration would carry.
 //
-// IsRevoked mirrors middleware.SessionChecker so the same
-// session.RedisSessionStore value can satisfy both: AuthMiddleware
-// for live request gating, the auth handler for the Refresh-after-
-// revocation race.
+// Pulled behind its own interface (rather than depending directly on
+// session.RedisSessionStore) so tests can substitute an in-memory
+// implementation without spinning up Redis and so api/auth keeps a
+// no-cycle dependency on internal/session.
 type SessionRevoker interface {
+	middleware.SessionChecker
 	RevokeUser(ctx context.Context, workspaceID, userID uuid.UUID, at time.Time, ttl time.Duration) error
-	IsRevoked(ctx context.Context, workspaceID, userID uuid.UUID, issuedAt time.Time) (bool, error)
 }
 
 // Handler serves authentication HTTP endpoints.
@@ -330,7 +333,16 @@ func (h *Handler) Refresh(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if h.sessions != nil && claims.IssuedAt != nil {
-		revoked, err := h.sessions.IsRevoked(r.Context(), claims.WorkspaceID, claims.UserID, claims.IssuedAt.Time)
+		// Bound the IsRevoked call the same way AuthMiddleware
+		// does. Without this matching timeout, a partial Redis
+		// outage that recovers just long enough for the
+		// middleware's 1-second-bounded check to succeed could
+		// still hang the Refresh handler for the full server
+		// WriteTimeout — re-introducing the exact failure mode
+		// the middleware timeout was designed to prevent.
+		checkCtx, cancel := context.WithTimeout(r.Context(), middleware.SessionCheckTimeout)
+		revoked, err := h.sessions.IsRevoked(checkCtx, claims.WorkspaceID, claims.UserID, claims.IssuedAt.Time)
+		cancel()
 		if err != nil {
 			// Fail closed: a Refresh that cannot verify revocation
 			// status must not mint a longer-lived token. The client
