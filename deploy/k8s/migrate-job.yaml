@@ -1,0 +1,70 @@
+# Database migration Job — runs out-of-band ahead of every deploy of
+# the server / worker pods. Replaces the previous behaviour where every
+# server pod called database.Migrate() on startup, which raced across
+# replicas and coupled schema lifecycle to pod lifecycle.
+#
+# Operational notes:
+#   - The Job is idempotent: re-running it against an up-to-date
+#     database exits 0 after acquiring + releasing the Postgres
+#     advisory lock that protects the migrate path.
+#   - backoffLimit: 2 — bounded retries so a persistent failure
+#     (bad migration SQL, dead Postgres) surfaces as a Job failure
+#     after a small number of attempts rather than looping forever.
+#   - activeDeadlineSeconds: 600 — caps the worst-case run time. A
+#     migration genuinely taking > 10 minutes is a red flag that
+#     warrants operator review, not a silent retry.
+#   - ttlSecondsAfterFinished: 86400 — Completed Job stays visible
+#     for 24h so an operator can inspect logs ("which migrations
+#     actually applied?") after a deploy.
+#   - The Job must be applied (kubectl apply / Argo sync / Helm
+#     hook) BEFORE the Deployment is rolled out. Server pods will
+#     refuse to start if MinRequiredMigrationVersion isn't applied
+#     (see internal/database.RequireMinMigrationVersion), so a
+#     deploy that forgets to run this Job will fail fast at
+#     readinessProbe rather than serving traffic against a stale
+#     schema.
+#
+# For Helm/Argo users: add the annotation
+#   helm.sh/hook: pre-install,pre-upgrade
+#   argocd.argoproj.io/sync-wave: "-5"
+# at the Job spec.metadata level to enforce ordering relative to the
+# Deployment, then `kubectl delete job` between deploys (or set
+# generateName) to allow re-runs of the same chart version.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: zk-drive-migrate
+  namespace: zk-drive
+  labels:
+    app: zk-drive
+    component: migrate
+spec:
+  backoffLimit: 2
+  activeDeadlineSeconds: 600
+  ttlSecondsAfterFinished: 86400
+  template:
+    metadata:
+      labels:
+        app: zk-drive
+        component: migrate
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: migrate
+          image: ghcr.io/kennguy3n/zk-drive:0.1.0
+          command: ["/app/migrate"]
+          envFrom:
+            - configMapRef:
+                name: zk-drive-config
+            - secretRef:
+                name: zk-drive-secrets
+          # The migrate binary only needs DATABASE_URL and (optionally)
+          # MIGRATIONS_DIR from the config. The other env vars in the
+          # shared ConfigMap / Secret are ignored.
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi

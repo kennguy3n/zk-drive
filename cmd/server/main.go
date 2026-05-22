@@ -75,8 +75,15 @@ func run() error {
 	}
 	defer pool.Close()
 
-	if err := database.Migrate(ctx, pool, cfg.MigrationsDir); err != nil {
-		return fmt.Errorf("migrate: %w", err)
+	// Migrations are applied out-of-band by the `migrate` binary (a
+	// Kubernetes Job, a Compose service, or an operator command) so
+	// the server pods can scale up / down independently of the
+	// schema lifecycle. Here we only verify the database is at or
+	// above the minimum version this binary needs; if not we fail
+	// fast with a clear error so the orchestrator surfaces "deploy
+	// is stale" rather than letting the pod 500 on missing columns.
+	if err := database.RequireMinMigrationVersion(ctx, pool); err != nil {
+		return fmt.Errorf("startup precondition: %w", err)
 	}
 
 	userRepo := user.NewPostgresRepository(pool)

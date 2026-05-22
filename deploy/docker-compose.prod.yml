@@ -51,6 +51,29 @@ services:
           cpus: "1.0"
           memory: 2G
 
+  # One-shot migration runner. Brought up once per deploy ahead of
+  # server / worker; exits 0 on success. The server / worker pods
+  # depend on `service_completed_successfully` so Compose blocks them
+  # until the schema is current — mirroring the K8s Job dependency
+  # graph in deploy/k8s/migrate-job.yaml.
+  zk-drive-migrate:
+    image: ghcr.io/kennguy3n/zk-drive:${APP_VERSION:-0.1.0}
+    entrypoint: ["/app/migrate"]
+    restart: "no"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgres://zkdrive:${POSTGRES_PASSWORD}@postgres:5432/zkdrive?sslmode=disable
+      # JWT_SECRET is read by config.Load() but not used by the
+      # migrate binary; still required for the shared config schema.
+      JWT_SECRET: ${JWT_SECRET}
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 256M
+
   zk-drive-server:
     image: ghcr.io/kennguy3n/zk-drive:${APP_VERSION:-0.1.0}
     entrypoint: ["/app/server"]
@@ -60,6 +83,8 @@ services:
         condition: service_healthy
       nats:
         condition: service_healthy
+      zk-drive-migrate:
+        condition: service_completed_successfully
     environment:
       DATABASE_URL: postgres://zkdrive:${POSTGRES_PASSWORD}@postgres:5432/zkdrive?sslmode=disable
       NATS_URL: nats://nats:4222
@@ -93,6 +118,8 @@ services:
         condition: service_healthy
       clamav:
         condition: service_started
+      zk-drive-migrate:
+        condition: service_completed_successfully
     environment:
       DATABASE_URL: postgres://zkdrive:${POSTGRES_PASSWORD}@postgres:5432/zkdrive?sslmode=disable
       NATS_URL: nats://nats:4222
