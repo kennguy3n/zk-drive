@@ -117,7 +117,12 @@ func (a KChatFileAdapter) ConfirmVersion(ctx context.Context, workspaceID, fileI
 		Checksum:  checksum,
 		CreatedBy: createdBy,
 	}
-	if err := a.Service.ConfirmVersion(ctx, workspaceID, v); err != nil {
+	// Server-internal KChat attachments mint a fresh v.ID via
+	// uuid.New() on every call so the idempotent-replay branch in
+	// ConfirmVersion is unreachable from here; discard the `fresh`
+	// boolean. The KChat ingest path has its own deduplication
+	// upstream and never wants to suppress its own activity logs.
+	if _, err := a.Service.ConfirmVersion(ctx, workspaceID, v); err != nil {
 		return kchat.FileVersionRef{}, err
 	}
 	return kchat.FileVersionRef{ID: v.ID, ObjectKey: v.ObjectKey}, nil

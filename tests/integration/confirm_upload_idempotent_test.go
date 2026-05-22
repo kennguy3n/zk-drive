@@ -99,4 +99,31 @@ func TestConfirmUploadIdempotentReplay(t *testing.T) {
 	if count != 1 {
 		t.Fatalf("file_versions row count after third confirm = %d, want 1", count)
 	}
+
+	// Side-effect suppression: activity_log and usage_events must
+	// also be idempotent — three back-to-back confirms of the same
+	// version should produce exactly one `file.upload` activity row
+	// and one storage_bytes_uploaded usage_events row. Without the
+	// handler's `if fresh { ... }` gate this would be 3-of-each.
+	var activityCount int
+	if err := env.pool.QueryRow(env.t.Context(),
+		`SELECT COUNT(*) FROM activity_log WHERE resource_id = $1 AND action = $2`,
+		urlResp.UploadID, "file.upload",
+	).Scan(&activityCount); err != nil {
+		t.Fatalf("count activity rows: %v", err)
+	}
+	if activityCount != 1 {
+		t.Fatalf("activity_log file.upload row count = %d, want 1", activityCount)
+	}
+
+	var usageCount int
+	if err := env.pool.QueryRow(env.t.Context(),
+		`SELECT COUNT(*) FROM usage_events WHERE workspace_id = (SELECT workspace_id FROM files WHERE id = $1) AND event_type = $2`,
+		urlResp.UploadID, "storage",
+	).Scan(&usageCount); err != nil {
+		t.Fatalf("count usage_events rows: %v", err)
+	}
+	if usageCount != 1 {
+		t.Fatalf("usage_events storage row count = %d, want 1", usageCount)
+	}
 }

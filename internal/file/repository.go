@@ -41,7 +41,15 @@ type Repository interface {
 
 	CreateFileVersion(ctx context.Context, workspaceID uuid.UUID, v *FileVersion) error
 	CreateVersionAndSetCurrent(ctx context.Context, workspaceID uuid.UUID, v *FileVersion) error
-	ConfirmVersion(ctx context.Context, workspaceID uuid.UUID, v *FileVersion) error
+	// ConfirmVersion inserts a new version row, advances the file's
+	// current_version_id, and updates files.size_bytes — all in one
+	// transaction. The `fresh` return value is true when this call
+	// created the version row, false when an existing row with the
+	// same v.ID was found and the call was treated as an idempotent
+	// retry. Callers that need to gate side effects (audit logs,
+	// billing usage events, post-upload job dispatch) on the first
+	// confirm vs. a network-retry MUST inspect `fresh`.
+	ConfirmVersion(ctx context.Context, workspaceID uuid.UUID, v *FileVersion) (fresh bool, err error)
 	ListVersions(ctx context.Context, workspaceID, fileID uuid.UUID) ([]*FileVersion, error)
 	GetVersionByID(ctx context.Context, workspaceID, versionID uuid.UUID) (*FileVersion, error)
 	SetCurrentVersion(ctx context.Context, workspaceID, fileID, versionID uuid.UUID) error
@@ -202,13 +210,19 @@ func (r *PostgresRepository) ListFilesByFolder(ctx context.Context, workspaceID,
 // INSERT ... SELECT statement atomically picks the next version number so
 // concurrent callers cannot collide on the (file_id, version_number)
 // unique constraint.
+//
+// This entrypoint does not surface the idempotent-replay branch:
+// it is reached only from server-internal paths (e.g. KChat room
+// attachments) that mint a fresh v.ID via uuid.New() and therefore
+// can never hit the ON CONFLICT path. The boolean from
+// insertVersionTx is intentionally discarded here.
 func (r *PostgresRepository) CreateFileVersion(ctx context.Context, workspaceID uuid.UUID, v *FileVersion) error {
 	tx, err := r.pool.Begin(ctx)
 	if err != nil {
 		return fmt.Errorf("begin create version: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
-	if err := insertVersionTx(ctx, tx, workspaceID, v); err != nil {
+	if _, err := insertVersionTx(ctx, tx, workspaceID, v); err != nil {
 		return err
 	}
 	return tx.Commit(ctx)
@@ -224,7 +238,10 @@ func (r *PostgresRepository) CreateVersionAndSetCurrent(ctx context.Context, wor
 		return fmt.Errorf("begin create+set version: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
-	if err := insertVersionTx(ctx, tx, workspaceID, v); err != nil {
+	// Same rationale as CreateFileVersion: the `fresh` boolean is
+	// not surfaced because this entrypoint is server-internal and
+	// mints a fresh v.ID on every call.
+	if _, err := insertVersionTx(ctx, tx, workspaceID, v); err != nil {
 		return err
 	}
 	const setQ = `
@@ -245,26 +262,37 @@ WHERE workspace_id = $1 AND id = $2 AND deleted_at IS NULL`
 // single transaction. Used by the upload-confirm endpoint so a partial
 // failure cannot leave the file pointing at a new version while still
 // reporting the previous version's size.
-func (r *PostgresRepository) ConfirmVersion(ctx context.Context, workspaceID uuid.UUID, v *FileVersion) error {
+//
+// The boolean return distinguishes a fresh confirm (`true`) from an
+// idempotent retry of an already-confirmed upload (`false`); see
+// insertVersionTx for the semantics. ConfirmUpload uses this to
+// avoid double-emitting activity logs, usage events, and post-
+// upload job dispatches when a network-flaky client re-issues the
+// same confirm call.
+func (r *PostgresRepository) ConfirmVersion(ctx context.Context, workspaceID uuid.UUID, v *FileVersion) (bool, error) {
 	tx, err := r.pool.Begin(ctx)
 	if err != nil {
-		return fmt.Errorf("begin confirm version: %w", err)
+		return false, fmt.Errorf("begin confirm version: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
-	if err := insertVersionTx(ctx, tx, workspaceID, v); err != nil {
-		return err
+	fresh, err := insertVersionTx(ctx, tx, workspaceID, v)
+	if err != nil {
+		return false, err
 	}
 	const setQ = `
 UPDATE files SET current_version_id = $3, size_bytes = $4, updated_at = now()
 WHERE workspace_id = $1 AND id = $2 AND deleted_at IS NULL`
 	tag, err := tx.Exec(ctx, setQ, workspaceID, v.FileID, v.ID, v.SizeBytes)
 	if err != nil {
-		return fmt.Errorf("confirm version: %w", err)
+		return false, fmt.Errorf("confirm version: %w", err)
 	}
 	if tag.RowsAffected() == 0 {
-		return ErrNotFound
+		return false, ErrNotFound
 	}
-	return tx.Commit(ctx)
+	if err := tx.Commit(ctx); err != nil {
+		return false, err
+	}
+	return fresh, nil
 }
 
 // insertVersionTx verifies file ownership and inserts a new version
@@ -288,16 +316,16 @@ WHERE workspace_id = $1 AND id = $2 AND deleted_at IS NULL`
 // honour the retry caller's claimed size or checksum — the original
 // commit is authoritative — so a retry cannot mutate the recorded
 // upload metadata.
-func insertVersionTx(ctx context.Context, tx pgx.Tx, workspaceID uuid.UUID, v *FileVersion) error {
+func insertVersionTx(ctx context.Context, tx pgx.Tx, workspaceID uuid.UUID, v *FileVersion) (bool, error) {
 	if v.ID == uuid.Nil {
 		v.ID = uuid.New()
 	}
 	var existing int
 	if err := tx.QueryRow(ctx, `SELECT 1 FROM files WHERE workspace_id = $1 AND id = $2 AND deleted_at IS NULL`, workspaceID, v.FileID).Scan(&existing); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			return ErrNotFound
+			return false, ErrNotFound
 		}
-		return fmt.Errorf("verify file ownership: %w", err)
+		return false, fmt.Errorf("verify file ownership: %w", err)
 	}
 	const q = `
 INSERT INTO file_versions (id, file_id, version_number, object_key, size_bytes, checksum, created_by)
@@ -307,10 +335,10 @@ RETURNING version_number, created_at, COALESCE(scan_status, ''), COALESCE(scan_d
 	err := tx.QueryRow(ctx, q, v.ID, v.FileID, v.ObjectKey, v.SizeBytes, v.Checksum, v.CreatedBy).
 		Scan(&v.VersionNumber, &v.CreatedAt, &v.ScanStatus, &v.ScanDetail, &v.ScannedAt)
 	if err == nil {
-		return nil
+		return true, nil
 	}
 	if !errors.Is(err, pgx.ErrNoRows) {
-		return fmt.Errorf("insert file version: %w", err)
+		return false, fmt.Errorf("insert file version: %w", err)
 	}
 
 	// Conflict: a row with this id already exists. Re-fetch it,
@@ -318,7 +346,9 @@ RETURNING version_number, created_at, COALESCE(scan_status, ''), COALESCE(scan_d
 	// and populate v from the stored row so the surrounding
 	// ConfirmVersion transaction updates files.size_bytes /
 	// current_version_id to the *original* values (not whatever
-	// the retrying client claimed).
+	// the retrying client claimed). Returning fresh=false lets the
+	// ConfirmUpload handler skip side effects (activity log,
+	// billing usage event, post-upload jobs) on the retry path.
 	var (
 		storedFileID    uuid.UUID
 		storedObjectKey string
@@ -331,12 +361,12 @@ FROM file_versions WHERE id = $1`
 		&storedFileID, &storedObjectKey, &v.VersionNumber, &v.SizeBytes, &v.Checksum, &v.CreatedBy, &v.CreatedAt,
 		&v.ScanStatus, &v.ScanDetail, &v.ScannedAt,
 	); err != nil {
-		return fmt.Errorf("re-fetch existing version: %w", err)
+		return false, fmt.Errorf("re-fetch existing version: %w", err)
 	}
 	if storedFileID != v.FileID || storedObjectKey != v.ObjectKey {
-		return ErrVersionConflict
+		return false, ErrVersionConflict
 	}
-	return nil
+	return false, nil
 }
 
 // ListVersions returns every version of a file, newest first.

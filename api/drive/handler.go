@@ -970,7 +970,8 @@ func (h *Handler) ConfirmUpload(w http.ResponseWriter, r *http.Request) {
 		Checksum:  req.Checksum,
 		CreatedBy: userID,
 	}
-	if err := h.files.ConfirmVersion(r.Context(), workspaceID, v); err != nil {
+	fresh, err := h.files.ConfirmVersion(r.Context(), workspaceID, v)
+	if err != nil {
 		writeServiceError(w, err)
 		return
 	}
@@ -980,17 +981,29 @@ func (h *Handler) ConfirmUpload(w http.ResponseWriter, r *http.Request) {
 		writeServiceError(w, err)
 		return
 	}
-	h.logActivity(r.Context(), activity.ActionFileUpload, permission.ResourceFile, f.ID, map[string]any{
-		"version_id": v.ID,
-		"size_bytes": v.SizeBytes,
-	})
-	h.billing.RecordUpload(r.Context(), workspaceID, v.SizeBytes)
-	// Fan out post-upload work (preview, scan, index) via JetStream.
-	// All three publishers are nil-safe so the handler behaves
-	// identically when NATS is not configured locally. Publish errors
-	// are logged and ignored so a flaky broker never fails an
-	// otherwise-successful upload — workers can be re-triggered later.
-	h.publishPostUploadJobs(r.Context(), f.ID, v.ID)
+	// Side effects (activity log, billing usage event, post-upload
+	// job dispatch) MUST only run on the first successful confirm
+	// for this version, never on an idempotent retry — otherwise
+	// the audit timeline and billing ledger double-count network
+	// hiccups, and the preview / scan / index workers re-process
+	// the same object. ConfirmVersion returns `fresh=true` exactly
+	// when the underlying INSERT actually created a new row; the
+	// ON CONFLICT branch returns false. See
+	// internal/file/repository.go's insertVersionTx for the full
+	// rationale.
+	if fresh {
+		h.logActivity(r.Context(), activity.ActionFileUpload, permission.ResourceFile, f.ID, map[string]any{
+			"version_id": v.ID,
+			"size_bytes": v.SizeBytes,
+		})
+		h.billing.RecordUpload(r.Context(), workspaceID, v.SizeBytes)
+		// Fan out post-upload work (preview, scan, index) via JetStream.
+		// All three publishers are nil-safe so the handler behaves
+		// identically when NATS is not configured locally. Publish errors
+		// are logged and ignored so a flaky broker never fails an
+		// otherwise-successful upload — workers can be re-triggered later.
+		h.publishPostUploadJobs(r.Context(), f.ID, v.ID)
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"file":    updated,
 		"version": v,
@@ -1449,6 +1462,14 @@ func writeServiceError(w http.ResponseWriter, err error) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 	case errors.Is(err, folder.ErrEncryptionModeMismatch):
 		http.Error(w, err.Error(), http.StatusConflict)
+	case errors.Is(err, file.ErrVersionConflict):
+		// Surface the generic 409 rather than err.Error() so the
+		// internal "file version conflicts with existing row" detail
+		// (which encodes the storage-layer invariant violation) does
+		// not leak to the client. The only way to trip this branch
+		// is a UUID forge attempt or a programming error, so a
+		// terse message is appropriate.
+		http.Error(w, "version conflict", http.StatusConflict)
 	default:
 		var br badRequestErr
 		var fb forbiddenErr

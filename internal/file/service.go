@@ -94,13 +94,17 @@ func (s *Service) CreateVersion(ctx context.Context, workspaceID uuid.UUID, v *F
 	return s.repo.CreateVersionAndSetCurrent(ctx, workspaceID, v)
 }
 
-// ConfirmVersion inserts a file version, advances current_version_id, and
-// updates the file's size_bytes atomically. Used by the upload-confirm
-// endpoint so a retry after a partial failure cannot produce duplicate
-// versions or a stale size_bytes.
-func (s *Service) ConfirmVersion(ctx context.Context, workspaceID uuid.UUID, v *FileVersion) error {
+// ConfirmVersion inserts a file version, advances current_version_id,
+// and updates the file's size_bytes atomically. The `fresh` return
+// flag is true when the call actually created a new row and false
+// when it hit the idempotent-replay path (a row with the same v.ID
+// already existed). Callers that need to gate one-shot side effects
+// (activity logs, billing usage events, post-upload jobs) MUST
+// inspect `fresh`; see the repository-level doc comment for the
+// full semantics.
+func (s *Service) ConfirmVersion(ctx context.Context, workspaceID uuid.UUID, v *FileVersion) (bool, error) {
 	if v.SizeBytes < 0 {
-		return errors.New("size_bytes must be non-negative")
+		return false, errors.New("size_bytes must be non-negative")
 	}
 	return s.repo.ConfirmVersion(ctx, workspaceID, v)
 }

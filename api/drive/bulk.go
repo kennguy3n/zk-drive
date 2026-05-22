@@ -270,7 +270,11 @@ func (h *Handler) BulkCopy(w http.ResponseWriter, r *http.Request) {
 			Checksum:   srcVer.Checksum,
 			CreatedBy:  userID,
 		}
-		if err := h.files.ConfirmVersion(r.Context(), workspaceID, newVersion); err != nil {
+		// BulkCopy mints a fresh newVersion.ID per copy operation so
+		// the idempotent-replay branch is unreachable here. Discard
+		// the `fresh` boolean — every successful confirm in a copy
+		// is by construction a "first" confirm for the new file row.
+		if _, err := h.files.ConfirmVersion(r.Context(), workspaceID, newVersion); err != nil {
 			// Soft-delete the orphan file row we just created so the
 			// target folder doesn't accumulate 0-byte rows when the
 			// version write fails. The Delete error is swallowed: if
