@@ -6,7 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
+	"log/slog"
 	"net/http"
 
 	"github.com/google/uuid"
@@ -201,7 +201,7 @@ func (h *StripeService) HandleWebhook(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := h.dispatch(r.Context(), &event); err != nil {
-		log.Printf("billing/stripe: dispatch %s (%s) failed: %v", event.Type, event.ID, err)
+		slog.ErrorContext(r.Context(), "billing stripe dispatch failed", "event_type", event.Type, "event_id", event.ID, "err", err)
 		http.Error(w, "processing failed", http.StatusInternalServerError)
 		return
 	}

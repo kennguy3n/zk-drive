@@ -4,7 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"log"
+	"log/slog"
 	"net/http"
 
 	"github.com/go-chi/chi/v5"
@@ -309,13 +309,13 @@ func (h *Handler) publishPostUploadJobs(ctx context.Context, fileID, versionID u
 		return
 	}
 	if err := h.jobs.PublishPreview(ctx, fileID, versionID); err != nil {
-		log.Printf("drive: publish preview job: %v", err)
+		slog.ErrorContext(ctx, "drive publish preview job failed", "file_id", fileID, "version_id", versionID, "err", err)
 	}
 	if err := h.jobs.PublishScan(ctx, fileID, versionID); err != nil {
-		log.Printf("drive: publish scan job: %v", err)
+		slog.ErrorContext(ctx, "drive publish scan job failed", "file_id", fileID, "version_id", versionID, "err", err)
 	}
 	if err := h.jobs.PublishIndex(ctx, fileID, versionID); err != nil {
-		log.Printf("drive: publish index job: %v", err)
+		slog.ErrorContext(ctx, "drive publish index job failed", "file_id", fileID, "version_id", versionID, "err", err)
 	}
 }
 

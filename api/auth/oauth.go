@@ -9,7 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"strings"
@@ -263,7 +263,7 @@ func (h *OAuthHandler) callback(w http.ResponseWriter, r *http.Request, c *oauth
 		return
 	}
 	if err := users.UpdateLastLogin(ctx, u.ID, time.Now().UTC()); err != nil && !errors.Is(err, user.ErrNotFound) {
-		log.Printf("sso: update last login: %v", err)
+		slog.ErrorContext(ctx, "sso update last login failed", "err", err)
 	}
 	if h.audit != nil {
 		actor := u.ID

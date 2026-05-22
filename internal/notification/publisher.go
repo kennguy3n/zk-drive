@@ -4,7 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"log"
+	"log/slog"
 	"strings"
 
 	"github.com/google/uuid"
@@ -127,7 +127,7 @@ func (p *RedisPublisher) Subscribe(ctx context.Context, bc LocalBroadcaster) err
 			}
 			workspaceID, userID, err := parseChannel(msg.Channel)
 			if err != nil {
-				log.Printf("ws redis: drop message on %q: %v", msg.Channel, err)
+				slog.WarnContext(ctx, "ws redis drop message: invalid channel", "channel", msg.Channel, "err", err)
 				continue
 			}
 			bc.BroadcastJSON(workspaceID, userID, []byte(msg.Payload))

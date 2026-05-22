@@ -44,7 +44,7 @@ package main
 import (
 	"context"
 	"fmt"
-	"log"
+	"log/slog"
 	"os"
 	"os/signal"
 	"syscall"
@@ -52,19 +52,21 @@ import (
 
 	"github.com/kennguy3n/zk-drive/internal/config"
 	"github.com/kennguy3n/zk-drive/internal/database"
+	"github.com/kennguy3n/zk-drive/internal/logging"
 	"github.com/kennguy3n/zk-drive/internal/reconciler"
 	"github.com/kennguy3n/zk-drive/internal/version"
 )
 
 func main() {
 	if err := run(); err != nil {
-		log.Printf("reconciler: %v", err)
+		slog.Error("reconciler exited", "err", err)
 		os.Exit(1)
 	}
 }
 
 func run() error {
-	log.Printf("zk-drive reconciler version=%s", version.Version)
+	logging.Init("reconciler")
+	slog.Info("zk-drive reconciler starting", "version", version.Version)
 
 	cfg, err := config.Load()
 	if err != nil {
@@ -95,11 +97,15 @@ func run() error {
 	// or a Forbid-concurrency replacement still leaves a readable
 	// trail in `kubectl logs --previous` for the next on-caller.
 	for _, e := range summary.Errors {
-		log.Printf("reconciler: workspace=%s err=%v", e.WorkspaceID, e.Err)
+		slog.Error("reconciler per-workspace failure", "workspace_id", e.WorkspaceID, "err", e.Err)
 	}
-	log.Printf("reconciler: completed workspaces=%d updated=%d drift_bytes=%d errors=%d duration=%s",
-		summary.Workspaces, summary.Updated, summary.TotalDriftBytes, len(summary.Errors),
-		time.Since(start).Round(time.Millisecond))
+	slog.Info("reconciler completed",
+		"workspaces", summary.Workspaces,
+		"updated", summary.Updated,
+		"drift_bytes", summary.TotalDriftBytes,
+		"errors", len(summary.Errors),
+		"duration", time.Since(start).Round(time.Millisecond).String(),
+	)
 
 	if err != nil {
 		return fmt.Errorf("reconcile all: %w", err)

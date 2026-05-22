@@ -8,7 +8,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"log"
+	"log/slog"
 	"net/http"
 	"strconv"
 	"strings"
@@ -278,9 +278,9 @@ func (h *Handler) PutCMK(w http.ResponseWriter, r *http.Request) {
 	if h.fabric != nil {
 		tenantID, terr := h.provisioner.LookupTenantID(r.Context(), workspaceID)
 		if terr != nil {
-			log.Printf("admin.PutCMK: lookup tenant id workspace=%s: %v", workspaceID, terr)
+			slog.ErrorContext(r.Context(), "admin.PutCMK lookup tenant id failed", "workspace_id", workspaceID, "err", terr)
 		} else if perr := h.fabric.PutCMK(r.Context(), tenantID, uri); perr != nil {
-			log.Printf("admin.PutCMK: fabric console update workspace=%s tenant=%s: %v", workspaceID, tenantID, perr)
+			slog.ErrorContext(r.Context(), "admin.PutCMK fabric console update failed", "workspace_id", workspaceID, "tenant_id", tenantID, "err", perr)
 		}
 	}
 	if h.storeFactory != nil {

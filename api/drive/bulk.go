@@ -6,7 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"log"
+	"log/slog"
 	"net/http"
 	"path"
 	"strings"
@@ -375,7 +375,7 @@ func (h *Handler) BulkDownload(w http.ResponseWriter, r *http.Request) {
 			// Past the header we can only signal via the zip stream;
 			// return without a partial entry and log server-side so
 			// operators can correlate truncated downloads with a cause.
-			log.Printf("drive: bulk download: append zip entry %q: %v", it.name, err)
+			slog.ErrorContext(r.Context(), "drive bulk download: append zip entry failed", "name", it.name, "err", err)
 			return
 		}
 	}

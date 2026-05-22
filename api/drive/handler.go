@@ -12,7 +12,7 @@ package drive
 
 import (
 	"context"
-	"log"
+	"log/slog"
 	"net/http"
 
 	"github.com/google/uuid"
@@ -190,7 +190,7 @@ func (h *Handler) notify(ctx context.Context, fn func(*notification.Service) err
 		return
 	}
 	if err := fn(h.notifications); err != nil {
-		log.Printf("notification error: %v", err)
+		slog.ErrorContext(ctx, "drive notification dispatch failed", "err", err)
 	}
 }
 

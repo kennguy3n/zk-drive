@@ -22,7 +22,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log"
+	"log/slog"
 	"strings"
 	"time"
 
@@ -125,7 +125,7 @@ func (s *SummaryService) Summarize(ctx context.Context, workspaceID, folderID uu
 			// forever. Intentionally one log line per
 			// fallback — we expect this to be rare in
 			// production.
-			log.Printf("ai/summary: local LLM (%s) failed, falling back to scaffold: %v", s.llm.Model(), llmErr)
+			slog.ErrorContext(ctx, "ai summary local LLM failed, falling back to scaffold", "model", s.llm.Model(), "err", llmErr)
 		}
 	}
 

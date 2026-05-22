@@ -4,7 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"log"
+	"log/slog"
 	"net/http"
 	"strings"
 	"time"
@@ -271,7 +271,7 @@ func (h *Handler) Login(w http.ResponseWriter, r *http.Request) {
 	// also mislead audit queries that use updated_at as an
 	// activity signal.
 	if err := h.users.MaybeRehashPassword(ctx, u, req.Password); err != nil {
-		log.Printf("auth: rehash-on-login best-effort failed user=%s: %v", u.ID, err)
+		slog.ErrorContext(ctx, "auth rehash-on-login best-effort failed", "user_id", u.ID, "err", err)
 	}
 	if err := h.users.UpdateLastLogin(ctx, u.ID, time.Now().UTC()); err != nil && !errors.Is(err, user.ErrNotFound) {
 		// Non-fatal: login still succeeds, but log the failure so we

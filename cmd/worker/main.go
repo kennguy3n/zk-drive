@@ -19,7 +19,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log"
+	"log/slog"
 	"os"
 	"os/signal"
 	"strconv"
@@ -37,6 +37,7 @@ import (
 	"github.com/kennguy3n/zk-drive/internal/folder"
 	"github.com/kennguy3n/zk-drive/internal/index"
 	"github.com/kennguy3n/zk-drive/internal/jobs"
+	"github.com/kennguy3n/zk-drive/internal/logging"
 	"github.com/kennguy3n/zk-drive/internal/notification"
 	"github.com/kennguy3n/zk-drive/internal/permission"
 	"github.com/kennguy3n/zk-drive/internal/preview"
@@ -57,12 +58,14 @@ const (
 
 func main() {
 	if err := run(); err != nil {
-		log.Fatalf("worker exited: %v", err)
+		slog.Error("worker exited", "err", err)
+		os.Exit(1)
 	}
 }
 
 func run() error {
-	log.Printf("zk-drive worker version=%s", version.Version)
+	logging.Init("worker")
+	slog.Info("zk-drive worker starting", "version", version.Version)
 
 	cfg, err := config.Load()
 	if err != nil {
@@ -124,9 +127,9 @@ func run() error {
 		if err != nil {
 			return fmt.Errorf("storage client: %w", err)
 		}
-		log.Printf("worker: storage client wired to %s (bucket=%s)", cfg.S3Endpoint, cfg.S3Bucket)
+		slog.Info("worker storage client wired", "endpoint", cfg.S3Endpoint, "bucket", cfg.S3Bucket)
 	} else {
-		log.Printf("worker: S3_ENDPOINT unset; preview/scan jobs will be logged only")
+		slog.Info("worker S3_ENDPOINT unset; preview/scan jobs will be logged only")
 	}
 
 	notifSvc := notification.NewService(notification.NewPostgresRepository(pool))
@@ -206,12 +209,12 @@ func run() error {
 	}
 	defer unsubscribeAll(subs)
 
-	log.Printf("zk-drive worker listening on %s (stream=%s)", natsURL, streamName)
+	slog.Info("zk-drive worker listening", "nats_url", natsURL, "stream", streamName)
 
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 	sig := <-sigCh
-	log.Printf("received signal %s, shutting down", sig)
+	slog.Info("received signal, shutting down", "signal", sig.String())
 	return nil
 }
 
@@ -285,17 +288,17 @@ func previewHandler(ctx context.Context, pool *pgxpool.Pool, svc *preview.Servic
 	return func(msg *nats.Msg) {
 		var job jobs.FileJob
 		if err := json.Unmarshal(msg.Data, &job); err != nil {
-			log.Printf("worker: malformed preview payload: %v", err)
+			slog.Error("worker malformed preview payload", "err", err)
 			_ = msg.Term()
 			return
 		}
 		if isStrictZK(ctx, pool, job.FileID) {
-			log.Printf("worker: skipping strict-zk file (preview) file=%s version=%s", job.FileID, job.VersionID)
+			slog.Info("worker skipping strict-zk file (preview)", "file_id", job.FileID, "version_id", job.VersionID)
 			_ = msg.Ack()
 			return
 		}
 		if svc == nil {
-			log.Printf("worker: preview skipped (no storage client): file=%s version=%s", job.FileID, job.VersionID)
+			slog.Warn("worker preview skipped (no storage client)", "file_id", job.FileID, "version_id", job.VersionID)
 			_ = msg.Ack()
 			return
 		}
@@ -304,15 +307,15 @@ func previewHandler(ctx context.Context, pool *pgxpool.Pool, svc *preview.Servic
 		p, err := svc.Generate(jobCtx, job.FileID, job.VersionID)
 		if err != nil {
 			if errors.Is(err, preview.ErrUnsupportedMime) {
-				log.Printf("worker: preview unsupported mime: file=%s version=%s", job.FileID, job.VersionID)
+				slog.Info("worker preview unsupported mime", "file_id", job.FileID, "version_id", job.VersionID)
 				_ = msg.Ack()
 				return
 			}
-			log.Printf("worker: preview failed file=%s version=%s: %v", job.FileID, job.VersionID, err)
+			slog.Error("worker preview failed", "file_id", job.FileID, "version_id", job.VersionID, "err", err)
 			_ = msg.Nak()
 			return
 		}
-		log.Printf("worker: preview ok file=%s version=%s key=%s", job.FileID, job.VersionID, p.ObjectKey)
+		slog.Info("worker preview ok", "file_id", job.FileID, "version_id", job.VersionID, "key", p.ObjectKey)
 		_ = msg.Ack()
 	}
 }
@@ -326,17 +329,17 @@ func scanHandler(ctx context.Context, pool *pgxpool.Pool, svc *scan.Service) nat
 	return func(msg *nats.Msg) {
 		var job jobs.FileJob
 		if err := json.Unmarshal(msg.Data, &job); err != nil {
-			log.Printf("worker: malformed scan payload: %v", err)
+			slog.Error("worker malformed scan payload", "err", err)
 			_ = msg.Term()
 			return
 		}
 		if isStrictZK(ctx, pool, job.FileID) {
-			log.Printf("worker: skipping strict-zk file (scan) file=%s version=%s", job.FileID, job.VersionID)
+			slog.Info("worker skipping strict-zk file (scan)", "file_id", job.FileID, "version_id", job.VersionID)
 			_ = msg.Ack()
 			return
 		}
 		if svc == nil {
-			log.Printf("worker: scan skipped (no storage client): file=%s version=%s", job.FileID, job.VersionID)
+			slog.Warn("worker scan skipped (no storage client)", "file_id", job.FileID, "version_id", job.VersionID)
 			_ = msg.Ack()
 			return
 		}
@@ -344,11 +347,11 @@ func scanHandler(ctx context.Context, pool *pgxpool.Pool, svc *scan.Service) nat
 		defer cancel()
 		v, err := svc.Scan(jobCtx, job.FileID, job.VersionID)
 		if err != nil {
-			log.Printf("worker: scan error file=%s version=%s: %v", job.FileID, job.VersionID, err)
+			slog.Error("worker scan error", "file_id", job.FileID, "version_id", job.VersionID, "err", err)
 			_ = msg.Nak()
 			return
 		}
-		log.Printf("worker: scan %s file=%s version=%s detail=%q", v.Status, job.FileID, job.VersionID, v.Detail)
+		slog.Info("worker scan complete", "status", v.Status, "file_id", job.FileID, "version_id", job.VersionID, "detail", v.Detail)
 		_ = msg.Ack()
 	}
 }
@@ -361,23 +364,23 @@ func archiveHandler(ctx context.Context, svc *retention.ArchiveService) nats.Msg
 	return func(msg *nats.Msg) {
 		var job jobs.FileJob
 		if err := json.Unmarshal(msg.Data, &job); err != nil {
-			log.Printf("worker: malformed archive payload: %v", err)
+			slog.Error("worker malformed archive payload", "err", err)
 			_ = msg.Term()
 			return
 		}
 		if svc == nil {
-			log.Printf("worker: archive skipped (no storage client): file=%s version=%s", job.FileID, job.VersionID)
+			slog.Warn("worker archive skipped (no storage client)", "file_id", job.FileID, "version_id", job.VersionID)
 			_ = msg.Ack()
 			return
 		}
 		jobCtx, cancel := context.WithTimeout(ctx, 10*time.Minute)
 		defer cancel()
 		if err := svc.ArchiveVersion(jobCtx, job.VersionID); err != nil {
-			log.Printf("worker: archive failed file=%s version=%s: %v", job.FileID, job.VersionID, err)
+			slog.Error("worker archive failed", "file_id", job.FileID, "version_id", job.VersionID, "err", err)
 			_ = msg.Nak()
 			return
 		}
-		log.Printf("worker: archive ok file=%s version=%s", job.FileID, job.VersionID)
+		slog.Info("worker archive ok", "file_id", job.FileID, "version_id", job.VersionID)
 		_ = msg.Ack()
 	}
 }
@@ -401,9 +404,9 @@ func runGuestExpirySweep(ctx context.Context, svc *sharing.Service, interval tim
 	for {
 		revoked, err := svc.ExpireGuestAccess(ctx, time.Now().UTC())
 		if err != nil {
-			log.Printf("worker: guest expiry sweep failed: %v", err)
+			slog.Error("worker guest expiry sweep failed", "err", err)
 		} else if revoked > 0 {
-			log.Printf("worker: guest expiry sweep revoked %d permissions", revoked)
+			slog.Info("worker guest expiry sweep revoked permissions", "revoked", revoked)
 		}
 		select {
 		case <-ctx.Done():
@@ -434,7 +437,7 @@ func reconcileInterval() time.Duration {
 	}
 	mins, err := strconv.Atoi(raw)
 	if err != nil || mins < 0 {
-		log.Printf("worker: invalid RECONCILE_INTERVAL_MINUTES=%q; defaulting to 60", raw)
+		slog.Warn("worker invalid RECONCILE_INTERVAL_MINUTES; defaulting to 60", "raw", raw)
 		return 60 * time.Minute
 	}
 	return time.Duration(mins) * time.Minute
@@ -479,15 +482,19 @@ func runStorageReconciler(ctx context.Context, rc *reconciler.Reconciler, interv
 		// shutdown is rarely actionable) but every other err path
 		// gets the full summary.
 		for _, e := range summary.Errors {
-			log.Printf("worker: reconciler workspace=%s err=%v", e.WorkspaceID, e.Err)
+			slog.Error("worker reconciler per-workspace failure", "workspace_id", e.WorkspaceID, "err", e.Err)
 		}
 		if err == nil || !errors.Is(err, context.Canceled) {
-			log.Printf("worker: reconciler ran workspaces=%d updated=%d drift_bytes=%d errors=%d duration=%s",
-				summary.Workspaces, summary.Updated, summary.TotalDriftBytes, len(summary.Errors),
-				time.Since(start).Round(time.Millisecond))
+			slog.Info("worker reconciler ran",
+				"workspaces", summary.Workspaces,
+				"updated", summary.Updated,
+				"drift_bytes", summary.TotalDriftBytes,
+				"errors", len(summary.Errors),
+				"duration", time.Since(start).Round(time.Millisecond).String(),
+			)
 		}
 		if err != nil && !errors.Is(err, context.Canceled) {
-			log.Printf("worker: storage reconciler aborted: %v", err)
+			slog.Error("worker storage reconciler aborted", "err", err)
 		}
 		select {
 		case <-ctx.Done():
@@ -511,28 +518,28 @@ func indexHandler(ctx context.Context, pool *pgxpool.Pool, svc *index.Service) n
 	return func(msg *nats.Msg) {
 		var job jobs.FileJob
 		if err := json.Unmarshal(msg.Data, &job); err != nil {
-			log.Printf("worker: malformed index payload: %v", err)
+			slog.Error("worker malformed index payload", "err", err)
 			_ = msg.Term()
 			return
 		}
 		if isStrictZK(ctx, pool, job.FileID) {
-			log.Printf("worker: skipping strict-zk file (index) file=%s version=%s", job.FileID, job.VersionID)
+			slog.Info("worker skipping strict-zk file (index)", "file_id", job.FileID, "version_id", job.VersionID)
 			_ = msg.Ack()
 			return
 		}
 		if svc == nil {
-			log.Printf("worker: index acked (no storage) file=%s version=%s", job.FileID, job.VersionID)
+			slog.Warn("worker index acked (no storage)", "file_id", job.FileID, "version_id", job.VersionID)
 			_ = msg.Ack()
 			return
 		}
 		jobCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
 		defer cancel()
 		if err := svc.IndexFile(jobCtx, job.FileID, job.VersionID); err != nil {
-			log.Printf("worker: index failed file=%s version=%s: %v", job.FileID, job.VersionID, err)
+			slog.Error("worker index failed", "file_id", job.FileID, "version_id", job.VersionID, "err", err)
 			_ = msg.Nak()
 			return
 		}
-		log.Printf("worker: index ok file=%s version=%s", job.FileID, job.VersionID)
+		slog.Info("worker index ok", "file_id", job.FileID, "version_id", job.VersionID)
 		_ = msg.Ack()
 	}
 }
@@ -544,28 +551,28 @@ func classifyHandler(ctx context.Context, pool *pgxpool.Pool, svc *classify.Serv
 	return func(msg *nats.Msg) {
 		var job jobs.FileJob
 		if err := json.Unmarshal(msg.Data, &job); err != nil {
-			log.Printf("worker: malformed classify payload: %v", err)
+			slog.Error("worker malformed classify payload", "err", err)
 			_ = msg.Term()
 			return
 		}
 		if isStrictZK(ctx, pool, job.FileID) {
-			log.Printf("worker: skipping strict-zk file (classify) file=%s version=%s", job.FileID, job.VersionID)
+			slog.Info("worker skipping strict-zk file (classify)", "file_id", job.FileID, "version_id", job.VersionID)
 			_ = msg.Ack()
 			return
 		}
 		if svc == nil {
-			log.Printf("worker: classify acked (no pool) file=%s version=%s", job.FileID, job.VersionID)
+			slog.Warn("worker classify acked (no pool)", "file_id", job.FileID, "version_id", job.VersionID)
 			_ = msg.Ack()
 			return
 		}
 		jobCtx, cancel := context.WithTimeout(ctx, 1*time.Minute)
 		defer cancel()
 		if err := svc.Classify(jobCtx, job.FileID); err != nil {
-			log.Printf("worker: classify failed file=%s version=%s: %v", job.FileID, job.VersionID, err)
+			slog.Error("worker classify failed", "file_id", job.FileID, "version_id", job.VersionID, "err", err)
 			_ = msg.Nak()
 			return
 		}
-		log.Printf("worker: classify ok file=%s version=%s", job.FileID, job.VersionID)
+		slog.Info("worker classify ok", "file_id", job.FileID, "version_id", job.VersionID)
 		_ = msg.Ack()
 	}
 }
@@ -582,7 +589,7 @@ func isStrictZK(ctx context.Context, pool *pgxpool.Pool, fileID uuid.UUID) bool 
 	}
 	mode, err := folder.EncryptionModeForFile(ctx, pool, fileID)
 	if err != nil {
-		log.Printf("worker: lookup encryption mode for file=%s: %v", fileID, err)
+		slog.Error("worker lookup encryption mode failed", "file_id", fileID, "err", err)
 		return false
 	}
 	return mode == folder.EncryptionStrictZK

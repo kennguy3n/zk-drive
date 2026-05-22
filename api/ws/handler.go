@@ -19,7 +19,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"log"
+	"log/slog"
 	"net/http"
 	"sync"
 	"time"
@@ -282,7 +282,7 @@ func (c *Client) readPump() {
 		if _, _, err := c.conn.NextReader(); err != nil {
 			if !errors.Is(err, websocket.ErrCloseSent) &&
 				!websocket.IsCloseError(err, websocket.CloseNormalClosure, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
-				log.Printf("ws read: %v", err)
+				slog.Error("ws read failed", "err", err)
 			}
 			return
 		}

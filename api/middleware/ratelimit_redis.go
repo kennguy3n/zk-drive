@@ -2,7 +2,7 @@ package middleware
 
 import (
 	"context"
-	"log"
+	"log/slog"
 	"math"
 	"net/http"
 	"strconv"
@@ -162,11 +162,11 @@ func (l *redisRateLimiter) reserve(ctx context.Context, workspaceID, userID uuid
 	if err != nil {
 		// Fail open. Logging here is intentional — a quiet drop
 		// would mask Redis outages from operators.
-		log.Printf("ratelimit_redis: script failed, allowing request: %v", err)
+		slog.ErrorContext(ctx, "ratelimit_redis script failed, allowing request", "err", err)
 		return 0
 	}
 	if len(res) < 1 {
-		log.Printf("ratelimit_redis: script returned no values, allowing request")
+		slog.WarnContext(ctx, "ratelimit_redis script returned no values, allowing request")
 		return 0
 	}
 	status, _ := res[0].(int64)

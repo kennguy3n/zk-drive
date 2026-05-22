@@ -3,7 +3,7 @@ package billing
 import (
 	"context"
 	"errors"
-	"log"
+	"log/slog"
 
 	"github.com/google/uuid"
 )
@@ -174,7 +174,7 @@ func (s *Service) recordEvent(ctx context.Context, workspaceID uuid.UUID, t stri
 		// Recording is best-effort: a usage write failure must not
 		// fail an otherwise-successful upload / download. Log so an
 		// operator can spot a broken billing pipeline.
-		log.Printf("billing: record %s event for workspace %s: %v", t, workspaceID, err)
+		slog.ErrorContext(ctx, "billing record event failed", "event_type", t, "workspace_id", workspaceID, "err", err)
 	}
 }
 
