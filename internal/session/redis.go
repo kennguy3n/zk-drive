@@ -34,6 +34,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strconv"
 	"time"
 
 	"github.com/google/uuid"
@@ -329,10 +330,15 @@ func (s *RedisSessionStore) IsRevoked(ctx context.Context, workspaceID, userID u
 // parseUnixSeconds decodes the integer cutoff written by RevokeUser.
 // Pulled into a helper so the parse error path stays uniform and so
 // the IsRevoked logic reads as a single comparison.
+//
+// strconv.ParseInt (rather than fmt.Sscanf) is the strict choice:
+// Sscanf with "%d" succeeds on inputs like "1234abc" by stopping at
+// the first non-digit and silently dropping the trailing garbage,
+// which would let a corrupted value like "1700000000.5" parse as
+// 1700000000 (off-by-half-a-second) without surfacing the
+// corruption. ParseInt rejects any trailing non-numeric bytes
+// outright, so IsRevoked fails closed on a malformed key and the
+// next RevokeUser overwrites it cleanly via the Lua self-heal path.
 func parseUnixSeconds(raw string) (int64, error) {
-	var n int64
-	if _, err := fmt.Sscanf(raw, "%d", &n); err != nil {
-		return 0, err
-	}
-	return n, nil
+	return strconv.ParseInt(raw, 10, 64)
 }

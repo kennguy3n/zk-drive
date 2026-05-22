@@ -3,6 +3,7 @@ package session
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 
@@ -211,6 +212,47 @@ func TestRevokeUserTTL(t *testing.T) {
 	}
 	if revoked {
 		t.Fatal("cutoff key should self-clean after TTL; got revoked=true")
+	}
+}
+
+// TestIsRevokedRejectsMalformedCutoff pins the strict-parse path:
+// a manually-corrupted cutoff (manual Redis surgery, an old
+// pre-script value format, or memory corruption) must surface as
+// an error from IsRevoked so the middleware fails closed, rather
+// than silently parsing the leading digits and using a half-right
+// number. fmt.Sscanf would tolerate "1700000000abc" → 1700000000;
+// strconv.ParseInt does not.
+func TestIsRevokedRejectsMalformedCutoff(t *testing.T) {
+	store, mr := newTestStore(t)
+	ctx := context.Background()
+
+	userID := uuid.New()
+	wsID := uuid.New()
+	key := fmt.Sprintf("ws:%s:user_revoked:%s", wsID.String(), userID.String())
+
+	cases := []struct {
+		name string
+		raw  string
+	}{
+		{"trailing letters", "1700000000abc"},
+		{"fractional second", "1700000000.5"},
+		{"hex prefix", "0x1234"},
+		{"pure garbage", "not-a-number"},
+		{"empty string", ""},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if err := mr.Set(key, c.raw); err != nil {
+				t.Fatalf("seed corrupt value: %v", err)
+			}
+			revoked, err := store.IsRevoked(ctx, wsID, userID, time.Now())
+			if err == nil {
+				t.Fatalf("malformed cutoff %q parsed without error (revoked=%v)", c.raw, revoked)
+			}
+			if revoked {
+				t.Errorf("malformed cutoff %q: must not report revoked=true on parse failure", c.raw)
+			}
+		})
 	}
 }
 
