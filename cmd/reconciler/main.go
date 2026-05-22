@@ -20,12 +20,19 @@
 //     (e.g. row-level deadlock or schema corruption) is logged as
 //     an error and skipped; the rest of the population is still
 //     reconciled.
-//   - Exits non-zero only if the workspaces enumeration itself
-//     failed (i.e. the run could not start). Per-workspace
-//     failures are surfaced via log output but do not flip the
-//     exit code, so a single bad row doesn't trip K8s CronJob
-//     alerting for the whole run. WS-17 will swap this for a
-//     metrics-based alert.
+//   - Per-workspace failures do NOT flip the exit code: a single
+//     bad row doesn't trip K8s CronJob alerting for the whole
+//     run; they are surfaced via log output for ad-hoc triage.
+//     WS-17 will swap this for a metrics-based alert.
+//   - Exits non-zero in three cases: (a) configuration / pool
+//     connect failure (the run could not start), (b) the
+//     workspaces enumeration query itself failed, and (c) the
+//     run was interrupted by SIGTERM / context cancellation
+//     before every workspace had been visited. Case (c) is the
+//     expected K8s behaviour when activeDeadlineSeconds fires or
+//     a Forbid-concurrency replacement Job lands: the previous
+//     Job is correctly flagged Failed so the next scheduled tick
+//     can pick up where it left off.
 //
 // Configuration: reads DATABASE_URL from the environment via
 // internal/config.Load. Other env vars Load reads (JWT_SECRET, S3_*,

@@ -374,12 +374,18 @@ func runGuestExpirySweep(ctx context.Context, svc *sharing.Service, interval tim
 
 // reconcileInterval reads RECONCILE_INTERVAL_MINUTES and returns the
 // cadence for the in-process storage counter reconciler. Returns 0
-// when the env var is "0" (operator opt-out, e.g. when a dedicated
-// K8s CronJob owns reconciliation) or when the value fails to parse;
-// the default is 60 minutes — short enough that frontend reads
-// converge to the canonical sum within an hour of any drift event,
-// long enough that the periodic SELECT/UPDATE pair is well below the
-// noise floor of regular database traffic.
+// only when the env var is exactly "0" — the documented operator
+// opt-out for deploys where a dedicated K8s CronJob owns
+// reconciliation. The default (used when the env var is unset, an
+// empty string, or fails to parse) is 60 minutes: short enough that
+// frontend reads converge to the canonical sum within an hour of any
+// drift event, long enough that the periodic SELECT/UPDATE pair is
+// well below the noise floor of regular database traffic. Falling
+// back to the default on parse failure (rather than disabling) is
+// the conservative choice: a typo'd value silently disabling a
+// safety-net reconciler is the worse outcome, and duplicate runs
+// against a dedicated CronJob are idempotent (row-level lock + no-op
+// UPDATE when there's no drift).
 func reconcileInterval() time.Duration {
 	raw := os.Getenv("RECONCILE_INTERVAL_MINUTES")
 	if raw == "" {
