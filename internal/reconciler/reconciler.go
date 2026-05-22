@@ -47,8 +47,20 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
+
+// ErrWorkspaceMissing is returned by ReconcileWorkspace when the
+// workspace row no longer exists at the time of the FOR UPDATE
+// lock. This is expected during normal operation: ReconcileAll
+// enumerates workspace IDs in one round-trip and then iterates
+// them, so a workspace can be deleted between enumeration and the
+// per-workspace lock. ReconcileAll filters this sentinel out
+// instead of recording it as a real error — there's nothing to
+// reconcile for a workspace that no longer exists, and a noisy
+// log line per concurrent deletion is not actionable.
+var ErrWorkspaceMissing = errors.New("reconciler: workspace missing")
 
 // Summary is the result of a Reconcile run across all workspaces.
 // Inspected/logged by the caller; fields are public so cmd/reconciler
@@ -158,6 +170,16 @@ func (r *Reconciler) ReconcileAll(ctx context.Context) (Summary, error) {
 		}
 		res, err := r.ReconcileWorkspace(ctx, id)
 		if err != nil {
+			if errors.Is(err, ErrWorkspaceMissing) {
+				// Workspace was deleted between the
+				// enumeration query and the per-workspace
+				// reconcile; treat as a no-op rather than
+				// polluting Errors with a phantom failure.
+				// Decrement Workspaces so the Summary counts
+				// reflect what was actually reconciled.
+				sum.Workspaces--
+				continue
+			}
 			sum.Errors = append(sum.Errors, WorkspaceError{WorkspaceID: id, Err: err})
 			continue
 		}
@@ -236,6 +258,13 @@ func (r *Reconciler) ReconcileWorkspace(ctx context.Context, workspaceID uuid.UU
 		`SELECT storage_used_bytes FROM workspaces WHERE id = $1 FOR UPDATE`,
 		workspaceID,
 	).Scan(&old); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			// Race: workspace was deleted after ReconcileAll's
+			// enumeration but before we got the row lock. Signal
+			// this via a typed sentinel so ReconcileAll can
+			// filter it out cleanly.
+			return Result{}, ErrWorkspaceMissing
+		}
 		return Result{}, fmt.Errorf("lock workspace %s: %w", workspaceID, err)
 	}
 

@@ -185,11 +185,22 @@ func run() error {
 		nats.Name("zk-drive-worker"),
 		nats.MaxReconnects(-1),
 		nats.ReconnectWait(2*time.Second),
+		// Bound shutdown drain time so a single slow / hung
+		// message handler (e.g. a multi-minute ClamAV scan that
+		// just started when SIGTERM arrived) can't block the
+		// entire shutdown chain. The LIFO defer sequence below
+		// runs nc.Drain() before cancel() so well-behaved
+		// handlers get to finish gracefully, but if the drain
+		// hangs past 20s NATS forcibly closes the connection,
+		// our defers continue, and the pod still terminates
+		// well within the K8s default terminationGracePeriod of
+		// 30s rather than being SIGKILL'd mid-shutdown.
+		nats.DrainTimeout(20*time.Second),
 	)
 	if err != nil {
 		return fmt.Errorf("connect nats %s: %w", natsURL, err)
 	}
-	defer nc.Drain() //nolint:errcheck // best-effort drain during shutdown
+	defer nc.Drain() //nolint:errcheck // best-effort drain bounded by nats.DrainTimeout
 
 	js, err := nc.JetStream()
 	if err != nil {

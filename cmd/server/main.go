@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -297,7 +298,7 @@ func run() error {
 		bgGoroutines.Add(1)
 		go func() {
 			defer bgGoroutines.Done()
-			if err := rp.Subscribe(ctx, hub); err != nil && err != context.Canceled {
+			if err := rp.Subscribe(ctx, hub); err != nil && !errors.Is(err, context.Canceled) {
 				log.Printf("redis: ws subscribe loop exited: %v", err)
 			}
 		}()

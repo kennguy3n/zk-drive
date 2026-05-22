@@ -3,6 +3,7 @@ package reconciler
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 
 	"github.com/google/uuid"
@@ -68,6 +69,36 @@ func TestReconcileWorkspaceRejectsNilPool(t *testing.T) {
 	r2 := &Reconciler{pool: nil}
 	if _, err := r2.ReconcileWorkspace(context.Background(), uuid.New()); err == nil {
 		t.Fatalf("expected error on nil pool, got nil")
+	}
+}
+
+// TestErrWorkspaceMissingIsSentinel locks in that
+// ErrWorkspaceMissing is a stable, comparable sentinel value
+// rather than a wrapped/dynamic error. ReconcileAll relies on
+// errors.Is to filter the workspace-deleted-mid-run race out of
+// Summary.Errors; if the sentinel ever got swapped for an
+// fmt.Errorf wrap chain the filter would silently break and the
+// summary would start logging phantom errors for normally-deleted
+// workspaces.
+func TestErrWorkspaceMissingIsSentinel(t *testing.T) {
+	if ErrWorkspaceMissing == nil {
+		t.Fatal("ErrWorkspaceMissing must not be nil")
+	}
+	if !errors.Is(ErrWorkspaceMissing, ErrWorkspaceMissing) {
+		t.Fatal("ErrWorkspaceMissing must satisfy errors.Is against itself")
+	}
+	// A wrap chain should still match the sentinel — callers
+	// upstream of ReconcileAll may chain context onto the err.
+	wrapped := fmt.Errorf("context: %w", ErrWorkspaceMissing)
+	if !errors.Is(wrapped, ErrWorkspaceMissing) {
+		t.Fatal("errors.Is must traverse wrap chains rooted at ErrWorkspaceMissing")
+	}
+	// A random error must NOT match — otherwise the
+	// ReconcileAll filter would swallow real failures as
+	// phantom deletions.
+	other := errors.New("some other error")
+	if errors.Is(other, ErrWorkspaceMissing) {
+		t.Fatal("unrelated error must not match ErrWorkspaceMissing")
 	}
 }
 
