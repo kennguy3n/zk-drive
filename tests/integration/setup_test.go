@@ -37,11 +37,15 @@ import (
 	"github.com/kennguy3n/zk-drive/internal/preview"
 	"github.com/kennguy3n/zk-drive/internal/retention"
 	"github.com/kennguy3n/zk-drive/internal/search"
+	"github.com/kennguy3n/zk-drive/internal/session"
 	"github.com/kennguy3n/zk-drive/internal/sharing"
 	"github.com/kennguy3n/zk-drive/internal/wiring"
 	"github.com/kennguy3n/zk-drive/internal/storage"
 	"github.com/kennguy3n/zk-drive/internal/user"
 	"github.com/kennguy3n/zk-drive/internal/workspace"
+
+	"github.com/alicebob/miniredis/v2"
+	"github.com/redis/go-redis/v9"
 
 	"github.com/google/uuid"
 )
@@ -54,11 +58,13 @@ const testJWTSecret = "integration-test-secret"
 // httptest server, the pgx pool, and the initialised services. Callers use
 // testEnv.ResetTables between tests.
 type testEnv struct {
-	t           *testing.T
-	pool        *pgxpool.Pool
-	server      *httptest.Server
-	storage     *storage.Client
-	provisioner *fabric.Provisioner
+	t            *testing.T
+	pool         *pgxpool.Pool
+	server       *httptest.Server
+	storage      *storage.Client
+	provisioner  *fabric.Provisioner
+	miniredis    *miniredis.Miniredis
+	sessionStore *session.RedisSessionStore
 }
 
 // setupEnv connects to Postgres, runs migrations, wires the API, and starts
@@ -122,7 +128,21 @@ func setupEnv(t *testing.T) *testEnv {
 	go hub.Run(hubCtx)
 	wsHandler := ws.NewHandler(hub)
 
-	authHandler := auth.NewHandler(pool, userSvc, wsSvc, testJWTSecret).WithAudit(auditSvc)
+	// Session store backed by miniredis so the logout-revocation
+	// integration tests can exercise the real Redis-mediated
+	// invalidation path without spinning up a real Redis container.
+	// The store is wired into both the auth handler (RevokeUser on
+	// Logout, IsRevoked on Refresh) and AuthMiddleware (IsRevoked on
+	// every authenticated request) below.
+	mr := miniredis.RunT(t)
+	t.Cleanup(mr.Close)
+	redisClient := redis.NewClient(&redis.Options{Addr: mr.Addr()})
+	t.Cleanup(func() { _ = redisClient.Close() })
+	sessionStore := session.NewRedisSessionStore(redisClient)
+
+	authHandler := auth.NewHandler(pool, userSvc, wsSvc, testJWTSecret).
+		WithAudit(auditSvc).
+		WithSessionRevoker(sessionStore)
 	driveHandler := drive.NewHandler(pool, wsSvc, folderSvc, fileSvc, userSvc, storageClient, permissionSvc, activitySvc).
 		WithSharing(sharingSvc).
 		WithSearch(searchSvc).
@@ -175,9 +195,14 @@ func setupEnv(t *testing.T) *testEnv {
 		r.Route("/auth", func(r chi.Router) {
 			r.Post("/signup", authHandler.Signup)
 			r.Post("/login", authHandler.Login)
-			r.Post("/logout", authHandler.Logout)
+			// /logout sits inside the AuthMiddleware group so the
+			// handler can read claims from the bearer token and
+			// record a per-user revocation cutoff. Without the
+			// middleware Logout would 204 without revoking
+			// anything — the bug WS-1 exists to fix.
 			r.Group(func(r chi.Router) {
-				r.Use(middleware.AuthMiddleware(testJWTSecret))
+				r.Use(middleware.AuthMiddleware(testJWTSecret, sessionStore))
+				r.Post("/logout", authHandler.Logout)
 				r.Post("/refresh", authHandler.Refresh)
 			})
 		})
@@ -189,7 +214,7 @@ func setupEnv(t *testing.T) *testEnv {
 		// per-frame and TenantGuard's HTTP-method assumptions trip on
 		// the upgrade handshake.
 		r.Group(func(r chi.Router) {
-			r.Use(middleware.AuthMiddleware(testJWTSecret))
+			r.Use(middleware.AuthMiddleware(testJWTSecret, sessionStore))
 			r.Get("/ws", wsHandler.ServeWS)
 		})
 
@@ -199,7 +224,7 @@ func setupEnv(t *testing.T) *testEnv {
 		r.Post("/webhooks/stripe", stripeService.HandleWebhook)
 
 		r.Group(func(r chi.Router) {
-			r.Use(middleware.AuthMiddleware(testJWTSecret))
+			r.Use(middleware.AuthMiddleware(testJWTSecret, sessionStore))
 			r.Use(middleware.TenantGuard())
 			// Permissive rate-limit (PerUser/PerWorkspace=0) so tests
 			// don't have to worry about throttling, but still exercise
@@ -268,14 +293,14 @@ func setupEnv(t *testing.T) *testEnv {
 		})
 
 		r.Route("/admin", func(r chi.Router) {
-			r.Use(middleware.AuthMiddleware(testJWTSecret))
+			r.Use(middleware.AuthMiddleware(testJWTSecret, sessionStore))
 			r.Use(middleware.TenantGuard())
 			r.Use(middleware.AdminOnly())
 			adminHandler.RegisterRoutes(r)
 		})
 
 		r.Route("/kchat", func(r chi.Router) {
-			r.Use(middleware.AuthMiddleware(testJWTSecret))
+			r.Use(middleware.AuthMiddleware(testJWTSecret, sessionStore))
 			r.Use(middleware.TenantGuard())
 			kchatHandler.RegisterRoutes(r)
 		})
@@ -285,7 +310,15 @@ func setupEnv(t *testing.T) *testEnv {
 	})
 
 	srv := httptest.NewServer(r)
-	env := &testEnv{t: t, pool: pool, server: srv, storage: storageClient, provisioner: provisioner}
+	env := &testEnv{
+		t:            t,
+		pool:         pool,
+		server:       srv,
+		storage:      storageClient,
+		provisioner:  provisioner,
+		miniredis:    mr,
+		sessionStore: sessionStore,
+	}
 	t.Cleanup(func() {
 		srv.Close()
 		// Stop the WS hub goroutine before closing the pool so

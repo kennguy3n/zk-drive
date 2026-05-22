@@ -74,10 +74,34 @@ func ParseToken(secret, raw string) (*Claims, error) {
 	return claims, nil
 }
 
+// SessionChecker is consulted by AuthMiddleware on every authenticated
+// request to honour out-of-band revocations (logout, password reset,
+// admin force-sign-out) without rotating the JWT signing secret.
+//
+// IsRevoked returns true when a token with the given (workspaceID,
+// userID, issuedAt) tuple has been revoked. Transport-level errors
+// must be returned to the caller verbatim — the middleware fails
+// closed on err != nil so a flaky Redis cannot silently degrade
+// revocation to a no-op.
+//
+// `issuedAt` is the JWT's `iat` claim; implementations compare it
+// against a per-user cutoff stored when the user logs out or has
+// their sessions force-revoked.
+type SessionChecker interface {
+	IsRevoked(ctx context.Context, workspaceID, userID uuid.UUID, issuedAt time.Time) (bool, error)
+}
+
 // AuthMiddleware returns a middleware that validates a Bearer JWT in the
 // Authorization header and injects the parsed identity into the request
 // context. Requests without a valid token receive HTTP 401.
-func AuthMiddleware(secret string) func(http.Handler) http.Handler {
+//
+// When checker is non-nil, AuthMiddleware additionally calls
+// checker.IsRevoked after signature/expiry validation passes; a
+// revoked token (or any error from the checker) also yields HTTP 401.
+// Passing nil keeps the previous stateless-JWT behaviour and is
+// retained for tests and the (deprecated) in-memory deployment path
+// where Redis isn't wired.
+func AuthMiddleware(secret string, checker SessionChecker) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			header := r.Header.Get("Authorization")
@@ -90,6 +114,30 @@ func AuthMiddleware(secret string) func(http.Handler) http.Handler {
 			if err != nil {
 				http.Error(w, "invalid token", http.StatusUnauthorized)
 				return
+			}
+			if checker != nil {
+				// The JWT carries IssuedAt as a *jwt.NumericDate
+				// (second-precision Unix time). When the claim is
+				// missing entirely we treat the token as
+				// pre-revocation-era: there's no iat to compare
+				// against a cutoff, so we conservatively fail
+				// closed.
+				if claims.IssuedAt == nil {
+					http.Error(w, "token missing iat", http.StatusUnauthorized)
+					return
+				}
+				revoked, ierr := checker.IsRevoked(r.Context(), claims.WorkspaceID, claims.UserID, claims.IssuedAt.Time)
+				if ierr != nil {
+					// Fail closed on store unreachable. Without
+					// this the revocation guarantee would silently
+					// vanish behind a single Redis outage.
+					http.Error(w, "revocation check failed", http.StatusUnauthorized)
+					return
+				}
+				if revoked {
+					http.Error(w, "token revoked", http.StatusUnauthorized)
+					return
+				}
 			}
 			ctx := withClaims(r.Context(), claims)
 			next.ServeHTTP(w, r.WithContext(ctx))

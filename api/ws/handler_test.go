@@ -36,7 +36,10 @@ func TestWSReceivesFileUploadEvent(t *testing.T) {
 
 	r := chi.NewRouter()
 	r.Group(func(r chi.Router) {
-		r.Use(middleware.AuthMiddleware(jwtSecret))
+		// nil checker: this unit test exercises the stateless-JWT
+		// path. The Redis-backed revocation flow has its own
+		// dedicated integration test (logout_revocation_test.go).
+		r.Use(middleware.AuthMiddleware(jwtSecret, nil))
 		r.Get("/api/ws", ws.NewHandler(hub).ServeWS)
 	})
 

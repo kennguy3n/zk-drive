@@ -14,10 +14,20 @@
 //
 //	ws:{workspaceID}:session:{sessionID}        # HASH (user_id, workspace_id)
 //	ws:{workspaceID}:user_sessions:{userID}     # SET of sessionIDs
+//	ws:{workspaceID}:user_revoked:{userID}      # STRING: unix-seconds cutoff
 //
 // The user-sessions SET is a secondary index used by RevokeAllForUser
 // so we can wipe every active session for a given identity without
 // scanning the keyspace.
+//
+// The user-revoked STRING records a per-user "tokens with iat <= this
+// timestamp are no longer valid" cutoff. It is the mechanism that
+// makes stateless JWT revocation actually work: AuthMiddleware
+// consults it on every request via the SessionChecker interface, so
+// a Logout call propagates to every replica within one Redis round
+// trip without rotating the JWT signing secret. The cutoff TTLs at
+// the JWT TTL so the key gracefully self-cleans after no token it
+// could revoke remains valid.
 package session
 
 import (
@@ -56,6 +66,13 @@ func sessionKey(workspaceID uuid.UUID, sessionID string) string {
 // active session for a user.
 func userSessionsKey(workspaceID, userID uuid.UUID) string {
 	return fmt.Sprintf("ws:%s:user_sessions:%s", workspaceID.String(), userID.String())
+}
+
+// userRevokedKey returns the workspace-scoped STRING key recording
+// the per-user revocation cutoff (unix-seconds). Tokens with `iat`
+// less than or equal to this value are considered revoked.
+func userRevokedKey(workspaceID, userID uuid.UUID) string {
+	return fmt.Sprintf("ws:%s:user_revoked:%s", workspaceID.String(), userID.String())
 }
 
 // Set stores a session hash and registers it in the user's secondary
@@ -187,4 +204,86 @@ func (s *RedisSessionStore) RevokeAllForUser(ctx context.Context, workspaceID, u
 		return fmt.Errorf("redis session revoke-all: %w", err)
 	}
 	return nil
+}
+
+// RevokeUser records a per-user revocation cutoff: every token
+// issued at or before `at` for the given user in the given workspace
+// is considered revoked. AuthMiddleware consults this via IsRevoked
+// on every authenticated request, so the next request from any
+// replica sees the revocation within one Redis round trip.
+//
+// The cutoff is stored with a TTL matching the longest plausible JWT
+// lifetime (`ttl` argument, normally the API's TokenTTL) — after
+// that, no token the cutoff could revoke remains valid, so the key
+// can self-clean rather than accumulating per-user state forever.
+//
+// `at` is rounded to second precision because JWT `iat` is a numeric
+// date with second resolution; storing finer precision would let a
+// token issued in the same wall-clock second as the revocation
+// either slip past or be incorrectly rejected depending on rounding.
+// The conservative choice is "any token issued at or before the
+// revocation second is revoked", which matches the comparison in
+// IsRevoked.
+//
+// When `ttl` is zero we fall back to a 24-hour default that matches
+// middleware.TokenTTL. Storing zero or omitting the EXPIRE would
+// leak the key indefinitely.
+func (s *RedisSessionStore) RevokeUser(ctx context.Context, workspaceID, userID uuid.UUID, at time.Time, ttl time.Duration) error {
+	if ttl <= 0 {
+		ttl = 24 * time.Hour
+	}
+	cutoff := at.UTC().Unix()
+	key := userRevokedKey(workspaceID, userID)
+	// SET key value EX ttl — single round trip, atomic write +
+	// expiry. We use Set with an explicit TTL rather than SetEX
+	// for symmetry with the rest of the file (TxPipeline + Expire)
+	// because Set on go-redis honours the Expiration field on the
+	// options struct.
+	if err := s.client.Set(ctx, key, cutoff, ttl).Err(); err != nil {
+		return fmt.Errorf("redis revoke user: %w", err)
+	}
+	return nil
+}
+
+// IsRevoked reports whether the per-user revocation cutoff for the
+// given (workspace, user) is set to a value greater than or equal to
+// `issuedAt`. If no cutoff exists (redis.Nil), the user has never
+// been force-logged-out and the token is treated as valid.
+//
+// Callers should fail closed on transport errors: a flaky Redis must
+// not silently degrade revocation to a no-op. The middleware returns
+// 401 on any non-nil error.
+//
+// The comparison is `iat <= cutoff` so a token issued *in the same
+// second* as a revocation is considered revoked. This matches
+// RevokeUser's "tokens issued at or before this moment" contract and
+// avoids the second-rounding edge case where a JWT issued just before
+// logout would otherwise survive on a colocated wall-clock tick.
+func (s *RedisSessionStore) IsRevoked(ctx context.Context, workspaceID, userID uuid.UUID, issuedAt time.Time) (bool, error) {
+	raw, err := s.client.Get(ctx, userRevokedKey(workspaceID, userID)).Result()
+	if err != nil {
+		if errors.Is(err, redis.Nil) {
+			return false, nil
+		}
+		return false, fmt.Errorf("redis is-revoked: %w", err)
+	}
+	// Parse via a fixed-width integer rather than time.Parse: the
+	// stored value is the Unix second from RevokeUser. A malformed
+	// value (manual Redis surgery, corrupted memory) fails closed.
+	cutoff, perr := parseUnixSeconds(raw)
+	if perr != nil {
+		return false, fmt.Errorf("parse revoke cutoff: %w", perr)
+	}
+	return issuedAt.UTC().Unix() <= cutoff, nil
+}
+
+// parseUnixSeconds decodes the integer cutoff written by RevokeUser.
+// Pulled into a helper so the parse error path stays uniform and so
+// the IsRevoked logic reads as a single comparison.
+func parseUnixSeconds(raw string) (int64, error) {
+	var n int64
+	if _, err := fmt.Sscanf(raw, "%d", &n); err != nil {
+		return 0, err
+	}
+	return n, nil
 }

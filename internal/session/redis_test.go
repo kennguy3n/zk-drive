@@ -122,6 +122,123 @@ func TestUserSessionsIndexTTLNeverShrinks(t *testing.T) {
 	}
 }
 
+// TestRevokeUserAndIsRevoked exercises the per-user cutoff path that
+// powers WS-1's JWT revocation. The IsRevoked decision boundary is
+// inclusive ("iat <= cutoff") so a token issued in the same second
+// as the revocation is treated as revoked — the conservative choice
+// for the race between login completion and logout call.
+func TestRevokeUserAndIsRevoked(t *testing.T) {
+	store, _ := newTestStore(t)
+	ctx := context.Background()
+
+	userID := uuid.New()
+	wsID := uuid.New()
+	otherUser := uuid.New()
+	otherWs := uuid.New()
+
+	// Baseline: no cutoff key yet, IsRevoked must return false
+	// without error so first-time auth is not silently 401.
+	revoked, err := store.IsRevoked(ctx, wsID, userID, time.Now())
+	if err != nil {
+		t.Fatalf("is-revoked (no key): %v", err)
+	}
+	if revoked {
+		t.Fatal("IsRevoked must be false when no cutoff exists")
+	}
+
+	now := time.Now().UTC().Truncate(time.Second)
+	if err := store.RevokeUser(ctx, wsID, userID, now, time.Hour); err != nil {
+		t.Fatalf("revoke-user: %v", err)
+	}
+
+	cases := []struct {
+		name        string
+		issuedAt    time.Time
+		wantRevoked bool
+	}{
+		{"iat before cutoff", now.Add(-time.Minute), true},
+		{"iat exactly at cutoff", now, true},
+		{"iat one second after cutoff", now.Add(time.Second), false},
+		{"iat well after cutoff", now.Add(time.Hour), false},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			revoked, err := store.IsRevoked(ctx, wsID, userID, tc.issuedAt)
+			if err != nil {
+				t.Fatalf("is-revoked: %v", err)
+			}
+			if revoked != tc.wantRevoked {
+				t.Errorf("revoked: got %v, want %v", revoked, tc.wantRevoked)
+			}
+		})
+	}
+
+	// Cross-tenant isolation: revoking userID in wsID must not
+	// affect (otherUser, otherWs) nor (userID, otherWs).
+	if r, err := store.IsRevoked(ctx, otherWs, userID, now.Add(-time.Hour)); err != nil || r {
+		t.Errorf("cross-workspace leak: got revoked=%v err=%v, want revoked=false", r, err)
+	}
+	if r, err := store.IsRevoked(ctx, wsID, otherUser, now.Add(-time.Hour)); err != nil || r {
+		t.Errorf("cross-user leak: got revoked=%v err=%v, want revoked=false", r, err)
+	}
+}
+
+// TestRevokeUserTTL pins that the cutoff key self-cleans after the
+// TTL elapses, so we don't accumulate per-user state forever. Without
+// this, every logout in the system would permanently leak a Redis key.
+func TestRevokeUserTTL(t *testing.T) {
+	store, mr := newTestStore(t)
+	ctx := context.Background()
+
+	userID := uuid.New()
+	wsID := uuid.New()
+	now := time.Now().UTC()
+
+	if err := store.RevokeUser(ctx, wsID, userID, now, 30*time.Second); err != nil {
+		t.Fatalf("revoke-user: %v", err)
+	}
+	revoked, err := store.IsRevoked(ctx, wsID, userID, now.Add(-time.Minute))
+	if err != nil || !revoked {
+		t.Fatalf("immediately after revoke: revoked=%v err=%v", revoked, err)
+	}
+
+	mr.FastForward(time.Minute)
+
+	revoked, err = store.IsRevoked(ctx, wsID, userID, now.Add(-time.Minute))
+	if err != nil {
+		t.Fatalf("post-ttl is-revoked: %v", err)
+	}
+	if revoked {
+		t.Fatal("cutoff key should self-clean after TTL; got revoked=true")
+	}
+}
+
+// TestRevokeUserZeroTTLFallsBackToDefault confirms the safety net
+// against a caller accidentally passing ttl=0, which would otherwise
+// SET the key without an EXPIRE and leak it forever.
+func TestRevokeUserZeroTTLFallsBackToDefault(t *testing.T) {
+	store, mr := newTestStore(t)
+	ctx := context.Background()
+
+	userID := uuid.New()
+	wsID := uuid.New()
+	now := time.Now().UTC()
+
+	if err := store.RevokeUser(ctx, wsID, userID, now, 0); err != nil {
+		t.Fatalf("revoke-user: %v", err)
+	}
+	ttl := mr.TTL(userRevokedKey(wsID, userID))
+	if ttl <= 0 {
+		t.Fatalf("expected positive TTL on cutoff key, got %v", ttl)
+	}
+	// The default is 24h; allow some slack because miniredis
+	// returns the remaining TTL at observation time.
+	if ttl < 23*time.Hour {
+		t.Errorf("default TTL too short: got %v, want >= 23h", ttl)
+	}
+}
+
 func TestSessionTTL(t *testing.T) {
 	store, mr := newTestStore(t)
 	ctx := context.Background()
