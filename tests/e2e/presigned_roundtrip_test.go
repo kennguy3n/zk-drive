@@ -205,7 +205,7 @@ func doJSON(t *testing.T, client *http.Client, method, fullURL, token string, in
 	if err != nil {
 		t.Fatalf("%s %s: %v", method, fullURL, err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	respBody, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		t.Fatalf("%s %s: status=%d body=%s", method, fullURL, resp.StatusCode, string(respBody))

@@ -173,7 +173,7 @@ func signedRequest(t *testing.T, payload []byte, secret string) *http.Request {
 	t.Helper()
 	ts := time.Now().Unix()
 	mac := hmac.New(sha256.New, []byte(secret))
-	fmt.Fprintf(mac, "%d", ts)
+	_, _ = fmt.Fprintf(mac, "%d", ts)
 	mac.Write([]byte("."))
 	mac.Write(payload)
 	sig := hex.EncodeToString(mac.Sum(nil))

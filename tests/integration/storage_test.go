@@ -173,7 +173,7 @@ func TestUploadConfirmDownloadRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("get download url: %v", err)
 	}
-	defer getResp.Body.Close()
+	defer func() { _ = getResp.Body.Close() }()
 	if getResp.StatusCode != http.StatusOK {
 		t.Fatalf("get download url: status=%d", getResp.StatusCode)
 	}

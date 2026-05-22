@@ -322,7 +322,7 @@ func (p *Provisioner) signupTenant(ctx context.Context, workspaceID uuid.UUID, w
 	if err != nil {
 		return nil, fmt.Errorf("call console signup: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode/100 != 2 {
 		// Drain a small slice of the body for diagnostics; never log it
 		// in full because callers may have included credentials.

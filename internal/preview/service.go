@@ -185,7 +185,7 @@ func (s *Service) downloadObject(ctx context.Context, key string) ([]byte, error
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode/100 != 2 {
 		return nil, fmt.Errorf("get %s: status %d", key, resp.StatusCode)
 	}
@@ -216,7 +216,7 @@ func (s *Service) uploadObject(ctx context.Context, key string, body []byte) err
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode/100 != 2 {
 		return fmt.Errorf("put %s: status %d", key, resp.StatusCode)
 	}

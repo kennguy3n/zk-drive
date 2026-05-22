@@ -131,7 +131,7 @@ func (a *ArchiveService) fetchAndCompress(ctx context.Context, url string) ([]by
 	if err != nil {
 		return nil, fmt.Errorf("archive: get hot object: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode/100 != 2 {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
 		return nil, fmt.Errorf("archive: get hot object: %d %s", resp.StatusCode, string(body))
@@ -158,7 +158,7 @@ func (a *ArchiveService) uploadArchive(ctx context.Context, url string, body []b
 	if err != nil {
 		return fmt.Errorf("archive: put archive: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode/100 != 2 {
 		b, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
 		return fmt.Errorf("archive: put archive: %d %s", resp.StatusCode, string(b))
