@@ -351,6 +351,16 @@ func AccessLog(next http.Handler) http.Handler {
 		}
 		ctx = context.WithValue(ctx, chimw.RequestIDKey, reqID)
 
+		// Echo the resolved request_id back to the client via the
+		// X-Request-Id response header. This is the same contract
+		// chimw.RequestID provided before WS-9 — clients that record
+		// the server-assigned id from their HTTP response can use it
+		// to correlate a client-side error report to the server-side
+		// log line in tools like Datadog / Honeycomb. Without this
+		// header, the access log's request_id becomes a private
+		// server-only field with no path back to the client.
+		w.Header().Set("X-Request-Id", reqID)
+
 		// Build the request-scoped logger AND install the
 		// shared slot so inner chi middleware can mutate it
 		// via Enrich (auth middleware uses this path to attach

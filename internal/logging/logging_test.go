@@ -667,6 +667,59 @@ func TestSanitizeRequestIDRejectsHostileInputs(t *testing.T) {
 	}
 }
 
+// TestAccessLogEchoesRequestIDHeader pins the response-side
+// half of the request_id contract: the resolved id (whether
+// echoed from a client-supplied X-Request-Id or freshly
+// generated server-side) MUST appear in the X-Request-Id
+// response header so clients can record it for later correlation
+// when they file a bug report. This matches the contract
+// chimw.RequestID provided before WS-9 removed it.
+func TestAccessLogEchoesRequestIDHeader(t *testing.T) {
+	wrapped := AccessLog(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	t.Run("echoes client-supplied id verbatim", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/x", nil)
+		req.Header.Set("X-Request-Id", "client-supplied-12345")
+		rec := httptest.NewRecorder()
+		wrapped.ServeHTTP(rec, req)
+		if got := rec.Header().Get("X-Request-Id"); got != "client-supplied-12345" {
+			t.Errorf("X-Request-Id response header = %q, want %q", got, "client-supplied-12345")
+		}
+	})
+
+	t.Run("emits generated id when client supplied none", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/x", nil)
+		rec := httptest.NewRecorder()
+		wrapped.ServeHTTP(rec, req)
+		got := rec.Header().Get("X-Request-Id")
+		if got == "" {
+			t.Fatalf("X-Request-Id response header empty; expected generated UUID")
+		}
+		// UUIDv4 is 36 chars; the generated id should at least
+		// look like one (not be the literal placeholder, etc.).
+		if len(got) < 16 {
+			t.Errorf("X-Request-Id %q looks too short to be a generated correlation id", got)
+		}
+	})
+
+	t.Run("hostile client header replaced with generated id", func(t *testing.T) {
+		hostile := strings.Repeat("a", maxRequestIDLen+1)
+		req := httptest.NewRequest(http.MethodGet, "/x", nil)
+		req.Header.Set("X-Request-Id", hostile)
+		rec := httptest.NewRecorder()
+		wrapped.ServeHTTP(rec, req)
+		got := rec.Header().Get("X-Request-Id")
+		if got == hostile {
+			t.Fatalf("X-Request-Id echo leaked hostile client header: %s", got)
+		}
+		if got == "" {
+			t.Fatalf("X-Request-Id response header empty; expected generated UUID")
+		}
+	})
+}
+
 // TestAccessLogDropsHostileRequestIDAndGeneratesFresh pins the
 // integration contract: a hostile X-Request-Id (over-long, or
 // containing control characters) must not appear in the emitted
