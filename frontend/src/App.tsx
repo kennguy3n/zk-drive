@@ -13,6 +13,11 @@ const BillingPage = lazy(() => import("./pages/BillingPage"));
 const PlacementPage = lazy(() => import("./pages/PlacementPage"));
 const EncryptionPage = lazy(() => import("./pages/EncryptionPage"));
 const KChatRoomsPage = lazy(() => import("./pages/KChatRoomsPage"));
+// PrivacyPage is the customer-facing explainer for the two per-folder
+// privacy modes (PROPOSAL.md §3.3). Linked from the FileBrowserPage
+// header and CreateFolderDialog, so it sits behind RequireAuth like
+// the rest of the /drive surface.
+const PrivacyPage = lazy(() => import("./pages/PrivacyPage"));
 
 // App-level routing. Unauthenticated visitors hit /login; everyone else
 // lands in the file browser at /drive. The :folderId variant lets us keep
@@ -42,6 +47,14 @@ export default function App() {
             element={
               <RequireAuth>
                 <FileBrowserPage />
+              </RequireAuth>
+            }
+          />
+          <Route
+            path="/drive/privacy"
+            element={
+              <RequireAuth>
+                <PrivacyPage />
               </RequireAuth>
             }
           />

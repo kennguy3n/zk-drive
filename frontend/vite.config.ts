@@ -24,8 +24,22 @@ export default defineConfig({
       },
       workbox: {
         // Precache the static app shell only. API responses (presigned URLs,
-        // CMK URIs, admin data) are intentionally NOT runtime-cached: in a
-        // zero-knowledge product they must not survive logout in Cache Storage.
+        // CMK URIs, admin data) are intentionally NOT runtime-cached:
+        //
+        // - For confidential-managed folders (default mode) caching response
+        //   bodies would leak server-decrypted content into the browser's
+        //   Cache Storage past logout, which directly contradicts the
+        //   "decrypted only in the gateway / server memory" boundary that
+        //   makes the managed mode honest to call "confidential."
+        // - For strict-zero-knowledge folders the gateway never sees
+        //   plaintext, but the SPA does once it decrypts via the client
+        //   SDK; caching that plaintext (or the presigned URL that resolves
+        //   to ciphertext under a session-lived token) would similarly
+        //   defeat the contract.
+        //
+        // Hence: shell only, no runtime API caching. The navigateFallback
+        // denylist on `^/api/` belt-and-braces this against a misconfigured
+        // Workbox runtime caching rule that might be added later.
         globPatterns: ["**/*.{js,css,html,ico,png,svg}"],
         navigateFallback: "/index.html",
         navigateFallbackDenylist: [/^\/api\//],
