@@ -311,10 +311,27 @@ func (h *Handler) ListWorkspaces(w http.ResponseWriter, r *http.Request) {
 
 // CreateWorkspace creates a new workspace and makes the authenticated user
 // its admin.
+//
+// Admin-only: creating a workspace makes the caller an admin of the
+// new workspace, which is effectively a privilege grant — a member of
+// an existing workspace must not be able to self-promote to admin of
+// a fresh workspace they spin up alongside. Members can still BE
+// invited to additional workspaces (and become admin there if invited
+// as admin), but the act of creating a workspace from scratch
+// requires they already hold admin in their current workspace.
+//
+// First-time signup is unaffected: the signup flow (api/auth.Signup)
+// creates a workspace + first admin user atomically via a separate
+// /api/auth/signup endpoint that does not pass through this handler.
 func (h *Handler) CreateWorkspace(w http.ResponseWriter, r *http.Request) {
 	userID, ok := middleware.UserIDFromContext(r.Context())
 	if !ok {
 		http.Error(w, "unauthenticated", http.StatusUnauthorized)
+		return
+	}
+	role, _ := middleware.RoleFromContext(r.Context())
+	if role != user.RoleAdmin {
+		http.Error(w, "admin role required", http.StatusForbidden)
 		return
 	}
 	var req createWorkspaceRequest
@@ -341,6 +358,18 @@ func (h *Handler) CreateWorkspace(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "create workspace: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
+	// Audit the privileged action so a security review can answer
+	// "who spun up a new workspace and when". Best-effort: a nil
+	// audit service silently drops via h.logAudit. Note that the
+	// audit entry is scoped to the SOURCE workspace (the admin's
+	// current workspace) so the chronology of admin actions for a
+	// workspace stays together in one timeline; the new workspace's
+	// id is recorded in the resource_id column (ws.ID), so the
+	// metadata only needs to carry context that ISN'T already on
+	// the audit row (i.e. the human-readable name).
+	h.logAudit(r.Context(), r, audit.ActionWorkspaceCreate, "workspace", &ws.ID, map[string]any{
+		"new_workspace_name": ws.Name,
+	})
 	writeJSON(w, http.StatusCreated, ws)
 }
 

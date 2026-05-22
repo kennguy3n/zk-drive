@@ -27,6 +27,7 @@ const (
 	ActionAdminUserInvite    = "admin.user_invite"
 	ActionAdminUserDeactivate = "admin.user_deactivate"
 	ActionAdminUserRoleChange = "admin.user_role_change"
+	ActionWorkspaceCreate    = "workspace.create"
 	ActionWorkspaceUpdate    = "workspace.update"
 	ActionRetentionPolicyUpsert = "retention.policy_upsert"
 	ActionRetentionPolicyDelete = "retention.policy_delete"
