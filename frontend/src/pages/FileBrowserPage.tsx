@@ -160,7 +160,21 @@ export default function FileBrowserPage() {
             <h2 style={{ fontSize: 14, color: "#6b7280", textTransform: "uppercase", margin: "8px 0" }}>
               Folders
             </h2>
-            <ul style={{ listStyle: "none", padding: 0, display: "grid", gap: 8, gridTemplateColumns: "repeat(auto-fill, minmax(200px, 1fr))" }}>
+            <ul
+              style={{
+                listStyle: "none",
+                padding: 0,
+                display: "grid",
+                gap: 8,
+                // Each card must fit: name (truncating) + privacy badge
+                // ('strict zero-knowledge' is ~140 px) + Share + Delete.
+                // 260 px keeps the name readable at the worst-case combo
+                // (long folder name + strict-ZK badge) and degrades to
+                // ellipsis instead of squeezing the link to zero width
+                // (which Playwright reports as 'hidden').
+                gridTemplateColumns: "repeat(auto-fill, minmax(260px, 1fr))",
+              }}
+            >
               {subfolders.map((f) => (
                 <li
                   key={f.id}
@@ -174,8 +188,36 @@ export default function FileBrowserPage() {
                     alignItems: "center",
                   }}
                 >
-                  <span style={{ display: "flex", alignItems: "center", gap: 6, minWidth: 0 }}>
-                    <Link to={`/drive/folder/${f.id}`} style={{ overflow: "hidden", textOverflow: "ellipsis" }}>
+                  <span
+                    style={{
+                      display: "flex",
+                      alignItems: "center",
+                      gap: 6,
+                      minWidth: 0,
+                      flex: 1,
+                    }}
+                  >
+                    {/*
+                      flex:1 + minWidth:0 + whiteSpace:nowrap on the link
+                      gives the folder name layout priority over the
+                      badge: the badge keeps its natural width (it has
+                      whiteSpace:nowrap), the name grows to fill the
+                      rest of the card, and overflow truncates with an
+                      ellipsis. Without flex:1 the link's intrinsic
+                      content width competes with the badge inside the
+                      flex container and can collapse to zero, which
+                      Playwright treats as a hidden element.
+                    */}
+                    <Link
+                      to={`/drive/folder/${f.id}`}
+                      style={{
+                        flex: 1,
+                        minWidth: 0,
+                        overflow: "hidden",
+                        textOverflow: "ellipsis",
+                        whiteSpace: "nowrap",
+                      }}
+                    >
                       {f.name}
                     </Link>
                     <EncryptionBadge mode={f.encryption_mode} />

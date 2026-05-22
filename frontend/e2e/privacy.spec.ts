@@ -69,9 +69,20 @@ test.describe("privacy", () => {
     await page.locator('input[name="encmode"][value="strict_zk"]').check();
     await expect(page.getByRole("alert")).toContainText(/irreversible/i);
 
-    // The "Learn how each mode works" link sends us to the privacy
-    // explainer.
+    // The "Learn how each mode works" link opens the privacy explainer
+    // in a new tab so the in-flight folder name + mode-radio selection
+    // in this dialog survive the click. Waiting on the `popup` event
+    // is how Playwright observes target=_blank navigations: the
+    // original `page` stays on /drive (the dialog is still mounted),
+    // and the new tab gets exposed as `popup`.
+    const popupPromise = page.waitForEvent("popup");
     await page.getByRole("link", { name: /learn how each mode works/i }).click();
-    await expect(page).toHaveURL(/\/drive\/privacy$/);
+    const popup = await popupPromise;
+    await popup.waitForLoadState();
+    await expect(popup).toHaveURL(/\/drive\/privacy$/);
+    // The original page (with the dialog still open) must still be
+    // on /drive — proving the click did NOT unmount FileBrowserPage.
+    await expect(page).toHaveURL(/\/drive$/);
+    await expect(page.getByText(/privacy mode/i)).toBeVisible();
   });
 });
