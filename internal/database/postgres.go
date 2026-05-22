@@ -102,8 +102,19 @@ const MinRequiredMigrationVersion = "024_row_level_security"
 var ErrMigrationsOutOfDate = errors.New("database migrations are out of date: run the migrate binary first")
 
 // RequireMinMigrationVersion verifies that MinRequiredMigrationVersion
-// (and every migration ordered before it lexicographically) has been
-// applied to the database. Returns ErrMigrationsOutOfDate if not.
+// has been applied to the database. Returns ErrMigrationsOutOfDate
+// if it has not.
+//
+// This is a spot-check on the named version, NOT a gap-scan of every
+// predecessor (1..N-1). Migrations are applied in lexicographic
+// order by Migrate() under an advisory lock that serialises
+// concurrent runs, so the presence of version N implies versions
+// 1..N-1 are also present unless an operator has manually mutated
+// schema_migrations. The trade-off is intentional: a gap-scan would
+// cost an extra round-trip per startup for a check that catches a
+// failure mode (manual row deletion) we don't actually defend
+// against at any other layer. WS-18 (down-migration CI) is the
+// right place to add gap detection if we ever want it.
 //
 // This is the entrypoint check both cmd/server and cmd/worker run at
 // startup, replacing the old behaviour of calling Migrate() inline.
@@ -157,23 +168,35 @@ func Migrate(ctx context.Context, pool *pgxpool.Pool, dir string) error {
 	if err != nil {
 		return fmt.Errorf("acquire lock connection: %w", err)
 	}
-	defer lockConn.Release()
 
 	if _, err := lockConn.Exec(ctx, "SELECT pg_advisory_lock($1)", migrateAdvisoryLockKey); err != nil {
+		lockConn.Release()
 		return fmt.Errorf("acquire migration advisory lock: %w", err)
 	}
 	defer func() {
-		// Best-effort unlock. If the parent ctx is already cancelled
-		// (e.g. SIGINT during a long migration) we still want to
-		// release; use a fresh background context with a tight
-		// deadline so the deferred unlock doesn't block shutdown.
-		// The session-scoped lock would auto-release on connection
-		// close anyway when lockConn.Release() runs above, so this
-		// is defence-in-depth for the happy path where Release()
-		// returns the conn to the pool.
+		// Try the explicit unlock first — happy path returns a
+		// clean, lock-free connection to the pool, reusable for any
+		// subsequent Migrate() call from the same long-lived process
+		// (e.g. the integration test harness re-running setup
+		// between subtests, or a future caller in a worker that
+		// re-validates the schema).
 		unlockCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		_, _ = lockConn.Exec(unlockCtx, "SELECT pg_advisory_unlock($1)", migrateAdvisoryLockKey)
+		if _, err := lockConn.Exec(unlockCtx, "SELECT pg_advisory_unlock($1)", migrateAdvisoryLockKey); err == nil {
+			lockConn.Release()
+			return
+		}
+		// Unlock failed (typically the parent ctx was cancelled
+		// mid-migration). Don't return the conn to the pool with a
+		// stale advisory lock attached — future Migrate() calls on
+		// the same pool could block indefinitely on the leaked
+		// lock. Hijack the conn out of the pool and close the raw
+		// pgx connection so the session ends and Postgres releases
+		// the lock at the backend.
+		rawConn := lockConn.Hijack()
+		closeCtx, closeCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer closeCancel()
+		_ = rawConn.Close(closeCtx)
 	}()
 
 	if _, err := pool.Exec(ctx, `CREATE TABLE IF NOT EXISTS schema_migrations (

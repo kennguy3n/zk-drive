@@ -44,7 +44,9 @@ jobs:
           cache-dependency-path: frontend/package-lock.json
 
       - name: Build backend
-        run: go build -o bin/server ./cmd/server
+        run: |
+          go build -o bin/server ./cmd/server
+          go build -o bin/migrate ./cmd/migrate
 
       - name: Install frontend deps
         working-directory: frontend
@@ -53,6 +55,13 @@ jobs:
       - name: Build frontend
         working-directory: frontend
         run: npm run build
+
+      - name: Apply migrations
+        run: ./bin/migrate
+        env:
+          DATABASE_URL: postgres://test:test@localhost:5432/zkdrive_test?sslmode=disable
+          JWT_SECRET: test-secret
+          MIGRATIONS_DIR: migrations
 
       - name: Start server
         run: |
