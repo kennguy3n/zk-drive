@@ -31,6 +31,7 @@ import (
 	"github.com/kennguy3n/zk-drive/internal/fabric"
 	"github.com/kennguy3n/zk-drive/internal/file"
 	"github.com/kennguy3n/zk-drive/internal/folder"
+	"github.com/kennguy3n/zk-drive/internal/health"
 	"github.com/kennguy3n/zk-drive/internal/kchat"
 	"github.com/kennguy3n/zk-drive/internal/notification"
 	"github.com/kennguy3n/zk-drive/internal/permission"
@@ -191,6 +192,21 @@ func setupEnv(t *testing.T) *testEnv {
 
 	r := chi.NewRouter()
 	r.Use(chimw.Recoverer)
+
+	// Mirror production wiring for the readiness probe. In the
+	// integration harness only Postgres is a real dependency — the
+	// fake S3 endpoint, miniredis, and absent NATS are all stubs or
+	// short-circuited optional deps, so wiring StorageChecker etc.
+	// would either trigger a HeadBucket against an unreachable URL
+	// (giving spurious 503s) or duplicate the unit-test coverage in
+	// internal/health/checkers_test.go. The production wiring in
+	// cmd/server/main.go DOES register all four checkers.
+	r.Get("/readyz", health.NewService(
+		[]health.Checker{
+			health.NewPostgresChecker(pool),
+		},
+		health.DefaultCheckTimeout,
+	).ReadyHandler())
 
 	r.Route("/api", func(r chi.Router) {
 		r.Route("/auth", func(r chi.Router) {

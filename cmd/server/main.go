@@ -35,6 +35,7 @@ import (
 	"github.com/kennguy3n/zk-drive/internal/fabric"
 	"github.com/kennguy3n/zk-drive/internal/file"
 	"github.com/kennguy3n/zk-drive/internal/folder"
+	"github.com/kennguy3n/zk-drive/internal/health"
 	"github.com/kennguy3n/zk-drive/internal/kchat"
 	"github.com/kennguy3n/zk-drive/internal/jobs"
 	"github.com/kennguy3n/zk-drive/internal/notification"
@@ -143,7 +144,13 @@ func run() error {
 	// becomes a no-op. Logging a best-effort connect failure (rather
 	// than returning it) keeps the API plane working in local dev
 	// stacks that don't run NATS.
+	//
+	// natsConn is retained even after JetStream is wired so the
+	// /readyz deep health-check can observe NATS reachability via
+	// nc.Status(). A nil natsConn signals "NATS not configured" to
+	// the health checker (which then short-circuits with OK).
 	var jobPublisher *jobs.Publisher
+	var natsConn *nats.Conn
 	if natsURL := os.Getenv("NATS_URL"); natsURL != "" {
 		nc, nerr := nats.Connect(natsURL,
 			nats.Name("zk-drive-server"),
@@ -159,6 +166,7 @@ func run() error {
 				nc.Close()
 			} else {
 				jobPublisher = jobs.NewPublisher(js)
+				natsConn = nc
 				log.Printf("nats: connected to %s, post-upload jobs enabled", natsURL)
 				defer nc.Drain() //nolint:errcheck // best-effort drain
 			}
@@ -345,6 +353,11 @@ func run() error {
 	r.Use(chimw.Logger)
 	r.Use(chimw.Recoverer)
 
+	// /healthz is a SHALLOW liveness probe: "the process is alive
+	// and HTTP is up." It never pings downstream dependencies
+	// because k8s interprets a failing liveness probe as "restart
+	// the pod," which is the wrong response to a transient Redis
+	// / Postgres outage.
 	r.Get("/healthz", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
@@ -353,6 +366,22 @@ func run() error {
 			"version": version.Version,
 		})
 	})
+
+	// /readyz is the DEEP readiness probe — it actually pings every
+	// configured downstream dependency under a per-check timeout.
+	// k8s should map this to the readiness probe so a Redis / NATS /
+	// S3 outage takes the affected pod out of the service mesh
+	// without triggering a restart loop. See internal/health for
+	// the per-check contract.
+	r.Get("/readyz", health.NewService(
+		[]health.Checker{
+			health.NewPostgresChecker(pool),
+			health.NewRedisChecker(redisClient),
+			health.NewStorageChecker(storageClient),
+			health.NewNATSChecker(natsConn),
+		},
+		health.DefaultCheckTimeout,
+	).ReadyHandler())
 
 	r.Route("/api", func(r chi.Router) {
 		r.Route("/auth", func(r chi.Router) {
