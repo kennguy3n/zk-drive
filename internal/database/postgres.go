@@ -10,10 +10,21 @@ import (
 	"strings"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/kennguy3n/zk-drive/internal/tenantctx"
 )
 
-// Connect opens a pgx connection pool against the supplied DSN.
+// Connect opens a pgx connection pool against the supplied DSN. The
+// pool is configured with a PrepareConn hook that binds the
+// `app.workspace_id` GUC on every acquire to the workspace UUID
+// stored on the caller's context (via tenantctx.WithWorkspaceID).
+// Migration 024_row_level_security.up.sql relies on that GUC for
+// its tenant_isolation policies; when no workspace is set on the
+// context the hook clears the GUC so unauthenticated paths (login,
+// signup, public share-link resolution) and background workers fall
+// back to the RLS bypass branch.
 func Connect(ctx context.Context, dsn string) (*pgxpool.Pool, error) {
 	cfg, err := pgxpool.ParseConfig(dsn)
 	if err != nil {
@@ -22,6 +33,7 @@ func Connect(ctx context.Context, dsn string) (*pgxpool.Pool, error) {
 	cfg.MaxConns = 10
 	cfg.MinConns = 1
 	cfg.MaxConnIdleTime = 30 * time.Minute
+	cfg.PrepareConn = bindTenantGUC
 
 	pool, err := pgxpool.NewWithConfig(ctx, cfg)
 	if err != nil {
@@ -34,6 +46,29 @@ func Connect(ctx context.Context, dsn string) (*pgxpool.Pool, error) {
 		return nil, fmt.Errorf("ping database: %w", err)
 	}
 	return pool, nil
+}
+
+// bindTenantGUC is invoked by pgxpool every time a connection is
+// checked out. It overwrites the session-level `app.workspace_id`
+// GUC with the workspace UUID on ctx, or clears it (empty string)
+// when no workspace is bound. Unconditional overwrite is required
+// because the GUC is session-scoped: a previous owner's tenant must
+// not leak to the next acquirer.
+//
+// Returning (true, error) signals pgxpool to release the connection
+// back to the pool while propagating the error to the caller — the
+// SET runs against a healthy connection, and a SET failure indicates
+// a transient backend issue, not a corrupted conn. A subsequent
+// acquire will re-run the hook on a fresh checkout.
+func bindTenantGUC(ctx context.Context, conn *pgx.Conn) (bool, error) {
+	value := ""
+	if wsID, ok := tenantctx.WorkspaceIDFromContext(ctx); ok {
+		value = wsID.String()
+	}
+	if _, err := conn.Exec(ctx, "SELECT set_config('app.workspace_id', $1, false)", value); err != nil {
+		return true, fmt.Errorf("bind app.workspace_id: %w", err)
+	}
+	return true, nil
 }
 
 // Migrate runs all forward SQL migrations in dir that have not yet been

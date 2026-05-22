@@ -5,14 +5,24 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/alicebob/miniredis/v2"
 	"github.com/google/uuid"
 	"github.com/redis/go-redis/v9"
+
+	"github.com/kennguy3n/zk-drive/internal/tenantctx"
 )
 
 // newTestRedis returns a fresh in-process miniredis and a connected
-// client. The client is closed and the server stopped via t.Cleanup.
+// client. The helper guarantees the returned client is responsive
+// before returning — on heavily-loaded CI runners (where this test
+// previously flaked under -race) miniredis.Run() can return before
+// the kernel's accept queue is hot, causing the first command from
+// go-redis's pool to fail with "connection refused after 5
+// attempts" and trip the fail-open branch. A short PING wait
+// converts that flake into a deterministic test setup.
+// The client is closed and the server stopped via t.Cleanup.
 func newTestRedis(t *testing.T) (*miniredis.Miniredis, *redis.Client) {
 	t.Helper()
 	mr, err := miniredis.Run()
@@ -22,7 +32,24 @@ func newTestRedis(t *testing.T) (*miniredis.Miniredis, *redis.Client) {
 	t.Cleanup(mr.Close)
 	c := redis.NewClient(&redis.Options{Addr: mr.Addr()})
 	t.Cleanup(func() { _ = c.Close() })
-	return mr, c
+
+	// Wait until the client can actually reach the listener. This
+	// is a defence against listener / accept-queue races on slow
+	// CI runners — Run() only guarantees net.Listen() succeeded,
+	// not that the accept goroutine is scheduled.
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+		err := c.Ping(ctx).Err()
+		cancel()
+		if err == nil {
+			return mr, c
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("miniredis ping never succeeded: %v", err)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 }
 
 // authedRequest fakes a request that has already been processed by
@@ -31,7 +58,7 @@ func newTestRedis(t *testing.T) (*miniredis.Miniredis, *redis.Client) {
 func authedRequest(userID, workspaceID uuid.UUID) *http.Request {
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
 	ctx := context.WithValue(req.Context(), userIDContextKey, userID)
-	ctx = context.WithValue(ctx, workspaceIDContextKey, workspaceID)
+	ctx = tenantctx.WithWorkspaceID(ctx, workspaceID)
 	return req.WithContext(ctx)
 }
 

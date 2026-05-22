@@ -9,6 +9,8 @@ import (
 
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/google/uuid"
+
+	"github.com/kennguy3n/zk-drive/internal/tenantctx"
 )
 
 // TokenTTL is the default validity of issued JWTs.
@@ -25,11 +27,16 @@ type Claims struct {
 type contextKey string
 
 const (
-	claimsContextKey      contextKey = "zkdrive.claims"
-	userIDContextKey      contextKey = "zkdrive.user_id"
-	workspaceIDContextKey contextKey = "zkdrive.workspace_id"
-	roleContextKey        contextKey = "zkdrive.role"
+	claimsContextKey contextKey = "zkdrive.claims"
+	userIDContextKey contextKey = "zkdrive.user_id"
+	roleContextKey   contextKey = "zkdrive.role"
 )
+
+// workspaceID is stored via internal/tenantctx so the pgxpool
+// PrepareConn hook in internal/database can read the same value
+// without forming an import cycle on this package. The accessor
+// below remains the public entrypoint for handler code so other
+// packages don't grow a direct import on tenantctx.
 
 // IssueToken signs and returns a new JWT with zk-drive's standard claims.
 func IssueToken(secret string, userID, workspaceID uuid.UUID, role string, ttl time.Duration) (string, time.Time, error) {
@@ -176,7 +183,7 @@ func AuthMiddleware(secret string, checker SessionChecker) func(http.Handler) ht
 func withClaims(ctx context.Context, c *Claims) context.Context {
 	ctx = context.WithValue(ctx, claimsContextKey, c)
 	ctx = context.WithValue(ctx, userIDContextKey, c.UserID)
-	ctx = context.WithValue(ctx, workspaceIDContextKey, c.WorkspaceID)
+	ctx = tenantctx.WithWorkspaceID(ctx, c.WorkspaceID)
 	ctx = context.WithValue(ctx, roleContextKey, c.Role)
 	return ctx
 }
@@ -194,10 +201,24 @@ func UserIDFromContext(ctx context.Context) (uuid.UUID, bool) {
 }
 
 // WorkspaceIDFromContext returns the workspace id bound to the current
-// request by auth / tenant middleware.
+// request by auth / tenant middleware. It delegates to
+// tenantctx.WorkspaceIDFromContext so handler code and the database
+// layer agree on a single canonical context key.
 func WorkspaceIDFromContext(ctx context.Context) (uuid.UUID, bool) {
-	v, ok := ctx.Value(workspaceIDContextKey).(uuid.UUID)
-	return v, ok
+	return tenantctx.WorkspaceIDFromContext(ctx)
+}
+
+// WithWorkspaceID returns a child context tagged with workspaceID so
+// downstream handlers (and the pgxpool PrepareConn hook that binds
+// `app.workspace_id` for row-level-security policies) see the tenant
+// scope. It is the public counterpart to WorkspaceIDFromContext and
+// the canonical entry point for handler / service code that needs to
+// attach a workspace id to a context produced outside the JWT auth
+// path (e.g. service-to-service calls, internal admin tools, tests).
+// It delegates to tenantctx.WithWorkspaceID to keep the api/middleware
+// and internal/database packages on the same canonical context key.
+func WithWorkspaceID(ctx context.Context, workspaceID uuid.UUID) context.Context {
+	return tenantctx.WithWorkspaceID(ctx, workspaceID)
 }
 
 // RoleFromContext returns the authenticated user's role within the workspace.
