@@ -1,0 +1,22 @@
+# golangci-lint v2 config. Pinning the linter set explicitly here
+# (rather than relying on golangci-lint's default-changing-per-release
+# behaviour) means a future version bump can't silently introduce new
+# findings. The set below matches the v1 defaults — gosimple was
+# folded into staticcheck in v2.0, so we don't list it separately.
+#
+# When adding a new linter, do it here and in a dedicated PR so
+# pre-existing findings can be triaged in isolation from CI plumbing.
+
+version: "2"
+
+run:
+  timeout: 5m
+
+linters:
+  default: none
+  enable:
+    - errcheck
+    - govet
+    - ineffassign
+    - staticcheck
+    - unused
