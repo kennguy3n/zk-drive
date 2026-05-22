@@ -84,14 +84,37 @@ func (a *ArchiveService) ArchiveVersion(ctx context.Context, versionID uuid.UUID
 // are collected and the slice of failed ids is returned alongside the
 // first wrapped error so the caller can retry the failures later. A
 // single failure does not abort the batch — archiving is idempotent.
+//
+// On context cancellation the returned slice contains both the items
+// that previously failed and every item not yet attempted. Items that
+// already archived successfully are excluded so callers don't redo
+// completed work on retry.
 func (a *ArchiveService) ArchiveVersions(ctx context.Context, ids []uuid.UUID) ([]uuid.UUID, error) {
+	return archiveBatch(ctx, ids, a.ArchiveVersion)
+}
+
+// archiveBatch is the testable batching loop separated from the
+// *ArchiveService receiver so unit tests can exercise the iteration,
+// error-collection, and cancellation semantics without standing up a
+// real database or S3 client.
+//
+// On context cancellation the returned error joins ctx.Err() with
+// any previously-captured per-item error via errors.Join, so callers
+// keep both the cancellation signal AND the diagnostic chain that
+// explains why earlier items failed. When no item failed before the
+// cancel, errors.Join wraps only ctx.Err() (it does NOT return
+// ctx.Err() identically — a direct `err == context.Canceled`
+// equality check will fail; callers must use
+// `errors.Is(err, context.Canceled)`, which is the idiomatic Go
+// pattern this API expects and which continues to work unchanged).
+func archiveBatch(ctx context.Context, ids []uuid.UUID, archive func(context.Context, uuid.UUID) error) ([]uuid.UUID, error) {
 	var failed []uuid.UUID
 	var firstErr error
-	for _, id := range ids {
+	for i, id := range ids {
 		if ctx.Err() != nil {
-			return append(failed, ids[len(failed):]...), ctx.Err()
+			return append(failed, ids[i:]...), errors.Join(firstErr, ctx.Err())
 		}
-		if err := a.ArchiveVersion(ctx, id); err != nil {
+		if err := archive(ctx, id); err != nil {
 			failed = append(failed, id)
 			if firstErr == nil {
 				firstErr = err
