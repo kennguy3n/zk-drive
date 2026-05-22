@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -38,6 +39,23 @@ type Repository interface {
 	MoveFile(ctx context.Context, workspaceID, fileID, folderID uuid.UUID) error
 	UpdateFileSize(ctx context.Context, workspaceID, fileID uuid.UUID, sizeBytes int64) error
 	ListFilesByFolder(ctx context.Context, workspaceID, folderID uuid.UUID) ([]*File, error)
+
+	// SetPendingUploadObjectKey records the presigned-PUT object_key
+	// on the file row so the orphan-object GC reconciler can later
+	// reclaim the S3 object if ConfirmUpload never completes (or is
+	// rejected for quota / suspended-tenant / etc.). Called from the
+	// UploadURL handler immediately after CreateFile + key derivation.
+	SetPendingUploadObjectKey(ctx context.Context, workspaceID, fileID uuid.UUID, key string) error
+	// ListPendingUploadOrphans returns file rows whose presigned upload
+	// was minted before olderThan and which still have no confirmed
+	// current_version_id. Drives the GC reconciler's scan loop.
+	ListPendingUploadOrphans(ctx context.Context, workspaceID uuid.UUID, olderThan time.Time, limit int) ([]*PendingOrphan, error)
+	// DeletePendingOrphan removes a file row that was previously
+	// returned by ListPendingUploadOrphans. The transaction is
+	// guarded by the pending_upload_object_key + current_version_id
+	// IS NULL predicates so a concurrent ConfirmUpload racing the GC
+	// pass cannot have its row deleted out from under it.
+	DeletePendingOrphan(ctx context.Context, workspaceID, fileID uuid.UUID) error
 
 	CreateFileVersion(ctx context.Context, workspaceID uuid.UUID, v *FileVersion) error
 	CreateVersionAndSetCurrent(ctx context.Context, workspaceID uuid.UUID, v *FileVersion) error
@@ -83,6 +101,18 @@ func scanFile(row pgx.Row) (*File, error) {
 	return f, nil
 }
 
+// PendingOrphan is the projection returned by ListPendingUploadOrphans.
+// It carries only the columns the GC reconciler needs to delete both
+// the S3 object and the file row: the file id (for the DELETE), the
+// recorded object_key (for the storage DeleteObject), and created_at
+// (for metric labels / structured-log fields documenting the age of
+// the orphan at reclaim time).
+type PendingOrphan struct {
+	FileID    uuid.UUID
+	ObjectKey string
+	CreatedAt time.Time
+}
+
 // CreateFile inserts a new file metadata row.
 func (r *PostgresRepository) CreateFile(ctx context.Context, f *File) error {
 	if f.ID == uuid.Nil {
@@ -98,6 +128,84 @@ RETURNING created_at, updated_at`
 	if err := r.pool.QueryRow(ctx, q, f.ID, f.WorkspaceID, f.FolderID, f.Name, f.SizeBytes, f.MimeType, f.CreatedBy).
 		Scan(&f.CreatedAt, &f.UpdatedAt); err != nil {
 		return fmt.Errorf("insert file: %w", err)
+	}
+	return nil
+}
+
+// SetPendingUploadObjectKey stamps the presigned-PUT object key on
+// the file row. Called from api/drive/upload.go:UploadURL right
+// after CreateFile + NewObjectKey. The ConfirmVersion path clears
+// the column transactionally with the version row insert; the
+// orphan GC reconciler scans rows where the column is still set
+// past the configured cooldown.
+func (r *PostgresRepository) SetPendingUploadObjectKey(ctx context.Context, workspaceID, fileID uuid.UUID, key string) error {
+	const q = `
+UPDATE files SET pending_upload_object_key = $3, updated_at = now()
+WHERE workspace_id = $1 AND id = $2 AND deleted_at IS NULL`
+	tag, err := r.pool.Exec(ctx, q, workspaceID, fileID, key)
+	if err != nil {
+		return fmt.Errorf("set pending upload object key: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// ListPendingUploadOrphans returns file rows with a recorded pending
+// object key that have not been confirmed by olderThan. The partial
+// index idx_files_pending_orphan pins this query to an index-only
+// scan during steady-state.
+func (r *PostgresRepository) ListPendingUploadOrphans(ctx context.Context, workspaceID uuid.UUID, olderThan time.Time, limit int) ([]*PendingOrphan, error) {
+	if limit <= 0 {
+		limit = 100
+	}
+	const q = `
+SELECT id, pending_upload_object_key, created_at
+FROM files
+WHERE workspace_id = $1
+  AND pending_upload_object_key IS NOT NULL
+  AND current_version_id IS NULL
+  AND deleted_at IS NULL
+  AND created_at < $2
+ORDER BY created_at ASC
+LIMIT $3`
+	rows, err := r.pool.Query(ctx, q, workspaceID, olderThan, limit)
+	if err != nil {
+		return nil, fmt.Errorf("list pending orphans: %w", err)
+	}
+	defer rows.Close()
+	var out []*PendingOrphan
+	for rows.Next() {
+		o := &PendingOrphan{}
+		if err := rows.Scan(&o.FileID, &o.ObjectKey, &o.CreatedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, o)
+	}
+	return out, rows.Err()
+}
+
+// DeletePendingOrphan removes an orphan file row. The WHERE clause
+// re-checks the orphan predicates so a concurrent ConfirmUpload that
+// races the GC scan-then-delete window cannot have its newly-
+// confirmed row deleted by mistake — if ConfirmUpload landed between
+// the list and this delete, current_version_id is now non-NULL and
+// the DELETE matches zero rows.
+func (r *PostgresRepository) DeletePendingOrphan(ctx context.Context, workspaceID, fileID uuid.UUID) error {
+	const q = `
+DELETE FROM files
+WHERE workspace_id = $1
+  AND id = $2
+  AND pending_upload_object_key IS NOT NULL
+  AND current_version_id IS NULL
+  AND deleted_at IS NULL`
+	tag, err := r.pool.Exec(ctx, q, workspaceID, fileID)
+	if err != nil {
+		return fmt.Errorf("delete pending orphan: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrNotFound
 	}
 	return nil
 }
@@ -303,8 +411,15 @@ func (r *PostgresRepository) ConfirmVersion(ctx context.Context, workspaceID uui
 		// on the replay path. The first commit already did it.
 		return false, tx.Commit(ctx)
 	}
+	// pending_upload_object_key is cleared in the same statement that
+	// advances current_version_id so the orphan GC scan never sees a
+	// confirmed row. A small race window between ConfirmVersion and the
+	// GC reconciler is still safely handled by the orphan predicates on
+	// DeletePendingOrphan, but clearing the column here is the cheap
+	// path that prevents the GC from ever considering the row.
 	const setQ = `
-UPDATE files SET current_version_id = $3, size_bytes = $4, updated_at = now()
+UPDATE files SET current_version_id = $3, size_bytes = $4,
+                 pending_upload_object_key = NULL, updated_at = now()
 WHERE workspace_id = $1 AND id = $2 AND deleted_at IS NULL`
 	tag, err := tx.Exec(ctx, setQ, workspaceID, v.FileID, v.ID, v.SizeBytes)
 	if err != nil {

@@ -109,6 +109,19 @@ func (h *Handler) UploadURL(w http.ResponseWriter, r *http.Request) {
 	versionID := uuid.New()
 	objectKey := storage.NewObjectKey(workspaceID, f.ID, versionID)
 
+	// Record the presigned-PUT object_key on the file row BEFORE
+	// minting the URL. If the client successfully PUTs the bytes
+	// but never calls ConfirmUpload (or confirm is rejected for
+	// quota / suspended-tenant / etc.), the orphan-object GC
+	// reconciler uses this column to find the stranded S3 object
+	// and reclaim it. ConfirmUpload's atomic UPDATE clears the
+	// column when current_version_id is advanced, so confirmed
+	// files never carry a stale key and the GC scan skips them.
+	if err := h.files.SetPendingUploadObjectKey(r.Context(), workspaceID, f.ID, objectKey); err != nil {
+		writeServiceError(w, err)
+		return
+	}
+
 	url, err := store.GenerateUploadURL(r.Context(), objectKey, req.MimeType, storage.DefaultPresignExpiry)
 	if err != nil {
 		http.Error(w, "generate upload url: "+err.Error(), http.StatusInternalServerError)

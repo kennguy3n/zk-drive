@@ -180,6 +180,37 @@ func (c *Client) GenerateDownloadURL(ctx context.Context, objectKey string, expi
 	return req.URL, nil
 }
 
+// DeleteObject removes a single object from the bucket. Used by the
+// orphan-object GC reconciler to reclaim storage for presigned PUTs
+// the client completed but never confirmed (api/drive/upload.go:
+// ConfirmUpload rejection path leaves the S3 object stranded; the
+// pending_upload_object_key column records the key so this delete
+// can target it directly without a ListObjects scan).
+//
+// The S3 DeleteObject operation is idempotent: deleting a key that
+// no longer exists returns 204 No Content rather than an error, so
+// callers don't need to pre-check existence. Versioned buckets
+// would respond with a delete-marker, but zk-object-fabric tenants
+// for ZK Drive are not version-enabled (object versioning happens
+// at the file_versions row level, not the S3 layer), so a single
+// DeleteObject permanently reclaims the bytes.
+func (c *Client) DeleteObject(ctx context.Context, objectKey string) error {
+	if c == nil || c.s3 == nil {
+		return errors.New("storage: client not initialised")
+	}
+	if strings.TrimSpace(objectKey) == "" {
+		return errors.New("storage: object key is required")
+	}
+	_, err := c.s3.DeleteObject(ctx, &s3.DeleteObjectInput{
+		Bucket: aws.String(c.bucket),
+		Key:    aws.String(objectKey),
+	})
+	if err != nil {
+		return fmt.Errorf("delete object: %w", err)
+	}
+	return nil
+}
+
 // Bucket returns the bucket this client is scoped to.
 func (c *Client) Bucket() string { return c.bucket }
 

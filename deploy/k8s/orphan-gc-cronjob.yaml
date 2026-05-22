@@ -1,0 +1,66 @@
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: zk-drive-orphan-gc
+  namespace: zk-drive
+spec:
+  # 6-hour cadence matches the worker's in-process default
+  # (GC_INTERVAL_MINUTES=360) so a deploy can choose:
+  #   - Run only the in-process loop and disable this CronJob.
+  #   - Run only this CronJob and set GC_INTERVAL_MINUTES=0 on the
+  #     worker Deployment so the two don't fight on the same orphan
+  #     rows.
+  # Defaulting to a CronJob (with the worker loop ON) is the safe
+  # belt-and-suspenders choice — the predicate-guarded DELETE means
+  # a duplicate pass on a row another pod just reclaimed matches
+  # zero rows, no harm done. S3 DeleteObject is idempotent.
+  #
+  # The schedule offset (37 past) staggers against the reconciler
+  # CronJob (17 past) so Postgres + S3 aren't hit by both background
+  # jobs at the same minute.
+  schedule: "37 */6 * * *"
+  # Skip a tick if the previous run hasn't finished; the per-row
+  # DeleteObject latency could in principle stretch a single run
+  # past 6h on a workspace with a runaway client. concurrencyPolicy
+  # Forbid means the next tick is skipped rather than starting a
+  # duplicate run.
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  startingDeadlineSeconds: 600
+  jobTemplate:
+    spec:
+      # GC can in principle take a long time on a cold-start with a
+      # huge backlog (every orphan = one DeleteObject round-trip).
+      # activeDeadline at 4h gives plenty of headroom for the first
+      # post-deploy run while still tripping well before the next
+      # scheduled tick.
+      activeDeadlineSeconds: 14400
+      backoffLimit: 2
+      ttlSecondsAfterFinished: 86400
+      template:
+        spec:
+          # Same image as server/worker/migrate/reconciler — every
+          # entrypoint ships in one tag (Dockerfile builds
+          # /app/orphan-gc alongside /app/server, /app/worker, etc).
+          restartPolicy: OnFailure
+          containers:
+            - name: orphan-gc
+              image: ghcr.io/kennguy3n/zk-drive:0.1.0
+              command: ["/app/orphan-gc"]
+              envFrom:
+                - configMapRef:
+                    name: zk-drive-config
+                - secretRef:
+                    name: zk-drive-secrets
+              resources:
+                # The GC is bound by S3 DeleteObject latency, not
+                # CPU or memory — it issues N DeleteObject calls +
+                # N row deletes per workspace, capped by the
+                # per-workspace orphan limit (default 500).
+                requests:
+                  cpu: 50m
+                  memory: 64Mi
+                limits:
+                  cpu: 500m
+                  memory: 256Mi
