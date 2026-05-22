@@ -95,11 +95,21 @@ func userRevokedKey(workspaceID, userID uuid.UUID) string {
 // separate Lua locals so the script stays uniform across go-redis
 // versions and so the EX refresh is part of the same atomic block
 // as the value comparison.
+//
+// The script also self-heals around a corrupted stored value: if
+// GET returns a non-numeric string (manual Redis surgery, memory
+// corruption, an older value format), `tonumber` evaluates to nil
+// and the `not current_num` branch overwrites the bad value with
+// the well-formed new cutoff. Without that fallback, every
+// subsequent RevokeUser call would raise a Lua arithmetic error
+// (`nil < new`) and the key would stay corrupted until manual
+// intervention.
 var revokeUserScript = redis.NewScript(`
 local current = redis.call('GET', KEYS[1])
+local current_num = current and tonumber(current)
 local new = tonumber(ARGV[1])
 local ttl = tonumber(ARGV[2])
-if not current or tonumber(current) < new then
+if not current_num or current_num < new then
 	redis.call('SET', KEYS[1], new, 'EX', ttl)
 	return 1
 end

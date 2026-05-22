@@ -294,7 +294,18 @@ func (h *Handler) Logout(w http.ResponseWriter, r *http.Request) {
 	}
 	actor := claims.UserID
 	if h.sessions != nil {
-		if err := h.sessions.RevokeUser(r.Context(), claims.WorkspaceID, claims.UserID, time.Now().UTC(), middleware.TokenTTL); err != nil {
+		// Bound the RevokeUser call the same way AuthMiddleware
+		// and Refresh bound their reads: a partial Redis stall
+		// would otherwise hang /auth/logout for the server's
+		// full WriteTimeout (30s) — and a hung logout endpoint
+		// is the worst possible failure mode for a user trying
+		// to terminate a possibly-compromised session. Fast
+		// failure plus the audit-trail recovery path is the
+		// right tradeoff.
+		revokeCtx, cancel := context.WithTimeout(r.Context(), middleware.SessionCheckTimeout)
+		err := h.sessions.RevokeUser(revokeCtx, claims.WorkspaceID, claims.UserID, time.Now().UTC(), middleware.TokenTTL)
+		cancel()
+		if err != nil {
 			// Best-effort: log via audit but don't 500. The client
 			// already considers itself logged out; surfacing 500
 			// here would leave it confused. The audit trail is the
@@ -332,7 +343,21 @@ func (h *Handler) Refresh(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "unauthenticated", http.StatusUnauthorized)
 		return
 	}
-	if h.sessions != nil && claims.IssuedAt != nil {
+	if h.sessions != nil {
+		// Mirror AuthMiddleware's missing-iat handling: when a
+		// revoker is wired, a token without an iat claim cannot
+		// be checked against the cutoff and must be rejected
+		// rather than silently bypassing the gate. The current
+		// production wiring already enforces this in the
+		// middleware before the handler runs, but a future
+		// route that mounts Refresh outside the middleware
+		// group (or a code path that constructs the handler
+		// directly in tests) would otherwise mint a fresh
+		// long-lived JWT without a revocation check.
+		if claims.IssuedAt == nil {
+			http.Error(w, "token missing iat", http.StatusUnauthorized)
+			return
+		}
 		// Bound the IsRevoked call the same way AuthMiddleware
 		// does. Without this matching timeout, a partial Redis
 		// outage that recovers just long enough for the
