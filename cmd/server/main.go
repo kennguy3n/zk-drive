@@ -10,6 +10,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -73,12 +74,26 @@ func run() error {
 		cancel()
 		return fmt.Errorf("connect postgres: %w", err)
 	}
-	// Defer order matters: defers run LIFO, so cancel() must be
-	// registered AFTER pool.Close() to ensure cancel() runs FIRST
-	// during shutdown. That lets long-running goroutines (HTTP
-	// server, websocket hub, NATS consumers) observe ctx.Done() and
-	// exit cleanly BEFORE pool.Close() starts rejecting new acquires.
+	// Defer order matters — defers run LIFO, so the target shutdown
+	// sequence is:
+	//
+	//   1. cancel()          — signals long-running goroutines
+	//                          (WebSocket hub, Redis pubsub loop) to
+	//                          exit.
+	//   2. bgGoroutines.Wait — blocks until those goroutines have
+	//                          observed ctx.Done() and returned, so
+	//                          no caller is mid-Acquire on the pool.
+	//   3. pool.Close()      — closes the pool against a quiescent
+	//                          set of consumers; no "use of closed
+	//                          connection" log noise.
+	//
+	// Registered in reverse of that order. HTTP server shutdown is
+	// handled by srv.Shutdown(shutdownCtx) below — not through this
+	// WaitGroup — because chi handlers may still need pool conns to
+	// flush their in-flight responses.
+	var bgGoroutines sync.WaitGroup
 	defer pool.Close()
+	defer bgGoroutines.Wait()
 	defer cancel()
 
 	// Migrations are applied out-of-band by the `migrate` binary (a
@@ -249,14 +264,20 @@ func run() error {
 	// so a misconfigured Redis still leaves the rest of the API
 	// working — we just log and fall back to local fan-out.
 	hub := ws.NewHub()
-	go hub.Run(ctx)
+	bgGoroutines.Add(1)
+	go func() {
+		defer bgGoroutines.Done()
+		hub.Run(ctx)
+	}()
 	wsHandler := ws.NewHandler(hub)
 
 	var notificationPublisher notification.WSPublisher = notification.NewLocalPublisher(hub)
 	if redisClient != nil {
 		rp := notification.NewRedisPublisher(redisClient)
 		notificationPublisher = rp
+		bgGoroutines.Add(1)
 		go func() {
+			defer bgGoroutines.Done()
 			if err := rp.Subscribe(ctx, hub); err != nil && err != context.Canceled {
 				log.Printf("redis: ws subscribe loop exited: %v", err)
 			}

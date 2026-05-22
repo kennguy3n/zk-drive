@@ -384,9 +384,18 @@ func archiveHandler(ctx context.Context, svc *retention.ArchiveService) nats.Msg
 
 // runGuestExpirySweep periodically revokes expired guest permission
 // rows. The first sweep runs 30 seconds after startup so the worker
-// doesn't race the server's migration pass on cold start.
+// doesn't race the server's migration pass on cold start. The
+// initial delay is a cancellable select rather than time.Sleep so
+// SIGTERM during the 30-second warm-up returns immediately — the
+// goroutine is now WaitGroup-tracked (bgGoroutines.Wait() blocks
+// pool teardown on it returning), and a plain time.Sleep would
+// delay graceful shutdown by up to 30s.
 func runGuestExpirySweep(ctx context.Context, svc *sharing.Service, interval time.Duration) {
-	time.Sleep(30 * time.Second)
+	select {
+	case <-ctx.Done():
+		return
+	case <-time.After(30 * time.Second):
+	}
 	t := time.NewTicker(interval)
 	defer t.Stop()
 	for {
