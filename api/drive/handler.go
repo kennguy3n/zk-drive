@@ -940,18 +940,59 @@ func (h *Handler) ConfirmUpload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Replay detection: if the file already points at this version,
-	// a previous confirm has already committed atomically and
-	// req.SizeBytes is already included in the workspace storage
-	// total (GetStorageUsed = SUM(files.size_bytes), see
-	// internal/billing/repository.go). Running CheckStorageQuota
-	// again would compute (workspace_total_already_including_this_file)
-	// + req.SizeBytes, double-counting the file's size and
-	// 402-rejecting an otherwise successful retry near the quota
-	// boundary. Detect the replay path early and skip the check;
-	// ConfirmVersion will hit the ON CONFLICT branch and return
-	// fresh=false, so the side-effect gate below also stays inert.
-	isReplay := f.CurrentVersionID != nil && *f.CurrentVersionID == versionID
+	// Replay detection: if a row with this versionID already exists
+	// in file_versions for this file, a previous confirm has
+	// committed it atomically and req.SizeBytes is already part of
+	// (or has been superseded in) the workspace storage total
+	// (GetStorageUsed = SUM(files.size_bytes), see
+	// internal/billing/repository.go). Re-running CheckStorageQuota
+	// with req.SizeBytes would double-count and 402-reject an
+	// otherwise successful idempotent retry near the quota
+	// boundary.
+	//
+	// We probe file_versions directly (rather than comparing
+	// f.CurrentVersionID == versionID) so detection stays correct
+	// when a newer V2 has advanced the file pointer past V1: a
+	// stale V1 retry must still bypass the quota check because
+	// V1's bytes are *not* net-new — V1 was already counted at its
+	// original confirm, then superseded by V2. The narrower
+	// "current pointer matches" heuristic would miss this case and
+	// let CheckStorageQuota run, computing a phantom over-quota
+	// that violates the idempotency contract. (Today no API in
+	// this codebase produces a V2-supersedes-V1 on the same file
+	// row, but the repository-level `if !fresh` guard already
+	// handles it correctly, so detection-side correctness here
+	// closes the matched gap.)
+	//
+	// On the replay path the subsequent ConfirmVersion hits its
+	// ON CONFLICT branch and returns fresh=false, so the
+	// side-effect gate further down also stays inert. The replay
+	// branch only skips the quota check itself; it does *not*
+	// skip ConfirmVersion (which still validates the identity
+	// tuple via re-fetch and returns ErrVersionConflict on
+	// mismatch).
+	existingVersion, vErr := h.files.GetVersionByID(r.Context(), workspaceID, versionID)
+	var isReplay bool
+	switch {
+	case vErr == nil:
+		// A workspace-scoped version row exists. Only treat it as
+		// a replay of *this* confirm if the row belongs to the
+		// same file — a version id colliding with a row owned by
+		// a different file in the same workspace is an identity
+		// mismatch that ConfirmVersion will reject with
+		// ErrVersionConflict, and for that path we want the quota
+		// check to run normally (the request is not actually a
+		// no-op retry of a prior committed confirm).
+		isReplay = existingVersion.FileID == f.ID
+	case errors.Is(vErr, file.ErrNotFound):
+		isReplay = false
+	default:
+		// Unexpected DB error during replay probe. Surfacing 500
+		// rather than silently proceeding so the caller can retry
+		// idempotently on a transient blip.
+		writeServiceError(w, vErr)
+		return
+	}
 
 	if !isReplay {
 		// Storage quota is re-checked against the actual size now that the

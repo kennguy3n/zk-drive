@@ -138,10 +138,19 @@ type RoomService struct {
 }
 
 // NewRoomService builds a RoomService. folders and permissions are
-// required for the mapping + permission-sync paths; files / presign /
-// keyFactory / keyValidator are only required by the attachment
-// flow and may be nil in tests that exercise mapping-only
-// behaviour.
+// required for the mapping + permission-sync paths.
+//
+// files / presign / keyFactory / keyValidator drive the attachment
+// flow. They are conceptually optional in the sense that the
+// mapping-only methods (Create, MapRoom, SyncMembers, etc.) don't
+// touch them — tests exercising only mapping behaviour may pass
+// nil for each. However, if *any* of these four is non-nil the
+// caller is expected to wire the full set; a partial wiring
+// (e.g. files + keyFactory but no keyValidator) would let the
+// attachment confirm path fall back to a weaker check on a
+// client-supplied object_key, and that's exactly the footgun WS-3
+// closes. Production wiring (cmd/server/main.go) and the
+// integration test harness both install all four.
 func NewRoomService(repo Repository, folders FolderCreator, permissions PermissionGranter, files FileCreator, presign PresignResolver, keyFactory ObjectKeyFactory, keyValidator ObjectKeyValidator) *RoomService {
 	return &RoomService{
 		repo:         repo,
@@ -447,24 +456,17 @@ func (s *RoomService) ConfirmAttachment(ctx context.Context, workspaceID, fileID
 	// ObjectKeyValidator enforces the exact three-UUID form, rejects
 	// "..", NUL, backslashes, non-canonical UUID forms, and uuid.Nil.
 	//
-	// When the wiring layer hasn't installed a validator (legacy
-	// constructors, some test stubs), fall back to the original
-	// prefix check so callers without a validator still work — but
-	// the production wiring in cmd/server installs the validator
-	// unconditionally, so the prefix-only branch is unreachable in
-	// production.
-	var versionID uuid.UUID
-	if s.keyValidator != nil {
-		vid, vErr := s.keyValidator(objectKey, workspaceID, f.ID)
-		if vErr != nil {
-			return nil, fmt.Errorf("%w %s", ErrObjectKeyMismatch, fileID)
-		}
-		versionID = vid
-	} else {
-		expectedPrefix := workspaceID.String() + "/" + f.ID.String() + "/"
-		if !strings.HasPrefix(objectKey, expectedPrefix) {
-			return nil, fmt.Errorf("%w %s", ErrObjectKeyMismatch, fileID)
-		}
+	// keyValidator is mandatory on the attachment flow: NewRoomService
+	// doc-comments that callers wiring `files` must also wire
+	// `keyValidator`, and missing it here is a wiring bug that we
+	// surface explicitly rather than falling back to a weaker check
+	// on attacker-controlled input.
+	if s.keyValidator == nil {
+		return nil, errors.New("kchat: object_key validator not configured")
+	}
+	versionID, vErr := s.keyValidator(objectKey, workspaceID, f.ID)
+	if vErr != nil {
+		return nil, fmt.Errorf("%w %s", ErrObjectKeyMismatch, fileID)
 	}
 	v, err := s.files.ConfirmVersion(ctx, workspaceID, f.ID, versionID, objectKey, checksum, sizeBytes, createdBy)
 	if err != nil {
