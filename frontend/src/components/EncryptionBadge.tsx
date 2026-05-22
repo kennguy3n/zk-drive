@@ -25,10 +25,26 @@
 // mode. PROPOSAL.md §3.3 is explicit only about NOT calling the
 // managed mode "zero-knowledge" — "managed" satisfies that
 // constraint and matches the brand vocabulary used elsewhere.
-export type EncryptionMode = "strict_zk" | "managed_encrypted" | string;
+// EncryptionMode is defined in api/client.ts (the wire-level types
+// module) so the API request/response shape and the UI share a single
+// source of truth for the union. Re-exported here for ergonomic imports
+// from UI code (`import EncryptionBadge, { type EncryptionMode } from
+// ".../EncryptionBadge"`).
+export type { EncryptionMode } from "../api/client";
 
 export interface EncryptionBadgeProps {
-  mode?: EncryptionMode;
+  // The badge takes a plain `string | undefined` (not `EncryptionMode`)
+  // at the type level so it can render rows coming off the wire that
+  // pre-date Phase 4 and don't carry the field at all, OR a hypothetical
+  // future mode the server starts emitting before the frontend has been
+  // re-deployed. The runtime branch (`mode === "strict_zk"`) is the
+  // single source of truth — unknown values fall through to the managed
+  // rendering, matching the documented "missing -> managed" contract
+  // above. Callers that DO know the mode at compile time should still
+  // declare their own state as `EncryptionMode` for autocomplete; the
+  // assignment widens to string here at the prop boundary, which is
+  // fine.
+  mode?: string;
   // size lets callers pick "row" (small, alongside file/folder names)
   // or "header" (larger, alongside the current folder in the breadcrumb).
   // Both render the same colour / label; only padding + font scale up.

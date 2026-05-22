@@ -5,7 +5,7 @@ import FileList from "../components/FileList";
 import UploadButton from "../components/UploadButton";
 import SearchBar from "../components/SearchBar";
 import ShareDialog from "../components/ShareDialog";
-import EncryptionBadge from "../components/EncryptionBadge";
+import EncryptionBadge, { type EncryptionMode } from "../components/EncryptionBadge";
 import {
   bulkCopy,
   bulkDelete,
@@ -362,7 +362,11 @@ function CreateFolderDialog({
   onCreated: () => void;
 }) {
   const [name, setName] = useState("");
-  const [mode, setMode] = useState<"managed_encrypted" | "strict_zk">("managed_encrypted");
+  // Reuses the EncryptionMode union exported by EncryptionBadge so the
+  // dialog state, the badge prop, and the createFolder request body all
+  // share a single source of truth. A typo like setMode("strict_z") is
+  // a TS error here, not a silent server-side rejection.
+  const [mode, setMode] = useState<EncryptionMode>("managed_encrypted");
   const [error, setError] = useState<string | null>(null);
 
   const submit = async () => {
