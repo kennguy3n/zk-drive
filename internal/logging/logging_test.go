@@ -1,11 +1,13 @@
 package logging
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
 	"log"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -243,5 +245,203 @@ func TestInitBridgesLegacyLogPackage(t *testing.T) {
 	out := buf.String()
 	if !strings.Contains(out, `"msg":"nats: connected to nats://localhost:4222"`) {
 		t.Fatalf("legacy log.Printf did not flow through slog handler: %s", out)
+	}
+}
+
+// hijackerRecorder is a minimal http.ResponseWriter that ALSO
+// implements http.Hijacker. Used to assert that AccessLog's
+// internal response-writer wrapper preserves Hijacker delegation
+// — without that delegation, WebSocket upgrades through
+// gorilla/websocket return 500 because the upgrader can't take
+// over the TCP connection.
+type hijackerRecorder struct {
+	*httptest.ResponseRecorder
+	hijacked bool
+}
+
+func (h *hijackerRecorder) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	h.hijacked = true
+	// Return a working pair so the caller doesn't crash; the
+	// connection is a pipe we immediately close on the other
+	// end. Tests don't actually write anything through it.
+	server, client := net.Pipe()
+	_ = client.Close()
+	br := bufio.NewReader(server)
+	bw := bufio.NewWriter(server)
+	return server, bufio.NewReadWriter(br, bw), nil
+}
+
+// TestAccessLogPreservesHijackerForWebSocketUpgrades reproduces
+// the regression Devin Review flagged: a naive status-capturing
+// response writer that only embeds http.ResponseWriter silently
+// strips optional interfaces like http.Hijacker, breaking
+// WebSocket upgrades because gorilla/websocket type-asserts the
+// writer to Hijacker before taking over the TCP connection.
+//
+// The fix uses chi's middleware.NewWrapResponseWriter which
+// returns a Hijacker-implementing variant when the underlying
+// writer supports it. This test installs AccessLog around a
+// handler that performs the same type-assertion gorilla does,
+// and verifies the assertion succeeds AND that the access log
+// line is still emitted.
+func TestAccessLogPreservesHijackerForWebSocketUpgrades(t *testing.T) {
+	var buf bytes.Buffer
+	prev := slog.Default()
+	defer slog.SetDefault(prev)
+	slog.SetDefault(slog.New(slog.NewJSONHandler(&buf, nil)))
+
+	inner := chi.NewRouter()
+	inner.Get("/ws", func(w http.ResponseWriter, _ *http.Request) {
+		hj, ok := w.(http.Hijacker)
+		if !ok {
+			http.Error(w, "writer does not implement http.Hijacker", http.StatusInternalServerError)
+			return
+		}
+		conn, _, err := hj.Hijack()
+		if err != nil {
+			http.Error(w, "hijack failed", http.StatusInternalServerError)
+			return
+		}
+		_ = conn.Close()
+		// Don't write to w after hijack — that's the gorilla
+		// upgrade contract.
+	})
+	wrapped := AccessLog(inner)
+
+	rec := &hijackerRecorder{ResponseRecorder: httptest.NewRecorder()}
+	req := httptest.NewRequest(http.MethodGet, "/ws", nil)
+	wrapped.ServeHTTP(rec, req)
+
+	if !rec.hijacked {
+		t.Fatalf("AccessLog stripped http.Hijacker from response writer; WebSocket upgrades would fail. body=%q", rec.Body.String())
+	}
+	if !strings.Contains(buf.String(), `"msg":"http request"`) {
+		t.Errorf("access log record missing after hijack: %s", buf.String())
+	}
+}
+
+// TestAccessLogAttachesRequestIDForCorrelation pins the
+// correlation contract Devin Review flagged: the access log
+// record AND the handler-emitted log records must share the
+// SAME request_id so operators can pivot between them in their
+// log aggregator. Pre-fix, AccessLog wrapped the mux OUTSIDE
+// chi, so request_id attached by inner middleware was invisible
+// to AccessLog's outer r.Context() after dispatch returned.
+//
+// Post-fix, AccessLog seeds request_id (from X-Request-Id or
+// freshly generated) BEFORE dispatch, so both the outer record
+// and the inner handler logs read the same value.
+func TestAccessLogAttachesRequestIDForCorrelation(t *testing.T) {
+	var buf bytes.Buffer
+	prev := slog.Default()
+	defer slog.SetDefault(prev)
+	slog.SetDefault(slog.New(slog.NewJSONHandler(&buf, nil)))
+
+	inner := chi.NewRouter()
+	inner.Get("/x", func(w http.ResponseWriter, req *http.Request) {
+		FromContext(req.Context()).Info("handler log")
+		w.WriteHeader(http.StatusOK)
+	})
+	wrapped := AccessLog(inner)
+
+	req := httptest.NewRequest(http.MethodGet, "/x", nil)
+	req.Header.Set("X-Request-Id", "rid-correlation-fixture")
+	rec := httptest.NewRecorder()
+	wrapped.ServeHTTP(rec, req)
+
+	out := buf.String()
+	// The handler record AND the http-request access record
+	// must both carry the same request_id.
+	occurrences := strings.Count(out, `"request_id":"rid-correlation-fixture"`)
+	if occurrences < 2 {
+		t.Fatalf("request_id should appear on BOTH handler log AND access log; got %d occurrence(s) in:\n%s", occurrences, out)
+	}
+	if !strings.Contains(out, `"msg":"handler log"`) {
+		t.Errorf("handler log missing: %s", out)
+	}
+	if !strings.Contains(out, `"msg":"http request"`) {
+		t.Errorf("access log record missing: %s", out)
+	}
+}
+
+// TestAccessLogGeneratesRequestIDWhenHeaderMissing ensures that
+// requests without an upstream-supplied X-Request-Id still get a
+// correlation id (UUIDv4) attached to both the access log and
+// any handler log. Without this, internal traffic that hits the
+// service without a request id (cron jobs, smoke probes) would
+// emit log lines with no way to correlate them.
+func TestAccessLogGeneratesRequestIDWhenHeaderMissing(t *testing.T) {
+	var buf bytes.Buffer
+	prev := slog.Default()
+	defer slog.SetDefault(prev)
+	slog.SetDefault(slog.New(slog.NewJSONHandler(&buf, nil)))
+
+	inner := chi.NewRouter()
+	inner.Get("/x", func(w http.ResponseWriter, req *http.Request) {
+		FromContext(req.Context()).Info("handler log")
+	})
+	wrapped := AccessLog(inner)
+
+	req := httptest.NewRequest(http.MethodGet, "/x", nil)
+	rec := httptest.NewRecorder()
+	wrapped.ServeHTTP(rec, req)
+
+	// Parse each emitted JSON record and assert both carry a
+	// non-empty request_id of the same value.
+	var ids []string
+	for _, line := range strings.Split(strings.TrimSpace(buf.String()), "\n") {
+		var rec map[string]any
+		if err := json.Unmarshal([]byte(line), &rec); err != nil {
+			t.Fatalf("invalid JSON %q: %v", line, err)
+		}
+		if v, ok := rec["request_id"].(string); ok {
+			ids = append(ids, v)
+		}
+	}
+	if len(ids) < 2 {
+		t.Fatalf("expected request_id on both handler and access log records, got %d: %s", len(ids), buf.String())
+	}
+	if ids[0] == "" {
+		t.Fatal("generated request_id is empty")
+	}
+	for _, id := range ids[1:] {
+		if id != ids[0] {
+			t.Fatalf("request_id diverged between handler (%q) and access log (%q)", ids[0], id)
+		}
+	}
+}
+
+// TestMiddlewareIsNoOpWhenAccessLogAlreadyRan pins the
+// idempotency contract: when AccessLog has already attached a
+// request-scoped logger, Middleware must not re-attach the same
+// fields (which would produce duplicate JSON keys in the
+// emitted record and confuse downstream log aggregators).
+func TestMiddlewareIsNoOpWhenAccessLogAlreadyRan(t *testing.T) {
+	var buf bytes.Buffer
+	prev := slog.Default()
+	defer slog.SetDefault(prev)
+	slog.SetDefault(slog.New(slog.NewJSONHandler(&buf, nil)))
+
+	inner := chi.NewRouter()
+	inner.Use(Middleware) // explicitly install both for the test
+	inner.Get("/x", func(w http.ResponseWriter, req *http.Request) {
+		FromContext(req.Context()).Info("handler log")
+	})
+	wrapped := AccessLog(inner)
+
+	req := httptest.NewRequest(http.MethodGet, "/x", nil)
+	req.Header.Set("X-Request-Id", "rid-no-dup")
+	rec := httptest.NewRecorder()
+	wrapped.ServeHTTP(rec, req)
+
+	// Each emitted record must have exactly one http_method
+	// attribute, not two.
+	for _, line := range strings.Split(strings.TrimSpace(buf.String()), "\n") {
+		if c := strings.Count(line, `"http_method":`); c != 1 {
+			t.Errorf("http_method appeared %d times in a single record (expected 1): %s", c, line)
+		}
+		if c := strings.Count(line, `"request_id":`); c != 1 {
+			t.Errorf("request_id appeared %d times in a single record (expected 1): %s", c, line)
+		}
 	}
 }

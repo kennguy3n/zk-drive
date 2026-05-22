@@ -51,6 +51,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	chimw "github.com/go-chi/chi/v5/middleware"
+	"github.com/google/uuid"
 )
 
 // timeNow / timeSince are package vars so tests can pin the
@@ -89,7 +90,16 @@ func Init(component string) *slog.Logger {
 	// structure as a native `slog.Info("nats: ...")` call. The
 	// LstdFlags reset prevents log from prefixing the message
 	// with a date-time that the JSON handler would duplicate.
-	bridge := slog.NewLogLogger(handler, level)
+	//
+	// Bridge records are emitted at INFO regardless of LOG_LEVEL
+	// because the producers are typically third-party libraries
+	// (nats.go reconnect notices, http.Server connection errors,
+	// etc.) that mean their `log.Printf` calls to be informational.
+	// Letting LOG_LEVEL push them to ERROR would misrepresent the
+	// severity for log aggregators that alert on ERROR rate; pushing
+	// them to DEBUG would silently hide useful operator telemetry
+	// the moment LOG_LEVEL switches back to INFO.
+	bridge := slog.NewLogLogger(handler, slog.LevelInfo)
 	log.SetFlags(0)
 	log.SetOutput(bridge.Writer())
 
@@ -161,74 +171,104 @@ func WithContext(ctx context.Context, logger *slog.Logger) context.Context {
 	return context.WithValue(ctx, loggerCtxKey, logger)
 }
 
-// Middleware attaches a request-scoped logger to every request
-// context. The child logger carries:
+// Middleware is the in-chi-router companion to AccessLog. It is a
+// no-op when AccessLog has already seeded the request-scoped
+// logger (the production wiring in cmd/server installs AccessLog
+// at the http.Server.Handler boundary, which means the logger is
+// already populated by the time the chi router dispatches). It
+// remains exported so binaries that do NOT wrap their mux with
+// AccessLog (e.g. small internal services, tests using bare
+// net/http) can still get the correlation attributes attached.
 //
-//   - http_method: GET / POST / etc.
-//   - http_path: raw URL path (NOT the chi route pattern). chi
-//     populates RouteContext.RoutePattern only after routing has
-//     completed, so attempting to read it inside this middleware
-//     yields an empty string. Operators that need to aggregate
-//     by pattern should use the AccessLog middleware, which runs
-//     post-dispatch and emits a per-request summary record with
-//     the resolved pattern, status, and duration.
-//   - remote_addr: helpful for rate-limit / abuse triage.
-//   - request_id: set if the upstream sent X-Request-Id (chi's
-//     middleware.RequestID also propagates it via
-//     middleware.GetReqID inside handlers; we just want the
-//     header value here so the access log and handler logs share
-//     a single correlation id without depending on chi internals).
+// When invoked without a pre-seeded logger, Middleware attaches:
+//
+//   - http_method, http_path, remote_addr
+//   - request_id: read from chi's middleware.RequestID context
+//     value first, then from X-Request-Id header. If neither
+//     supplies one, generate a fresh UUID so handler logs always
+//     carry a correlation id.
 //
 // Workspace and user IDs are added later by the auth middleware
-// once JWT claims are resolved — those need to be additive, not
-// replace the request-scoped fields.
+// once JWT claims are resolved.
 func Middleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		base := FromContext(r.Context())
-		attrs := []any{
-			"http_method", r.Method,
-			"http_path", r.URL.Path,
-			"remote_addr", clientIP(r),
+		ctx := r.Context()
+		// If AccessLog (or any earlier wrapper) already seeded
+		// the request-scoped logger we leave it alone — adding
+		// the same fields again would create duplicate JSON
+		// keys in the emitted record and confuse downstream
+		// log aggregators.
+		if _, ok := ctx.Value(loggerCtxKey).(*slog.Logger); ok {
+			next.ServeHTTP(w, r)
+			return
 		}
-		// Prefer chi's middleware.RequestID context value, which
-		// is set by chimw.RequestID earlier in the chain and
-		// includes server-generated IDs for upstream clients
-		// that didn't supply one. Fall back to the raw header
-		// in case the chi middleware isn't installed (e.g.
-		// tests using bare net/http).
-		if rid := chimw.GetReqID(r.Context()); rid != "" {
-			attrs = append(attrs, "request_id", rid)
-		} else if rid := r.Header.Get("X-Request-Id"); rid != "" {
-			attrs = append(attrs, "request_id", rid)
-		}
-		ctx := WithContext(r.Context(), base.With(attrs...))
+		ctx = withRequestScopedLogger(ctx, r, FromContext(ctx))
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
 }
 
-// AccessLog returns a middleware that emits a single "http
-// request" info record per request AFTER the handler finishes,
-// with the resolved chi route pattern, response status, response
-// byte count, and request duration. Install this OUTSIDE the chi
-// router (e.g. wrap the entire mux) so it observes both routed
-// and unrouted requests.
+// AccessLog wraps the entire mux and is responsible for two
+// things, in this order:
+//
+//  1. Seeding the per-request correlation surface BEFORE
+//     dispatch: a request_id (read from X-Request-Id or
+//     generated), the request-scoped *slog.Logger carrying
+//     http_method / http_path / remote_addr / request_id, AND a
+//     fresh chi.RouteContext so post-dispatch we can read the
+//     resolved route pattern off the same struct that chi
+//     populated in-place.
+//  2. Emitting one "http request" info record AFTER the handler
+//     finishes, with http_status / http_bytes / http_route /
+//     duration_ms attached to the same logger the handler used.
+//
+// Seeding correlation pre-dispatch is what makes a single
+// request_id appear on every log line — including the access
+// log record itself, which lives OUTSIDE the chi router and
+// therefore cannot observe context modifications made by inner
+// middleware (those happen on chi-internal request copies that
+// never propagate back up). Without this seeding, the access
+// log line would carry no request_id and operators couldn't
+// correlate it to the handler-emitted logs from the same
+// request.
+//
+// Install AccessLog outside chi so it observes routed AND
+// unrouted requests (404s, recovered panics, etc.).
 func AccessLog(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Install a fresh chi RouteContext on the request ctx
-		// BEFORE handing off to the inner chi router. chi will
-		// populate this context in-place during routing rather
-		// than creating its own, so when the handler chain
-		// returns we can read the resolved route pattern off
-		// the same struct. Without this, chi's internal
-		// RouteContext lives on the child request that gets
-		// scoped to the handler chain and is invisible to us.
-		rctx := chi.NewRouteContext()
-		ctx := context.WithValue(r.Context(), chi.RouteCtxKey, rctx)
-		r = r.WithContext(ctx)
+		ctx := r.Context()
 
-		sw := &statusWriter{ResponseWriter: w, status: http.StatusOK}
+		// Pre-install a chi.RouteContext so the inner router
+		// populates it in-place during dispatch and we can
+		// read RoutePattern() after next.ServeHTTP returns.
+		rctx := chi.NewRouteContext()
+		ctx = context.WithValue(ctx, chi.RouteCtxKey, rctx)
+
+		// Resolve request_id once, here, so the access log and
+		// every handler log line carry the same id. chi's own
+		// middleware.RequestID is intentionally NOT in the
+		// chain anymore (it would generate a different id
+		// inside chi that AccessLog couldn't see) — we set
+		// chimw.RequestIDKey ourselves so chimw.GetReqID
+		// continues to work for any handler that calls it.
+		reqID := r.Header.Get("X-Request-Id")
+		if reqID == "" {
+			reqID = uuid.NewString()
+		}
+		ctx = context.WithValue(ctx, chimw.RequestIDKey, reqID)
+		ctx = withRequestScopedLogger(ctx, r, FromContext(ctx))
+
+		// Wrap the response writer through chi's WrapResponseWriter
+		// which preserves http.Hijacker / http.Flusher / io.ReaderFrom
+		// via interface composition — critical for WebSocket
+		// upgrades (gorilla/websocket type-asserts to Hijacker)
+		// and SSE streams (assert to Flusher). A naive
+		// status-capturing struct that only embeds
+		// http.ResponseWriter silently strips these optional
+		// interfaces and the upgrade fails with a 500.
+		ww := chimw.NewWrapResponseWriter(w, r.ProtoMajor)
+
 		start := timeNow()
-		next.ServeHTTP(sw, r)
+		next.ServeHTTP(ww, r.WithContext(ctx))
 		dur := timeSince(start)
 
 		pattern := r.URL.Path
@@ -236,34 +276,43 @@ func AccessLog(next http.Handler) http.Handler {
 			pattern = p
 		}
 
-		FromContext(r.Context()).Info("http request",
-			"http_status", sw.status,
-			"http_bytes", sw.bytes,
+		// FromContext(ctx) gives us the logger we seeded
+		// pre-dispatch — same request_id as every handler log
+		// line, so correlation works in log aggregators that
+		// filter on request_id.
+		FromContext(ctx).Info("http request",
+			"http_status", ww.Status(),
+			"http_bytes", ww.BytesWritten(),
 			"http_route", pattern,
 			"duration_ms", dur.Milliseconds(),
 		)
 	})
 }
 
-// statusWriter wraps http.ResponseWriter to capture the response
-// status code and byte count for the access log. WriteHeader may
-// not be called explicitly (the net/http server defaults to 200),
-// so the zero value defaults to 200 OK.
-type statusWriter struct {
-	http.ResponseWriter
-	status int
-	bytes  int
-}
-
-func (s *statusWriter) WriteHeader(code int) {
-	s.status = code
-	s.ResponseWriter.WriteHeader(code)
-}
-
-func (s *statusWriter) Write(p []byte) (int, error) {
-	n, err := s.ResponseWriter.Write(p)
-	s.bytes += n
-	return n, err
+// withRequestScopedLogger derives a child logger from base
+// carrying http_method, http_path, remote_addr, and request_id,
+// then attaches it to ctx so FromContext returns it. request_id
+// is sourced from (in priority order) the chimw.RequestIDKey
+// value, the X-Request-Id header, then a freshly-generated
+// UUID. Shared between AccessLog and Middleware so the
+// two paths produce identical attribute sets.
+func withRequestScopedLogger(ctx context.Context, r *http.Request, base *slog.Logger) context.Context {
+	reqID := ""
+	if rid := chimw.GetReqID(ctx); rid != "" {
+		reqID = rid
+	} else if rid := r.Header.Get("X-Request-Id"); rid != "" {
+		reqID = rid
+		ctx = context.WithValue(ctx, chimw.RequestIDKey, reqID)
+	} else {
+		reqID = uuid.NewString()
+		ctx = context.WithValue(ctx, chimw.RequestIDKey, reqID)
+	}
+	return WithContext(ctx, base.With(
+		"http_method", r.Method,
+		"http_path", r.URL.Path,
+		"remote_addr", clientIP(r),
+		"request_id", reqID,
+	))
 }
 
 // clientIP returns the request's remote IP, preferring the first

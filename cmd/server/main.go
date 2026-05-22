@@ -404,16 +404,18 @@ func run() error {
 	kchatHandler := apikchat.NewHandler(kchatSvc, summarySvc)
 
 	r := chi.NewRouter()
-	r.Use(chimw.RequestID)
+	// chimw.RequestID is intentionally omitted: the request_id
+	// and the request-scoped *slog.Logger are seeded by
+	// logging.AccessLog at the http.Server.Handler boundary
+	// (see srv := &http.Server{Handler: logging.AccessLog(r)}
+	// below). Installing chimw.RequestID here would generate a
+	// SECOND id inside the chi router that diverges from the
+	// one AccessLog already attached, breaking correlation
+	// between the access log line and handler-emitted logs.
+	// AccessLog also writes the chosen id to chimw.RequestIDKey
+	// so handlers calling chimw.GetReqID continue to get the
+	// right value.
 	r.Use(chimw.RealIP)
-	// logging.Middleware attaches a request-scoped *slog.Logger
-	// (method, path, request_id, client IP) to every request
-	// context. Handlers call logging.FromContext(ctx) to inherit
-	// those attributes; the auth middleware later layers user_id
-	// and workspace_id on top once the JWT has been validated.
-	// Installed BEFORE Recoverer so a panic inside a handler
-	// still gets logged with the request correlation attached.
-	r.Use(logging.Middleware)
 	r.Use(chimw.Recoverer)
 
 	// /healthz is a SHALLOW liveness probe: "the process is alive
