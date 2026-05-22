@@ -364,9 +364,10 @@ func (h *Handler) CreateWorkspace(w http.ResponseWriter, r *http.Request) {
 	// audit entry is scoped to the SOURCE workspace (the admin's
 	// current workspace) so the chronology of admin actions for a
 	// workspace stays together in one timeline; the new workspace's
-	// id is captured in the metadata.
+	// id is recorded in the resource_id column (ws.ID), so the
+	// metadata only needs to carry context that ISN'T already on
+	// the audit row (i.e. the human-readable name).
 	h.logAudit(r.Context(), r, audit.ActionWorkspaceCreate, "workspace", &ws.ID, map[string]any{
-		"new_workspace_id":   ws.ID.String(),
 		"new_workspace_name": ws.Name,
 	})
 	writeJSON(w, http.StatusCreated, ws)
