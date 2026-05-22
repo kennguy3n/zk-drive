@@ -274,6 +274,16 @@ func (s *RedisSessionStore) RevokeUser(ctx context.Context, workspaceID, userID 
 	if ttl <= 0 {
 		ttl = 24 * time.Hour
 	}
+	// Redis EX is in whole seconds and rejects 0 as an invalid expire
+	// time. int64(ttl.Seconds()) truncates anything in (0, 1s) to 0
+	// and would have produced a runtime error from the EVAL. Production
+	// today only ever passes middleware.TokenTTL (24h) so this is
+	// defence-in-depth, but the floor keeps the contract crisp: any
+	// positive duration produces a key with at least 1s of TTL.
+	ttlSeconds := int64(ttl.Seconds())
+	if ttlSeconds < 1 {
+		ttlSeconds = 1
+	}
 	cutoff := at.UTC().Unix()
 	key := userRevokedKey(workspaceID, userID)
 	// Atomic max-update via Lua: the script only overwrites the
@@ -289,7 +299,7 @@ func (s *RedisSessionStore) RevokeUser(ctx context.Context, workspaceID, userID 
 	// The script always returns an integer (1 on write, 0 on no-op),
 	// so we don't need a redis.Nil guard — any non-nil error here is
 	// a transport- or script-level failure.
-	if err := revokeUserScript.Run(ctx, s.client, []string{key}, cutoff, int64(ttl.Seconds())).Err(); err != nil {
+	if err := revokeUserScript.Run(ctx, s.client, []string{key}, cutoff, ttlSeconds).Err(); err != nil {
 		return fmt.Errorf("redis revoke user: %w", err)
 	}
 	return nil

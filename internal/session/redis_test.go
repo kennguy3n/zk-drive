@@ -215,6 +215,42 @@ func TestRevokeUserTTL(t *testing.T) {
 	}
 }
 
+// TestRevokeUserFloorsSubSecondTTL pins the sub-second TTL floor.
+// Redis EX is in whole seconds and rejects 0 as an invalid expire
+// time, so int64(ttl.Seconds()) truncating a (0, 1s) duration to 0
+// would have surfaced as an EVAL error and the revocation would
+// have silently been lost. We floor to 1s instead so any positive
+// TTL produces a working revocation key.
+func TestRevokeUserFloorsSubSecondTTL(t *testing.T) {
+	store, mr := newTestStore(t)
+	ctx := context.Background()
+
+	userID := uuid.New()
+	wsID := uuid.New()
+	at := time.Now().UTC()
+
+	if err := store.RevokeUser(ctx, wsID, userID, at, 100*time.Millisecond); err != nil {
+		t.Fatalf("revoke with sub-second TTL: %v", err)
+	}
+
+	// Within the 1-second floor window the key must be readable and
+	// the cutoff must report the token as revoked.
+	revoked, err := store.IsRevoked(ctx, wsID, userID, at)
+	if err != nil {
+		t.Fatalf("is-revoked: %v", err)
+	}
+	if !revoked {
+		t.Fatal("token issued at cutoff must be considered revoked")
+	}
+
+	// And the underlying key must have an actual TTL (>= 1s, not 0).
+	key := fmt.Sprintf("ws:%s:user_revoked:%s", wsID.String(), userID.String())
+	ttl := mr.TTL(key)
+	if ttl < time.Second {
+		t.Fatalf("expected TTL floored to >= 1s, got %v", ttl)
+	}
+}
+
 // TestIsRevokedRejectsMalformedCutoff pins the strict-parse path:
 // a manually-corrupted cutoff (manual Redis surgery, an old
 // pre-script value format, or memory corruption) must surface as

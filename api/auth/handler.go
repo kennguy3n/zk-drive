@@ -286,9 +286,14 @@ func (h *Handler) Login(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) Logout(w http.ResponseWriter, r *http.Request) {
 	claims, ok := middleware.ClaimsFromContext(r.Context())
 	if !ok {
-		// No identity — caller hit /logout without an Authorization
-		// header. Still respond 204 (rather than 401) because
-		// clients often fire-and-forget logout on app shutdown.
+		// Defence-in-depth: production routes /logout behind
+		// AuthMiddleware so this branch is normally unreachable —
+		// the middleware would have already returned 401. We keep
+		// the fallback so a future route that mounts Logout outside
+		// the middleware group doesn't NPE on a nil claims pointer.
+		// 204 (not 401) is the safer response in that case: the
+		// client treats logout as fire-and-forget, and we'd rather
+		// confirm than crash.
 		w.WriteHeader(http.StatusNoContent)
 		return
 	}
