@@ -46,6 +46,16 @@ export interface AuthResponse {
   role: string;
 }
 
+// EncryptionMode is the canonical wire-level union for a folder's
+// privacy mode. The server emits one of these two values; pre-Phase 4
+// rows may omit the field entirely. PROPOSAL §3.3 freezes these two
+// strings as the canonical names — widening this with `| string` would
+// silently break TS narrowing in every consumer, so we keep it strict
+// here and let runtime guards (e.g. EncryptionBadge's `=== "strict_zk"`
+// check) handle hypothetical future modes that ship before the
+// frontend is re-deployed.
+export type EncryptionMode = "strict_zk" | "managed_encrypted";
+
 export interface Folder {
   id: string;
   workspace_id: string;
@@ -56,7 +66,7 @@ export interface Folder {
   updated_at: string;
   // Encryption mode is optional in the response for pre-Phase 4
   // clients; current folders default to "managed_encrypted".
-  encryption_mode?: string;
+  encryption_mode?: EncryptionMode;
 }
 
 export interface FileItem {
@@ -141,7 +151,7 @@ export async function getFolder(id: string): Promise<{ folder: Folder; children:
 export async function createFolder(input: {
   name: string;
   parent_folder_id?: string | null;
-  encryption_mode?: string;
+  encryption_mode?: EncryptionMode;
 }): Promise<Folder> {
   const { data } = await client.post<Folder>("/folders", input);
   return data;

@@ -1,8 +1,10 @@
 # ZK Drive
 
-> Privacy-preserving document management with zero-knowledge storage,
-> powered by zk-object-fabric. Secure file collaboration for teams,
-> clients, and partners.
+> Privacy-conscious document management with per-folder choice of
+> confidential managed storage (default, server-readable for preview /
+> search / virus-scan) or strict zero-knowledge mode (opt-in, the
+> server never sees plaintext). Powered by zk-object-fabric. Secure
+> file collaboration for teams, clients, and partners.
 
 ## What it is
 
@@ -10,8 +12,9 @@ ZK Drive is a document management and file collaboration system — a
 privacy-first alternative to Google Drive, OneDrive, and Dropbox —
 built on top of the [ZK Object Fabric](https://github.com/kennguy3n/zk-object-fabric)
 encrypted storage layer. It provides a familiar drive UI (folders,
-files, sharing, previews) while ensuring data privacy through
-client-side encryption and provider-neutral object storage.
+files, sharing, previews) on provider-neutral, encrypted-at-rest
+object storage, with an opt-in per-folder strict-zero-knowledge mode
+for content that must never be readable by the server.
 
 ZK Drive serves two roles:
 
@@ -35,9 +38,15 @@ previews.
 The file-storage market leaves a clear gap for privacy-conscious SMEs:
 
 - **Privacy gap** — most providers (Google Drive, OneDrive, Dropbox)
-  can read customer files at rest. ZK Drive is zero-knowledge by
-  default in strict-ZK mode and confidentially managed in managed
-  encrypted mode.
+  can read customer files at rest with no honest disclosure. ZK Drive
+  defaults to **confidential managed storage** (server-readable in
+  memory during request handling — this is the right default for SMEs
+  because it enables previews, full-text search, virus scanning, and
+  admin recovery, but it is **not** zero-knowledge and we say so).
+  Folders that need strict zero-knowledge can opt in on a per-folder
+  basis, in which case the server cannot decrypt the contents (and
+  loses preview / search / virus-scan for those folders as the honest
+  trade-off).
 - **Data residency gap** — most providers do not let customers pin
   data to a specific country, DC, or rack. ZK Drive inherits
   zk-object-fabric's customer-controlled placement.
@@ -55,12 +64,20 @@ The file-storage market leaves a clear gap for privacy-conscious SMEs:
 
 - **Folder and file management** — nested folders, file versioning,
   rename, move, copy, soft-delete (trash), restore.
-- **Zero-knowledge encryption** — per-folder selection of managed
-  encrypted mode (default) or strict ZK mode (opt-in), delegated to
-  zk-object-fabric.
-- **Managed encrypted mode** — gateway-side encryption via
-  zk-object-fabric `ManagedEncrypted`. Enables server-side previews,
-  virus scanning, and full-text search.
+- **Per-folder privacy mode** — each folder picks between
+  **confidential managed storage** (default — server-readable for
+  preview / search / virus-scan; gateway-side encryption at rest)
+  and **strict zero-knowledge** (opt-in — end-to-end encrypted, server
+  never sees plaintext, no previews / no full-text search / no virus
+  scan for those folders). Delegated to zk-object-fabric. The trade-off
+  is surfaced honestly in the UI at folder-creation time and on the
+  in-app Privacy page.
+- **Confidential managed storage (default)** — gateway-side encryption
+  via zk-object-fabric `ManagedEncrypted`. The server can read
+  plaintext in memory during request handling, which is what enables
+  server-side previews, virus scanning, and full-text search. This is
+  **not** zero-knowledge; we deliberately call it "confidential
+  managed" so customers can tell which folders are which.
 - **Sharing and permissions** — per-file and per-folder sharing with
   view / edit / admin roles. Folder permissions inherit to children
   unless overridden.

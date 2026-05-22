@@ -53,13 +53,15 @@ test.describe("Demo Flow Screenshots", () => {
     await page.screenshot({ path: `${screenshotDir}/04-folder-contents.png`, fullPage: true });
   });
 
-  test("05 - Create folder dialog (encryption mode picker)", async ({ page }) => {
+  test("05 - Create folder dialog (privacy mode picker)", async ({ page }) => {
     await installDemoMocks(page);
     await page.goto("/drive");
     await page.waitForLoadState("networkidle");
     await page.getByRole("button", { name: /^new folder$/i }).click();
-    // Dialog with name input + Managed/Strict-ZK radio
-    await expect(page.getByText(/managed encrypted/i).first()).toBeVisible();
+    // Dialog now uses the customer-facing mode names from PROPOSAL §3.3:
+    // "Confidential managed (default)" (server-readable) vs
+    // "Strict zero-knowledge" (server-blind). See PrivacyPage.tsx.
+    await expect(page.getByText(/confidential managed/i).first()).toBeVisible();
     await expect(page.getByText(/strict zero-knowledge/i).first()).toBeVisible();
     await page.screenshot({ path: `${screenshotDir}/05-create-folder-dialog.png`, fullPage: true });
   });
@@ -69,9 +71,14 @@ test.describe("Demo Flow Screenshots", () => {
     await page.goto("/drive");
     await page.waitForLoadState("networkidle");
     await page.getByRole("button", { name: /^new folder$/i }).click();
-    // Switch to strict-ZK and capture the warning callout
-    await page.getByLabel(/strict zero-knowledge/i).check();
-    await expect(page.getByText(/disables server-side previews/i)).toBeVisible();
+    // Switch to strict-ZK and capture the honest disclosure callout.
+    // The radio label now reads "Strict zero-knowledge - end-to-end
+    // encrypted ... Previews, full-text search, and virus scanning are
+    // disabled" — `getByLabel` matches against the full label text,
+    // which now also matches the per-mode body copy. Use the input
+    // selector directly so we stay robust to body-copy edits.
+    await page.locator('input[name="encmode"][value="strict_zk"]').check();
+    await expect(page.getByRole("alert")).toContainText(/irreversible/i);
     await page.screenshot({ path: `${screenshotDir}/06-create-folder-strict-zk.png`, fullPage: true });
   });
 

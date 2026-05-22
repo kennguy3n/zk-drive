@@ -5,6 +5,7 @@ import FileList from "../components/FileList";
 import UploadButton from "../components/UploadButton";
 import SearchBar from "../components/SearchBar";
 import ShareDialog from "../components/ShareDialog";
+import EncryptionBadge, { type EncryptionMode } from "../components/EncryptionBadge";
 import {
   bulkCopy,
   bulkDelete,
@@ -121,6 +122,13 @@ export default function FileBrowserPage() {
               </button>
             ) : null}
             <UploadButton folderID={currentFolderID} onUploaded={() => refresh()} />
+            <Link
+              to="/drive/privacy"
+              style={{ ...btn, textDecoration: "none", color: "#111827" }}
+              title="How your data is protected"
+            >
+              Privacy
+            </Link>
             {isAdmin ? (
               <>
                 <Link to="/admin" style={{ ...btn, textDecoration: "none", color: "#111827" }}>
@@ -152,7 +160,21 @@ export default function FileBrowserPage() {
             <h2 style={{ fontSize: 14, color: "#6b7280", textTransform: "uppercase", margin: "8px 0" }}>
               Folders
             </h2>
-            <ul style={{ listStyle: "none", padding: 0, display: "grid", gap: 8, gridTemplateColumns: "repeat(auto-fill, minmax(200px, 1fr))" }}>
+            <ul
+              style={{
+                listStyle: "none",
+                padding: 0,
+                display: "grid",
+                gap: 8,
+                // Each card must fit: name (truncating) + privacy badge
+                // ('strict zero-knowledge' is ~140 px) + Share + Delete.
+                // 260 px keeps the name readable at the worst-case combo
+                // (long folder name + strict-ZK badge) and degrades to
+                // ellipsis instead of squeezing the link to zero width
+                // (which Playwright reports as 'hidden').
+                gridTemplateColumns: "repeat(auto-fill, minmax(260px, 1fr))",
+              }}
+            >
               {subfolders.map((f) => (
                 <li
                   key={f.id}
@@ -166,8 +188,36 @@ export default function FileBrowserPage() {
                     alignItems: "center",
                   }}
                 >
-                  <span style={{ display: "flex", alignItems: "center", gap: 6, minWidth: 0 }}>
-                    <Link to={`/drive/folder/${f.id}`} style={{ overflow: "hidden", textOverflow: "ellipsis" }}>
+                  <span
+                    style={{
+                      display: "flex",
+                      alignItems: "center",
+                      gap: 6,
+                      minWidth: 0,
+                      flex: 1,
+                    }}
+                  >
+                    {/*
+                      flex:1 + minWidth:0 + whiteSpace:nowrap on the link
+                      gives the folder name layout priority over the
+                      badge: the badge keeps its natural width (it has
+                      whiteSpace:nowrap), the name grows to fill the
+                      rest of the card, and overflow truncates with an
+                      ellipsis. Without flex:1 the link's intrinsic
+                      content width competes with the badge inside the
+                      flex container and can collapse to zero, which
+                      Playwright treats as a hidden element.
+                    */}
+                    <Link
+                      to={`/drive/folder/${f.id}`}
+                      style={{
+                        flex: 1,
+                        minWidth: 0,
+                        overflow: "hidden",
+                        textOverflow: "ellipsis",
+                        whiteSpace: "nowrap",
+                      }}
+                    >
                       {f.name}
                     </Link>
                     <EncryptionBadge mode={f.encryption_mode} />
@@ -302,33 +352,6 @@ export default function FileBrowserPage() {
   );
 }
 
-// EncryptionBadge displays a small pill next to the folder name
-// indicating whether the folder is server-processable (managed) or
-// strict zero-knowledge. Unknown / missing modes fall back to the
-// neutral "managed" rendering so pre-Phase 4 rows stay clean.
-function EncryptionBadge({ mode }: { mode?: string }) {
-  const isStrict = mode === "strict_zk";
-  return (
-    <span
-      title={
-        isStrict
-          ? "Strict zero-knowledge: end-to-end encrypted, no server-side processing."
-          : "Managed encrypted: server-side preview, search, and virus scanning enabled."
-      }
-      style={{
-        fontSize: 10,
-        padding: "1px 6px",
-        borderRadius: 999,
-        background: isStrict ? "#fee2e2" : "#dcfce7",
-        color: isStrict ? "#991b1b" : "#166534",
-        whiteSpace: "nowrap",
-      }}
-    >
-      {isStrict ? "strict-ZK" : "managed"}
-    </span>
-  );
-}
-
 function CreateFolderDialog({
   parentID,
   onClose,
@@ -339,7 +362,11 @@ function CreateFolderDialog({
   onCreated: () => void;
 }) {
   const [name, setName] = useState("");
-  const [mode, setMode] = useState<"managed_encrypted" | "strict_zk">("managed_encrypted");
+  // Reuses the EncryptionMode union exported by EncryptionBadge so the
+  // dialog state, the badge prop, and the createFolder request body all
+  // share a single source of truth. A typo like setMode("strict_z") is
+  // a TS error here, not a silent server-side rejection.
+  const [mode, setMode] = useState<EncryptionMode>("managed_encrypted");
   const [error, setError] = useState<string | null>(null);
 
   const submit = async () => {
@@ -371,7 +398,7 @@ function CreateFolderDialog({
           <input value={name} onChange={(e) => setName(e.target.value)} autoFocus required />
         </label>
         <fieldset style={{ border: "1px solid #e5e7eb", borderRadius: 6, padding: 12 }}>
-          <legend style={{ fontSize: 13, color: "#6b7280" }}>Encryption mode</legend>
+          <legend style={{ fontSize: 13, color: "#6b7280" }}>Privacy mode</legend>
           <label style={{ display: "block", marginBottom: 8 }}>
             <input
               type="radio"
@@ -380,7 +407,10 @@ function CreateFolderDialog({
               checked={mode === "managed_encrypted"}
               onChange={() => setMode("managed_encrypted")}
             />{" "}
-            Managed Encrypted (default)
+            <strong>Confidential managed</strong> (default) &mdash; the server
+            can read plaintext in memory during request handling, which is
+            what enables previews, search, and virus scanning. Encrypted at
+            rest. <em>Not</em> zero-knowledge.
           </label>
           <label style={{ display: "block" }}>
             <input
@@ -390,10 +420,13 @@ function CreateFolderDialog({
               checked={mode === "strict_zk"}
               onChange={() => setMode("strict_zk")}
             />{" "}
-            Strict Zero-Knowledge
+            <strong>Strict zero-knowledge</strong> &mdash; end-to-end
+            encrypted, the server cannot decrypt this folder. Previews,
+            full-text search, and virus scanning are disabled.
           </label>
           {mode === "strict_zk" ? (
             <div
+              role="alert"
               style={{
                 marginTop: 8,
                 padding: 8,
@@ -404,10 +437,29 @@ function CreateFolderDialog({
                 borderRadius: 4,
               }}
             >
-              Strict-ZK disables server-side previews, full-text search, and virus
-              scanning. Files are end-to-end encrypted.
+              Strict-ZK is irreversible once the folder has content: there is
+              no server-side migration path back to managed mode because the
+              server never had the plaintext to begin with.
             </div>
           ) : null}
+          <p style={{ fontSize: 12, color: "#6b7280", margin: "8px 0 0" }}>
+            {/*
+              Opens in a new tab so the in-flight folder name + mode
+              radio selection in this dialog survive the click. A
+              `react-router` <Link> would unmount FileBrowserPage and
+              wipe the dialog state without warning; a plain <a> with
+              target="_blank" leaves the dialog intact, and the new
+              tab still hits the SPA's /drive/privacy route via the
+              client-side router on first nav.
+            */}
+            <a
+              href="/drive/privacy"
+              target="_blank"
+              rel="noopener noreferrer"
+            >
+              Learn how each mode works &rarr;
+            </a>
+          </p>
         </fieldset>
         {error ? <p style={{ color: "#b91c1c" }}>{error}</p> : null}
         <div style={{ display: "flex", justifyContent: "flex-end", gap: 8 }}>
@@ -535,9 +587,15 @@ function Breadcrumb({ folder }: { folder: Folder | null }) {
   // Split the materialized path into clickable segments. The API stores
   // paths like "/Engineering/Backend/" so trimming empty parts keeps the
   // display clean.
+  //
+  // EncryptionBadge sits at the end of the breadcrumb so users always
+  // know what privacy mode the current folder is in — not just when
+  // they scan a parent's subfolder list. This is the same trade-off
+  // matrix as PROPOSAL.md §3.3 (managed = server-readable, strict =
+  // server-blind), surfaced at the point of action.
   const parts = folder?.path?.split("/").filter(Boolean) ?? [];
   return (
-    <nav style={{ fontSize: 14 }}>
+    <nav style={{ fontSize: 14, display: "flex", alignItems: "center", gap: 8 }}>
       <Link to="/drive">Drive</Link>
       {parts.map((p, i) => (
         <span key={i}>
@@ -545,6 +603,7 @@ function Breadcrumb({ folder }: { folder: Folder | null }) {
           <span>{p}</span>
         </span>
       ))}
+      {folder ? <EncryptionBadge mode={folder.encryption_mode} size="header" /> : null}
     </nav>
   );
 }
