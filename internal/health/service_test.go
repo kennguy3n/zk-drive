@@ -88,8 +88,15 @@ func TestReadyHandlerOneFailing(t *testing.T) {
 	if resp.Checks["postgres"] != "ok" {
 		t.Errorf("postgres: expected ok, got %q", resp.Checks["postgres"])
 	}
-	if got := resp.Checks["redis"]; !strings.HasPrefix(got, "fail: ") || !strings.Contains(got, "connection refused") {
-		t.Errorf("redis: expected fail with cause, got %q", got)
+	// Response surfaces only the checker name + generic "fail"; the
+	// underlying cause ("connection refused") MUST NOT appear in
+	// the response body — it's emitted to the server log instead so
+	// /readyz can't be used to leak internal network topology.
+	if got := resp.Checks["redis"]; got != "fail" {
+		t.Errorf("redis: expected generic fail status, got %q", got)
+	}
+	if strings.Contains(rr.Body.String(), "connection refused") {
+		t.Errorf("response body leaked underlying error: %s", rr.Body.String())
 	}
 	if resp.Checks["storage"] != "ok" {
 		t.Errorf("storage: expected ok, got %q", resp.Checks["storage"])
@@ -140,8 +147,8 @@ func TestReadyHandlerCheckerTimeout(t *testing.T) {
 	if resp.Checks["fast"] != "ok" {
 		t.Errorf("fast: expected ok, got %q", resp.Checks["fast"])
 	}
-	if got := resp.Checks["slow"]; !strings.HasPrefix(got, "fail: ") {
-		t.Errorf("slow: expected fail with context error, got %q", got)
+	if got := resp.Checks["slow"]; got != "fail" {
+		t.Errorf("slow: expected generic fail status (verbatim error must stay out of the body), got %q", got)
 	}
 }
 

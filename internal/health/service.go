@@ -19,14 +19,17 @@
 //
 // Each Checker is invoked under a per-check timeout shared from the
 // Service so a slow dependency cannot pin the whole probe past the
-// k8s probe timeout (default 1s). Errors are surfaced verbatim in
-// the JSON response so operators can quickly identify which
-// dependency is degraded.
+// k8s probe timeout (default 1s). Failures are reported in the JSON
+// response by checker name + a generic "fail" status; the verbose
+// underlying error is written to the server logs only, so /readyz
+// stays safe to expose even if a misconfigured ingress accidentally
+// reaches it. See ReadyHandler for the rationale.
 package health
 
 import (
 	"context"
 	"encoding/json"
+	"log"
 	"net/http"
 	"sync"
 	"time"
@@ -97,7 +100,8 @@ func NewService(checkers []Checker, timeout time.Duration) *Service {
 
 // readyResponse is the JSON envelope for /readyz. Status is "ready"
 // when all checks pass, "not_ready" otherwise. Checks maps each
-// checker's Name() to either "ok" or "fail: <error message>".
+// checker's Name() to "ok" or "fail" — by design we never leak the
+// underlying error string into the response (see ReadyHandler).
 type readyResponse struct {
 	Status string            `json:"status"`
 	Checks map[string]string `json:"checks"`
@@ -113,13 +117,29 @@ type readyResponse struct {
 // slowest dependency, not the sum. A 5-checker probe with a 2s
 // timeout will return within ~2s of the first call regardless of
 // how many backends are degraded.
+//
+// Information-disclosure posture: the response body identifies WHICH
+// checker failed (by Name()) but never echoes the underlying error
+// string back to the caller. Verbatim error messages from net/Go SDK
+// stacks routinely embed dial tcp addresses, container hostnames, or
+// internal DNS names, which would leak network topology to anyone
+// who could reach /readyz (e.g. if a misconfigured ingress exposes
+// the path to the internet). Operators get the full error context
+// from the server logs instead, where one log.Printf per failed
+// check is emitted with the checker name + error so it correlates
+// to the response body's "fail" entry.
 func (s *Service) ReadyHandler() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		results := make(map[string]string, len(s.checkers))
+		type checkFailure struct {
+			name string
+			err  error
+		}
 		var (
-			mu      sync.Mutex
-			wg      sync.WaitGroup
-			allOK   = true
+			mu       sync.Mutex
+			wg       sync.WaitGroup
+			allOK    = true
+			failures []checkFailure
 		)
 		// Each checker gets a fresh derived context with the per-
 		// check timeout, but they all share the request context as
@@ -134,7 +154,10 @@ func (s *Service) ReadyHandler() http.HandlerFunc {
 				mu.Lock()
 				defer mu.Unlock()
 				if err != nil {
-					results[c.Name()] = "fail: " + err.Error()
+					// Response carries the name + generic "fail"
+					// only; the verbose error goes to the logs.
+					results[c.Name()] = "fail"
+					failures = append(failures, checkFailure{name: c.Name(), err: err})
 					allOK = false
 				} else {
 					results[c.Name()] = "ok"
@@ -142,6 +165,13 @@ func (s *Service) ReadyHandler() http.HandlerFunc {
 			}(c)
 		}
 		wg.Wait()
+
+		// Emit one server-side log line per failed check so the
+		// operator-visible response ("fail") can be correlated to a
+		// full error in the logs.
+		for _, f := range failures {
+			log.Printf("readyz: check failed name=%s err=%v", f.name, f.err)
+		}
 
 		status := http.StatusOK
 		body := readyResponse{Status: "ready", Checks: results}
