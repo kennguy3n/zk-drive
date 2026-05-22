@@ -184,11 +184,19 @@ func AuthMiddleware(secret string, checker SessionChecker) func(http.Handler) ht
 			// guard above returns 401 before we reach this point),
 			// so the attributes are never set to zero values that
 			// would pollute aggregation queries.
-			ctx = logging.WithContext(ctx, logging.FromContext(ctx).With(
+			//
+			// Enrich (not WithContext) is the right primitive here
+			// because the auth middleware runs INSIDE chi, and the
+			// access log line emitted by logging.AccessLog OUTSIDE
+			// chi must also carry these identity attributes for
+			// operator filtering. Enrich mutates the request-scoped
+			// logger slot in place so the post-dispatch AccessLog
+			// frame sees the enriched logger.
+			ctx = logging.Enrich(ctx,
 				"workspace_id", claims.WorkspaceID.String(),
 				"user_id", claims.UserID.String(),
 				"role", claims.Role,
-			))
+			)
 			next.ServeHTTP(w, r.WithContext(ctx))
 		})
 	}

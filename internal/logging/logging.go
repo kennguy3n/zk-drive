@@ -47,6 +47,7 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -66,7 +67,39 @@ var (
 // string. Standard pattern from net/http.
 type ctxKey int
 
-const loggerCtxKey ctxKey = 0
+const (
+	loggerCtxKey ctxKey = 0
+	slotCtxKey   ctxKey = 1
+)
+
+// requestLoggerSlot is the shared mutable container that
+// AccessLog seeds into the request context pre-dispatch. Inner
+// middleware in the chi chain (auth layering workspace_id /
+// user_id / role, etc.) calls Enrich which swaps the slot's
+// logger in place — so attributes added inside chi are visible
+// to AccessLog's post-dispatch "http request" record AND to any
+// goroutine spawned from the request that reads via FromContext
+// after the swap. Without this slot the access log line would
+// only carry attributes seeded BEFORE dispatch (request_id,
+// http_method, http_path, remote_addr) because chi runs inner
+// middleware on request copies whose context modifications
+// never propagate back up to the outer http.Handler.
+type requestLoggerSlot struct {
+	mu  sync.RWMutex
+	log *slog.Logger
+}
+
+func (s *requestLoggerSlot) get() *slog.Logger {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.log
+}
+
+func (s *requestLoggerSlot) set(l *slog.Logger) {
+	s.mu.Lock()
+	s.log = l
+	s.mu.Unlock()
+}
 
 // Init configures the process-wide default logger and returns it
 // for callers that want to hold a reference rather than reach for
@@ -99,7 +132,13 @@ func Init(component string) *slog.Logger {
 	// severity for log aggregators that alert on ERROR rate; pushing
 	// them to DEBUG would silently hide useful operator telemetry
 	// the moment LOG_LEVEL switches back to INFO.
-	bridge := slog.NewLogLogger(handler, slog.LevelInfo)
+	//
+	// Use logger.Handler() (not the raw handler) so bridged records
+	// carry the same "component" attribute every native slog call
+	// emits. Without this, a third-party `log.Printf` from nats.go
+	// would land in the log stream WITHOUT a component field,
+	// breaking operators' filter-by-binary queries.
+	bridge := slog.NewLogLogger(logger.Handler(), slog.LevelInfo)
 	log.SetFlags(0)
 	log.SetOutput(bridge.Writer())
 
@@ -145,9 +184,21 @@ func newHandler(w io.Writer, level slog.Level) slog.Handler {
 // service methods call to log — never use slog.Default() directly
 // from a code path that has a ctx in scope, otherwise the
 // request_id / workspace_id correlation gets lost.
+//
+// When ctx carries a requestLoggerSlot (i.e. the request went
+// through AccessLog), FromContext returns the slot's current
+// logger which reflects every attribute Enrich layered on
+// during the chi dispatch. This is what makes post-dispatch
+// AccessLog records carry workspace_id / user_id from the auth
+// middleware that ran inside chi.
 func FromContext(ctx context.Context) *slog.Logger {
 	if ctx == nil {
 		return slog.Default()
+	}
+	if slot, ok := ctx.Value(slotCtxKey).(*requestLoggerSlot); ok {
+		if l := slot.get(); l != nil {
+			return l
+		}
 	}
 	if l, ok := ctx.Value(loggerCtxKey).(*slog.Logger); ok && l != nil {
 		return l
@@ -156,11 +207,15 @@ func FromContext(ctx context.Context) *slog.Logger {
 }
 
 // WithContext returns a new ctx carrying logger as the value
-// returned by FromContext. Used by Middleware after building a
-// per-request child logger; can also be used by background
-// workers that want to scope a logger to a job (e.g. "job_id" or
-// "workspace_id" attached for the duration of one message
-// handler).
+// returned by FromContext. Used by background workers that want
+// to scope a logger to a job (e.g. "job_id" or "workspace_id"
+// attached for the duration of one message handler).
+//
+// WithContext stores the logger immutably — sub-tasks branched
+// from the returned ctx see this logger, but the parent ctx is
+// unaffected. For request-scoped attribute enrichment that the
+// access log line must also observe (auth middleware adding
+// workspace_id / user_id), use Enrich instead.
 func WithContext(ctx context.Context, logger *slog.Logger) context.Context {
 	if ctx == nil {
 		ctx = context.Background()
@@ -169,6 +224,41 @@ func WithContext(ctx context.Context, logger *slog.Logger) context.Context {
 		return ctx
 	}
 	return context.WithValue(ctx, loggerCtxKey, logger)
+}
+
+// Enrich layers attrs onto the request-scoped logger so they
+// appear on every subsequent log line emitted via
+// FromContext(ctx) — INCLUDING the "http request" access log
+// record that AccessLog emits after the chi handler chain
+// returns. Used by middleware running inside chi (notably the
+// auth middleware) that needs its enrichments to be visible at
+// the http.Handler boundary outside chi.
+//
+// When ctx has a request-scoped slot (i.e. AccessLog seeded one
+// pre-dispatch), Enrich swaps the slot's logger in place and
+// returns ctx unchanged — the mutation is what makes the
+// enrichment visible to the outer AccessLog frame.
+//
+// When ctx does NOT have a slot (background workers, tests,
+// code paths that never went through AccessLog), Enrich falls
+// back to WithContext so callers can use this function safely
+// in both HTTP and non-HTTP contexts.
+func Enrich(ctx context.Context, attrs ...any) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if len(attrs) == 0 {
+		return ctx
+	}
+	if slot, ok := ctx.Value(slotCtxKey).(*requestLoggerSlot); ok {
+		base := slot.get()
+		if base == nil {
+			base = FromContext(ctx)
+		}
+		slot.set(base.With(attrs...))
+		return ctx
+	}
+	return WithContext(ctx, FromContext(ctx).With(attrs...))
 }
 
 // Middleware is the in-chi-router companion to AccessLog. It is a
@@ -207,7 +297,7 @@ func Middleware(next http.Handler) http.Handler {
 	})
 }
 
-// AccessLog wraps the entire mux and is responsible for two
+// AccessLog wraps the entire mux and is responsible for three
 // things, in this order:
 //
 //  1. Seeding the per-request correlation surface BEFORE
@@ -217,9 +307,14 @@ func Middleware(next http.Handler) http.Handler {
 //     fresh chi.RouteContext so post-dispatch we can read the
 //     resolved route pattern off the same struct that chi
 //     populated in-place.
-//  2. Emitting one "http request" info record AFTER the handler
+//  2. Installing a request-scoped logger slot that inner
+//     middleware (auth) mutates via Enrich, so workspace_id /
+//     user_id / role layered on inside chi are visible to the
+//     access log record emitted outside chi.
+//  3. Emitting one "http request" info record AFTER the handler
 //     finishes, with http_status / http_bytes / http_route /
-//     duration_ms attached to the same logger the handler used.
+//     duration_ms attached to the SAME logger the handler used
+//     (including any attrs Enrich layered on during dispatch).
 //
 // Seeding correlation pre-dispatch is what makes a single
 // request_id appear on every log line — including the access
@@ -255,7 +350,20 @@ func AccessLog(next http.Handler) http.Handler {
 			reqID = uuid.NewString()
 		}
 		ctx = context.WithValue(ctx, chimw.RequestIDKey, reqID)
-		ctx = withRequestScopedLogger(ctx, r, FromContext(ctx))
+
+		// Build the request-scoped logger AND install the
+		// shared slot so inner chi middleware can mutate it
+		// via Enrich (auth middleware uses this path to attach
+		// workspace_id / user_id / role after JWT validation).
+		base := FromContext(ctx).With(
+			"http_method", r.Method,
+			"http_path", r.URL.Path,
+			"remote_addr", clientIP(r),
+			"request_id", reqID,
+		)
+		slot := &requestLoggerSlot{log: base}
+		ctx = context.WithValue(ctx, slotCtxKey, slot)
+		ctx = context.WithValue(ctx, loggerCtxKey, base)
 
 		// Wrap the response writer through chi's WrapResponseWriter
 		// which preserves http.Hijacker / http.Flusher / io.ReaderFrom
@@ -294,8 +402,9 @@ func AccessLog(next http.Handler) http.Handler {
 // then attaches it to ctx so FromContext returns it. request_id
 // is sourced from (in priority order) the chimw.RequestIDKey
 // value, the X-Request-Id header, then a freshly-generated
-// UUID. Shared between AccessLog and Middleware so the
-// two paths produce identical attribute sets.
+// UUID. Used by Middleware when running standalone (no
+// AccessLog wrapper); AccessLog has its own inline equivalent
+// because it ALSO needs to install the mutable logger slot.
 func withRequestScopedLogger(ctx context.Context, r *http.Request, base *slog.Logger) context.Context {
 	reqID := ""
 	if rid := chimw.GetReqID(ctx); rid != "" {
@@ -318,7 +427,10 @@ func withRequestScopedLogger(ctx context.Context, r *http.Request, base *slog.Lo
 // clientIP returns the request's remote IP, preferring the first
 // entry in X-Forwarded-For when present (we sit behind a
 // load-balancer / reverse proxy in every production deployment).
-// Falls back to RemoteAddr without the port suffix.
+// Falls back to RemoteAddr without the port suffix and IPv6
+// brackets stripped — matching the format internal/audit/service.go
+// uses so dashboards can join on remote_addr across the access
+// log and the audit log without IPv6-specific string munging.
 func clientIP(r *http.Request) string {
 	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
 		if i := strings.IndexByte(xff, ','); i > 0 {
@@ -330,9 +442,14 @@ func clientIP(r *http.Request) string {
 		return ""
 	}
 	// RemoteAddr is host:port; strip the port to keep the field
-	// stable across reconnects on the same client.
-	if i := strings.LastIndexByte(r.RemoteAddr, ':'); i > 0 {
-		return r.RemoteAddr[:i]
+	// stable across reconnects on the same client. Also strip
+	// surrounding "[" / "]" so the IPv6 form "[::1]:5" becomes
+	// "::1", matching internal/audit/service.go's clientIP.
+	host := r.RemoteAddr
+	if i := strings.LastIndexByte(host, ':'); i > 0 {
+		host = host[:i]
 	}
-	return r.RemoteAddr
+	host = strings.TrimPrefix(host, "[")
+	host = strings.TrimSuffix(host, "]")
+	return host
 }

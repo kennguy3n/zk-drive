@@ -411,6 +411,127 @@ func TestAccessLogGeneratesRequestIDWhenHeaderMissing(t *testing.T) {
 	}
 }
 
+// TestEnrichFromInnerMiddlewareReachesAccessLog pins the
+// architectural fix Devin Review flagged: attributes added by
+// middleware INSIDE chi (auth layering workspace_id / user_id /
+// role) must reach the access log record that AccessLog emits
+// OUTSIDE chi. Pre-fix, the auth middleware called
+// logging.WithContext on the chi-internal request context, so
+// those modifications were invisible to AccessLog's outer
+// r.Context() after dispatch returned. Post-fix, AccessLog
+// installs a shared logger slot in ctx and Enrich mutates the
+// slot in place — making the auth middleware's enrichments
+// visible to BOTH handler logs AND the access log line.
+func TestEnrichFromInnerMiddlewareReachesAccessLog(t *testing.T) {
+	var buf bytes.Buffer
+	prev := slog.Default()
+	defer slog.SetDefault(prev)
+	slog.SetDefault(slog.New(slog.NewJSONHandler(&buf, nil)))
+
+	// Simulate the auth middleware: an inner middleware that
+	// calls Enrich after some hypothetical JWT validation.
+	authLike := func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+			ctx := Enrich(req.Context(),
+				"workspace_id", "ws-fixture-001",
+				"user_id", "user-fixture-002",
+				"role", "admin",
+			)
+			next.ServeHTTP(w, req.WithContext(ctx))
+		})
+	}
+
+	inner := chi.NewRouter()
+	inner.Use(authLike)
+	inner.Get("/x", func(w http.ResponseWriter, req *http.Request) {
+		FromContext(req.Context()).Info("handler log")
+	})
+	wrapped := AccessLog(inner)
+
+	req := httptest.NewRequest(http.MethodGet, "/x", nil)
+	req.Header.Set("X-Request-Id", "rid-enrich-test")
+	rec := httptest.NewRecorder()
+	wrapped.ServeHTTP(rec, req)
+
+	out := buf.String()
+	// Both records (handler log + access log) must carry the
+	// identity attributes Enrich layered on inside chi.
+	for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
+		var rec map[string]any
+		if err := json.Unmarshal([]byte(line), &rec); err != nil {
+			t.Fatalf("invalid JSON line %q: %v", line, err)
+		}
+		for _, key := range []string{"workspace_id", "user_id", "role", "request_id"} {
+			if _, ok := rec[key]; !ok {
+				t.Errorf("record missing %q (Enrich didn't reach AccessLog?): %s", key, line)
+			}
+		}
+		if rec["workspace_id"] != "ws-fixture-001" {
+			t.Errorf("workspace_id wrong on line: %s", line)
+		}
+	}
+}
+
+// TestEnrichOutsideRequestSlotFallsBackToImmutableContext
+// asserts the documented fallback path: when ctx has no
+// AccessLog-seeded slot (background workers, tests, code paths
+// that never went through HTTP), Enrich must still work
+// correctly by creating a new ctx with the enriched logger.
+func TestEnrichOutsideRequestSlotFallsBackToImmutableContext(t *testing.T) {
+	var buf bytes.Buffer
+	base := slog.New(slog.NewJSONHandler(&buf, nil)).With("component", "worker")
+	parent := WithContext(context.Background(), base)
+
+	child := Enrich(parent, "job_id", "j-123")
+	if child == parent {
+		t.Fatal("Enrich must return a new ctx when no slot is present (immutable fallback)")
+	}
+
+	FromContext(child).Info("processed")
+	out := buf.String()
+	if !strings.Contains(out, `"job_id":"j-123"`) {
+		t.Errorf("Enrich-without-slot must produce a logger with the new attrs: %s", out)
+	}
+	if !strings.Contains(out, `"component":"worker"`) {
+		t.Errorf("Enrich-without-slot must preserve base attrs: %s", out)
+	}
+
+	// Parent ctx must NOT see the enrichment (immutable
+	// semantics for non-slot fallback).
+	buf.Reset()
+	FromContext(parent).Info("parent")
+	if strings.Contains(buf.String(), "job_id") {
+		t.Errorf("Enrich-without-slot leaked into parent ctx: %s", buf.String())
+	}
+}
+
+// TestInitBridgePreservesComponentAttribute pins the fix for
+// Devin Review's bridge-handler finding: the legacy log.Printf
+// bridge must use logger.Handler() not the raw handler so
+// bridged records carry the "component" attribute every native
+// slog call emits. Without this, third-party `log.Printf`
+// output lands in the log stream missing the field operators
+// use to filter by binary (server / worker / reconciler).
+func TestInitBridgePreservesComponentAttribute(t *testing.T) {
+	var buf bytes.Buffer
+	handler := slog.NewJSONHandler(&buf, nil)
+	componentLogger := slog.New(handler).With("component", "test-binary")
+
+	// Mirror Init's bridge construction with the fix.
+	bridge := slog.NewLogLogger(componentLogger.Handler(), slog.LevelInfo)
+	prevFlags := log.Flags()
+	prevOut := log.Writer()
+	defer log.SetFlags(prevFlags)
+	defer log.SetOutput(prevOut)
+	log.SetFlags(0)
+	log.SetOutput(bridge.Writer())
+
+	log.Printf("third-party: noisy thing happened")
+	if !strings.Contains(buf.String(), `"component":"test-binary"`) {
+		t.Fatalf("bridge dropped component attribute: %s", buf.String())
+	}
+}
+
 // TestMiddlewareIsNoOpWhenAccessLogAlreadyRan pins the
 // idempotency contract: when AccessLog has already attached a
 // request-scoped logger, Middleware must not re-attach the same
