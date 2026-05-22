@@ -62,7 +62,7 @@ func TestSecurityHeadersCSPEnumeratesExpectedDirectives(t *testing.T) {
 		"style-src 'self' 'unsafe-inline'",
 		"img-src 'self' data: blob:",
 		"font-src 'self' data:",
-		"connect-src 'self' wss: ws:",
+		"connect-src 'self'",
 		"frame-ancestors 'none'",
 		"form-action 'self'",
 		"base-uri 'self'",
@@ -140,8 +140,18 @@ func TestSecurityHeadersCSPConnectAndImgExtraMergedIn(t *testing.T) {
 	wrapped.ServeHTTP(rec, req)
 
 	csp := rec.Header().Get("Content-Security-Policy")
-	if !strings.Contains(csp, "connect-src 'self' wss: ws: https://fabric-gw.example.com https://api.stripe.com") {
+	if !strings.Contains(csp, "connect-src 'self' https://fabric-gw.example.com https://api.stripe.com") {
 		t.Errorf("CSP connect-src missing extras; full header: %s", csp)
+	}
+	// Defense-in-depth: the default connect-src must NOT carry
+	// bare wss: / ws: scheme sources — those would let an XSS
+	// payload exfiltrate via WebSocket to any host. 'self'
+	// covers same-origin WS upgrades in modern browsers, and
+	// cross-origin WS gateways must opt in via CSPConnectExtra.
+	for _, scheme := range []string{" wss:", " ws:"} {
+		if strings.Contains(csp, scheme) {
+			t.Errorf("CSP connect-src contains bare %q scheme source (XSS exfil vector); full header: %s", scheme, csp)
+		}
 	}
 	if !strings.Contains(csp, "img-src 'self' data: blob: https://fabric-gw.example.com") {
 		t.Errorf("CSP img-src missing extras; full header: %s", csp)

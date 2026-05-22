@@ -32,14 +32,25 @@ type SecurityHeadersOptions struct {
 	CSPReportURI string
 
 	// CSPConnectExtra is a list of additional origins to allow
-	// in `connect-src`, on top of `'self' wss: ws:`. The
-	// frontend issues XHR / fetch / WebSocket requests to (a)
-	// the API on the same origin and (b) the zk-object-fabric
-	// gateway for direct-to-storage uploads / downloads. The
-	// gateway origin is deployment-specific (e.g.
-	// `https://fabric-gw.example.com`) and must be added here
-	// — otherwise presigned URLs fail with a "Refused to
-	// connect" console error in production.
+	// in `connect-src`, on top of the default `'self'`. The
+	// `'self'` keyword in CSP3 covers same-origin XHR / fetch
+	// AND same-origin WebSocket upgrades (ws:// from an http://
+	// document, wss:// from an https:// document), so the
+	// frontend's `/api/ws` connection is already allowed.
+	//
+	// Add the zk-object-fabric storage gateway origin here
+	// (deployment-specific, e.g. `https://fabric-gw.example.com`)
+	// so direct-to-storage presigned-URL uploads / downloads
+	// land. Without it, the browser blocks the PUT with a
+	// "Refused to connect" console error.
+	//
+	// If the deployment also uses a dedicated WebSocket gateway
+	// on a different origin (e.g. `wss://ws.example.com`), add
+	// that here too — the default does NOT include bare
+	// `wss:` / `ws:` scheme sources, which would otherwise
+	// allow an XSS payload to open a WebSocket to any host
+	// (a data-exfiltration channel that bypasses the rest of
+	// the policy).
 	CSPConnectExtra []string
 
 	// CSPImgExtra is a list of additional origins to allow in
@@ -208,7 +219,16 @@ const defaultPermissionsPolicy = "accelerometer=(), " +
 // attack vector), but a paste mishap shouldn't be able to
 // flip script-src to unsafe-inline silently.
 func buildCSP(opts SecurityHeadersOptions) string {
-	connect := []string{"'self'", "wss:", "ws:"}
+	// connect-src intentionally does NOT carry bare `wss:` /
+	// `ws:` scheme sources. Per CSP3, `'self'` matches
+	// same-origin WebSocket upgrades (ws:// from http:// doc,
+	// wss:// from https:// doc) in every browser the SPA
+	// targets, so the same-origin /api/ws path is already
+	// allowed by `'self'` alone. Allowing bare `wss:` would
+	// let an XSS payload exfiltrate to `wss://attacker.com`
+	// — cross-origin WebSocket gateway deployments must opt in
+	// via CSPConnectExtra (documented threat model).
+	connect := []string{"'self'"}
 	connect = append(connect, sanitiseCSPOrigins(opts.CSPConnectExtra)...)
 
 	img := []string{"'self'", "data:", "blob:"}

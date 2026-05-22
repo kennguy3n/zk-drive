@@ -118,8 +118,13 @@ type Config struct {
 	SecurityHeadersCSPReportURI string
 	// SecurityHeadersCSPConnectExtra is a comma-separated list
 	// of additional origins to allow in `connect-src` (on top of
-	// `'self' wss: ws:`). The fabric storage gateway URL goes
-	// here — required so presigned-URL uploads / downloads land.
+	// the default `'self'`). The default deliberately does NOT
+	// include bare `wss:` / `ws:` scheme sources — `'self'`
+	// already covers same-origin WebSocket upgrades, and bare
+	// `wss:` would allow XSS exfiltration to any host. The
+	// fabric storage gateway URL goes here (required so
+	// presigned-URL uploads / downloads land); a cross-origin
+	// WebSocket gateway URL (if any) goes here too.
 	SecurityHeadersCSPConnectExtra []string
 	// SecurityHeadersCSPImgExtra is a comma-separated list of
 	// additional origins to allow in `img-src` (on top of
