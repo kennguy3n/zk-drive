@@ -96,6 +96,14 @@ func ensureRLSTestRole(t *testing.T, env *testEnv) {
 // production code uses (pgxpool PrepareConn → SET app.workspace_id),
 // so the test exercises the real production wiring rather than a
 // hand-rolled SET inside the transaction.
+//
+// fn callers can pass context.Background() (rather than a workspace-
+// bound context) to tx.QueryRow / tx.Exec inside fn: the GUC was set
+// at session level by the PrepareConn hook when Begin acquired this
+// connection, and a session-level GUC persists across every operation
+// on that connection regardless of what context is threaded through
+// pgx. The context passed to tx.QueryRow only governs cancellation /
+// timeout, NOT the tenant scope.
 func runAsRLSRole(t *testing.T, env *testEnv, wsID uuid.UUID, fn func(t *testing.T, tx pgx.Tx)) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
