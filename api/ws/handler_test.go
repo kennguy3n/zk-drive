@@ -61,7 +61,7 @@ func TestWSReceivesFileUploadEvent(t *testing.T) {
 		}
 		t.Fatalf("dial %s: %v", wsURL, err)
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 
 	// The hub registers the client on a buffered channel; poll its
 	// per-(workspaceID, userID) client count until the registration
@@ -190,7 +190,7 @@ func TestServeWSRejectsUnauthenticated(t *testing.T) {
 	if err != nil {
 		t.Fatalf("get: %v", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusUnauthorized {
 		t.Fatalf("status: got %d, want %d", resp.StatusCode, http.StatusUnauthorized)
 	}

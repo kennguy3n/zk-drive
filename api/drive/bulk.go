@@ -53,10 +53,6 @@ type bulkResponse struct {
 	Failed    []bulkFailure `json:"failed"`
 }
 
-func (bulkResponse) itemCount(req bulkMutateRequest) int {
-	return len(req.FileIDs) + len(req.FolderIDs)
-}
-
 // BulkMove relocates a set of files and folders into a target folder.
 // Each item is checked independently; failures on one item do not
 // abort the rest. Returns a per-item success/failure summary.
@@ -372,7 +368,7 @@ func (h *Handler) BulkDownload(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/zip")
 	w.Header().Set("Content-Disposition", `attachment; filename="download.zip"`)
 	zw := zip.NewWriter(w)
-	defer zw.Close()
+	defer func() { _ = zw.Close() }()
 	client := &http.Client{}
 	for _, it := range items {
 		if err := appendZipEntry(r.Context(), zw, client, store, it.name, it.objectKey); err != nil {
@@ -427,7 +423,7 @@ func appendZipEntry(ctx context.Context, zw *zip.Writer, client *http.Client, st
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("object fetch: %s", resp.Status)
 	}

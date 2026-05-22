@@ -178,7 +178,7 @@ func run() error {
 			return fmt.Errorf("parse REDIS_URL: %w", perr)
 		}
 		redisClient = redis.NewClient(opts)
-		defer redisClient.Close()
+		defer func() { _ = redisClient.Close() }()
 		if perr := redisClient.Ping(ctx).Err(); perr != nil {
 			log.Printf("redis: ping %s failed, continuing with in-memory fallbacks: %v", cfg.RedisURL, perr)
 			redisClient = nil

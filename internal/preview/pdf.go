@@ -35,7 +35,7 @@ func renderPDFFirstPage(ctx context.Context, pdfBytes []byte) (image.Image, erro
 	if err != nil {
 		return nil, fmt.Errorf("mkdir temp: %w", err)
 	}
-	defer os.RemoveAll(dir)
+	defer func() { _ = os.RemoveAll(dir) }()
 
 	inPath := filepath.Join(dir, "in.pdf")
 	if err := os.WriteFile(inPath, pdfBytes, 0o600); err != nil {

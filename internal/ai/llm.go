@@ -151,7 +151,7 @@ func (c *OllamaClient) Generate(ctx context.Context, prompt string) (string, err
 	if err != nil {
 		return "", fmt.Errorf("ai/ollama: post: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		// Read at most 1 KiB of the error body so operator
 		// debug logs aren't flooded by a misbehaving daemon.

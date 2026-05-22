@@ -185,7 +185,7 @@ func (s *Service) downloadObject(ctx context.Context, key string) ([]byte, error
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode/100 != 2 {
 		return nil, fmt.Errorf("get %s: status %d", key, resp.StatusCode)
 	}
@@ -221,7 +221,7 @@ func (s *Service) instream(ctx context.Context, body []byte) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("dial clamd: %w", err)
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 	if deadline, ok := ctx.Deadline(); ok {
 		_ = conn.SetDeadline(deadline)
 	}

@@ -72,7 +72,7 @@ func (c *Client) GetPlacement(ctx context.Context, tenantID string) (*Policy, er
 	if err != nil {
 		return nil, fmt.Errorf("call console: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode == http.StatusNotFound {
 		return nil, ErrPlacementNotFound
 	}
@@ -114,7 +114,7 @@ func (c *Client) PutPlacement(ctx context.Context, tenantID string, p *Policy) e
 	if err != nil {
 		return fmt.Errorf("call console: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode/100 != 2 {
 		preview, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
 		return fmt.Errorf("console PUT placement: status %d: %s", resp.StatusCode, strings.TrimSpace(string(preview)))
@@ -150,7 +150,7 @@ func (c *Client) PutCMK(ctx context.Context, tenantID, cmkURI string) error {
 	if err != nil {
 		return fmt.Errorf("call console: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode/100 != 2 {
 		preview, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
 		return fmt.Errorf("console PUT cmk: status %d: %s", resp.StatusCode, strings.TrimSpace(string(preview)))

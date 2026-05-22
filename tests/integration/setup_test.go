@@ -400,7 +400,7 @@ func (e *testEnv) httpRequest(method, path, token string, payload any) (int, []b
 	if err != nil {
 		e.t.Fatalf("do request: %v", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	b, err := io.ReadAll(resp.Body)
 	if err != nil {
 		e.t.Fatalf("read body: %v", err)

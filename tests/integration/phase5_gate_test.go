@@ -139,7 +139,7 @@ func TestPhase5Gate(t *testing.T) {
 			}
 			t.Fatalf("dial %s: %v", wsURL, err)
 		}
-		defer conn.Close()
+		defer func() { _ = conn.Close() }()
 		if resp.StatusCode != http.StatusSwitchingProtocols {
 			t.Fatalf("expected 101 Switching Protocols, got %d", resp.StatusCode)
 		}
