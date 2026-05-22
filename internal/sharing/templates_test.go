@@ -26,19 +26,40 @@ func TestListTemplatesIsSorted(t *testing.T) {
 	}
 }
 
-// TestListTemplatesReturnsCopy verifies the slice is freshly
-// allocated on every call. Returning the package-level map's value
-// slice directly would let a caller mutate the in-memory registry
-// (e.g. by reslicing) and affect every subsequent request — this
-// test rejects that footgun.
-func TestListTemplatesReturnsCopy(t *testing.T) {
+// TestListTemplatesReturnsDeepCopy is the load-bearing pin on the
+// "callers cannot corrupt the registry" contract. It actually mutates
+// the first template's first SubFolder via the returned value, then
+// re-fetches and asserts the registry is unchanged. A shallow copy
+// (which is what `tc := t` produces — the SubFolders slice header
+// still points at the registry's underlying array) would let the
+// mutation flow through to the second fetch and fail this test.
+func TestListTemplatesReturnsDeepCopy(t *testing.T) {
 	a := ListTemplates()
-	b := ListTemplates()
-	if len(a) == 0 || len(b) == 0 {
+	if len(a) == 0 {
 		t.Fatalf("expected non-empty templates")
 	}
+	// Outer-slice independence: separate fetches must yield distinct
+	// slice headers so an append() on one cannot grow/shrink the
+	// other.
+	b := ListTemplates()
+	if len(b) == 0 {
+		t.Fatalf("expected non-empty templates on second fetch")
+	}
 	if &a[0] == &b[0] {
-		t.Fatalf("ListTemplates returned aliased slice headers; callers can corrupt registry")
+		t.Fatalf("ListTemplates returned aliased slice headers")
+	}
+	// Inner-slice independence: mutate a SubFolder via the first
+	// fetch and assert the second fetch sees the original value.
+	// This is the test the previous tautology pretended to be.
+	if len(a[0].SubFolders) == 0 {
+		t.Fatalf("first template has no SubFolders to mutate")
+	}
+	original := a[0].SubFolders[0]
+	a[0].SubFolders[0] = "MUTATED-BY-TEST"
+
+	c := ListTemplates()
+	if c[0].SubFolders[0] != original {
+		t.Fatalf("ListTemplates leaked SubFolders aliasing — mutation via earlier fetch corrupted registry (got %q, want %q)", c[0].SubFolders[0], original)
 	}
 }
 
@@ -75,28 +96,34 @@ func TestGetTemplateUnknown(t *testing.T) {
 	}
 }
 
-// TestGetTemplateReturnsDistinctCopy guards the same pitfall as
-// ListTemplates: a mutation by one caller (e.g. appending to
-// SubFolders) must not affect the package registry.
-func TestGetTemplateReturnsDistinctCopy(t *testing.T) {
+// TestGetTemplateReturnsDeepCopy guards the same pitfall as
+// ListTemplates but on the single-template path. The previous
+// version of this test was a tautology — it observed length without
+// mutating, so a shallow copy in GetTemplate would pass. Here we
+// actually overwrite the first SubFolder via the returned pointer
+// and assert the second fetch sees the original value.
+func TestGetTemplateReturnsDeepCopy(t *testing.T) {
 	a, err := GetTemplate("legal")
 	if err != nil {
 		t.Fatalf("legal template missing: %v", err)
 	}
-	// Mutate the returned slice by appending a sentinel — if the
-	// internal map shares the underlying array (which it does, since
-	// SubFolders is a slice and slices are reference types), a
-	// future Append from another caller could surface that sentinel.
-	// We don't expect callers to mutate, but the API surface should
-	// at least return a fresh Template value so reassigning fields
-	// is safe.
-	originalLen := len(a.SubFolders)
+	if len(a.SubFolders) == 0 {
+		t.Fatalf("legal template has no SubFolders to mutate")
+	}
+	original := a.SubFolders[0]
+	a.SubFolders[0] = "MUTATED-BY-TEST"
 
 	b, err := GetTemplate("legal")
 	if err != nil {
 		t.Fatalf("legal template missing on second fetch: %v", err)
 	}
-	if len(b.SubFolders) != originalLen {
-		t.Fatalf("registry mutated between fetches: first=%d second=%d", originalLen, len(b.SubFolders))
+	if b.SubFolders[0] != original {
+		t.Fatalf("GetTemplate leaked SubFolders aliasing — mutation via earlier fetch corrupted registry (got %q, want %q)", b.SubFolders[0], original)
+	}
+
+	// Outer struct must also be a fresh allocation so a caller doing
+	// `tpl.Name = "..."` cannot rename the registry entry.
+	if a == b {
+		t.Fatalf("GetTemplate returned the same pointer twice; callers can rename templates in place")
 	}
 }
