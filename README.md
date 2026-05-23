@@ -367,6 +367,44 @@ workspace admin can use `PATCH /api/admin/users/{id}` to deactivate
 and re-activate the account (manual identity-proofing process —
 deliberately not a 1-click button on the admin page).
 
+### Searchable file types
+
+The search endpoint (`GET /api/search?q=...`) queries Postgres
+full-text search over file names, tag lists, AND file body content
+(`files.content_text`). The index worker (`drive.search.index`
+subject) is responsible for populating `content_text` after each
+successful upload. The extractor lives in `internal/index` and
+supports the following mime types:
+
+| Mime type                                                                   | Extractor          | Notes                                                                                                                                                                                                                              |
+| --------------------------------------------------------------------------- | ------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `text/*`                                                                    | pass-through       | Body bytes are written verbatim (UTF-8 truncated to 4 MiB on a rune boundary).                                                                                                                                                     |
+| `application/json`, `application/xml`                                       | pass-through       | Same as `text/*`.                                                                                                                                                                                                                  |
+| `application/pdf`                                                           | `pdftotext`        | Shells out to `pdftotext` (part of `poppler-utils`, GPL — used as a subprocess, not linked). Same package the preview pipeline already requires for `pdftoppm`, so a host with PDF previews enabled also has PDF text extraction. |
+| `application/vnd.openxmlformats-officedocument.wordprocessingml.document` (.docx) | pure Go            | `archive/zip` opens the .docx, `encoding/xml` streams `word/document.xml`, and visible `<w:t>` text runs are concatenated with `<w:tab>` / `<w:br>` rendered as `\t` / `\n` and `<w:p>` paragraphs separated by newlines.            |
+
+Files of any other mime type (images, video, archives, binaries) are
+still searchable by **name** and **tag** — the index worker simply
+acks the message with no body content recorded. The same holds for
+strict zero-knowledge folders: their bytes never reach the server,
+so `content_text` stays empty regardless of mime type, and the
+search index covers names + tags only.
+
+**Graceful skip semantics.** If `pdftotext` is not installed on the
+worker host (e.g. operators who strip `poppler-utils` from a custom
+image), PDF extraction returns the same "unsupported mime" signal
+as an image upload — the message is acked and the file remains
+searchable by name. This is the same graceful-degrade pattern the
+preview pipeline already uses for `pdftoppm`. The official ZK Drive
+Dockerfile installs `poppler-utils` so both extractors and previews
+work out of the box.
+
+**Limits.** The extractor reads at most 4 MiB of text per file
+(`MaxIndexBytes`), so very large PDFs / DOCX get truncated to the
+first 4 MiB of extracted body. DOCX archives are also bounded at
+64 MiB uncompressed XML (`docxMaxUncompressedBytes`) to defend
+against zip-bomb inputs.
+
 ### Quick start with the zk-object-fabric Docker demo
 
 When running alongside zk-object-fabric's Docker demo, point ZK Drive
