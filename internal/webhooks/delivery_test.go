@@ -78,6 +78,22 @@ func TestDeliveryClient_Deliver_Success(t *testing.T) {
 	if capturedHeaders.Get(DeliveryIDHeader) == "" {
 		t.Errorf("delivery-id header missing")
 	}
+	// User-Agent contract: subscribers documented to filter by
+	// `zk-drive-webhooks/` prefix (README "HTTP headers on every
+	// request"). Pinning the prefix here keeps the code, the
+	// README, and any operator-side WAF rule in lockstep — change
+	// one without changing the others and this test breaks.
+	ua := capturedHeaders.Get("User-Agent")
+	if !strings.HasPrefix(ua, "zk-drive-webhooks/") {
+		t.Errorf("User-Agent should start with %q, got %q", "zk-drive-webhooks/", ua)
+	}
+	// The version suffix is non-empty even in unit tests (set to
+	// "dev" by internal/version.Version when no build-time
+	// override is provided). A bare "zk-drive-webhooks/" suffix
+	// would mean we're not actually wiring the version through.
+	if ua == "zk-drive-webhooks/" {
+		t.Errorf("User-Agent missing version suffix: %q", ua)
+	}
 }
 
 func TestDeliveryClient_Deliver_HTTPError(t *testing.T) {

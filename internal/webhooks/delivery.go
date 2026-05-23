@@ -12,6 +12,8 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+
+	"github.com/kennguy3n/zk-drive/internal/version"
 )
 
 // DefaultDeliveryTimeout caps a single HTTP attempt. 30s is long
@@ -30,10 +32,22 @@ const DefaultDeliveryTimeout = 30 * time.Second
 // truncation contract.
 const DefaultMaxResponseBodyBytes = 4 * 1024
 
-// DefaultUserAgent is sent on every webhook POST. Suffixed with the
-// version constant baked into the binary at build time so a subscriber
-// can correlate behavioural changes against a specific server release.
-const DefaultUserAgent = "zk-drive-webhooks/1"
+// userAgentPrefix is the documented prefix subscribers can match in
+// reverse-proxy / WAF rules (see README “HTTP headers on every
+// request”). Kept in sync with that documentation — changing the
+// prefix is a breaking change for any subscriber filtering on it.
+const userAgentPrefix = "zk-drive-webhooks/"
+
+// DefaultUserAgent is sent on every webhook POST. The suffix is the
+// version string baked into the binary at build time via
+// ‘-ldflags "-X .../internal/version.Version=..."’ ("dev" in unit
+// tests and local dev builds), so a subscriber can correlate
+// behavioural changes against a specific server release.
+//
+// Declared as a var (not a const) because version.Version is itself
+// a var — const requires a literal expression. Initialised once at
+// package init; never reassigned at runtime.
+var DefaultUserAgent = userAgentPrefix + version.Version
 
 // DeliveryOutcome categorises the terminal state of one attempt.
 // Mirrors the CHECK constraint in migration 028's webhook_deliveries

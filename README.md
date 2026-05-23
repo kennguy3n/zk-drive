@@ -830,7 +830,7 @@ by event type, but the envelope is stable:
 | Header                  | Purpose                                                                                              |
 | ----------------------- | ---------------------------------------------------------------------------------------------------- |
 | `Content-Type`          | Always `application/json; charset=utf-8`.                                                            |
-| `User-Agent`            | `zkdrive-webhooks/<version>` — useful for filtering test traffic in your reverse proxy.              |
+| `User-Agent`            | `zk-drive-webhooks/<version>` (e.g. `zk-drive-webhooks/0.1.0`; `zk-drive-webhooks/dev` for unsemvered builds). The `<version>` suffix is the server build version (`internal/version.Version`); subscribers should match on the `zk-drive-webhooks/` prefix only in reverse-proxy / WAF rules. |
 | `X-ZkDrive-Signature`   | `t=<unix>,v1=<hex>` HMAC-SHA256 over `<unix>.<body>` keyed on the subscription secret. See below.     |
 | `X-ZkDrive-Event-Id`    | Stable across retries. Subscribers de-dupe on this.                                                  |
 | `X-ZkDrive-Event-Type`  | Same as `type` in the body — lets a subscriber route to a per-type handler without parsing the body. |
