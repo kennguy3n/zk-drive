@@ -111,11 +111,14 @@ type DeliveryClient struct {
 }
 
 // NewDeliveryClient constructs a delivery client. The supplied
-// timeout is applied per request via http.Client.Timeout; a separate
-// per-attempt context with the same timeout is also created in
-// Deliver so the cancellation propagates through transport callbacks
-// that don't honour http.Client.Timeout (notably TLS handshake
-// callbacks on some Go versions).
+// timeout is applied per request via http.Client.Timeout, which on
+// modern Go propagates through the full request lifecycle —
+// connection dial, TLS handshake, request header send, response
+// header read, and response body read — so a wedged subscriber
+// can't pin the worker at any stage. Deliver passes the caller's
+// ctx into http.NewRequestWithContext as well, so caller-driven
+// cancellation (e.g. shutdown signal) cuts the request short
+// independently of the timeout.
 func NewDeliveryClient(validator *URLValidator, timeout time.Duration) *DeliveryClient {
 	if timeout <= 0 {
 		timeout = DefaultDeliveryTimeout

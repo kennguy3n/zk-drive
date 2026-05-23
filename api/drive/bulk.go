@@ -189,7 +189,7 @@ func (h *Handler) BulkDelete(w http.ResponseWriter, r *http.Request) {
 		// succeeds keeps the webhook stream consistent with the
 		// persisted soft-delete (no phantom emits for a folder
 		// that failed to delete).
-		snaps := h.publishWebhookFileDeletedForFolderSubtree(r.Context(), workspaceID, id)
+		snaps := h.snapshotFilesForFolderSubtreeDelete(r.Context(), workspaceID, id)
 		if err := h.folders.Delete(r.Context(), workspaceID, id); err != nil {
 			resp.Failed = append(resp.Failed, bulkFailure{ID: raw, Error: err.Error()})
 			continue

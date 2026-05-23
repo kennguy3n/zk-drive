@@ -181,7 +181,7 @@ func (h *Handler) DeleteFolder(w http.ResponseWriter, r *http.Request) {
 	// silently miss them. Symmetric with the single-file DeleteFile
 	// path so subscribers see file.deleted events regardless of
 	// whether a file was removed individually or via folder cascade.
-	snaps := h.publishWebhookFileDeletedForFolderSubtree(r.Context(), workspaceID, id)
+	snaps := h.snapshotFilesForFolderSubtreeDelete(r.Context(), workspaceID, id)
 	if err := h.folders.Delete(r.Context(), workspaceID, id); err != nil {
 		writeServiceError(w, err)
 		return

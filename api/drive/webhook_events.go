@@ -117,13 +117,21 @@ func (h *Handler) publishWebhookPermissionEvent(ctx context.Context, t webhooks.
 	}
 }
 
-// publishWebhookFileDeletedForFolderSubtree snapshots every
-// non-deleted file under the given folder (including descendants)
-// and emits a file.deleted webhook per snapshot. Callers MUST invoke
-// this BEFORE calling folders.Delete — once the recursive folder
-// soft-delete cascades to files.deleted_at the rows would no longer
-// match the snapshotting query's deleted_at IS NULL filter, leaving
-// subscribers in the dark about cascaded files.
+// snapshotFilesForFolderSubtreeDelete is the first half of the
+// two-phase folder-cascade webhook pattern: it returns every
+// non-deleted file under the given folder (including descendants),
+// so the caller can later emit a file.deleted webhook per snapshot
+// via emitWebhookFileDeletedBatch AFTER folders.Delete succeeds.
+//
+// Callers MUST invoke this BEFORE calling folders.Delete — once the
+// recursive folder soft-delete cascades to files.deleted_at the
+// rows would no longer match the snapshotting query's deleted_at
+// IS NULL filter, leaving subscribers in the dark about cascaded
+// files. The split into snapshot + emit (instead of one
+// publish-everything helper) is deliberate so the caller can abort
+// emission if folders.Delete itself fails — we never want
+// subscribers to see a file.deleted event for a file that wasn't
+// actually deleted on the server.
 //
 // Closes the asymmetry between single-file deletes (which already
 // emit file.deleted) and folder-cascade deletes (which used to emit
@@ -140,7 +148,7 @@ func (h *Handler) publishWebhookPermissionEvent(ctx context.Context, t webhooks.
 // apart, no transaction) applies here and is accepted as part of
 // the documented at-least-once delivery contract: subscribers must
 // dedupe on X-ZkDrive-Event-Id.
-func (h *Handler) publishWebhookFileDeletedForFolderSubtree(ctx context.Context, workspaceID, folderID uuid.UUID) []*file.File {
+func (h *Handler) snapshotFilesForFolderSubtreeDelete(ctx context.Context, workspaceID, folderID uuid.UUID) []*file.File {
 	if h.webhooks == nil {
 		return nil
 	}
@@ -160,11 +168,14 @@ func (h *Handler) publishWebhookFileDeletedForFolderSubtree(ctx context.Context,
 	return snaps
 }
 
-// emitWebhookFileDeletedBatch emits a file.deleted webhook for each
-// snapshot returned by publishWebhookFileDeletedForFolderSubtree.
-// Split into a separate call so handlers can interleave the actual
-// folder soft-delete between the snapshot and the emission, giving
-// callers the freedom to abort emission if the delete itself fails.
+// emitWebhookFileDeletedBatch is the second half of the two-phase
+// folder-cascade webhook pattern: emit a file.deleted webhook per
+// snapshot returned by snapshotFilesForFolderSubtreeDelete, AFTER
+// folders.Delete has succeeded. Split into a separate call so
+// handlers can interleave the actual folder soft-delete between
+// the snapshot and the emission, giving callers the freedom to
+// abort emission if the delete itself fails (preventing phantom
+// events for files that weren't actually deleted).
 func (h *Handler) emitWebhookFileDeletedBatch(ctx context.Context, workspaceID uuid.UUID, snaps []*file.File) {
 	if h.webhooks == nil || len(snaps) == 0 {
 		return

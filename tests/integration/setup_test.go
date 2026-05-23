@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -20,6 +21,7 @@ import (
 
 	"github.com/kennguy3n/zk-drive/api/admin"
 	apikchat "github.com/kennguy3n/zk-drive/api/kchat"
+	apiwebhooks "github.com/kennguy3n/zk-drive/api/webhooks"
 	"github.com/kennguy3n/zk-drive/api/auth"
 	"github.com/kennguy3n/zk-drive/api/drive"
 	"github.com/kennguy3n/zk-drive/api/middleware"
@@ -269,6 +271,38 @@ func setupEnv(t *testing.T) *testEnv {
 		WithWorkspaces(wsSvc).
 		WithWebhooks(webhookCap)
 
+	// Outbound-webhook subscription admin handler (WS-24). Mounted
+	// alongside adminHandler under /admin/webhooks so the
+	// integration harness exercises the same CRUD surface that
+	// cmd/server/main.go does (Create / List / Get / Delete /
+	// ListDeliveries / Resume) against the real Postgres
+	// PostgresRepository — the in-process webhookCap fake covers
+	// emission, this covers the admin CRUD path the bot flagged as
+	// unreachable from the integration harness. POST /test wires
+	// the synchronous TestDispatcher so admin-driven sanity checks
+	// against a single subscription also work end-to-end.
+	webhookRepo := webhooks.NewPostgresRepository(pool)
+	// Relaxed validator for the harness: a fixed resolver returning
+	// a public IP for any hostname (so subscription-create works
+	// without an outbound DNS query), AllowLoopback so the
+	// TestDispatcher can deliver to an httptest.Server bound to
+	// 127.0.0.1:port, and AllowHTTP so we don't need a TLS-
+	// terminating fixture. Mirrors the testValidator helper in
+	// api/webhooks/handler_test.go so the two surfaces have
+	// identical SSRF behaviour in tests.
+	webhookValidator := webhooks.NewURLValidator()
+	webhookValidator.Resolver = staticIPResolver{ip: net.ParseIP("1.1.1.1")}
+	webhookValidator.AllowHTTP = true
+	webhookValidator.AllowLoopback = true
+	webhookTester, err := webhooks.NewTestDispatcher(webhookRepo, webhooks.NewDeliveryClient(webhookValidator, webhooks.DefaultDeliveryTimeout))
+	if err != nil {
+		t.Fatalf("webhooks/test-dispatcher: %v", err)
+	}
+	webhookHandler := apiwebhooks.NewHandler(webhookRepo).
+		WithValidator(webhookValidator).
+		WithTestDispatcher(webhookTester).
+		WithAudit(auditSvc)
+
 	// KChat service: same wiring as cmd/server/main.go, with a fallback
 	// storage factory so AttachmentUploadURL can mint signed URLs in
 	// tests even without per-workspace credentials.
@@ -453,6 +487,19 @@ func setupEnv(t *testing.T) *testEnv {
 			r.Use(middleware.TenantGuard())
 			r.Use(middleware.AdminOnly())
 			adminHandler.RegisterRoutes(r)
+			// Outbound-webhook subscription admin surface (WS-24).
+			// Mounted here so the integration harness exercises the
+			// real Create / List / Get / Delete / ListDeliveries /
+			// Resume routes against the Postgres repository, not
+			// just the in-process emission fakes. The POST /test
+			// route is wired via WithTestDispatcher below so the
+			// synchronous test-fan-out works end-to-end without
+			// JetStream. The repo lives next to the production
+			// PostgresRepository so the integration tests catch
+			// migration drift the unit tests can't.
+			r.Route("/webhooks", func(r chi.Router) {
+				webhookHandler.RegisterRoutes(r)
+			})
 		})
 
 		r.Route("/kchat", func(r chi.Router) {
@@ -631,11 +678,44 @@ func (e *testEnv) signupAndLogin(workspaceName, email, name, password string) to
 	return tok
 }
 
+// login authenticates an existing user (e.g. a member previously
+// invited by an admin) and returns the resulting token payload.
+// Distinct from signupAndLogin so multi-role tests can exercise
+// both the admin role and the member role inside one workspace.
+func (e *testEnv) login(email, password string) tokenPayload {
+	e.t.Helper()
+	status, body := e.httpRequest(http.MethodPost, "/api/auth/login", "", map[string]string{
+		"email":    email,
+		"password": password,
+	})
+	if status != http.StatusOK {
+		e.t.Fatalf("login: status=%d body=%s", status, string(body))
+	}
+	var tok tokenPayload
+	e.decodeJSON(body, &tok)
+	return tok
+}
+
 type tokenPayload struct {
 	Token       string `json:"token"`
 	UserID      string `json:"user_id"`
 	WorkspaceID string `json:"workspace_id"`
 	Role        string `json:"role"`
+}
+
+// staticIPResolver is a webhooks.Resolver implementation that returns
+// a fixed public IP for every host. Used by the webhook admin CRUD
+// integration tests so subscription-create can validate URLs like
+// https://hooks.example.com/x without performing an actual outbound
+// DNS lookup (which would couple test reliability to the host's
+// recursive resolver state). Returns a public IP rather than a
+// private one so the validator's SSRF guard passes.
+type staticIPResolver struct {
+	ip net.IP
+}
+
+func (r staticIPResolver) LookupIPAddr(_ context.Context, _ string) ([]net.IPAddr, error) {
+	return []net.IPAddr{{IP: r.ip}}, nil
 }
 
 // identityCodec is a no-op totp.Encryptor for the integration tests:
