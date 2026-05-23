@@ -524,6 +524,39 @@ func TestAuditRetentionFloorMatchesService(t *testing.T) {
 	}
 }
 
+// TestClampAuditMaxRowsPerBatch exercises every branch of the
+// rows-per-batch clamp so a future refactor can't drop the upper
+// bound without failing CI. The upper bound is load-bearing: the
+// CronJob pod (deploy/k8s/audit-archiver-cronjob.yaml) is limited to
+// 512Mi memory, and the JSONL.gz encoder buffers an entire page in
+// memory before uploading. A malformed env var like
+// AUDIT_LOG_ARCHIVE_MAX_ROWS_PER_BATCH=10000000 (intended 100k) would
+// OOM-kill the pod without this clamp. See WS-23 PR #68 Devin Review
+// finding ANALYSIS_pr-review-job-667bb339b9654552bfaa74d3720a8d0b_0005.
+func TestClampAuditMaxRowsPerBatch(t *testing.T) {
+	cases := []struct {
+		name  string
+		input int
+		want  int
+	}{
+		{"negative falls back to default", -42, defaultAuditArchiveMaxRowsPerBatch},
+		{"zero falls back to default", 0, defaultAuditArchiveMaxRowsPerBatch},
+		{"one passes through (valid floor)", 1, 1},
+		{"default passes through", defaultAuditArchiveMaxRowsPerBatch, defaultAuditArchiveMaxRowsPerBatch},
+		{"at ceiling passes through", maxAuditArchiveMaxRowsPerBatch, maxAuditArchiveMaxRowsPerBatch},
+		{"above ceiling clamps to max", maxAuditArchiveMaxRowsPerBatch + 1, maxAuditArchiveMaxRowsPerBatch},
+		{"far above ceiling clamps to max (OOM-prevention)", 10_000_000, maxAuditArchiveMaxRowsPerBatch},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := clampAuditMaxRowsPerBatch(tc.input)
+			if got != tc.want {
+				t.Errorf("clampAuditMaxRowsPerBatch(%d) = %d, want %d", tc.input, got, tc.want)
+			}
+		})
+	}
+}
+
 // TestNormaliseArchivePrefix walks every input shape that an
 // operator might paste into AUDIT_LOG_ARCHIVE_PREFIX. The
 // trailing-slash normalisation is critical because the archive

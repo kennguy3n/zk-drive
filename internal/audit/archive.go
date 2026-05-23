@@ -323,12 +323,38 @@ func (a *ArchiveService) Run(ctx context.Context) (*RunResult, error) {
 		groups[idx].months = append(groups[idx].months, b)
 	}
 
+	// processedGroups tracks how many of THIS run's workspace groups
+	// we've fully attempted (success or failure). On context cancellation
+	// between workspace iterations, the months belonging to the
+	// remaining-untouched groups are attributed to WorkspaceMonthsFailed
+	// so the invariant
+	//
+	//   WorkspaceMonthsTotal == WorkspaceMonthsOK + WorkspaceMonthsFailed
+	//
+	// holds in every termination path (clean completion, per-workspace
+	// timeout inside archiveWorkspace, and parent-context cancellation
+	// here). Without this attribution, an operator monitoring the OK +
+	// Failed counters would see them sum to less than Total whenever a
+	// run was cancelled mid-iteration — a confusing gap that this
+	// branch closes. See WS-23 PR #68 Devin Review finding
+	// ANALYSIS_pr-review-job-667bb339b9654552bfaa74d3720a8d0b_0001.
+	processedGroups := 0
 	for _, g := range groups {
 		if err := ctx.Err(); err != nil {
+			remainingMonths := 0
+			for _, rg := range groups[processedGroups:] {
+				remainingMonths += len(rg.months)
+			}
+			result.WorkspaceMonthsFailed += remainingMonths
+			result.Errors = append(result.Errors,
+				fmt.Errorf("run cancelled with %d workspace(s) and %d month(s) unprocessed: %w",
+					len(groups)-processedGroups, remainingMonths, err))
+			span.RecordError(err)
 			span.SetStatus(codes.Error, "cancelled during workspace iteration")
 			return result, err
 		}
 		a.archiveWorkspace(ctx, runID, cutoff, g.workspaceID, g.months, result)
+		processedGroups++
 	}
 
 	if len(result.Errors) > 0 {

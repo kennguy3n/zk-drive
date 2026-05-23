@@ -371,7 +371,7 @@ func buildConfigFromEnv() *Config {
 		AuditLogRetentionDays:       clampAuditRetentionDays(parseIntDefault(os.Getenv("AUDIT_LOG_RETENTION_DAYS"), 90)),
 		AuditArchivePrefix:          normaliseArchivePrefix(getEnvDefault("AUDIT_LOG_ARCHIVE_PREFIX", "audit-archive/")),
 		AuditArchiveBucket:          strings.TrimSpace(os.Getenv("AUDIT_LOG_ARCHIVE_BUCKET")),
-		AuditArchiveMaxRowsPerBatch: parseIntDefault(os.Getenv("AUDIT_LOG_ARCHIVE_MAX_ROWS_PER_BATCH"), 50000),
+		AuditArchiveMaxRowsPerBatch: clampAuditMaxRowsPerBatch(parseIntDefault(os.Getenv("AUDIT_LOG_ARCHIVE_MAX_ROWS_PER_BATCH"), defaultAuditArchiveMaxRowsPerBatch)),
 	}
 }
 
@@ -525,6 +525,51 @@ func clampAuditRetentionDays(d int) int {
 		return maxAuditRetentionDays
 	}
 	return d
+}
+
+// maxAuditArchiveMaxRowsPerBatch caps AUDIT_LOG_ARCHIVE_MAX_ROWS_PER_BATCH
+// at 1,000,000 rows so an operator typo like "10000000" (intended
+// "100000") doesn't cause the archiver to try to encode 10M rows of
+// JSONL.gz in memory and OOM-kill the CronJob pod
+// (deploy/k8s/audit-archiver-cronjob.yaml sets a 512Mi memory limit;
+// at ~500B per row, 1M rows = ~500MB uncompressed encoded, which
+// gzip-streams comfortably within that ceiling while still being a
+// dramatic upper bound vs the 50k default).
+//
+// Defense-in-depth: NewArchiveService already rejects non-positive
+// values (defaultMaxRowsPerBatch substitution), but had no upper
+// guard. This clamp matches the retention-days pattern — bound at
+// both ends in config so the service receives only sane values.
+const maxAuditArchiveMaxRowsPerBatch = 1_000_000
+
+// defaultAuditArchiveMaxRowsPerBatch mirrors
+// internal/audit.defaultMaxRowsPerBatch so the env-unset default and
+// the service-level fallback never drift. Kept locally to avoid an
+// internal/config → internal/audit import cycle (audit already
+// depends on config types via the ArchiveServiceConfig struct).
+const defaultAuditArchiveMaxRowsPerBatch = 50000
+
+// clampAuditMaxRowsPerBatch bounds AUDIT_LOG_ARCHIVE_MAX_ROWS_PER_BATCH
+// at sensible limits. Returns the configured value when valid;
+// otherwise:
+//   - non-positive input clamps to defaultAuditArchiveMaxRowsPerBatch
+//     (the default — assume the operator forgot to set it rather
+//     than intentionally set 0, which would archive nothing).
+//   - input > maxAuditArchiveMaxRowsPerBatch clamps to the ceiling
+//     so a malformed env var can't OOM-kill the archiver pod.
+//
+// The caller surfaces the clamped value at startup via the boot
+// logs so an operator can confirm the effective setting. See WS-23
+// PR #68 Devin Review finding
+// ANALYSIS_pr-review-job-667bb339b9654552bfaa74d3720a8d0b_0005.
+func clampAuditMaxRowsPerBatch(n int) int {
+	if n <= 0 {
+		return defaultAuditArchiveMaxRowsPerBatch
+	}
+	if n > maxAuditArchiveMaxRowsPerBatch {
+		return maxAuditArchiveMaxRowsPerBatch
+	}
+	return n
 }
 
 // normaliseArchivePrefix ensures the prefix ends with exactly one

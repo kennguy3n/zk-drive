@@ -889,6 +889,157 @@ func TestArchiveService_Run_MultipleWorkspaces(t *testing.T) {
 	}
 }
 
+// cancellingRepo is a deterministic test decorator around
+// fakeArchiveRepo that cancels a captured context.CancelFunc once a
+// specific number of FetchBatch calls have completed. Used by
+// TestArchiveService_Run_CancellationAttributesRemainingMonths to
+// avoid the race that a sleep-poll based test would have on an
+// in-memory fake (every Put/Fetch completes in microseconds, so the
+// goroutine doing time.Sleep(2ms) almost always misses the window
+// between workspace iterations).
+type cancellingRepo struct {
+	inner             *fakeArchiveRepo
+	cancel            context.CancelFunc
+	fetchCalls        int
+	cancelAfterFetchN int // 1-indexed; cancel right after the Nth FetchBatch returns
+	mu                sync.Mutex
+}
+
+func (c *cancellingRepo) EnumerateWorkspaceMonths(ctx context.Context, cutoff time.Time) ([]WorkspaceAuditMonth, error) {
+	return c.inner.EnumerateWorkspaceMonths(ctx, cutoff)
+}
+
+func (c *cancellingRepo) FetchBatch(ctx context.Context, workspaceID uuid.UUID, yearMonth string, cutoff time.Time, limit int, after uuid.UUID) ([]*Entry, error) {
+	out, err := c.inner.FetchBatch(ctx, workspaceID, yearMonth, cutoff, limit, after)
+	c.mu.Lock()
+	c.fetchCalls++
+	shouldCancel := c.fetchCalls == c.cancelAfterFetchN
+	c.mu.Unlock()
+	if shouldCancel {
+		c.cancel()
+	}
+	return out, err
+}
+
+func (c *cancellingRepo) RecordRun(ctx context.Context, rec *ArchiveRunRecord) error {
+	return c.inner.RecordRun(ctx, rec)
+}
+
+func (c *cancellingRepo) SetRunError(ctx context.Context, runID uuid.UUID, errorMessage string) error {
+	return c.inner.SetRunError(ctx, runID, errorMessage)
+}
+
+func (c *cancellingRepo) DeleteBatch(ctx context.Context, workspaceID uuid.UUID, ids []uuid.UUID) (int, error) {
+	return c.inner.DeleteBatch(ctx, workspaceID, ids)
+}
+
+func (c *cancellingRepo) ListRuns(ctx context.Context, workspaceID uuid.UUID) ([]*ArchiveRunRecord, error) {
+	return c.inner.ListRuns(ctx, workspaceID)
+}
+
+// TestArchiveService_Run_CancellationAttributesRemainingMonths is
+// the regression test for WS-23 PR #68 Devin Review finding
+// ANALYSIS_pr-review-job-667bb339b9654552bfaa74d3720a8d0b_0001: when
+// the parent ctx is cancelled between workspace iterations in
+// Run(), the months belonging to unstarted workspaces MUST be
+// attributed to WorkspaceMonthsFailed so the invariant
+//
+//	WorkspaceMonthsTotal == WorkspaceMonthsOK + WorkspaceMonthsFailed
+//
+// holds in every termination path. Before the fix, only the
+// currently-running workspace's months (via archiveWorkspace's own
+// wsCtx.Err() branch) were attributed, leaving operators with a
+// confusing OK + Failed < Total gap whenever a run was cancelled
+// mid-iteration.
+//
+// Cancellation is forced deterministically: cancellingRepo cancels
+// the parent context immediately after the FIRST workspace's
+// FetchBatch returns (its single month) but BEFORE archiveWorkspace
+// returns. The next iteration of Run's outer loop then observes
+// ctx.Err() and takes the new attribution branch under test.
+func TestArchiveService_Run_CancellationAttributesRemainingMonths(t *testing.T) {
+	// Allocate three workspace IDs and order them by their string
+	// representation so EnumerateWorkspaceMonths' sortMonths produces
+	// a deterministic iteration order. Without this, the test would
+	// be flaky on the assertion "the first-iterated workspace is in
+	// OK and the remaining are in Failed" since uuid.New() is random.
+	ids := []uuid.UUID{uuid.New(), uuid.New(), uuid.New()}
+	sort.Slice(ids, func(i, j int) bool { return ids[i].String() < ids[j].String() })
+	ws1, ws2, ws3 := ids[0], ids[1], ids[2]
+
+	now := time.Date(2024, 6, 15, 12, 0, 0, 0, time.UTC)
+	old := now.AddDate(0, 0, -45)
+
+	// One month per workspace keeps the test focused on inter-
+	// workspace cancellation semantics. The fetchCount-after-1
+	// trigger then cleanly fires after ws1 (1 fetch) completes
+	// but before ws2 starts (would be fetch #2).
+	rows := []*Entry{
+		makeEntry(t, ws1, old),
+		makeEntry(t, ws2, old),
+		makeEntry(t, ws3, old),
+	}
+
+	inner := newFakeRepo(rows)
+	store := newFakeStorage()
+	ctx, cancel := context.WithCancel(context.Background())
+	// cancellingRepo will cancel the parent ctx as soon as the first
+	// FetchBatch returns. archiveBucket then completes its current
+	// page (PutObject, RecordRun, DeleteBatch all run against the
+	// already-cancelled ctx but they don't honor cancellation today
+	// in the fake — they finish synchronously). Then Run() loops
+	// back, observes ctx.Err(), and takes the new attribution
+	// branch under test.
+	repo := &cancellingRepo{
+		inner:             inner,
+		cancel:            cancel,
+		cancelAfterFetchN: 1,
+	}
+
+	svc, err := NewArchiveService(repo, store, ArchiveServiceConfig{
+		RetentionDays:    30,
+		ArchivePrefix:    "audit-archive/",
+		MaxRowsPerBatch:  defaultMaxRowsPerBatch,
+		UploadTimeout:    DefaultUploadTimeout,
+		WorkspaceTimeout: DefaultWorkspaceTimeout,
+	})
+	if err != nil {
+		t.Fatalf("NewArchiveService: %v", err)
+	}
+	svc.nowFn = func() time.Time { return now }
+
+	result, runErr := svc.Run(ctx)
+	if runErr == nil {
+		t.Fatal("Run: expected context.Canceled error, got nil")
+	}
+	if !errors.Is(runErr, context.Canceled) {
+		t.Fatalf("Run: error = %v, want context.Canceled", runErr)
+	}
+	// THE INVARIANT under test:
+	if result.WorkspaceMonthsOK+result.WorkspaceMonthsFailed != result.WorkspaceMonthsTotal {
+		t.Errorf("invariant violated: OK(%d) + Failed(%d) = %d, want WorkspaceMonthsTotal = %d",
+			result.WorkspaceMonthsOK, result.WorkspaceMonthsFailed,
+			result.WorkspaceMonthsOK+result.WorkspaceMonthsFailed,
+			result.WorkspaceMonthsTotal)
+	}
+	if result.WorkspaceMonthsTotal != 3 {
+		t.Fatalf("WorkspaceMonthsTotal = %d, want 3 (3 workspaces × 1 month)", result.WorkspaceMonthsTotal)
+	}
+	// ws1 completes (its single FetchBatch is what triggers the
+	// cancel; archiveWorkspace finishes the current month before
+	// returning). ws2 and ws3 are unstarted and attributed to
+	// Failed by the new branch.
+	if result.WorkspaceMonthsOK != 1 {
+		t.Errorf("WorkspaceMonthsOK = %d, want 1 (first workspace should complete before cancellation)", result.WorkspaceMonthsOK)
+	}
+	if result.WorkspaceMonthsFailed != 2 {
+		t.Errorf("WorkspaceMonthsFailed = %d, want 2 (ws2 + ws3 unstarted months attributed)", result.WorkspaceMonthsFailed)
+	}
+	if len(result.Errors) == 0 {
+		t.Errorf("Errors slice is empty, expected the run-cancelled error to be appended")
+	}
+}
+
 func TestArchiveService_buildObjectKey_Format(t *testing.T) {
 	svc, err := NewArchiveService(newFakeRepo(nil), newFakeStorage(), ArchiveServiceConfig{
 		RetentionDays: 90,
