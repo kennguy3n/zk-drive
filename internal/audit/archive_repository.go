@@ -34,10 +34,18 @@ type ArchiveRunRecord struct {
 	YearMonth        string
 	ArchiveObjectKey string
 	RowsArchived     int
-	BytesUploaded    int64
-	StartedAt        time.Time
-	CompletedAt      time.Time
-	ErrorMessage     *string
+	// BytesUploaded is the UNCOMPRESSED JSONL payload size in bytes
+	// (the byte count fed into the gzip writer), NOT the on-the-wire
+	// size of the gzipped object that landed in S3. The matching
+	// Prometheus metric zkdrive_audit_archive_bytes_total carries the
+	// same semantic. Operators sizing S3 cost should multiply by the
+	// empirically-observed gzip ratio for their audit traffic (≈10x
+	// compression in practice). See WS-23 PR #68 Devin Review
+	// finding ANALYSIS_pr-review-job-ad89da4c3a1449c5b914d6045dc4ffb8_0003.
+	BytesUploaded int64
+	StartedAt     time.Time
+	CompletedAt   time.Time
+	ErrorMessage  *string
 }
 
 // ArchiveRepository extends Repository with the workspace-iteration,

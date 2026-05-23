@@ -116,7 +116,28 @@ const migrateAdvisoryLockKey int64 = 0x5a4b44524956534D // 'ZKDRIVSM' ASCII
 // optionally consumes). The migrate binary is allowed to run against
 // any older state — its job is to bring the database up to HEAD; only
 // the server/worker binaries gate on this.
+//
+// Per-binary precondition constants: each standalone binary that
+// requires a different minimum schema version (e.g. audit-archiver
+// against migration 027) has its own MinRequiredMigrationVersionFoo
+// constant below. Keeping them as separate exported constants — not
+// bumping this one — preserves the documented contract that this
+// constant is the server/worker baseline. Server/worker do not touch
+// audit_log_archive_runs, so coupling their boot to migration 027
+// would block deploys that don't enable the archiver.
 const MinRequiredMigrationVersion = "026_user_totp"
+
+// MinRequiredMigrationVersionAuditArchiver is the minimum schema
+// version that the cmd/audit-archiver binary requires — it inserts
+// into audit_log_archive_runs which migration 027 creates. The
+// audit-archiver calls RequireMinMigrationVersionFor with this
+// constant at startup so an operator who deploys the archiver
+// against a stale schema fails fast (clear error) rather than
+// burning a full run's worth of S3 PutObject + audit fetch only
+// to fail on the first RecordRun INSERT with "relation
+// audit_log_archive_runs does not exist". See WS-23 PR #68 Devin
+// Review finding ANALYSIS_pr-review-job-ad89da4c3a1449c5b914d6045dc4ffb8_0002.
+const MinRequiredMigrationVersionAuditArchiver = "027_audit_log_archive_runs"
 
 // ErrMigrationsOutOfDate is returned by RequireMinMigrationVersion when
 // the database is missing one or more migrations that the binary
@@ -145,8 +166,24 @@ var ErrMigrationsOutOfDate = errors.New("database migrations are out of date: ru
 // us run the migrate binary as a Kubernetes Job (or Compose service)
 // while the runtime pods refuse to serve traffic against a stale db.
 func RequireMinMigrationVersion(ctx context.Context, pool *pgxpool.Pool) error {
+	return RequireMinMigrationVersionFor(ctx, pool, MinRequiredMigrationVersion)
+}
+
+// RequireMinMigrationVersionFor is the parameterised form of
+// RequireMinMigrationVersion: same spot-check semantics, but the
+// caller supplies the required version explicitly. Used by binaries
+// that have their own migration precondition distinct from the
+// server/worker baseline — currently cmd/audit-archiver, which
+// requires migration 027 to exist. Keeping the version pluggable
+// (rather than adding a second function per binary) lets new
+// binaries gate on their own minimum without growing the surface
+// area of this file.
+func RequireMinMigrationVersionFor(ctx context.Context, pool *pgxpool.Pool, required string) error {
 	if pool == nil {
 		return errors.New("nil pool")
+	}
+	if strings.TrimSpace(required) == "" {
+		return errors.New("required migration version must be non-empty")
 	}
 	var applied bool
 	err := pool.QueryRow(ctx, `
@@ -161,12 +198,12 @@ func RequireMinMigrationVersion(ctx context.Context, pool *pgxpool.Pool) error {
 	if !applied {
 		return fmt.Errorf("%w: schema_migrations table not found (no migrations have ever been applied)", ErrMigrationsOutOfDate)
 	}
-	err = pool.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM schema_migrations WHERE version = $1)`, MinRequiredMigrationVersion).Scan(&applied)
+	err = pool.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM schema_migrations WHERE version = $1)`, required).Scan(&applied)
 	if err != nil {
-		return fmt.Errorf("probe schema_migrations for %s: %w", MinRequiredMigrationVersion, err)
+		return fmt.Errorf("probe schema_migrations for %s: %w", required, err)
 	}
 	if !applied {
-		return fmt.Errorf("%w: required version %s is not in schema_migrations", ErrMigrationsOutOfDate, MinRequiredMigrationVersion)
+		return fmt.Errorf("%w: required version %s is not in schema_migrations", ErrMigrationsOutOfDate, required)
 	}
 	return nil
 }

@@ -269,7 +269,34 @@ type Config struct {
 // bucket, access key, and secret key must also be set — a half-configured
 // storage client would only fail at request time.
 func Load() (*Config, error) {
-	cfg := &Config{
+	cfg := buildConfigFromEnv()
+
+	var missing []string
+	if strings.TrimSpace(cfg.DatabaseURL) == "" {
+		missing = append(missing, "DATABASE_URL")
+	}
+	if strings.TrimSpace(cfg.JWTSecret) == "" {
+		missing = append(missing, "JWT_SECRET")
+	}
+	if len(missing) > 0 {
+		return nil, errors.New("missing required environment variables: " + strings.Join(missing, ", "))
+	}
+
+	if err := validateS3Group(cfg); err != nil {
+		return nil, err
+	}
+	return cfg, nil
+}
+
+// buildConfigFromEnv populates a *Config purely from environment
+// variables WITHOUT applying required-variable validation. Shared
+// between Load (which adds the DATABASE_URL + JWT_SECRET + S3-group
+// checks) and LoadStorageOnly (which only validates the S3 group).
+// Keep all per-field defaulting + parsing rules in this single
+// function so adding a new field doesn't require touching multiple
+// constructors.
+func buildConfigFromEnv() *Config {
+	return &Config{
 		DatabaseURL:           os.Getenv("DATABASE_URL"),
 		JWTSecret:             os.Getenv("JWT_SECRET"),
 		ListenAddr:            getEnvDefault("LISTEN_ADDR", ":8080"),
@@ -339,34 +366,60 @@ func Load() (*Config, error) {
 		AuditArchiveBucket:          strings.TrimSpace(os.Getenv("AUDIT_LOG_ARCHIVE_BUCKET")),
 		AuditArchiveMaxRowsPerBatch: parseIntDefault(os.Getenv("AUDIT_LOG_ARCHIVE_MAX_ROWS_PER_BATCH"), 50000),
 	}
+}
 
-	var missing []string
-	if strings.TrimSpace(cfg.DatabaseURL) == "" {
-		missing = append(missing, "DATABASE_URL")
+// LoadStorageOnly reads configuration from environment variables and
+// returns a populated Config WITHOUT enforcing DATABASE_URL or
+// JWT_SECRET. The S3 group is still validated as a coherent set
+// (S3_ENDPOINT requires S3_BUCKET + S3_ACCESS_KEY + S3_SECRET_KEY).
+//
+// Intended for read-only binaries that never touch Postgres or the
+// HTTP request lifecycle — currently just cmd/audit-restore, which
+// streams gzipped JSONL audit objects out of S3 for incident
+// investigation. Forcing those operators to supply DATABASE_URL /
+// JWT_SECRET (per the README workaround `JWT_SECRET=unused-but-required`)
+// is friction during incident response: an on-call engineer may have
+// S3 credentials in hand but not the running Postgres password.
+// See WS-23 PR #68 Devin Review finding
+// ANALYSIS_pr-review-job-ad89da4c3a1449c5b914d6045dc4ffb8_0001.
+//
+// Any new binary that wants this slim variant should call
+// LoadStorageOnly explicitly; the default Load remains strict so
+// server / worker startup still fails fast if those env vars are
+// missing.
+func LoadStorageOnly() (*Config, error) {
+	cfg := buildConfigFromEnv()
+	if err := validateS3Group(cfg); err != nil {
+		return nil, err
 	}
-	if strings.TrimSpace(cfg.JWTSecret) == "" {
-		missing = append(missing, "JWT_SECRET")
-	}
-	if len(missing) > 0 {
-		return nil, errors.New("missing required environment variables: " + strings.Join(missing, ", "))
-	}
-
-	if strings.TrimSpace(cfg.S3Endpoint) != "" {
-		var missingS3 []string
-		if strings.TrimSpace(cfg.S3Bucket) == "" {
-			missingS3 = append(missingS3, "S3_BUCKET")
-		}
-		if strings.TrimSpace(cfg.S3AccessKey) == "" {
-			missingS3 = append(missingS3, "S3_ACCESS_KEY")
-		}
-		if strings.TrimSpace(cfg.S3SecretKey) == "" {
-			missingS3 = append(missingS3, "S3_SECRET_KEY")
-		}
-		if len(missingS3) > 0 {
-			return nil, errors.New("S3_ENDPOINT is set but missing required variables: " + strings.Join(missingS3, ", "))
-		}
+	if strings.TrimSpace(cfg.S3Endpoint) == "" {
+		return nil, errors.New("audit-restore / storage-only binaries require S3_ENDPOINT to be configured")
 	}
 	return cfg, nil
+}
+
+// validateS3Group enforces the coherent-S3-group invariant: if
+// S3_ENDPOINT is set, the bucket + access key + secret key must
+// also be set. Shared between Load and LoadStorageOnly so the two
+// entrypoints can't drift on S3 validation rules.
+func validateS3Group(cfg *Config) error {
+	if strings.TrimSpace(cfg.S3Endpoint) == "" {
+		return nil
+	}
+	var missingS3 []string
+	if strings.TrimSpace(cfg.S3Bucket) == "" {
+		missingS3 = append(missingS3, "S3_BUCKET")
+	}
+	if strings.TrimSpace(cfg.S3AccessKey) == "" {
+		missingS3 = append(missingS3, "S3_ACCESS_KEY")
+	}
+	if strings.TrimSpace(cfg.S3SecretKey) == "" {
+		missingS3 = append(missingS3, "S3_SECRET_KEY")
+	}
+	if len(missingS3) > 0 {
+		return errors.New("S3_ENDPOINT is set but missing required variables: " + strings.Join(missingS3, ", "))
+	}
+	return nil
 }
 
 func getEnvDefault(key, def string) string {

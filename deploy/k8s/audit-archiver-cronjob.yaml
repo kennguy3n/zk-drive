@@ -1,3 +1,16 @@
+# zk-drive audit-archiver CronJob.
+#
+# Deployment ordering: this CronJob requires migration
+# 027_audit_log_archive_runs to have been applied to the database
+# (audit-archiver's RequireMinMigrationVersionFor check on
+# MinRequiredMigrationVersionAuditArchiver enforces this at process
+# startup). Apply migrate-job.yaml AT LEAST ONCE against the target
+# database before scheduling this CronJob, otherwise every run will
+# fail-fast with `database migrations are out of date: run the
+# migrate binary first`. Server / worker pods have their own
+# (separate, older) baseline (MinRequiredMigrationVersion =
+# 026_user_totp) so they keep booting on databases that have not
+# yet had 027 applied — only this CronJob is gated on 027.
 apiVersion: batch/v1
 kind: CronJob
 metadata:

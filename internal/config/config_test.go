@@ -178,6 +178,72 @@ func TestLoadCompleteS3(t *testing.T) {
 	}
 }
 
+// TestLoadStorageOnly verifies the audit-restore-friendly slim
+// loader: it returns a populated Config WITHOUT requiring
+// DATABASE_URL or JWT_SECRET. S3_ENDPOINT is required (since the
+// loader is for storage-only binaries); the S3 group remains
+// coherent-validated. Added for WS-23 PR #68 Devin Review finding
+// ANALYSIS_pr-review-job-ad89da4c3a1449c5b914d6045dc4ffb8_0001.
+func TestLoadStorageOnly(t *testing.T) {
+	requireEnv(t, map[string]string{
+		// Intentionally NO DATABASE_URL / JWT_SECRET.
+		"S3_ENDPOINT":              "https://s3.example.com",
+		"S3_BUCKET":                "drive-prod",
+		"S3_ACCESS_KEY":            "AKIA...",
+		"S3_SECRET_KEY":            "supersecret",
+		"AUDIT_LOG_ARCHIVE_PREFIX": "audit-archive/",
+	})
+	cfg, err := LoadStorageOnly()
+	if err != nil {
+		t.Fatalf("LoadStorageOnly failed: %v", err)
+	}
+	if cfg.S3Endpoint != "https://s3.example.com" || cfg.S3Bucket != "drive-prod" {
+		t.Fatalf("S3 fields not propagated: %+v", cfg)
+	}
+	if cfg.AuditArchivePrefix != "audit-archive/" {
+		t.Fatalf("AuditArchivePrefix not propagated: %q", cfg.AuditArchivePrefix)
+	}
+	// DatabaseURL / JWTSecret may be empty — that's the whole point.
+}
+
+// TestLoadStorageOnlyRequiresS3Endpoint verifies that the slim
+// loader still refuses to run if S3_ENDPOINT is absent — without
+// S3 access there's nothing for audit-restore to read.
+func TestLoadStorageOnlyRequiresS3Endpoint(t *testing.T) {
+	requireEnv(t, map[string]string{
+		// No S3_ENDPOINT.
+	})
+	_, err := LoadStorageOnly()
+	if err == nil {
+		t.Fatalf("expected error when S3_ENDPOINT is unset")
+	}
+	if !strings.Contains(err.Error(), "S3_ENDPOINT") {
+		t.Fatalf("expected error to mention S3_ENDPOINT, got: %v", err)
+	}
+}
+
+// TestLoadStorageOnlyEnforcesS3Group asserts the slim loader still
+// applies the coherent-S3-group invariant (S3_ENDPOINT requires
+// bucket + access key + secret key). Drift between Load and
+// LoadStorageOnly on S3 validation would mean an operator could
+// run audit-restore with half-configured S3 and get cryptic
+// failures only when the first ListObjects call fires.
+func TestLoadStorageOnlyEnforcesS3Group(t *testing.T) {
+	requireEnv(t, map[string]string{
+		"S3_ENDPOINT": "https://s3.example.com",
+		// Intentionally missing S3_BUCKET / S3_ACCESS_KEY / S3_SECRET_KEY.
+	})
+	_, err := LoadStorageOnly()
+	if err == nil {
+		t.Fatalf("expected error when S3 group is incomplete")
+	}
+	for _, sub := range []string{"S3_BUCKET", "S3_ACCESS_KEY", "S3_SECRET_KEY"} {
+		if !strings.Contains(err.Error(), sub) {
+			t.Fatalf("expected error to mention %s, got: %v", sub, err)
+		}
+	}
+}
+
 // TestParsePriceTierMapHappy exercises the documented format
 // (comma-separated price_id:tier pairs with whitespace tolerance).
 func TestParsePriceTierMapHappy(t *testing.T) {

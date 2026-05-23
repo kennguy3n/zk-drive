@@ -129,6 +129,23 @@ func run() error {
 	}
 	defer pool.Close()
 
+	// Defense-in-depth: fail fast if the operator deployed the
+	// audit-archiver before applying migration 027. Without this
+	// guard the archiver would run a full enumerate + fetch + S3
+	// PutObject cycle before the first RecordRun INSERT failed
+	// with "relation audit_log_archive_runs does not exist" —
+	// wasted work + a confusing tail-of-run failure. Audit-archiver
+	// has a precondition distinct from server/worker (which
+	// don't touch audit_log_archive_runs), so we check
+	// MinRequiredMigrationVersionAuditArchiver explicitly rather
+	// than bumping the shared baseline. See WS-23 PR #68 Devin
+	// Review finding ANALYSIS_pr-review-job-ad89da4c3a1449c5b914d6045dc4ffb8_0002.
+	if err := database.RequireMinMigrationVersionFor(
+		ctx, pool, database.MinRequiredMigrationVersionAuditArchiver,
+	); err != nil {
+		return fmt.Errorf("migration precondition: %w", err)
+	}
+
 	// Build the storage client. The archive bucket overrides
 	// S3_BUCKET when configured so an operator can target a
 	// dedicated bucket with Glacier transition / object-lock

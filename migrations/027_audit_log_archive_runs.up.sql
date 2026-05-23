@@ -73,6 +73,20 @@ CREATE TABLE audit_log_archive_runs (
     -- detecting silent regressions: if rows_archived drops to zero
     -- while audit_log row count keeps growing, something is broken.
     rows_archived       INTEGER     NOT NULL,
+    -- bytes_uploaded is the UNCOMPRESSED JSONL payload size in
+    -- bytes, NOT the on-the-wire size of the gzipped object that
+    -- landed in S3. The archiver records the source-of-truth
+    -- byte count (the input that produced the gzip stream) so
+    -- the operator dashboard can plot a meaningful rows/byte
+    -- ratio independent of gzip's compression behaviour on each
+    -- workspace's audit traffic. The matching Prometheus metric
+    -- zkdrive_audit_archive_bytes_total carries the same
+    -- "uncompressed JSONL bytes" semantic; the two must agree.
+    -- Operators who want S3 storage cost should multiply by the
+    -- empirically-observed gzip ratio for their workload (≈10x
+    -- compression on real audit traffic). See WS-23 PR #68
+    -- Devin Review finding
+    -- ANALYSIS_pr-review-job-ad89da4c3a1449c5b914d6045dc4ffb8_0003.
     bytes_uploaded      BIGINT      NOT NULL,
     started_at          TIMESTAMPTZ NOT NULL,
     completed_at        TIMESTAMPTZ NOT NULL,

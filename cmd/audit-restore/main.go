@@ -103,12 +103,17 @@ func run() error {
 		return errors.New("--to must be strictly after --from")
 	}
 
-	cfg, err := config.Load()
+	// LoadStorageOnly skips the DATABASE_URL / JWT_SECRET checks
+	// that the server's Load enforces — audit-restore is strictly
+	// read-only against S3 and an on-call engineer responding to a
+	// compliance request shouldn't need Postgres credentials just
+	// to stream archived JSONL out. The S3 group is still validated
+	// (S3_ENDPOINT requires bucket + access key + secret key).
+	// See WS-23 PR #68 Devin Review finding
+	// ANALYSIS_pr-review-job-ad89da4c3a1449c5b914d6045dc4ffb8_0001.
+	cfg, err := config.LoadStorageOnly()
 	if err != nil {
 		return fmt.Errorf("load config: %w", err)
-	}
-	if strings.TrimSpace(cfg.S3Endpoint) == "" {
-		return errors.New("audit-restore requires S3_ENDPOINT to be configured")
 	}
 
 	archiveBucket := cfg.S3Bucket

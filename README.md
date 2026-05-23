@@ -506,9 +506,18 @@ ZK Drive ships seven binaries from a single container image:
   Exports `audit_log` rows older than `AUDIT_LOG_RETENTION_DAYS` to S3 as
   compressed JSONL (one object per workspace per calendar month) and
   deletes them from the hot table. Opt-in via `AUDIT_LOG_ARCHIVE_ENABLED`.
+  Has its own migration precondition distinct from the server/worker
+  baseline: refuses to start unless migration `027_audit_log_archive_runs`
+  has been applied (see
+  `internal/database.MinRequiredMigrationVersionAuditArchiver`). Deploys
+  enabling the archiver must therefore run `/app/migrate` to HEAD before
+  scheduling the CronJob; deploys that do not enable the archiver are
+  unaffected and can stay on the older baseline.
 - `/app/audit-restore` — read-only CLI for the cold tier. Reads archived
   audit rows back for incident investigation and compliance "produce all
   admin actions in workspace X between two dates" requests. Run ad-hoc.
+  Loads configuration via `config.LoadStorageOnly` so it does not require
+  `DATABASE_URL` or `JWT_SECRET` — only the S3 group.
 
 ### Observability
 
@@ -739,20 +748,24 @@ operators can run it freely against any historical period.
 
 ```
 docker run --rm \
-  -e DATABASE_URL=postgres://... \
   -e S3_ENDPOINT=https://... \
   -e S3_ACCESS_KEY=... \
   -e S3_SECRET_KEY=... \
   -e S3_BUCKET=zk-drive-prod \
   -e AUDIT_LOG_ARCHIVE_BUCKET=zk-drive-audit-archive \
   -e AUDIT_LOG_ARCHIVE_PREFIX=audit-archive/ \
-  -e JWT_SECRET=unused-but-required \
   ghcr.io/kennguy3n/zk-drive:<version> /app/audit-restore \
     --workspace 00000000-1111-2222-3333-444444444444 \
     --from 2024-01-01T00:00:00Z \
     --to   2024-03-31T23:59:59Z \
     --output /tmp/workspace-audit-q1-2024.jsonl
 ```
+
+`audit-restore` is read-only against S3 and intentionally does NOT
+require `DATABASE_URL` or `JWT_SECRET` — on-call engineers responding
+to an incident or compliance request can run it with only S3
+credentials in hand. (The archiver and server binaries still require
+both, since they touch Postgres / the request lifecycle.)
 
 The output is newline-delimited JSON, one row per audit event,
 sorted chronologically (`created_at` ASC), deduplicated by row id.
