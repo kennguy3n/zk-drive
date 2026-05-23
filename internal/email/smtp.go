@@ -16,7 +16,19 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	semconv "go.opentelemetry.io/otel/semconv/v1.26.0"
+	"go.opentelemetry.io/otel/trace"
 )
+
+// smtpTracerName is the instrumentation-scope name. Resolved
+// lazily via otel.Tracer on each Send so the tracer picks up the
+// real provider installed by tracing.Init rather than the no-op
+// global that existed at package init.
+const smtpTracerName = "github.com/kennguy3n/zk-drive/internal/email"
 
 // SMTPConfig is the configuration block consumed by NewSMTPClient.
 // Pulled out of internal/config so the email package stays
@@ -148,7 +160,37 @@ func (c *SMTPClient) IsConfigured() bool { return c.configured }
 // AUTHs, then MAIL FROM / RCPT TO / DATA. Returns context errors
 // transparently so the caller can distinguish a transport failure
 // from a request cancellation.
-func (c *SMTPClient) Send(ctx context.Context, msg Message) error {
+//
+// A single span wraps the entire SMTP conversation (dial → TLS →
+// AUTH → MAIL FROM → RCPT TO → DATA → QUIT). Per-phase events
+// (added via span.AddEvent below) let the trace backend show
+// inter-phase wait times without inflating span count. Phase
+// attributes mirror the [OTel SMTP semantic conventions] —
+// network.peer.address, network.peer.port, tls.mode — so any
+// backend that knows OTel can group / filter sends without custom
+// mapping.
+//
+// [OTel SMTP semantic conventions]: https://opentelemetry.io/docs/specs/semconv/messaging/
+func (c *SMTPClient) Send(ctx context.Context, msg Message) (sendErr error) {
+	ctx, span := otel.Tracer(smtpTracerName).Start(ctx,
+		"smtp.send",
+		trace.WithSpanKind(trace.SpanKindClient),
+		trace.WithAttributes(
+			semconv.NetworkPeerAddress(c.cfg.Host),
+			semconv.NetworkPeerPort(c.cfg.Port),
+			attribute.String("tls.mode", c.cfg.TLSMode),
+			attribute.Int("email.message.size", len(msg.TextBody)+len(msg.HTMLBody)+len(msg.Subject)),
+			attribute.String("email.template", msg.TemplateName),
+		),
+	)
+	defer func() {
+		if sendErr != nil {
+			span.RecordError(sendErr)
+			span.SetStatus(codes.Error, "smtp send failed")
+		}
+		span.End()
+	}()
+
 	if !c.configured {
 		return ErrNotConfigured
 	}

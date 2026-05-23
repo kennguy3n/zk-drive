@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/exaring/otelpgx"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
@@ -34,6 +35,28 @@ func Connect(ctx context.Context, dsn string) (*pgxpool.Pool, error) {
 	cfg.MinConns = 1
 	cfg.MaxConnIdleTime = 30 * time.Minute
 	cfg.PrepareConn = bindTenantGUC
+
+	// Wire OpenTelemetry tracing into pgx via otelpgx. Every
+	// Query / QueryRow / Exec / Begin / Conn checkout emits a
+	// span tagged with db.system=postgresql, db.operation, and
+	// (when otelpgx.WithIncludeQueryParameters is NOT set) a
+	// parametrised db.statement. We deliberately do NOT enable
+	// WithIncludeQueryParameters because (a) parameter values
+	// can carry PII (email addresses, encrypted blobs) and would
+	// leak into the trace backend, and (b) the parametrised
+	// statement alone is enough to identify the query plan in
+	// pg_stat_statements.
+	//
+	// When tracing.Init installs the no-op global tracer (i.e.
+	// OTEL_EXPORTER_OTLP_ENDPOINT is unset), the tracer is still
+	// invoked on every query, but the OTel SDK's no-op
+	// implementation is essentially free (no allocs, no I/O).
+	// The hook stays on unconditionally to avoid a "tracing on
+	// path A but off on path B" diff that would surface as
+	// missing parent-child links in observability tooling.
+	cfg.ConnConfig.Tracer = otelpgx.NewTracer(
+		otelpgx.WithTrimSQLInSpanName(),
+	)
 
 	pool, err := pgxpool.NewWithConfig(ctx, cfg)
 	if err != nil {

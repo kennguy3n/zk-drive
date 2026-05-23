@@ -563,6 +563,66 @@ Splitting onto a separate port (e.g. by reverse-proxying everything except
 `/metrics` from the public ingress) is the simpler posture and matches the
 worker binary's default of `:9091`.
 
+#### Distributed tracing
+
+Both `/app/server` and `/app/worker` emit OpenTelemetry spans over
+**OTLP/HTTP** to whatever collector / backend you point them at — Jaeger,
+Grafana Tempo, Honeycomb, Datadog (via the OTLP gateway), New Relic,
+SigNoz, or an in-cluster OTel Collector that fans out to multiple backends.
+The instrumentation covers chi HTTP handlers (named by route pattern, not
+raw path, so cardinality stays bounded), pgxpool queries, redis commands,
+NATS JetStream publish + consume (parent-child linked across the message
+boundary), and SMTP sends — i.e. every blocking dependency a request can
+hit.
+
+| Env var | Default | What it does |
+| ------- | ------- | ------------ |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | _unset_ | Collector URL (e.g. `https://otlp.honeycomb.io:443` or `http://otel-collector.observability.svc:4318`). **Empty = tracing disabled (no-op provider).** Boot log announces the state explicitly. |
+| `OTEL_EXPORTER_OTLP_HEADERS` | _unset_ | Comma-separated `key=value` pairs added to every export request (e.g. `x-honeycomb-team=<your-team-key>` for Honeycomb, `dd-api-key=<key>` for Datadog gateway). |
+| `OTEL_EXPORTER_OTLP_INSECURE` | `false` | Set to `true` to skip TLS verification — local collectors only. |
+| `OTEL_EXPORTER_OTLP_COMPRESSION` | `gzip` | `gzip` or `none`. `gzip` is the OTel default and roughly halves egress bytes for typical span shapes. |
+| `OTEL_SERVICE_NAME` | `zk-drive` | `service.name` resource attribute. The server and worker share this so trace backends present them as one logical service; the `service.instance.id` (auto-generated UUID per process) distinguishes the two. |
+| `OTEL_DEPLOYMENT_ENVIRONMENT` | _unset_ | `deployment.environment` resource attribute, e.g. `production` / `staging`. Omitted entirely when unset (rather than emitted as the empty string) so dashboards filtering on `env=""` don't bucket everything together. |
+| `OTEL_TRACES_SAMPLER_ARG` | `0.1` | Root-span sample ratio. **10% is the production default.** Set `1.0` in dev / staging for full visibility; `0.0` keeps propagation working but stops root sampling (useful when you want correlation IDs but no exporter cost). Out-of-range values are clamped at SDK construction with a startup warning. |
+
+The sampler is **parent-based**: if the request arrives carrying a sampled
+W3C trace-context (i.e. a frontend or upstream load balancer made the
+sample decision), zk-drive honours it. Root spans (no upstream context)
+use `OTEL_TRACES_SAMPLER_ARG`. This is what lets a "force sample for this
+specific user" header from your edge propagate through the whole stack.
+
+**Trace ↔ log correlation.** When tracing is enabled, every access-log
+line and every handler-emitted slog record carries `trace_id` and
+`span_id` fields alongside the existing `request_id`. In any backend that
+supports the link (Honeycomb, Datadog, Grafana Loki + Tempo, Splunk
+Observability) you can click a slog record and jump straight to the
+trace, or click a span and jump to the related log lines — without having
+to manually correlate via `request_id`.
+
+**Disabled-but-instrumented.** Leaving `OTEL_EXPORTER_OTLP_ENDPOINT`
+unset installs a no-op tracer provider. All instrumented code paths
+still compile and execute (Span creation, attribute setting, propagator
+inject/extract are all silent no-ops on the no-op SDK), so flipping the
+env var on a running pod is sufficient to start emitting spans on the
+next request without any code changes — and the propagator is installed
+either way, so distributed correlation IDs continue to flow through your
+deployment even with the local exporter disabled.
+
+Quick example — point a local server at the all-in-one Grafana Tempo
+container for end-to-end testing:
+
+```
+docker run -d --name=tempo \
+  -p 3200:3200 -p 4318:4318 \
+  grafana/tempo:latest \
+  -config.file=/etc/tempo.yaml -target=all
+
+OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318 \
+OTEL_TRACES_SAMPLER_ARG=1.0 \
+OTEL_DEPLOYMENT_ENVIRONMENT=dev \
+./server
+```
+
 The migrate binary must run **before** the server / worker pods are rolled out.
 On Kubernetes this is wired as a Job (see `deploy/k8s/migrate-job.yaml`) and
 on Compose as a `service_completed_successfully` dependency (see

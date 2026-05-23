@@ -53,6 +53,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	chimw "github.com/go-chi/chi/v5/middleware"
 	"github.com/google/uuid"
+	"go.opentelemetry.io/otel/trace"
 )
 
 // timeNow / timeSince are package vars so tests can pin the
@@ -416,12 +417,28 @@ func AccessLog(next http.Handler) http.Handler {
 		// shared slot so inner chi middleware can mutate it
 		// via Enrich (auth middleware uses this path to attach
 		// workspace_id / user_id / role after JWT validation).
+		//
+		// trace_id / span_id are sourced from the OTel span the
+		// otelhttp wrapper installed BEFORE AccessLog runs
+		// (otelhttp.NewHandler is the outermost wrapper in
+		// cmd/server/main.go). When tracing is disabled or the
+		// upstream did not propagate W3C trace-context, the
+		// returned SpanContext.IsValid() is false and we leave
+		// the fields off — emitting an all-zero trace_id would
+		// just pollute log dashboards with a sentinel that means
+		// "no trace" and bucket all such records together.
 		base := FromContext(ctx).With(
 			"http_method", r.Method,
 			"http_path", r.URL.Path,
 			"remote_addr", clientIP(r),
 			"request_id", reqID,
 		)
+		if sc := trace.SpanContextFromContext(ctx); sc.IsValid() {
+			base = base.With(
+				"trace_id", sc.TraceID().String(),
+				"span_id", sc.SpanID().String(),
+			)
+		}
 		slot := &requestLoggerSlot{log: base}
 		ctx = context.WithValue(ctx, slotCtxKey, slot)
 		ctx = context.WithValue(ctx, loggerCtxKey, base)

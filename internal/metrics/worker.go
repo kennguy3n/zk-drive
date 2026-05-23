@@ -1,6 +1,7 @@
 package metrics
 
 import (
+	"context"
 	"time"
 
 	"github.com/nats-io/nats.go"
@@ -53,7 +54,14 @@ const (
 // write-DB-then-ack) is a per-job correctness decision that
 // belongs to the handler. The handler returns the JobResult so
 // the wrapper can emit metrics with the right label.
-type JobHandler func(msg *nats.Msg) JobResult
+//
+// The ctx parameter is the per-message context: it carries the
+// W3C trace-context extracted from msg.Header (so DB / Redis
+// / downstream calls reuse the publisher-side trace id) and
+// retains the worker's shutdown cancel signal. Handlers should
+// derive a per-job timeout from this context rather than from a
+// closure-captured root ctx so trace propagation works.
+type JobHandler func(ctx context.Context, msg *nats.Msg) JobResult
 
 // InstrumentJob wraps a JobHandler with the worker_jobs_total
 // counter (labelled by subject + result) and the
@@ -61,14 +69,19 @@ type JobHandler func(msg *nats.Msg) JobResult
 // The returned nats.MsgHandler is the value to pass to
 // js.Subscribe.
 //
+// workerCtx is the worker's root context (carrying the shutdown
+// cancel signal). InstrumentJob passes it through to the
+// handler as-is unless a per-message context wrapper (e.g.
+// tracing.WrapConsumer) was installed first.
+//
 // Subject is taken as a constant (not pulled off msg.Subject)
 // because msg.Subject can include wildcard token expansions on
 // some NATS deployments — the constant from internal/jobs is
 // the bounded label space we want.
-func (m *Metrics) InstrumentJob(subject string, h JobHandler) nats.MsgHandler {
+func (m *Metrics) InstrumentJob(workerCtx context.Context, subject string, h JobHandler) nats.MsgHandler {
 	return func(msg *nats.Msg) {
 		start := time.Now()
-		result := h(msg)
+		result := h(workerCtx, msg)
 		elapsed := time.Since(start).Seconds()
 
 		m.workerJobsTotal.WithLabelValues(subject, string(result)).Inc()
