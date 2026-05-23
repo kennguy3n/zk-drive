@@ -416,6 +416,7 @@ func newOTLPExporter(ctx context.Context, cfg Config) (sdktrace.SpanExporter, er
 //   - "host:4318"                 → ("host:4318", "")           default path applies
 //   - "host"                      → ("host", "")
 //   - "https://host:4318"         → ("host:4318", "")
+//   - "https://host:4318/"        → ("host:4318", "")           trailing slash treated as no-path
 //   - "http://host:4318/v1/traces"→ ("host:4318", "/v1/traces") Insecure inferred
 //   - "host:4318/v1/traces"       → ("host:4318", "/v1/traces")
 //
@@ -423,6 +424,16 @@ func newOTLPExporter(ctx context.Context, cfg Config) (sdktrace.SpanExporter, er
 // is not set, which matches the convention every receiver implements.
 // Operators pasting either form into OTEL_EXPORTER_OTLP_ENDPOINT
 // expect it to "just work", so we normalise rather than rejecting.
+//
+// Trailing slash handling: an operator copy-pasting a base URL often
+// includes a trailing "/" (e.g. "https://otlp.honeycomb.io:443/").
+// Naively that produces urlPath="/" which OVERRIDES the SDK default
+// "/v1/traces", causing every export request to 404 against the
+// collector's root. We strip a sole trailing slash so the default
+// path applies. Multi-segment paths ("/v1/traces/") still strip their
+// trailing slash too (most receivers don't care, but a few are
+// strict). Operators who genuinely want to POST to the collector's
+// root (rare) can configure their collector with a non-trailing path.
 //
 // We deliberately do NOT auto-toggle WithInsecure off a "http://"
 // prefix here — the Insecure field is the single source of truth for
@@ -447,6 +458,13 @@ func splitOTLPEndpoint(raw string) (host string, urlPath string, err error) {
 		host = s
 		urlPath = ""
 	}
+	// Strip a trailing slash from the path so an operator's
+	// copy-pasted "https://host:port/" doesn't shadow the SDK
+	// default "/v1/traces" with a useless "/" that 404s. After
+	// trimming, a path that started as just "/" becomes "" (default
+	// path applies); a path like "/v1/traces/" becomes "/v1/traces"
+	// (the canonical form receivers expect).
+	urlPath = strings.TrimRight(urlPath, "/")
 	if host == "" {
 		return "", "", fmt.Errorf("tracing: endpoint %q has no host", raw)
 	}
