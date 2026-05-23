@@ -28,6 +28,7 @@ import (
 	"github.com/kennguy3n/zk-drive/internal/retention"
 	"github.com/kennguy3n/zk-drive/internal/storage"
 	"github.com/kennguy3n/zk-drive/internal/user"
+	"github.com/kennguy3n/zk-drive/internal/workspace"
 )
 
 // cryptoValidateCMKURI is a thin alias so the handler stays
@@ -50,6 +51,7 @@ type FabricClient interface {
 type Handler struct {
 	pool         *pgxpool.Pool
 	users        *user.Service
+	workspaces   *workspace.Service
 	audit        *audit.Service
 	retention    *retention.Service
 	billing      *billing.Service
@@ -63,6 +65,15 @@ type Handler struct {
 // not wired yet; the related routes will respond 501 Not Implemented.
 func NewHandler(pool *pgxpool.Pool, users *user.Service, aud *audit.Service, ret *retention.Service) *Handler {
 	return &Handler{pool: pool, users: users, audit: aud, retention: ret}
+}
+
+// WithWorkspaces wires the workspace service so the MFA policy
+// toggle endpoint (PATCH /workspace/mfa-policy) can flip the
+// workspaces.mfa_required column. Optional: the route responds 501
+// when nil.
+func (h *Handler) WithWorkspaces(ws *workspace.Service) *Handler {
+	h.workspaces = ws
+	return h
 }
 
 // WithBilling wires the billing service so admin billing endpoints
@@ -108,6 +119,70 @@ func (h *Handler) RegisterRoutes(r chi.Router) {
 	r.Put("/placement", h.PutPlacement)
 	r.Get("/cmk", h.GetCMK)
 	r.Put("/cmk", h.PutCMK)
+	r.Patch("/workspace/mfa-policy", h.UpdateMFAPolicy)
+}
+
+// updateMFAPolicyRequest carries the boolean toggle for the
+// workspace MFA policy. We use a pointer so the absence of the key
+// in the JSON body returns 400 rather than silently defaulting to
+// false (which would be a silent policy DOWNGRADE).
+type updateMFAPolicyRequest struct {
+	MFARequired *bool `json:"mfa_required"`
+}
+
+type updateMFAPolicyResponse struct {
+	MFARequired bool `json:"mfa_required"`
+}
+
+// UpdateMFAPolicy flips workspaces.mfa_required for the caller's
+// workspace. Mounted behind middleware.AdminOnly so only the
+// workspace admin can require / un-require MFA for the workspace.
+//
+// The transition is audited (audit.ActionMFAPolicyChange) with the
+// before/after values so a compliance auditor can later reconstruct
+// who flipped the policy and when. Disabling MFA does NOT delete
+// any user's enrolled credential — the credential remains active
+// for that user, but other users in the workspace are no longer
+// forced to enroll. This is intentional: a user who has already
+// enrolled has the second-factor protection regardless of the
+// workspace policy.
+func (h *Handler) UpdateMFAPolicy(w http.ResponseWriter, r *http.Request) {
+	if h.workspaces == nil {
+		http.Error(w, "workspace service not wired", http.StatusNotImplemented)
+		return
+	}
+	workspaceID, ok := middleware.WorkspaceIDFromContext(r.Context())
+	if !ok {
+		http.Error(w, "workspace not in context", http.StatusInternalServerError)
+		return
+	}
+	actorID, _ := middleware.UserIDFromContext(r.Context())
+
+	var req updateMFAPolicyRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid json body", http.StatusBadRequest)
+		return
+	}
+	if req.MFARequired == nil {
+		http.Error(w, "mfa_required is required", http.StatusBadRequest)
+		return
+	}
+
+	prev, err := h.workspaces.SetMFARequired(r.Context(), workspaceID, *req.MFARequired)
+	if err != nil {
+		http.Error(w, "update mfa policy: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	if h.audit != nil {
+		actor := actorID
+		h.audit.LogAction(r.Context(), workspaceID, &actor, audit.ActionMFAPolicyChange, "", nil, r, map[string]any{
+			"previous": prev,
+			"current":  *req.MFARequired,
+		})
+	}
+
+	writeJSON(w, http.StatusOK, updateMFAPolicyResponse{MFARequired: *req.MFARequired})
 }
 
 // GetPlacement returns the workspace's current placement policy by

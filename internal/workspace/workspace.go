@@ -24,6 +24,11 @@ type Workspace struct {
 	StorageQuotaBytes int64      `json:"storage_quota_bytes"`
 	StorageUsedBytes  int64      `json:"storage_used_bytes"`
 	Tier              string     `json:"tier"`
-	CreatedAt         time.Time  `json:"created_at"`
-	UpdatedAt         time.Time  `json:"updated_at"`
+	// MFARequired flips the login flow to require every user in
+	// the workspace to have an enrolled 2FA factor. Admins toggle
+	// it via the dedicated PATCH endpoint (audited via
+	// audit.ActionMFAPolicyChange). Default false.
+	MFARequired bool      `json:"mfa_required"`
+	CreatedAt   time.Time `json:"created_at"`
+	UpdatedAt   time.Time `json:"updated_at"`
 }

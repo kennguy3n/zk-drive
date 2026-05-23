@@ -18,7 +18,22 @@ export default function LoginPage() {
       onSubmit={async (v) => {
         try {
           setError(null);
-          await login({ email: v.email, password: v.password });
+          const resp = await login({ email: v.email, password: v.password });
+          if ("mfa_required" in resp && resp.mfa_required) {
+            // Hand the short-lived challenge token off via navigation
+            // state instead of localStorage so it disappears when the
+            // user navigates away. The MFA challenge page exchanges
+            // it for a real session token via /auth/totp/verify.
+            nav("/mfa-challenge", {
+              replace: true,
+              state: {
+                mfaToken: resp.mfa_token,
+                expiresAt: resp.expires_at,
+                mustEnroll: resp.must_enroll === true,
+              },
+            });
+            return;
+          }
           nav("/drive", { replace: true });
         } catch (err) {
           setError(extractErr(err));

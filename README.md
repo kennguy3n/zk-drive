@@ -303,6 +303,70 @@ allow-list the storage gateway origin and stage CSP rollouts:
 | `GC_INTERVAL_MINUTES`                 | `360`    | Cadence of the worker's in-process orphan-object GC loop (WS-18). Reclaims S3 objects whose presigned PUT completed but whose ConfirmUpload never landed (quota overage, suspended tenant, network drop). Set to `0` to disable the in-process loop — K8s deploys that prefer dedicated CronJob scheduling set this to 0 and run `/app/orphan-gc` externally. |
 | `GC_PENDING_UPLOAD_TTL_HOURS`         | `168`    | Cooldown applied before a pending-upload row is considered an orphan. Default 7 days matches the trash / recycle-bin retention window. Tightening below the presigned-URL expiry (15 minutes) risks racing a still-uploading client. |
 
+### Two-factor authentication (TOTP)
+
+ZK Drive ships a built-in RFC 6238 TOTP second factor for every user
+(WS-19). It is opt-in per user from the account settings page, and
+opt-in per workspace via an admin toggle that forces every member to
+enroll before completing login.
+
+**Threat model.** WS-5 (bcrypt cost 12) and WS-1 (Redis-backed session
+revocation) closed the password-related auth gaps, but a leaked DB
+row, a phished password, or password reuse from another breach still
+fully owns the account. TOTP adds a possession factor: an attacker
+holding only the password cannot complete login without also holding
+the device that owns the shared secret.
+
+**Encryption at rest.** TOTP secrets are stored encrypted with the
+same `internal/crypto.Codec` (AES-256-GCM keyed via
+`CREDENTIAL_ENCRYPTION_KEY`) that protects per-tenant storage
+credentials. Operators rotating the key already have the runbook
+from WS-13.
+
+**Recovery codes.** 10 codes are generated at enrollment finalize,
+shown to the user exactly once, then bcrypt-hashed (cost 12) before
+commit. Codes are normalised to lowercase and dash-separated on
+input, so the user can type "XB-4Q-9Z-PM-TK", "xb4q9zpmtk", or
+"xb 4q 9z pm tk" interchangeably. Burning a code marks
+`used_at` (we never delete the row) so audit queries can prove a
+recovery code was the second factor on a given session. If the user
+runs low (≤ 2 remaining) the account-settings page warns them; the
+only way to mint a fresh set is to Disable and re-enroll.
+
+**Replay protection.** Each successful Verify stamps
+`user_totp_credentials.last_used_at` with the accepted code's 30s
+period boundary. The verifier rejects any subsequent code whose
+period start is `<=` last_used_at, so a code observed by a MITM
+within its 30s window cannot be replayed.
+
+**Workspace policy.** Admins flip `workspaces.mfa_required` via
+`PATCH /api/admin/workspace/mfa-policy`. The transition is audited
+(`auth.mfa_policy_change`). When the policy is on, a user without
+an enrolled credential receives a `purpose=mfa_enroll` token at
+login that authorises ONLY the enrollment endpoints — the user
+cannot reach any data-plane handler until enrollment is finalised.
+Disabling the policy does NOT delete any user's enrolled credential;
+that user remains protected by their second factor, but new users
+are no longer forced to enroll.
+
+**Audit trail.** Five events are logged with the standard audit
+shape (workspace, actor, request IP / UA): `auth.mfa_enroll`,
+`auth.mfa_verify`, `auth.mfa_recovery_use`, `auth.mfa_disable`,
+`auth.mfa_policy_change`. The `auth.login` event also records
+`factor=totp` or `factor=recovery_code` so an investigator can
+distinguish the two paths.
+
+**Lost authenticator.** The user should burn a recovery code on
+their next login (it goes through the same Verify path as a TOTP
+code). After signing in they can Disable 2FA from settings (the
+disable endpoint re-verifies the password to prevent a stolen
+session token from quietly downgrading their auth posture), then
+re-enroll a new authenticator and receive a fresh recovery set. If
+the user has lost both the authenticator and all recovery codes, a
+workspace admin can use `PATCH /api/admin/users/{id}` to deactivate
+and re-activate the account (manual identity-proofing process —
+deliberately not a 1-click button on the admin page).
+
 ### Quick start with the zk-object-fabric Docker demo
 
 When running alongside zk-object-fabric's Docker demo, point ZK Drive

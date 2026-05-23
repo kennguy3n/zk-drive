@@ -17,6 +17,7 @@ import (
 
 	"github.com/kennguy3n/zk-drive/api/middleware"
 	"github.com/kennguy3n/zk-drive/internal/audit"
+	"github.com/kennguy3n/zk-drive/internal/totp"
 	"github.com/kennguy3n/zk-drive/internal/user"
 	"github.com/kennguy3n/zk-drive/internal/workspace"
 )
@@ -55,6 +56,7 @@ type Handler struct {
 	jwtSecret  string
 	postSignup PostSignupHook
 	sessions   SessionRevoker
+	totp       *totp.Service
 }
 
 // NewHandler constructs a Handler from the user and workspace services. The
@@ -88,6 +90,21 @@ func (h *Handler) WithSessionRevoker(s SessionRevoker) *Handler {
 	h.sessions = s
 	return h
 }
+
+// WithTOTP wires the TOTP service so Login can fork into the MFA
+// challenge path when the user has 2FA enrolled, and so the
+// /auth/totp/* endpoints can drive enrollment / verify / disable.
+// Optional: when nil the auth handler behaves exactly as it did
+// pre-WS-19 (password-only logins).
+func (h *Handler) WithTOTP(svc *totp.Service) *Handler {
+	h.totp = svc
+	return h
+}
+
+// TOTPService exposes the wired *totp.Service so the
+// api/auth/totp.go endpoint handlers can share the same instance
+// without each route taking its own service pointer.
+func (h *Handler) TOTPService() *totp.Service { return h.totp }
 
 // logAudit is nil-safe so the integration test harness (which does not
 // wire an audit service) keeps passing without code duplication.
@@ -137,6 +154,27 @@ type tokenResponse struct {
 	UserID      uuid.UUID `json:"user_id"`
 	WorkspaceID uuid.UUID `json:"workspace_id"`
 	Role        string    `json:"role"`
+}
+
+// mfaChallengeResponse is returned by Login when the user has TOTP
+// enrolled OR when the workspace requires MFA but the user has not
+// yet enrolled. The client never receives a session JWT in this
+// path — it must complete /auth/totp/verify (or /auth/totp/enroll
+// for must_enroll users) to receive a real session token.
+//
+// The shape is intentionally NOT a tokenResponse subtype: a client
+// that fails to inspect `mfa_required` and treats the body as a
+// session token must fail loudly, not silently end up holding a
+// challenge token in its session cookie.
+type mfaChallengeResponse struct {
+	MFARequired bool      `json:"mfa_required"`
+	MFAToken    string    `json:"mfa_token"`
+	ExpiresAt   time.Time `json:"expires_at"`
+	// MustEnroll signals that the workspace requires MFA but the
+	// user has no credential yet. Clients should redirect to the
+	// enrollment flow and use the supplied mfa_token (with
+	// purpose=mfa_enroll) to authorize the enroll endpoints.
+	MustEnroll bool `json:"must_enroll,omitempty"`
 }
 
 // Signup creates a workspace, the first admin user, and returns a JWT.
@@ -275,6 +313,25 @@ func (h *Handler) Login(w http.ResponseWriter, r *http.Request) {
 	if err := h.users.MaybeRehashPassword(ctx, u, req.Password); err != nil {
 		logging.FromContext(ctx).Error("auth rehash-on-login best-effort failed", "user_id", u.ID, "err", err)
 	}
+
+	// MFA fork. Run BEFORE UpdateLastLogin so the password-only
+	// step never stamps last_login_at for a session that didn't
+	// actually complete — last_login_at should reflect the
+	// effective sign-in, which for MFA users only happens after
+	// /auth/totp/verify. The verify handler is responsible for the
+	// stamp on its happy path.
+	if h.totp != nil {
+		mfaResp, mfaErr := h.maybeIssueMFAChallenge(ctx, u, r)
+		if mfaErr != nil {
+			http.Error(w, "mfa: "+mfaErr.Error(), http.StatusInternalServerError)
+			return
+		}
+		if mfaResp != nil {
+			writeJSON(w, http.StatusOK, mfaResp)
+			return
+		}
+	}
+
 	if err := h.users.UpdateLastLogin(ctx, u.ID, time.Now().UTC()); err != nil && !errors.Is(err, user.ErrNotFound) {
 		// Non-fatal: login still succeeds, but log the failure so we
 		// can investigate a misconfigured pool.
@@ -289,6 +346,69 @@ func (h *Handler) Login(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeToken(w, h.jwtSecret, u.ID, u.WorkspaceID, u.Role)
+}
+
+// maybeIssueMFAChallenge runs after a successful password verify
+// to decide whether the user has to satisfy a second factor before
+// receiving a session JWT.
+//
+// Returns (nil, nil) when the user can proceed with the
+// password-only login: they have no TOTP credential AND the
+// workspace does not require MFA.
+//
+// Returns (response, nil) with mfa_required=true in two cases:
+//   - User has an ACTIVATED TOTP credential. Body carries a
+//     purpose=mfa_challenge token; the client must POST it to
+//     /auth/totp/verify with the live 6-digit code.
+//   - Workspace requires MFA (mfa_required=true) but the user has
+//     no activated credential. Body carries a purpose=mfa_enroll
+//     token; the client must redirect to the enrollment flow.
+//
+// Audit-logs the auth.login event with result="mfa_required" so
+// security operators can distinguish completed sign-ins from
+// password-only ones that stalled at the second factor.
+func (h *Handler) maybeIssueMFAChallenge(ctx context.Context, u *user.User, r *http.Request) (*mfaChallengeResponse, error) {
+	status, err := h.totp.Status(ctx, u.ID)
+	if err != nil {
+		return nil, err
+	}
+
+	if status.Enabled {
+		token, exp, err := middleware.IssueMFAChallengeToken(h.jwtSecret, u.ID, u.WorkspaceID)
+		if err != nil {
+			return nil, err
+		}
+		h.logAudit(ctx, u.WorkspaceID, &u.ID, audit.ActionLogin, r, map[string]any{
+			"result": "mfa_required",
+		})
+		return &mfaChallengeResponse{
+			MFARequired: true,
+			MFAToken:    token,
+			ExpiresAt:   exp,
+		}, nil
+	}
+
+	// User has no active credential. Consult the workspace policy.
+	ws, err := h.workspaces.GetByID(ctx, u.WorkspaceID)
+	if err != nil {
+		return nil, err
+	}
+	if !ws.MFARequired {
+		return nil, nil
+	}
+	token, exp, err := middleware.IssueMFAEnrollToken(h.jwtSecret, u.ID, u.WorkspaceID)
+	if err != nil {
+		return nil, err
+	}
+	h.logAudit(ctx, u.WorkspaceID, &u.ID, audit.ActionLogin, r, map[string]any{
+		"result": "mfa_enrollment_required",
+	})
+	return &mfaChallengeResponse{
+		MFARequired: true,
+		MFAToken:    token,
+		ExpiresAt:   exp,
+		MustEnroll:  true,
+	}, nil
 }
 
 // Logout records a per-user revocation cutoff in the session store

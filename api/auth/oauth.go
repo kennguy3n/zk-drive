@@ -264,6 +264,34 @@ func (h *OAuthHandler) callback(w http.ResponseWriter, r *http.Request, c *oauth
 		http.Error(w, "account deactivated", http.StatusForbidden)
 		return
 	}
+
+	// MFA fork: SSO logins respect the same workspace MFA policy
+	// and per-user enrollment state as the password-login path. We
+	// hold off on UpdateLastLogin and the success-side audit until
+	// the second factor (if any) is satisfied so last_login_at
+	// reflects the effective sign-in, not the half-complete
+	// SSO-only one.
+	if h.auth.TOTPService() != nil {
+		mfaResp, err := h.auth.maybeIssueMFAChallenge(ctx, u, r)
+		if err != nil {
+			http.Error(w, "mfa: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		if mfaResp != nil {
+			if h.audit != nil {
+				actor := u.ID
+				h.audit.LogAction(ctx, u.WorkspaceID, &actor, audit.ActionSSOLogin, "", nil, r, map[string]any{
+					"provider": provider,
+					"email":    email,
+					"name":     name,
+					"result":   "mfa_required",
+				})
+			}
+			writeJSON(w, http.StatusOK, mfaResp)
+			return
+		}
+	}
+
 	if err := users.UpdateLastLogin(ctx, u.ID, time.Now().UTC()); err != nil && !errors.Is(err, user.ErrNotFound) {
 		logging.FromContext(ctx).Error("sso update last login failed", "err", err)
 	}

@@ -14,14 +14,45 @@ import (
 	"github.com/kennguy3n/zk-drive/internal/tenantctx"
 )
 
-// TokenTTL is the default validity of issued JWTs.
+// TokenTTL is the default validity of issued session JWTs.
 const TokenTTL = 24 * time.Hour
 
+// MFAChallengeTokenTTL is the validity of the short-lived JWT
+// issued by the login handler when the user has TOTP enrolled.
+// The user has this long to complete the 2FA verify step before
+// the challenge expires and they must re-enter their password.
+// 5 minutes is the industry standard (GitHub, Stripe, AWS).
+const MFAChallengeTokenTTL = 5 * time.Minute
+
+// Purpose values for the Purpose claim.
+const (
+	// PurposeMFAChallenge marks a token issued by the password-
+	// verify step that has NOT yet satisfied the second factor.
+	// AuthMiddleware rejects any token with this purpose; only the
+	// dedicated MFA verify endpoint accepts it.
+	PurposeMFAChallenge = "mfa_challenge"
+	// PurposeMFAEnroll marks a token issued when the workspace
+	// requires MFA but the user has no credential yet. It grants
+	// ONLY the enrollment endpoints — the user cannot reach any
+	// data-plane handler until they finish enrollment and exchange
+	// the enroll token for a full session token by verifying a
+	// freshly generated TOTP code.
+	PurposeMFAEnroll = "mfa_enroll"
+)
+
 // Claims is the JWT payload used by zk-drive.
+//
+// Purpose is empty for ordinary session tokens (the default).
+// When non-empty, the token is restricted to a specific endpoint
+// family (see PurposeMFAChallenge / PurposeMFAEnroll). AuthMiddleware
+// rejects any token with a non-empty purpose so that an attacker who
+// captures an mfa-challenge token cannot replay it against a data-
+// plane endpoint.
 type Claims struct {
 	UserID      uuid.UUID `json:"user_id"`
 	WorkspaceID uuid.UUID `json:"workspace_id"`
 	Role        string    `json:"role"`
+	Purpose     string    `json:"purpose,omitempty"`
 	jwt.RegisteredClaims
 }
 
@@ -39,8 +70,35 @@ const (
 // below remains the public entrypoint for handler code so other
 // packages don't grow a direct import on tenantctx.
 
-// IssueToken signs and returns a new JWT with zk-drive's standard claims.
+// IssueToken signs and returns a new session JWT with zk-drive's
+// standard claims. Purpose is left empty so AuthMiddleware accepts
+// the token on every protected endpoint.
 func IssueToken(secret string, userID, workspaceID uuid.UUID, role string, ttl time.Duration) (string, time.Time, error) {
+	return issueWithPurpose(secret, userID, workspaceID, role, "", ttl)
+}
+
+// IssueMFAChallengeToken signs a short-lived JWT marked with
+// purpose=mfa_challenge. AuthMiddleware rejects it; only the
+// /auth/totp/verify endpoint will accept it as proof that the
+// password factor has been satisfied.
+func IssueMFAChallengeToken(secret string, userID, workspaceID uuid.UUID) (string, time.Time, error) {
+	// Role is intentionally empty: a challenge token must not carry
+	// authority on the data plane, and emitting the user's role
+	// here would invite a future bug where some handler bypasses
+	// AuthMiddleware's purpose check and treats the challenge as a
+	// session.
+	return issueWithPurpose(secret, userID, workspaceID, "", PurposeMFAChallenge, MFAChallengeTokenTTL)
+}
+
+// IssueMFAEnrollToken signs a short-lived JWT marked with
+// purpose=mfa_enroll. It authorizes ONLY the enrollment endpoints
+// for a user on a workspace that requires MFA but has not yet
+// completed enrollment.
+func IssueMFAEnrollToken(secret string, userID, workspaceID uuid.UUID) (string, time.Time, error) {
+	return issueWithPurpose(secret, userID, workspaceID, "", PurposeMFAEnroll, MFAChallengeTokenTTL)
+}
+
+func issueWithPurpose(secret string, userID, workspaceID uuid.UUID, role, purpose string, ttl time.Duration) (string, time.Time, error) {
 	if ttl == 0 {
 		ttl = TokenTTL
 	}
@@ -50,6 +108,7 @@ func IssueToken(secret string, userID, workspaceID uuid.UUID, role string, ttl t
 		UserID:      userID,
 		WorkspaceID: workspaceID,
 		Role:        role,
+		Purpose:     purpose,
 		RegisteredClaims: jwt.RegisteredClaims{
 			IssuedAt:  jwt.NewNumericDate(now),
 			ExpiresAt: jwt.NewNumericDate(exp),
@@ -139,6 +198,17 @@ func AuthMiddleware(secret string, checker SessionChecker) func(http.Handler) ht
 			claims, err := ParseToken(secret, raw)
 			if err != nil {
 				http.Error(w, "invalid token", http.StatusUnauthorized)
+				return
+			}
+			// Purpose-scoped tokens (mfa_challenge, mfa_enroll) MUST
+			// NOT reach data-plane endpoints. AuthMiddleware is the
+			// single chokepoint: rejecting non-empty purpose here
+			// means an attacker who captures a challenge token cannot
+			// replay it against any handler other than the dedicated
+			// MFA endpoints (which use MFAChallengeMiddleware /
+			// MFAEnrollMiddleware below).
+			if claims.Purpose != "" {
+				http.Error(w, "token not valid for this endpoint", http.StatusUnauthorized)
 				return
 			}
 			if checker != nil {
@@ -247,4 +317,45 @@ func WithWorkspaceID(ctx context.Context, workspaceID uuid.UUID) context.Context
 func RoleFromContext(ctx context.Context) (string, bool) {
 	v, ok := ctx.Value(roleContextKey).(string)
 	return v, ok
+}
+
+// PurposeMiddleware returns a middleware that accepts ONLY tokens
+// whose Purpose claim matches `want`. Used by the MFA verify and
+// MFA enrollment routes so that an mfa_challenge token cannot be
+// used to access protected data, and a session token cannot be
+// used to satisfy the 2FA verification step.
+//
+// Unlike AuthMiddleware, PurposeMiddleware does NOT consult the
+// SessionChecker: challenge / enroll tokens are short-lived (5
+// minutes), single-purpose, and not stored in the revocation
+// index. Adding them would burn Redis traffic for zero security
+// benefit since the token expires before any revocation window
+// would be meaningful.
+func PurposeMiddleware(secret, want string) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			header := r.Header.Get("Authorization")
+			if header == "" || !strings.HasPrefix(header, "Bearer ") {
+				http.Error(w, "missing bearer token", http.StatusUnauthorized)
+				return
+			}
+			raw := strings.TrimPrefix(header, "Bearer ")
+			claims, err := ParseToken(secret, raw)
+			if err != nil {
+				http.Error(w, "invalid token", http.StatusUnauthorized)
+				return
+			}
+			if claims.Purpose != want {
+				http.Error(w, "token not valid for this endpoint", http.StatusUnauthorized)
+				return
+			}
+			ctx := withClaims(r.Context(), claims)
+			ctx = logging.Enrich(ctx,
+				"workspace_id", claims.WorkspaceID.String(),
+				"user_id", claims.UserID.String(),
+				"purpose", claims.Purpose,
+			)
+			next.ServeHTTP(w, r.WithContext(ctx))
+		})
+	}
 }
