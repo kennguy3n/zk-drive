@@ -87,8 +87,11 @@ const (
 	// admin already knows the file is going away.)
 	EventFileDeleted EventType = "file.deleted"
 
-	// EventFileRestored fires when a trashed file is recovered.
-	EventFileRestored EventType = "file.restored"
+	// (A file.restored event will be added alongside the trash /
+	// restore feature; intentionally not declared today so the
+	// catalogue returned by GET /event-types only lists events the
+	// system actually emits — subscribers should never be able to
+	// register against a type they will never receive.)
 
 	// EventPermissionGranted fires when a file or folder is shared
 	// with a user, group, or guest (anything that creates a new
@@ -116,7 +119,6 @@ func AllEventTypes() []EventType {
 	return []EventType{
 		EventFileUploadConfirmed,
 		EventFileDeleted,
-		EventFileRestored,
 		EventPermissionGranted,
 		EventPermissionRevoked,
 		EventMemberJoined,

@@ -964,11 +964,13 @@ func traceJob(subject string, h metrics.JobHandler) metrics.JobHandler {
 //
 //   - "ok" / "skip": Ack — fully fanned out OR no matching
 //     subscribers (skip).
-//   - "error":       Nak — at least one subscriber failed and the
-//     attempt count hasn't hit MaxAttempts yet. JetStream re-queues
-//     for redelivery on the configured AckWait cadence; the
-//     per-subscription webhook_deliveries row already records the
-//     failure detail.
+//   - "error":       NakWithDelay — at least one subscriber failed
+//     and the attempt count hasn't hit MaxAttempts yet. We pass the
+//     same BackoffDelay schedule the worker recorded on the
+//     next_retry_at column so JetStream's redelivery matches what
+//     the admin UI tells the operator (1s, 2s, 4s, 8s between
+//     retries 2 through 5). Without the delay JetStream redelivers
+//     instantly and the documented schedule becomes a lie.
 //   - "dropped":     Term — terminal (poison payload or MaxAttempts
 //     exhausted); stop redelivery so the stream doesn't spin on an
 //     undelivable event. Operators see the final state on the
@@ -982,7 +984,18 @@ func webhookDeliveryHandler(w *webhooks.DeliveryWorker) metrics.JobHandler {
 		case "dropped":
 			_ = msg.Term()
 		default:
-			_ = msg.Nak()
+			// Compute the same backoff the worker recorded on
+			// next_retry_at. NumDelivered is 1-indexed (1 ==
+			// initial attempt) so BackoffDelay(attempt+1)
+			// computes the delay before the NEXT redelivery.
+			attempt := 1
+			if md, mdErr := msg.Metadata(); mdErr == nil && md != nil {
+				attempt = int(md.NumDelivered)
+				if attempt < 1 {
+					attempt = 1
+				}
+			}
+			_ = msg.NakWithDelay(webhooks.BackoffDelay(attempt + 1))
 		}
 		return metrics.JobResult(result)
 	}

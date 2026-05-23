@@ -1,13 +1,16 @@
 // Package webhooks serves the workspace-admin REST surface for
-// outbound webhook subscriptions (WS-24). Routes:
+// outbound webhook subscriptions (WS-24). Routes are mounted under
+// /api/admin/webhooks in cmd/server/main.go inside the admin-guarded
+// router; the workspace is resolved from the JWT context, not from
+// a URL parameter, so paths are NOT parameterised by workspace ID:
 //
-//	POST   /api/workspaces/{workspaceID}/webhooks
-//	GET    /api/workspaces/{workspaceID}/webhooks
-//	GET    /api/workspaces/{workspaceID}/webhooks/{id}
-//	DELETE /api/workspaces/{workspaceID}/webhooks/{id}
-//	GET    /api/workspaces/{workspaceID}/webhooks/{id}/deliveries
-//	POST   /api/workspaces/{workspaceID}/webhooks/{id}/test
-//	POST   /api/workspaces/{workspaceID}/webhooks/{id}/resume
+//	POST   /api/admin/webhooks
+//	GET    /api/admin/webhooks
+//	GET    /api/admin/webhooks/{id}
+//	DELETE /api/admin/webhooks/{id}
+//	GET    /api/admin/webhooks/{id}/deliveries
+//	POST   /api/admin/webhooks/{id}/test
+//	POST   /api/admin/webhooks/{id}/resume
 //
 // All routes are admin-only. The handler delegates persistence to
 // internal/webhooks.Repository (pgx-backed in production) and

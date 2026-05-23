@@ -213,9 +213,15 @@ func (c *DeliveryClient) Deliver(ctx context.Context, u *url.URL, eventID, deliv
 	_, copyErr := io.CopyN(buf, resp.Body, c.maxBody+1)
 	if copyErr != nil && !errors.Is(copyErr, io.EOF) {
 		// A read failure here is rare (the request itself
-		// already succeeded) but if it happens we still know
-		// the status code, so this is still an http_error
-		// outcome rather than net_error.
+		// already succeeded). Outcome is still derived from
+		// resp.StatusCode below — a 2xx with a body-read
+		// failure stays OutcomeSuccess (the subscriber DID
+		// acknowledge the event); only the ErrorMessage is
+		// populated so an admin can see the diagnostic. A
+		// non-2xx with a body-read failure stays
+		// OutcomeHTTPError. We deliberately do NOT downgrade
+		// to OutcomeNetError because the network round-trip
+		// itself succeeded.
 		a.ResponseBody = buf.String()
 		a.ErrorMessage = fmt.Sprintf("read response body: %v", copyErr)
 	} else if int64(buf.Len()) > c.maxBody {

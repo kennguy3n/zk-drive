@@ -92,11 +92,16 @@ func (r *PostgresRepository) Create(ctx context.Context, s *Subscription) error 
 	if s.ID == uuid.Nil {
 		s.ID = uuid.New()
 	}
+	// The cap is on ACTIVE subscriptions, not on the row count, so
+	// an admin who has accumulated 5 auto-paused rows can still
+	// register their 20 active subscriptions. Mirrors the
+	// documented contract in README ("20 active subscriptions") and
+	// the handler-test fakeRepo which also filters on Active.
 	const q = `
 WITH cap_check AS (
 	SELECT COUNT(*) AS n
 	FROM webhook_subscriptions
-	WHERE workspace_id = $2
+	WHERE workspace_id = $2 AND active = TRUE
 )
 INSERT INTO webhook_subscriptions
 	(id, workspace_id, created_by, url, event_type, description, secret, active)

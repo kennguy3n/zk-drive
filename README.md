@@ -820,7 +820,6 @@ by event type, but the envelope is stable:
 | --------------------------- | -------------------------------------------------------------- | -------------------------------------------------------------- |
 | `file.upload.confirmed`     | A presigned upload completes and the file row is committed     | `file_id`, `version_id`, `folder_id`, `name`, `mime_type`, `size_bytes` |
 | `file.deleted`              | A file is soft-deleted via API or bulk-delete                  | `file_id`, `folder_id`, `name`                                 |
-| `file.restored`             | A previously soft-deleted file is restored                     | `file_id`, `folder_id`, `name`                                 |
 | `permission.granted`        | A file or folder permission is added                           | `resource_type`, `resource_id`, `grantee_id`, `role`           |
 | `permission.revoked`        | A file or folder permission is removed                         | `resource_type`, `resource_id`, `grantee_id`, `role`           |
 | `member.joined`             | An admin invites a new user to the workspace                   | `user_id`, `email`, `role`                                     |

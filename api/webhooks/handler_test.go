@@ -302,6 +302,37 @@ func TestHandler_Create_CapReached(t *testing.T) {
 	}
 }
 
+// TestHandler_Create_AutoPausedDoesNotCountTowardsCap pins the
+// contract that the per-workspace cap is on ACTIVE subscriptions —
+// auto-paused rows (active=false, populated by the worker's
+// consecutive-failure threshold) do NOT count. Regression for the
+// SQL CTE in PostgresRepository.Create which previously counted all
+// rows (Devin Review pr-review-job-2ce203d4_0001).
+func TestHandler_Create_AutoPausedDoesNotCountTowardsCap(t *testing.T) {
+	t.Parallel()
+	repo := &fakeRepo{}
+	h := NewHandler(repo).WithValidator(testValidator())
+	r := newRouter(h)
+	workspaceID := uuid.New()
+	// Pre-populate to the cap with INACTIVE subscriptions —
+	// admin should still be able to create a new ACTIVE one.
+	now := time.Now().UTC()
+	for i := 0; i < webhooks.MaxSubscriptionsPerWorkspace; i++ {
+		repo.subs = append(repo.subs, &webhooks.Subscription{
+			ID: uuid.New(), WorkspaceID: workspaceID,
+			Active: false, AutoPausedAt: &now,
+		})
+	}
+	body := `{"url":"https://hooks.example.com/x","event_type":"file.upload.confirmed"}`
+	req := httptest.NewRequest(http.MethodPost, "/webhooks/", bytes.NewBufferString(body))
+	req = req.WithContext(newAdminCtx(workspaceID, uuid.New()))
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, req)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("status: got=%d want=201 (auto-paused subs should not count) body=%s", rec.Code, rec.Body.String())
+	}
+}
+
 func TestHandler_List_HidesSecret(t *testing.T) {
 	t.Parallel()
 	repo := &fakeRepo{}
