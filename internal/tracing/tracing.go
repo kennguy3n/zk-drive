@@ -337,6 +337,11 @@ func Init(ctx context.Context, cfg Config) (*Provider, error) {
 	// range is enforced at one site and an operator typo
 	// (e.g. SAMPLER_ARG=10 meaning "10%") surfaces as a log line.
 	ratio := cfg.SamplerRatio
+	if ratio < 0 {
+		slog.WarnContext(ctx, "tracing sampler ratio clamped",
+			"configured", ratio, "applied", 0.0)
+		ratio = 0
+	}
 	if ratio > MaxSamplerRatio {
 		slog.WarnContext(ctx, "tracing sampler ratio clamped",
 			"configured", ratio, "applied", MaxSamplerRatio)

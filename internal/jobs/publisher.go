@@ -22,6 +22,7 @@ import (
 	"fmt"
 
 	"github.com/google/uuid"
+	"github.com/kennguy3n/zk-drive/internal/tracing"
 	"github.com/nats-io/nats.go"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
@@ -29,26 +30,6 @@ import (
 	semconv "go.opentelemetry.io/otel/semconv/v1.26.0"
 	"go.opentelemetry.io/otel/trace"
 )
-
-// natsMsgCarrier adapts nats.Header to the OpenTelemetry
-// propagation.TextMapCarrier interface so the global propagator can
-// inject the W3C trace-context (traceparent / tracestate) and
-// baggage onto an outgoing NATS message. The consumer then extracts
-// the same headers in cmd/worker, recreating a parent-child span
-// relationship across the network boundary. NATS supports per-message
-// headers since 2.2 (and JetStream since 2.3.4), which our minimum
-// required server version already exceeds.
-type natsMsgCarrier nats.Header
-
-func (c natsMsgCarrier) Get(key string) string  { return nats.Header(c).Get(key) }
-func (c natsMsgCarrier) Set(key, value string)  { nats.Header(c).Set(key, value) }
-func (c natsMsgCarrier) Keys() []string {
-	out := make([]string, 0, len(c))
-	for k := range c {
-		out = append(out, k)
-	}
-	return out
-}
 
 // publisherTracerName is the instrumentation-scope name. Resolved
 // lazily via otel.Tracer on each Start call rather than cached at
@@ -157,7 +138,7 @@ func (p *Publisher) publish(ctx context.Context, subject string, payload FileJob
 	// link. Using PublishMsgAsync rather than PublishAsync because
 	// the latter has no header-passing equivalent.
 	msg := &nats.Msg{Subject: subject, Data: body, Header: nats.Header{}}
-	otel.GetTextMapPropagator().Inject(ctx, natsMsgCarrier(msg.Header))
+	otel.GetTextMapPropagator().Inject(ctx, tracing.NATSHeaderCarrier(msg.Header))
 	if _, err := p.js.PublishMsgAsync(msg, nats.Context(ctx)); err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "publish failed")

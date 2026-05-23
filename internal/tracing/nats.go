@@ -11,15 +11,18 @@ import (
 	"go.opentelemetry.io/otel/trace"
 )
 
-// natsMsgCarrier adapts nats.Header to TextMapCarrier so the global
-// propagator can READ the W3C trace-context the publisher injected.
-// Symmetric to internal/jobs.natsMsgCarrier; duplicated here so the
-// tracing package stays free of an import cycle with internal/jobs.
-type natsMsgCarrier nats.Header
+// NATSHeaderCarrier adapts nats.Header to the OpenTelemetry
+// propagation.TextMapCarrier interface so the global propagator can
+// inject or extract W3C trace-context (traceparent / tracestate) and
+// baggage onto/from NATS message headers. Exported so both the
+// publisher (internal/jobs) and consumer (this package) share one
+// canonical implementation — avoids the duplication footgun where a
+// future key-normalisation fix would need to land in two places.
+type NATSHeaderCarrier nats.Header
 
-func (c natsMsgCarrier) Get(key string) string { return nats.Header(c).Get(key) }
-func (c natsMsgCarrier) Set(key, value string) { nats.Header(c).Set(key, value) }
-func (c natsMsgCarrier) Keys() []string {
+func (c NATSHeaderCarrier) Get(key string) string  { return nats.Header(c).Get(key) }
+func (c NATSHeaderCarrier) Set(key, value string)  { nats.Header(c).Set(key, value) }
+func (c NATSHeaderCarrier) Keys() []string {
 	out := make([]string, 0, len(c))
 	for k := range c {
 		out = append(out, k)
@@ -70,7 +73,7 @@ func WrapConsumer(subject string, h ConsumerJobHandler) func(ctx context.Context
 		// way as no headers (no parent context discovered, the
 		// consumer span starts a new root).
 		if msg != nil && msg.Header != nil {
-			ctx = otel.GetTextMapPropagator().Extract(ctx, natsMsgCarrier(msg.Header))
+			ctx = otel.GetTextMapPropagator().Extract(ctx, NATSHeaderCarrier(msg.Header))
 		}
 		spanCtx, span := otel.Tracer(consumerTracerName).Start(ctx,
 			"jetstream.consume "+subject,

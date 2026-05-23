@@ -562,18 +562,15 @@ func run() error {
 	// so handlers calling chimw.GetReqID continue to get the
 	// right value.
 	r.Use(chimw.RealIP)
-	// otelChiSpanRenamer runs as the FIRST chi middleware so the
+	// otelChiSpanRenamer reads the fully-resolved chi route
+	// pattern AFTER dispatch (via defer) and renames the
 	// otelhttp-created span (whose initial name is "http.server")
-	// is renamed to the resolved chi route pattern (e.g.
-	// `GET /api/files/{id}`) the moment routing completes. Chi
-	// populates chi.RouteContext during the router's trie walk
-	// BEFORE invoking the middleware chain, so by the time this
-	// middleware runs the pattern is available. Renaming here
-	// keeps the otelhttp wrapper at the outermost http.Handler
-	// boundary (so the span covers AccessLog's pre/post-dispatch
-	// work too) while still producing bounded-cardinality span
-	// names — without this rename, a backend would see millions
-	// of distinct `/api/files/<uuid>` spans instead of one
+	// to `GET /api/files/{id}` style bounded-cardinality names.
+	// Chi populates RoutePattern() incrementally through nested
+	// sub-routers, so reading must happen post-dispatch — the
+	// same timing used by metrics.HTTPMiddleware and AccessLog.
+	// Without this rename, a backend would see millions of
+	// distinct `/api/files/<uuid>` spans instead of one
 	// `GET /api/files/{id}` aggregate.
 	r.Use(otelChiSpanRenamer)
 	// SecurityHeaders runs BEFORE Recoverer so a panic in a
@@ -861,14 +858,15 @@ func run() error {
 		//
 		// otelhttp.NewHandler is the outermost wrapper so a
 		// single span covers the WHOLE request lifecycle
-		// (including AccessLog's pre/post-dispatch work). Its
-		// WithSpanNameFormatter pulls the resolved chi route
-		// pattern off the post-dispatch RouteContext so spans
-		// group as `/api/files/{id}` rather than per-UUID. The
-		// otelhttp middleware also injects the active span into
-		// the request context, so downstream packages (slog,
-		// pgx, redis, NATS publisher) tag their child operations
-		// with the same trace id.
+		// (including AccessLog's pre/post-dispatch work). The
+		// span starts with the generic name "http.server" and is
+		// renamed post-dispatch by otelChiSpanRenamer (a chi
+		// middleware that reads the resolved RoutePattern AFTER
+		// chi finishes routing). This ensures spans group as
+		// `/api/files/{id}` rather than per-UUID. otelhttp also
+		// injects the active span into the request context, so
+		// downstream packages (slog, pgx, redis, NATS publisher)
+		// tag their child operations with the same trace id.
 		Handler: otelhttp.NewHandler(
 			logging.AccessLog(r),
 			"http.server",
@@ -984,13 +982,12 @@ func buildEmailService(cfg *config.Config) (*email.Service, error) {
 }
 
 // otelChiSpanRenamer is a chi middleware that renames the
-// otelhttp-created span to the resolved chi route pattern as soon
-// as routing completes. It is installed as the first chi middleware
-// so the rename happens BEFORE any handler logic runs — that way
-// the span name is correct even if the request panics or returns
-// early. The span is also enriched with http.route (which the OTel
-// semantic conventions recommend, distinct from http.target which
-// otelhttp captures as the raw path).
+// otelhttp-created span to the resolved chi route pattern AFTER
+// dispatch. Chi only fully populates RoutePattern() as the request
+// passes through nested sub-routers, so reading it before
+// next.ServeHTTP would return an incomplete pattern (e.g. "/api/*"
+// instead of "/api/files/{id}"). The defer ensures the rename
+// fires even if the handler panics.
 //
 // When otelhttp is wired but tracing.Init installed the no-op
 // provider (OTEL_EXPORTER_OTLP_ENDPOINT unset), trace.SpanFromContext
@@ -998,17 +995,20 @@ func buildEmailService(cfg *config.Config) (*email.Service, error) {
 // no-ops — so the middleware is safe to install unconditionally.
 func otelChiSpanRenamer(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Chi populates RouteContext during the trie walk before
-		// invoking the middleware chain, so RoutePattern() is
-		// available here. For 404s the pattern is empty — keep
-		// the otelhttp default "http.server" name in that case
-		// so the span still groups (per-NotFound cardinality is
-		// bounded by the SPA fallback).
-		if rctx := chi.RouteContext(r.Context()); rctx != nil {
-			if pattern := rctx.RoutePattern(); pattern != "" {
-				tracing.RenameHTTPServerSpan(r.Context(), r.Method, pattern)
+		defer func() {
+			// Chi resolves RoutePattern incrementally during
+			// its tree walk through nested routers, so the full
+			// pattern is only available AFTER next.ServeHTTP
+			// returns — same timing used by metrics.HTTPMiddleware
+			// and logging.AccessLog. For 404s the pattern is
+			// empty — keep the otelhttp default "http.server"
+			// name.
+			if rctx := chi.RouteContext(r.Context()); rctx != nil {
+				if pattern := rctx.RoutePattern(); pattern != "" {
+					tracing.RenameHTTPServerSpan(r.Context(), r.Method, pattern)
+				}
 			}
-		}
+		}()
 		next.ServeHTTP(w, r)
 	})
 }
