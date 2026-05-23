@@ -245,17 +245,26 @@ func (h *Handler) dispatchGuestInviteEmail(r *http.Request, inv *sharing.GuestIn
 	if h.email == nil {
 		return
 	}
-	// Build the detached context with a fresh logger value bound
-	// via logging.WithContext (NOT logging.Enrich, which would
-	// mutate the request-scoped logger slot that AccessLog is
-	// still reading to write the access-log line at response
-	// complete — racy AND would leak invite_id into the access
-	// log of the inbound HTTP request, which is the wrong frame).
-	// The new logger carries invite_id so Service.SendGuestInvite
-	// → logSendOutcome emits a single fully-enriched slog line per
-	// failure (template / outcome / err / invite_id) and the
-	// handler does not need its own redundant log call.
+	// Detach the request-scoped logger SLOT before enriching so
+	// the goroutine reads its own logger value (not the parent's
+	// shared slot). Three things would otherwise go wrong:
+	//   1. logging.Enrich mutates the slot — that races with the
+	//      AccessLog frame still reading the slot at response
+	//      complete, AND it leaks invite_id into the access-log
+	//      line of the inbound HTTP request, which is the wrong
+	//      frame.
+	//   2. logging.WithContext stores at loggerCtxKey, but
+	//      FromContext gives slotCtxKey precedence — so the
+	//      WithContext-set logger is silently shadowed by the
+	//      slot's unenriched logger.
+	// DetachForBackground closes the gap: it captures the slot's
+	// current snapshot (workspace_id / user_id / request_id),
+	// shadows the slot with a typed-nil sentinel so FromContext
+	// falls through to loggerCtxKey, and re-attaches the snapshot
+	// there. Subsequent .With("invite_id", ...) on the returned
+	// logger lands cleanly without touching the request's slot.
 	detached := context.WithoutCancel(r.Context())
+	detached = logging.DetachForBackground(detached)
 	detached = logging.WithContext(detached, logging.FromContext(detached).With("invite_id", inv.ID))
 	sendCtx, cancel := context.WithTimeout(detached, guestInviteEmailDispatchTimeout)
 	detachedR := r.Clone(sendCtx)

@@ -195,7 +195,12 @@ func FromContext(ctx context.Context) *slog.Logger {
 	if ctx == nil {
 		return slog.Default()
 	}
-	if slot, ok := ctx.Value(slotCtxKey).(*requestLoggerSlot); ok {
+	// The nil-slot check supports the DetachForBackground sentinel
+	// pattern: callers that want to break a child goroutine off
+	// from the request's slot install a typed-nil slot here so the
+	// next lookup falls through to loggerCtxKey instead of reading
+	// (and racing with) the parent request's slot.
+	if slot, ok := ctx.Value(slotCtxKey).(*requestLoggerSlot); ok && slot != nil {
 		if l := slot.get(); l != nil {
 			return l
 		}
@@ -226,6 +231,48 @@ func WithContext(ctx context.Context, logger *slog.Logger) context.Context {
 	return context.WithValue(ctx, loggerCtxKey, logger)
 }
 
+// DetachForBackground returns a context suitable for a goroutine
+// that out-lives the HTTP request it was spawned from. It captures
+// the request-scoped slot's CURRENT logger snapshot (including any
+// workspace_id / user_id / request_id that auth + access-log
+// middleware threaded into it) and re-attaches that snapshot via
+// WithContext on a context that no longer holds the slot.
+//
+// Why this exists: callers that want to enrich a detached
+// goroutine's logger (e.g. add an invite_id correlation for an
+// async email send) cannot use Enrich — Enrich would mutate the
+// request's slot from another goroutine, which races with the
+// outer AccessLog frame's slot read AND would leak the
+// goroutine-only attribute into the access log line of the
+// INBOUND HTTP request. They also cannot use WithContext directly
+// against the request context: FromContext checks slotCtxKey FIRST
+// and returns the slot's (unenriched) logger, silently shadowing
+// the WithContext-set logger at loggerCtxKey.
+//
+// DetachForBackground closes that gap: after this call, the
+// returned context has the snapshot at loggerCtxKey AND a typed-nil
+// at slotCtxKey, so FromContext skips the slot branch and falls
+// through to loggerCtxKey. Subsequent WithContext / Enrich calls
+// against the returned context behave like any non-HTTP context —
+// they don't touch the request's slot, and they don't race.
+//
+// The returned context still carries all OTHER values from ctx
+// (workspace_id, user_id from tenantctx, anything else
+// middleware-attached). Callers typically pair this with
+// context.WithoutCancel + context.WithTimeout to also detach the
+// cancellation lifecycle.
+func DetachForBackground(ctx context.Context) context.Context {
+	if ctx == nil {
+		return context.Background()
+	}
+	logger := FromContext(ctx)
+	// Shadow the slot with a typed nil so FromContext's type
+	// assertion (*requestLoggerSlot) succeeds but the nil check
+	// at line 199 falls through to the loggerCtxKey branch.
+	ctx = context.WithValue(ctx, slotCtxKey, (*requestLoggerSlot)(nil))
+	return WithContext(ctx, logger)
+}
+
 // Enrich layers attrs onto the request-scoped logger so they
 // appear on every subsequent log line emitted via
 // FromContext(ctx) — INCLUDING the "http request" access log
@@ -250,7 +297,11 @@ func Enrich(ctx context.Context, attrs ...any) context.Context {
 	if len(attrs) == 0 {
 		return ctx
 	}
-	if slot, ok := ctx.Value(slotCtxKey).(*requestLoggerSlot); ok {
+	// Mirror FromContext's nil-slot guard so an Enrich call on a
+	// DetachForBackground'd context attaches via WithContext
+	// (the non-HTTP branch) instead of trying to mutate the
+	// typed-nil sentinel and panicking on a nil-receiver RLock.
+	if slot, ok := ctx.Value(slotCtxKey).(*requestLoggerSlot); ok && slot != nil {
 		base := slot.get()
 		if base == nil {
 			base = FromContext(ctx)
