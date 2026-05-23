@@ -606,7 +606,23 @@ inject/extract are all silent no-ops on the no-op SDK), so flipping the
 env var on a running pod is sufficient to start emitting spans on the
 next request without any code changes — and the propagator is installed
 either way, so distributed correlation IDs continue to flow through your
-deployment even with the local exporter disabled.
+deployment even with the local exporter disabled. The no-op provider
+also skips header injection on outgoing NATS messages (the propagator
+no-ops when the span context is invalid), so the NATS 2.2+ requirement
+below applies **only** when tracing is enabled.
+
+**NATS server version requirement (tracing-enabled deployments).**
+When tracing is enabled, the publisher (server) injects the W3C
+`traceparent` (and optional `tracestate` / `baggage`) header onto every
+JetStream message it publishes so the consumer (worker) can recreate
+the parent-child span link. NATS server **2.2 or newer** is required
+to accept messages with headers — older servers reject them at the
+protocol level with `ErrHeadersNotSupported`, which would surface as a
+publish failure on every async job dispatch. The JetStream features we
+already use (subjects, durable consumers, ack policies) require 2.3+
+in any case, so this is consistent with the existing minimum version.
+The official `nats:2.10-alpine` image used in `deploy/docker-compose.yml`
+and our Helm values satisfies this comfortably.
 
 Quick example — point a local server at the all-in-one Grafana Tempo
 container for end-to-end testing:
