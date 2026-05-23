@@ -8,7 +8,6 @@
 package index
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -24,10 +23,25 @@ import (
 	"github.com/kennguy3n/zk-drive/internal/storage"
 )
 
-// MaxIndexBytes caps how much body content the worker will read from
-// a single object. Past this point the FTS gain is marginal and the
-// memory pressure becomes a problem on shared workers.
+// MaxIndexBytes caps the final extracted text written to
+// files.content_text. Past this point the FTS gain is marginal and
+// the Postgres column begins to dominate per-row size. Applied as a
+// rune-boundary truncate to the extractor output, NOT as a cap on the
+// downloaded blob — PDF / DOCX are binary formats where truncating
+// the source bytes produces a corrupt input that the extractor would
+// then fail on (a zip central directory lives at the end of the
+// archive; a PDF xref table at the end of the file).
 const MaxIndexBytes int64 = 4 << 20 // 4 MiB
+
+// MaxDownloadBytes caps how much of an uploaded object the worker
+// will pull down before extraction. Mirrors MaxSourceBytes /
+// MaxScanBytes used by the preview and scan workers — same order
+// of magnitude (100 MiB) so a single worker job is bounded by a
+// predictable amount of network and memory regardless of which
+// pipeline it lands in. Files larger than this surface a hard
+// "exceeds N bytes" error and the worker NAKs the job rather than
+// silently writing a partial index that would mis-rank search hits.
+const MaxDownloadBytes int64 = 100 << 20 // 100 MiB
 
 // ErrUnsupportedMimeType is returned by ExtractText when the worker
 // has no text extractor for the supplied content type. Callers ack
@@ -201,10 +215,18 @@ func (s *Service) fetch(ctx context.Context, url string) ([]byte, error) {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
 		return nil, fmt.Errorf("index: download: %d %s", resp.StatusCode, string(body))
 	}
-	limited := io.LimitReader(resp.Body, MaxIndexBytes+1)
-	var buf bytes.Buffer
-	if _, err := io.Copy(&buf, limited); err != nil {
+	// Read MaxDownloadBytes+1 so we can distinguish a file that is
+	// exactly MaxDownloadBytes long from one that overflows the cap.
+	// Silent truncation is not acceptable: PDF / DOCX both store their
+	// directory structures at the end of the file, so a truncated
+	// download would produce extraction errors that mask the real
+	// problem (the object is too large to index).
+	buf, err := io.ReadAll(io.LimitReader(resp.Body, MaxDownloadBytes+1))
+	if err != nil {
 		return nil, fmt.Errorf("index: read body: %w", err)
 	}
-	return buf.Bytes(), nil
+	if int64(len(buf)) > MaxDownloadBytes {
+		return nil, fmt.Errorf("index: object exceeds %d bytes", MaxDownloadBytes)
+	}
+	return buf, nil
 }

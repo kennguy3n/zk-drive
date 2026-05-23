@@ -4,7 +4,6 @@ import (
 	"archive/zip"
 	"bytes"
 	"encoding/xml"
-	"errors"
 	"fmt"
 	"io"
 	"strings"
@@ -141,11 +140,17 @@ func parseDOCXBody(r io.Reader) (string, error) {
 		}
 	}
 
-	if decoderError != nil && !errors.Is(decoderError, io.ErrUnexpectedEOF) {
-		// Surface real parse failures so the worker re-delivers
-		// rather than silently writing a partial extract. EOF on a
-		// LimitReader-truncated body is not surfaced — the caller
-		// already capped at docxMaxUncompressedBytes.
+	if decoderError != nil {
+		// Surface real parse failures (malformed body XML, mid-token
+		// truncation by the LimitReader at docxMaxUncompressedBytes,
+		// etc.) so the worker re-delivers rather than silently
+		// writing a partial extract. encoding/xml reports mid-token
+		// EOF as *xml.SyntaxError, not io.ErrUnexpectedEOF — so there
+		// is no special-case to swallow here. A LimitReader cap hit
+		// between tokens is delivered as a clean io.EOF and handled
+		// at the top of the loop (line 100 above); a cap hit
+		// mid-token surfaces here and is a legitimate failure given
+		// the 64 MiB cap is well above any well-formed .docx body.
 		return "", fmt.Errorf("index/docx: parse body xml: %w", decoderError)
 	}
 
