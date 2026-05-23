@@ -1,0 +1,237 @@
+import { useEffect, useState, type FormEvent } from "react";
+import { useLocation, useNavigate } from "react-router-dom";
+import {
+  totpEnrollBegin,
+  totpEnrollBeginRequired,
+  totpEnrollFinalize,
+  totpEnrollFinalizeRequired,
+  totpStatus,
+  type TOTPEnrollBeginResponse,
+  type TOTPStatus,
+} from "../api/client";
+
+// TwoFactorEnrollPage handles BOTH:
+//
+//   - /account/2fa  : authenticated re-enrollment from settings. The
+//                     stored session token is used as the
+//                     Authorization header.
+//   - /mfa-enroll   : forced enrollment under a workspace MFA
+//                     policy. The page receives an mfa_enroll-purpose
+//                     token via react-router state and uses it
+//                     instead of the (absent) session token.
+//
+// The route distinguishes by presence of an enrollToken in the
+// router state; the API helpers route to the right backend endpoint
+// accordingly.
+export default function TwoFactorEnrollPage() {
+  const nav = useNavigate();
+  const loc = useLocation();
+  const enrollState = (loc.state as EnrollState | null) ?? null;
+  const enrollToken = enrollState?.enrollToken ?? null;
+
+  const [status, setStatus] = useState<TOTPStatus | null>(null);
+  const [challenge, setChallenge] = useState<TOTPEnrollBeginResponse | null>(null);
+  const [code, setCode] = useState("");
+  const [recovery, setRecovery] = useState<string[] | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  // For the authenticated path we fetch the current status first so a
+  // user who is already enrolled sees a "disable first" prompt
+  // instead of accidentally generating a fresh secret. For the
+  // forced-enrollment path we know status is "not enrolled" (the
+  // server only issues an enroll token when status is empty), so we
+  // skip the lookup and go straight to BeginEnrollment.
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        if (enrollToken) {
+          // Required-enrollment path: no status fetch (the user has
+          // no session token; the status endpoint would 401).
+          const ch = await totpEnrollBeginRequired(enrollToken);
+          if (!cancelled) setChallenge(ch);
+          return;
+        }
+        const s = await totpStatus();
+        if (cancelled) return;
+        setStatus(s);
+        if (!s.enabled) {
+          const ch = await totpEnrollBegin();
+          if (!cancelled) setChallenge(ch);
+        }
+      } catch (e) {
+        if (!cancelled) setError(extractErr(e));
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [enrollToken]);
+
+  const onFinalize = async (e: FormEvent) => {
+    e.preventDefault();
+    if (busy || !challenge) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const resp = enrollToken
+        ? await totpEnrollFinalizeRequired(enrollToken, code.trim())
+        : await totpEnrollFinalize(code.trim());
+      setRecovery(resp.recovery_codes);
+      // Re-fetch status only on the authenticated path. On the
+      // required-enrollment path the user still doesn't have a
+      // session token — status would 401.
+      if (!enrollToken) {
+        setStatus(await totpStatus());
+      }
+    } catch (err) {
+      setError(extractErr(err));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  // Recovery codes screen: shown exactly once after a successful
+  // finalize. The user MUST download / copy / print before
+  // dismissing — server-side they exist only as bcrypt hashes from
+  // this point forward.
+  if (recovery) {
+    return (
+      <div className="auth-page">
+        <h1>Two-factor authentication enabled</h1>
+        <p className="recovery-warning">
+          <strong>Save these recovery codes now.</strong> Each one can be used
+          once if you lose access to your authenticator. You will not see them
+          again.
+        </p>
+        <pre className="recovery-codes">{recovery.join("\n")}</pre>
+        <button
+          type="button"
+          onClick={() => {
+            const blob = new Blob([recovery.join("\n") + "\n"], {
+              type: "text/plain",
+            });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement("a");
+            a.href = url;
+            a.download = "zk-drive-recovery-codes.txt";
+            a.click();
+            URL.revokeObjectURL(url);
+          }}
+        >
+          Download codes
+        </button>
+        <button
+          type="button"
+          onClick={() => {
+            if (enrollToken) {
+              // After forced enrollment the user must complete the
+              // login by going BACK through /login — the mfa_enroll
+              // token cannot mint a session, only the password
+              // factor can.
+              nav("/login", { replace: true });
+            } else {
+              nav("/drive", { replace: true });
+            }
+          }}
+          style={{ marginLeft: "1rem" }}
+        >
+          {enrollToken ? "Sign in again" : "Done"}
+        </button>
+      </div>
+    );
+  }
+
+  if (status?.enabled && !enrollToken) {
+    return (
+      <div className="auth-page">
+        <h1>Two-factor authentication is on</h1>
+        <p>
+          You enrolled on{" "}
+          {status.activated_at
+            ? new Date(status.activated_at).toLocaleString()
+            : "an earlier date"}
+          .
+        </p>
+        <p>
+          {status.recovery_codes_remaining} recovery code
+          {status.recovery_codes_remaining === 1 ? "" : "s"} remaining.
+        </p>
+        {status.recovery_codes_remaining <= 2 && (
+          <p className="warning">
+            You are running low on recovery codes. Disable and re-enroll to
+            generate a fresh set.
+          </p>
+        )}
+        <p>
+          To replace your authenticator or generate new recovery codes,
+          disable 2FA first.
+        </p>
+        <button type="button" onClick={() => nav("/drive")}>
+          Back
+        </button>
+      </div>
+    );
+  }
+
+  return (
+    <div className="auth-page">
+      <h1>Set up two-factor authentication</h1>
+      {enrollToken && (
+        <p>
+          Your workspace requires every member to enroll a second factor
+          before signing in.
+        </p>
+      )}
+      {!challenge && <p>Loading…</p>}
+      {challenge && (
+        <>
+          <p>
+            Scan this QR code with your authenticator app (Google
+            Authenticator, 1Password, Authy, etc.) or paste the secret
+            manually.
+          </p>
+          <img
+            src={`data:image/png;base64,${challenge.qr_code_png}`}
+            alt="otpauth QR code"
+            width={200}
+            height={200}
+          />
+          <p>
+            <code>{challenge.secret}</code>
+          </p>
+          <form onSubmit={onFinalize}>
+            <label htmlFor="totp-code">
+              Enter the 6-digit code from your app to confirm
+            </label>
+            <input
+              id="totp-code"
+              type="text"
+              inputMode="numeric"
+              autoComplete="one-time-code"
+              autoFocus
+              value={code}
+              onChange={(e) => setCode(e.target.value)}
+              placeholder="123456"
+            />
+            <button type="submit" disabled={busy || code.trim() === ""}>
+              {busy ? "Verifying…" : "Enable 2FA"}
+            </button>
+          </form>
+        </>
+      )}
+      {error && <p className="auth-error">{error}</p>}
+    </div>
+  );
+}
+
+interface EnrollState {
+  enrollToken?: string;
+  expiresAt?: string;
+}
+
+function extractErr(e: unknown): string {
+  const maybe = e as { response?: { data?: string }; message?: string };
+  return maybe.response?.data || maybe.message || "Something went wrong";
+}

@@ -49,6 +49,7 @@ import (
 	"github.com/kennguy3n/zk-drive/internal/session"
 	"github.com/kennguy3n/zk-drive/internal/sharing"
 	"github.com/kennguy3n/zk-drive/internal/storage"
+	"github.com/kennguy3n/zk-drive/internal/totp"
 	"github.com/kennguy3n/zk-drive/internal/user"
 	"github.com/kennguy3n/zk-drive/internal/version"
 	"github.com/kennguy3n/zk-drive/internal/wiring"
@@ -314,8 +315,18 @@ func run() error {
 	defer auditSvc.Close()
 	retentionSvc := retention.NewService(retention.NewPostgresRepository(pool), pool)
 
+	totpRepo := totp.NewPostgresRepository(pool)
+	// Issuer is the human-readable label rendered by authenticator
+	// apps (e.g. "zk-drive" → Google Authenticator shows
+	// "zk-drive:alice@example.com"). Hardcoded rather than env-
+	// driven because changing it would break every already-enrolled
+	// user's authenticator entry (the entry is keyed on issuer +
+	// account label).
+	totpSvc := totp.NewService(totpRepo, credentialCodec, "zk-drive")
+
 	authHandler := auth.NewHandler(pool, userSvc, wsSvc, cfg.JWTSecret).
 		WithAudit(auditSvc).
+		WithTOTP(totpSvc).
 		WithPostSignupHook(func(ctx context.Context, workspaceID uuid.UUID, workspaceName string) {
 			// Best-effort: provision a fabric tenant for the new
 			// workspace. Errors are logged and swallowed so signup
@@ -380,7 +391,8 @@ func run() error {
 	adminHandler := admin.NewHandler(pool, userSvc, auditSvc, retentionSvc).
 		WithBilling(billingSvc).
 		WithStripe(stripeService).
-		WithFabric(fabricClient, provisioner, storageFactory)
+		WithFabric(fabricClient, provisioner, storageFactory).
+		WithWorkspaces(wsSvc)
 
 	kchatSvc := kchat.NewRoomService(
 		kchat.NewPostgresRepository(pool),
@@ -531,6 +543,51 @@ func run() error {
 				r.Post("/logout", authHandler.Logout)
 				r.Post("/refresh", authHandler.Refresh)
 			})
+
+			// TOTP / 2FA routes (WS-19). The three middleware
+			// groups model the three valid token "purposes":
+			//   - session token: enroll/begin, enroll/finalize
+			//     (re-enrollment from settings), disable, status
+			//   - mfa_enroll purpose: enroll/begin, enroll/finalize
+			//     (initial enrollment under a workspace policy)
+			//   - mfa_challenge purpose: verify
+			// AuthMiddleware refuses purpose-scoped tokens for the
+			// session group; PurposeMiddleware refuses everything
+			// that doesn't carry the expected purpose. The two
+			// surfaces never overlap, so an attacker who captures
+			// one kind of token cannot replay it against the other.
+			totpHandler := auth.NewTOTPHandler(authHandler)
+			if totpHandler != nil {
+				r.Route("/totp", func(r chi.Router) {
+					// Session-authenticated routes: re-enroll
+					// flow, disable, status. The user already has
+					// a session JWT and is managing 2FA from
+					// account settings.
+					r.Group(func(r chi.Router) {
+						r.Use(middleware.AuthMiddleware(cfg.JWTSecret, sessionChecker))
+						r.Post("/enroll/begin", totpHandler.EnrollBegin)
+						r.Post("/enroll/finalize", totpHandler.EnrollFinalize)
+						r.Post("/disable", totpHandler.Disable)
+						r.Get("/status", totpHandler.Status)
+					})
+					// must-enroll path: the user just authenticated
+					// with password / OAuth on a workspace that
+					// requires MFA, and they have no credential yet.
+					// The enroll token authorises ONLY the
+					// enrollment endpoints — no data plane.
+					r.Group(func(r chi.Router) {
+						r.Use(middleware.PurposeMiddleware(cfg.JWTSecret, middleware.PurposeMFAEnroll))
+						r.Post("/enroll/begin/required", totpHandler.EnrollBegin)
+						r.Post("/enroll/finalize/required", totpHandler.EnrollFinalize)
+					})
+					// Challenge-token path: complete the second
+					// factor and exchange for a real session JWT.
+					r.Group(func(r chi.Router) {
+						r.Use(middleware.PurposeMiddleware(cfg.JWTSecret, middleware.PurposeMFAChallenge))
+						r.Post("/verify", totpHandler.Verify)
+					})
+				})
+			}
 		})
 
 		// WebSocket endpoint runs behind the auth middleware so the

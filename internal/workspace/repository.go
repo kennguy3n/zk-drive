@@ -23,6 +23,10 @@ type Repository interface {
 	ListForUser(ctx context.Context, userID uuid.UUID) ([]*Workspace, error)
 	SetOwner(ctx context.Context, workspaceID, ownerUserID uuid.UUID) error
 	SetOwnerTx(ctx context.Context, tx pgx.Tx, workspaceID, ownerUserID uuid.UUID) error
+	// SetMFARequired flips the workspaces.mfa_required column for
+	// the admin policy-toggle endpoint. Returns the previous value
+	// so the audit log can capture the transition.
+	SetMFARequired(ctx context.Context, workspaceID uuid.UUID, required bool) (previous bool, err error)
 }
 
 // PostgresRepository implements Repository against Postgres.
@@ -35,11 +39,11 @@ func NewPostgresRepository(pool *pgxpool.Pool) *PostgresRepository {
 	return &PostgresRepository{pool: pool}
 }
 
-const workspaceColumns = "id, name, owner_user_id, storage_quota_bytes, storage_used_bytes, tier, created_at, updated_at"
+const workspaceColumns = "id, name, owner_user_id, storage_quota_bytes, storage_used_bytes, tier, mfa_required, created_at, updated_at"
 
 func scanWorkspace(row pgx.Row) (*Workspace, error) {
 	w := &Workspace{}
-	if err := row.Scan(&w.ID, &w.Name, &w.OwnerUserID, &w.StorageQuotaBytes, &w.StorageUsedBytes, &w.Tier, &w.CreatedAt, &w.UpdatedAt); err != nil {
+	if err := row.Scan(&w.ID, &w.Name, &w.OwnerUserID, &w.StorageQuotaBytes, &w.StorageUsedBytes, &w.Tier, &w.MFARequired, &w.CreatedAt, &w.UpdatedAt); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, ErrNotFound
 		}
@@ -130,13 +134,50 @@ func setOwner(ctx context.Context, q workspaceQuerier, workspaceID, ownerUserID 
 	return nil
 }
 
+// SetMFARequired flips the mfa_required column and returns the
+// prior value so the caller can record the transition in the
+// audit log. Returns ErrNotFound if no row matches.
+func (r *PostgresRepository) SetMFARequired(ctx context.Context, workspaceID uuid.UUID, required bool) (bool, error) {
+	// Two-step under an explicit transaction so the previous-value
+	// read and the UPDATE happen atomically. Without this, a
+	// concurrent policy toggle could read the same prior value
+	// twice and misreport one of the two transitions in the audit
+	// log.
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return false, fmt.Errorf("begin tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	var prev bool
+	if err := tx.QueryRow(ctx,
+		"SELECT mfa_required FROM workspaces WHERE id = $1 FOR UPDATE",
+		workspaceID,
+	).Scan(&prev); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return false, ErrNotFound
+		}
+		return false, fmt.Errorf("read mfa_required: %w", err)
+	}
+	if _, err := tx.Exec(ctx,
+		"UPDATE workspaces SET mfa_required = $2, updated_at = now() WHERE id = $1",
+		workspaceID, required,
+	); err != nil {
+		return false, fmt.Errorf("update mfa_required: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return false, fmt.Errorf("commit mfa_required: %w", err)
+	}
+	return prev, nil
+}
+
 // ListForUser returns every workspace the caller belongs to. Because each
 // workspace has its own users row per identity, we pivot through the
 // caller's email (resolved from the supplied user id) so workspaces joined
 // after signup are also returned.
 func (r *PostgresRepository) ListForUser(ctx context.Context, userID uuid.UUID) ([]*Workspace, error) {
 	q := `
-SELECT w.id, w.name, w.owner_user_id, w.storage_quota_bytes, w.storage_used_bytes, w.tier, w.created_at, w.updated_at
+SELECT w.id, w.name, w.owner_user_id, w.storage_quota_bytes, w.storage_used_bytes, w.tier, w.mfa_required, w.created_at, w.updated_at
 FROM workspaces w
 JOIN users u ON u.workspace_id = w.id
 WHERE u.email = (SELECT email FROM users WHERE id = $1)

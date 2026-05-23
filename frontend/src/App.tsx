@@ -18,6 +18,10 @@ const KChatRoomsPage = lazy(() => import("./pages/KChatRoomsPage"));
 // header and CreateFolderDialog, so it sits behind RequireAuth like
 // the rest of the /drive surface.
 const PrivacyPage = lazy(() => import("./pages/PrivacyPage"));
+// MFA pages are also off the critical path so the initial bundle
+// keeps shipping only the login + drive flow.
+const MfaChallengePage = lazy(() => import("./pages/MfaChallengePage"));
+const TwoFactorEnrollPage = lazy(() => import("./pages/TwoFactorEnrollPage"));
 
 // App-level routing. Unauthenticated visitors hit /login; everyone else
 // lands in the file browser at /drive. The :folderId variant lets us keep
@@ -34,6 +38,24 @@ export default function App() {
         <Routes>
           <Route path="/login" element={<LoginPage />} />
           <Route path="/signup" element={<SignupPage />} />
+          {/* MFA pages are unauthenticated routes: they accept the
+              short-lived mfa_challenge / mfa_enroll token passed via
+              react-router navigation state, NOT a stored session
+              token. The user explicitly does not have a session
+              token at this point — that's the whole point of the
+              two-factor flow. */}
+          <Route path="/mfa-challenge" element={<MfaChallengePage />} />
+          <Route path="/mfa-enroll" element={<TwoFactorEnrollPage />} />
+          {/* Authenticated re-enrollment / disable flow from account
+              settings. RequireAuth gives us the session token. */}
+          <Route
+            path="/account/2fa"
+            element={
+              <RequireAuth>
+                <TwoFactorEnrollPage />
+              </RequireAuth>
+            }
+          />
           <Route
             path="/drive"
             element={

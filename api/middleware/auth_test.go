@@ -247,3 +247,143 @@ func TestAuthMiddleware_CheckerOnlyCalledOnce(t *testing.T) {
 		t.Errorf("checker call count: got %d, want 1", stub.calls)
 	}
 }
+
+// TestAuthMiddleware_RejectsPurposeToken pins the WS-19 invariant:
+// AuthMiddleware MUST refuse any token whose Purpose claim is set,
+// regardless of its TTL or signing key. This is the single chokepoint
+// that prevents an attacker who captures an mfa_challenge token from
+// replaying it against a data-plane endpoint.
+func TestAuthMiddleware_RejectsPurposeToken(t *testing.T) {
+	t.Parallel()
+	const secret = "test-secret"
+	for _, purpose := range []string{PurposeMFAChallenge, PurposeMFAEnroll} {
+		purpose := purpose
+		t.Run(purpose, func(t *testing.T) {
+			t.Parallel()
+			token, _, err := issueWithPurpose(secret, uuid.New(), uuid.New(), "", purpose, time.Hour)
+			if err != nil {
+				t.Fatalf("issue purpose token: %v", err)
+			}
+			h := AuthMiddleware(secret, nil)(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				t.Errorf("next handler reached on %s purpose token", purpose)
+				w.WriteHeader(http.StatusOK)
+			}))
+			req := httptest.NewRequest(http.MethodGet, "/protected", nil)
+			req.Header.Set("Authorization", "Bearer "+token)
+			rr := httptest.NewRecorder()
+			h.ServeHTTP(rr, req)
+			if rr.Code != http.StatusUnauthorized {
+				t.Errorf("%s: status got %d, want 401", purpose, rr.Code)
+			}
+		})
+	}
+}
+
+// TestPurposeMiddleware exercises the dedicated purpose-token gate
+// used by /auth/totp/verify (mfa_challenge) and the must-enroll
+// /auth/totp/enroll/*/required routes (mfa_enroll). The contract
+// is the inverse of AuthMiddleware: refuse tokens WITHOUT a matching
+// purpose, accept tokens that have it.
+func TestPurposeMiddleware(t *testing.T) {
+	t.Parallel()
+	const secret = "test-secret"
+	workspaceID := uuid.New()
+	userID := uuid.New()
+
+	sessionToken, _, err := IssueToken(secret, userID, workspaceID, "admin", time.Hour)
+	if err != nil {
+		t.Fatalf("issue session token: %v", err)
+	}
+	challengeToken, _, err := IssueMFAChallengeToken(secret, userID, workspaceID)
+	if err != nil {
+		t.Fatalf("issue challenge token: %v", err)
+	}
+	enrollToken, _, err := IssueMFAEnrollToken(secret, userID, workspaceID)
+	if err != nil {
+		t.Fatalf("issue enroll token: %v", err)
+	}
+
+	tests := []struct {
+		name       string
+		want       string
+		header     string
+		wantStatus int
+		wantNext   bool
+	}{
+		{
+			name:       "challenge token accepted by challenge gate",
+			want:       PurposeMFAChallenge,
+			header:     "Bearer " + challengeToken,
+			wantStatus: http.StatusOK,
+			wantNext:   true,
+		},
+		{
+			name:       "enroll token rejected by challenge gate",
+			want:       PurposeMFAChallenge,
+			header:     "Bearer " + enrollToken,
+			wantStatus: http.StatusUnauthorized,
+			wantNext:   false,
+		},
+		{
+			name:       "session token rejected by challenge gate",
+			want:       PurposeMFAChallenge,
+			header:     "Bearer " + sessionToken,
+			wantStatus: http.StatusUnauthorized,
+			wantNext:   false,
+		},
+		{
+			name:       "enroll token accepted by enroll gate",
+			want:       PurposeMFAEnroll,
+			header:     "Bearer " + enrollToken,
+			wantStatus: http.StatusOK,
+			wantNext:   true,
+		},
+		{
+			name:       "challenge token rejected by enroll gate",
+			want:       PurposeMFAEnroll,
+			header:     "Bearer " + challengeToken,
+			wantStatus: http.StatusUnauthorized,
+			wantNext:   false,
+		},
+		{
+			name:       "missing authorization header rejected",
+			want:       PurposeMFAChallenge,
+			header:     "",
+			wantStatus: http.StatusUnauthorized,
+			wantNext:   false,
+		},
+	}
+
+	for _, tc := range tests {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var nextCalled bool
+			next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				nextCalled = true
+				claims, ok := ClaimsFromContext(r.Context())
+				if !ok {
+					t.Error("ClaimsFromContext: not found in passing path")
+					return
+				}
+				if claims.Purpose != tc.want {
+					t.Errorf("claims.Purpose: got %q, want %q", claims.Purpose, tc.want)
+				}
+				w.WriteHeader(http.StatusOK)
+			})
+			h := PurposeMiddleware(secret, tc.want)(next)
+			req := httptest.NewRequest(http.MethodPost, "/totp/verify", nil)
+			if tc.header != "" {
+				req.Header.Set("Authorization", tc.header)
+			}
+			rr := httptest.NewRecorder()
+			h.ServeHTTP(rr, req)
+			if rr.Code != tc.wantStatus {
+				t.Errorf("status: got %d, want %d", rr.Code, tc.wantStatus)
+			}
+			if nextCalled != tc.wantNext {
+				t.Errorf("next called: got %v, want %v", nextCalled, tc.wantNext)
+			}
+		})
+	}
+}

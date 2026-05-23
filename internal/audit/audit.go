@@ -22,6 +22,15 @@ const (
 	ActionPasswordChange     = "auth.password_change"
 	ActionSSOLink            = "auth.sso_link"
 	ActionSSOLogin           = "auth.sso_login"
+	// MFA / TOTP lifecycle (WS-19). All five are user-visible in
+	// the workspace audit log and surface in operator monitoring
+	// for unusual frequency (e.g. repeated disable/enroll churn,
+	// recovery-code consumption spikes that hint at lost devices).
+	ActionMFAEnroll        = "auth.mfa_enroll"
+	ActionMFAVerify        = "auth.mfa_verify"
+	ActionMFARecoveryUse   = "auth.mfa_recovery_use"
+	ActionMFADisable       = "auth.mfa_disable"
+	ActionMFAPolicyChange  = "auth.mfa_policy_change"
 	ActionPermissionGrant    = "permission.grant"
 	ActionPermissionRevoke   = "permission.revoke"
 	ActionAdminUserInvite    = "admin.user_invite"

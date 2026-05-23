@@ -100,11 +100,35 @@ export async function signup(input: {
   return data;
 }
 
+// LoginResponse is the discriminated union returned by POST /auth/login:
+//   - normal session: AuthResponse (token, user_id, workspace_id, role).
+//   - MFA-required: MFAChallengeResponse (mfa_token + must_enroll flag).
+// Clients MUST inspect `mfa_required` before treating the response as
+// a session token. The server intentionally returns a different shape
+// in each case so that a buggy client treating the body as a
+// tokenResponse fails loudly (missing `token` field) rather than
+// silently storing an mfa_challenge token as a session.
+export interface MFAChallengeResponse {
+  mfa_required: true;
+  mfa_token: string;
+  expires_at: string;
+  must_enroll?: boolean;
+}
+
+export type LoginResponse = AuthResponse | MFAChallengeResponse;
+
+function isMFAChallenge(r: LoginResponse): r is MFAChallengeResponse {
+  return (r as MFAChallengeResponse).mfa_required === true;
+}
+
 export async function login(input: {
   email: string;
   password: string;
-}): Promise<AuthResponse> {
-  const { data } = await client.post<AuthResponse>("/auth/login", input);
+}): Promise<LoginResponse> {
+  const { data } = await client.post<LoginResponse>("/auth/login", input);
+  if (isMFAChallenge(data)) {
+    return data;
+  }
   storeAuth(data);
   return data;
 }
@@ -113,6 +137,114 @@ export function logout(): void {
   localStorage.removeItem(TOKEN_STORAGE_KEY);
   localStorage.removeItem(WORKSPACE_STORAGE_KEY);
   localStorage.removeItem(ROLE_STORAGE_KEY);
+}
+
+// --- TOTP / 2FA ----------------------------------------------------------
+
+export interface TOTPStatus {
+  enabled: boolean;
+  pending_enrollment: boolean;
+  activated_at?: string;
+  last_used_at?: string;
+  recovery_codes_remaining: number;
+}
+
+export interface TOTPEnrollBeginResponse {
+  secret: string;
+  otpauth_uri: string;
+  qr_code_png: string;
+}
+
+export interface TOTPFinalizeResponse {
+  recovery_codes: string[];
+}
+
+// totpVerifyWithChallenge uses the supplied mfa challenge token
+// instead of the stored session token. The challenge token is a
+// short-lived (5 min) JWT marked with purpose=mfa_challenge that
+// the server issues in response to a successful password login when
+// the user has 2FA enrolled. Once verification succeeds the server
+// returns a real session token which we store via storeAuth.
+export async function totpVerifyWithChallenge(
+  challengeToken: string,
+  code: string,
+): Promise<AuthResponse> {
+  const { data } = await client.post<AuthResponse>(
+    "/auth/totp/verify",
+    { code },
+    { headers: { Authorization: `Bearer ${challengeToken}` } },
+  );
+  storeAuth(data);
+  return data;
+}
+
+export async function totpStatus(): Promise<TOTPStatus> {
+  const { data } = await client.get<TOTPStatus>("/auth/totp/status");
+  return data;
+}
+
+export async function totpEnrollBegin(): Promise<TOTPEnrollBeginResponse> {
+  const { data } = await client.post<TOTPEnrollBeginResponse>(
+    "/auth/totp/enroll/begin",
+    {},
+  );
+  return data;
+}
+
+export async function totpEnrollFinalize(
+  code: string,
+): Promise<TOTPFinalizeResponse> {
+  const { data } = await client.post<TOTPFinalizeResponse>(
+    "/auth/totp/enroll/finalize",
+    { code },
+  );
+  return data;
+}
+
+// totpEnrollBeginRequired / totpEnrollFinalizeRequired drive the
+// must-enroll flow: the user logged in on a workspace that requires
+// MFA but they have no credential yet. The server gave them a
+// purpose=mfa_enroll token; we send it as the Authorization header
+// because the dedicated `/required` routes refuse a session token
+// and the AuthMiddleware-guarded `/auth/totp/enroll/*` routes refuse
+// a purpose token. Two routes that converge on the same handler.
+export async function totpEnrollBeginRequired(
+  enrollToken: string,
+): Promise<TOTPEnrollBeginResponse> {
+  const { data } = await client.post<TOTPEnrollBeginResponse>(
+    "/auth/totp/enroll/begin/required",
+    {},
+    { headers: { Authorization: `Bearer ${enrollToken}` } },
+  );
+  return data;
+}
+
+export async function totpEnrollFinalizeRequired(
+  enrollToken: string,
+  code: string,
+): Promise<TOTPFinalizeResponse> {
+  const { data } = await client.post<TOTPFinalizeResponse>(
+    "/auth/totp/enroll/finalize/required",
+    { code },
+    { headers: { Authorization: `Bearer ${enrollToken}` } },
+  );
+  return data;
+}
+
+export async function totpDisable(password: string): Promise<void> {
+  await client.post("/auth/totp/disable", { password });
+}
+
+// --- Admin: workspace MFA policy -----------------------------------------
+
+export async function updateWorkspaceMFAPolicy(
+  mfaRequired: boolean,
+): Promise<{ mfa_required: boolean }> {
+  const { data } = await client.patch<{ mfa_required: boolean }>(
+    "/admin/workspace/mfa-policy",
+    { mfa_required: mfaRequired },
+  );
+  return data;
 }
 
 export function currentToken(): string | null {

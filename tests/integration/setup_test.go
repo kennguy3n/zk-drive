@@ -42,6 +42,7 @@ import (
 	"github.com/kennguy3n/zk-drive/internal/sharing"
 	"github.com/kennguy3n/zk-drive/internal/wiring"
 	"github.com/kennguy3n/zk-drive/internal/storage"
+	"github.com/kennguy3n/zk-drive/internal/totp"
 	"github.com/kennguy3n/zk-drive/internal/user"
 	"github.com/kennguy3n/zk-drive/internal/workspace"
 
@@ -141,8 +142,18 @@ func setupEnv(t *testing.T) *testEnv {
 	t.Cleanup(func() { _ = redisClient.Close() })
 	sessionStore := session.NewRedisSessionStore(redisClient)
 
+	// WS-19: a real TOTP service is wired through the integration
+	// harness so the full enroll -> challenge -> verify -> disable
+	// lifecycle exercises the same code path as production. The
+	// codec uses identity (no-op) encryption -- acceptable for
+	// tests because we don't need to validate the at-rest
+	// ciphertext shape end-to-end here (the crypto package has its
+	// own dedicated unit tests for that).
+	totpSvc := totp.NewService(totp.NewPostgresRepository(pool), identityCodec{}, "zk-drive-test")
+
 	authHandler := auth.NewHandler(pool, userSvc, wsSvc, testJWTSecret).
 		WithAudit(auditSvc).
+		WithTOTP(totpSvc).
 		WithSessionRevoker(sessionStore)
 	driveHandler := drive.NewHandler(pool, wsSvc, folderSvc, fileSvc, userSvc, storageClient, permissionSvc, activitySvc).
 		WithSharing(sharingSvc).
@@ -160,7 +171,8 @@ func setupEnv(t *testing.T) *testEnv {
 	adminHandler := admin.NewHandler(pool, userSvc, auditSvc, retentionSvc).
 		WithBilling(billingSvc).
 		WithStripe(stripeService).
-		WithFabric(nil, provisioner, nil)
+		WithFabric(nil, provisioner, nil).
+		WithWorkspaces(wsSvc)
 
 	// KChat service: same wiring as cmd/server/main.go, with a fallback
 	// storage factory so AttachmentUploadURL can mint signed URLs in
@@ -229,6 +241,31 @@ func setupEnv(t *testing.T) *testEnv {
 				r.Post("/logout", authHandler.Logout)
 				r.Post("/refresh", authHandler.Refresh)
 			})
+
+			// WS-19 TOTP routes mirror cmd/server/main.go wiring so
+			// integration tests exercise the same purpose-token
+			// chokepoint that production enforces.
+			totpHandler := auth.NewTOTPHandler(authHandler)
+			if totpHandler != nil {
+				r.Route("/totp", func(r chi.Router) {
+					r.Group(func(r chi.Router) {
+						r.Use(middleware.AuthMiddleware(testJWTSecret, sessionStore))
+						r.Post("/enroll/begin", totpHandler.EnrollBegin)
+						r.Post("/enroll/finalize", totpHandler.EnrollFinalize)
+						r.Post("/disable", totpHandler.Disable)
+						r.Get("/status", totpHandler.Status)
+					})
+					r.Group(func(r chi.Router) {
+						r.Use(middleware.PurposeMiddleware(testJWTSecret, middleware.PurposeMFAEnroll))
+						r.Post("/enroll/begin/required", totpHandler.EnrollBegin)
+						r.Post("/enroll/finalize/required", totpHandler.EnrollFinalize)
+					})
+					r.Group(func(r chi.Router) {
+						r.Use(middleware.PurposeMiddleware(testJWTSecret, middleware.PurposeMFAChallenge))
+						r.Post("/verify", totpHandler.Verify)
+					})
+				})
+			}
 		})
 
 		// WebSocket endpoint mirrors cmd/server/main.go: behind the
@@ -503,6 +540,20 @@ type tokenPayload struct {
 	UserID      string `json:"user_id"`
 	WorkspaceID string `json:"workspace_id"`
 	Role        string `json:"role"`
+}
+
+// identityCodec is a no-op totp.Encryptor for the integration tests:
+// it round-trips the plaintext unchanged. The crypto package has its
+// own unit tests for the real AES-GCM path; here we just exercise
+// the enroll / verify / disable lifecycle against a real Postgres.
+type identityCodec struct{}
+
+func (identityCodec) Encrypt(_ context.Context, plaintext string) (string, error) {
+	return plaintext, nil
+}
+
+func (identityCodec) Decrypt(_ context.Context, ciphertext string) (string, error) {
+	return ciphertext, nil
 }
 
 // testPermissionGranter mirrors the production

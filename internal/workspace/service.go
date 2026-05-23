@@ -67,3 +67,11 @@ func (s *Service) SetOwnerTx(ctx context.Context, tx pgx.Tx, workspaceID, ownerU
 func (s *Service) ListForUser(ctx context.Context, userID uuid.UUID) ([]*Workspace, error) {
 	return s.repo.ListForUser(ctx, userID)
 }
+
+// SetMFARequired flips the workspaces.mfa_required policy and
+// returns the previous value so the caller can record the
+// transition in the audit log. See PostgresRepository.SetMFARequired
+// for the locking semantics.
+func (s *Service) SetMFARequired(ctx context.Context, workspaceID uuid.UUID, required bool) (bool, error) {
+	return s.repo.SetMFARequired(ctx, workspaceID, required)
+}
