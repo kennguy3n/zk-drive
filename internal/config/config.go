@@ -432,15 +432,34 @@ func parsePriceTierMap(s string) map[string]string {
 // surface in startup logs.
 const maxAuditRetentionDays = 3650
 
+// minAuditRetentionDays mirrors internal/audit.MinRetentionDays (= 7)
+// — the service-level floor that ArchiveService refuses to operate
+// below. They MUST stay locked-step: a value that passes config but
+// fails the service produces a confusing operator experience where
+// the binary loads successfully and then aborts at archive start.
+// internal/config/config_test.go pins the equality with a Go-level
+// assertion so a future change in either constant fails CI.
+const minAuditRetentionDays = 7
+
 // clampAuditRetentionDays bounds AUDIT_LOG_RETENTION_DAYS at sensible
-// limits. Returns the configured value when valid; otherwise returns
-// 90 (the default) for non-positive input and maxAuditRetentionDays
-// for clearly-typo'd large input. The caller surfaces the clamped
-// value at startup via tracing.LogStartup-style boot logs so an
-// operator can confirm the effective setting.
+// limits. Returns the configured value when valid; otherwise:
+//   - non-positive input clamps to 90 (the default — assume the
+//     operator forgot to set it rather than intentionally set 0).
+//   - input in the range [1, minAuditRetentionDays-1] (i.e. 1–6 days)
+//     clamps UP to minAuditRetentionDays. Values that low almost
+//     certainly indicate a typo and aggressively pruning legitimately-
+//     recent audit history would compound the mistake. Clamping up
+//     preserves audit history rather than deleting it.
+//   - input > maxAuditRetentionDays clamps to maxAuditRetentionDays.
+//
+// The caller surfaces the clamped value at startup via the boot logs
+// so an operator can confirm the effective setting.
 func clampAuditRetentionDays(d int) int {
 	if d <= 0 {
 		return 90
+	}
+	if d < minAuditRetentionDays {
+		return minAuditRetentionDays
 	}
 	if d > maxAuditRetentionDays {
 		return maxAuditRetentionDays

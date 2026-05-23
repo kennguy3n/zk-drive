@@ -4,6 +4,8 @@ import (
 	"os"
 	"strings"
 	"testing"
+
+	"github.com/kennguy3n/zk-drive/internal/audit"
 )
 
 // requireEnv installs envs for the duration of t and restores the
@@ -362,12 +364,16 @@ func TestWorkerMetricsAddrFromEnv(t *testing.T) {
 
 // TestClampAuditRetentionDays exercises every branch of the
 // retention-day clamp so a future refactor that drops one of the
-// safety floors (negative input, zero input, max ceiling) trips a
-// regression. The branches matter because each one prevents a
-// different operator footgun:
+// safety floors (negative input, zero input, sub-service-floor input,
+// max ceiling) trips a regression. The branches matter because each
+// one prevents a different operator footgun:
 //
 //   - non-positive input -> 90 (default) so an empty / malformed
 //     env var doesn't disable archival silently
+//   - input in [1, minAuditRetentionDays-1] (1-6 days) -> clamps UP
+//     to minAuditRetentionDays so the value is accepted by both
+//     config Load() AND audit.NewArchiveService rather than getting
+//     accepted at config-load time then rejected at archive start
 //   - input above maxAuditRetentionDays -> ceiling (3650 = 10y) so
 //     a typo'd "9999" doesn't keep archived rows in the hot tier
 //     for 27 years
@@ -380,7 +386,9 @@ func TestClampAuditRetentionDays(t *testing.T) {
 		{"negative falls back to default", -7, 90},
 		{"zero falls back to default", 0, 90},
 		{"valid passes through", 365, 365},
-		{"minimum-valid passes through", 1, 1},
+		{"one clamps to service floor", 1, minAuditRetentionDays},
+		{"six clamps to service floor", 6, minAuditRetentionDays},
+		{"at service floor passes through", minAuditRetentionDays, minAuditRetentionDays},
 		{"above ceiling clamps to max", 9999, maxAuditRetentionDays},
 		{"at ceiling passes through", maxAuditRetentionDays, maxAuditRetentionDays},
 	}
@@ -391,6 +399,20 @@ func TestClampAuditRetentionDays(t *testing.T) {
 				t.Errorf("clampAuditRetentionDays(%d) = %d, want %d", tc.input, got, tc.want)
 			}
 		})
+	}
+}
+
+// TestAuditRetentionFloorMatchesService pins minAuditRetentionDays
+// to audit.MinRetentionDays so a future change in one constant
+// without the other fails CI rather than at archive-start runtime.
+// Same-package import is allowed for tests; the production binary
+// doesn't import audit from config.
+func TestAuditRetentionFloorMatchesService(t *testing.T) {
+	if minAuditRetentionDays != audit.MinRetentionDays {
+		t.Fatalf("minAuditRetentionDays (%d) != audit.MinRetentionDays (%d). "+
+			"They must stay locked-step so a config-accepted value cannot be "+
+			"rejected by ArchiveService at archive-start.",
+			minAuditRetentionDays, audit.MinRetentionDays)
 	}
 }
 
