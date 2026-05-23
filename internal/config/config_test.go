@@ -33,6 +33,20 @@ func requireEnv(t *testing.T, envs map[string]string) {
 		"SECURITY_HEADERS_DISABLE_HSTS", "SECURITY_HEADERS_CSP_REPORT_ONLY",
 		"SECURITY_HEADERS_CSP_REPORT_URI", "SECURITY_HEADERS_CSP_CONNECT_EXTRA",
 		"SECURITY_HEADERS_CSP_IMG_EXTRA",
+		// OpenTelemetry env vars (WS-22 distributed tracing). Same
+		// rationale as the audit-archival block below: any env var
+		// read by buildConfigFromEnv must be in this list so a CI
+		// runner with e.g. OTEL_EXPORTER_OTLP_ENDPOINT exported
+		// doesn't bleed into tests that exercise the tracing-off
+		// default. No test currently asserts on these fields, but
+		// the convention is "every env Load reads goes here" — the
+		// list is the source of truth for what tests are protected
+		// against. See WS-23 PR #68 Devin Review finding
+		// ANALYSIS_pr-review-job-336ff0c949fb48ea98da61b605622dd2_0001.
+		"OTEL_EXPORTER_OTLP_ENDPOINT", "OTEL_EXPORTER_OTLP_HEADERS",
+		"OTEL_EXPORTER_OTLP_INSECURE", "OTEL_EXPORTER_OTLP_COMPRESSION",
+		"OTEL_SERVICE_NAME", "OTEL_DEPLOYMENT_ENVIRONMENT",
+		"OTEL_TRACES_SAMPLER_ARG",
 		// Audit-log cold archival env vars (WS-23). MUST be in this
 		// list so tests like TestLoadAuditArchiveDefaults observe the
 		// production "unset" state regardless of what the parent
