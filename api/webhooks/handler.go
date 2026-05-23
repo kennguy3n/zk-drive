@@ -362,6 +362,21 @@ func (h *Handler) ListDeliveries(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid id", http.StatusBadRequest)
 		return
 	}
+	// Verify the subscription exists in this workspace before
+	// returning its deliveries. Without this guard, GET on a non-
+	// existent / cross-workspace subscription ID returns 200 with
+	// an empty list — the same shape as a subscription that simply
+	// has no deliveries yet — which is indistinguishable to the
+	// admin UI and silently hides a typo or stale bookmark.
+	// Mirrors the Get handler's 404 behaviour for consistency.
+	if _, err := h.repo.GetByID(r.Context(), workspaceID, id); err != nil {
+		if errors.Is(err, webhooks.ErrSubscriptionNotFound) {
+			http.Error(w, "subscription not found", http.StatusNotFound)
+			return
+		}
+		writeServerError(r.Context(), w, "verify subscription", err)
+		return
+	}
 	limit := 100
 	if raw := strings.TrimSpace(r.URL.Query().Get("limit")); raw != "" {
 		if n, perr := strconv.Atoi(raw); perr == nil && n > 0 && n <= 500 {

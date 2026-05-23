@@ -401,6 +401,26 @@ func TestHandler_Delete_NotFound(t *testing.T) {
 	}
 }
 
+// TestHandler_ListDeliveries_NotFound pins the contract that GET
+// /webhooks/{id}/deliveries on a subscription that does not exist
+// in the caller's workspace returns 404 instead of 200 with an
+// empty deliveries array. The two outcomes are otherwise visually
+// identical to the admin UI, which would mask typos and stale
+// bookmarks. Matches the Get-by-id handler's 404 contract.
+func TestHandler_ListDeliveries_NotFound(t *testing.T) {
+	t.Parallel()
+	repo := &fakeRepo{}
+	h := NewHandler(repo).WithValidator(testValidator())
+	r := newRouter(h)
+	req := httptest.NewRequest(http.MethodGet, "/webhooks/"+uuid.New().String()+"/deliveries", nil)
+	req = req.WithContext(newAdminCtx(uuid.New(), uuid.New()))
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, req)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status: got=%d want=404 body=%s", rec.Code, rec.Body.String())
+	}
+}
+
 func TestHandler_Resume_ReactivatesSubscription(t *testing.T) {
 	t.Parallel()
 	repo := &fakeRepo{}
