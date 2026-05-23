@@ -313,12 +313,31 @@ func writeRFC5322(w io.Writer, cfg SMTPConfig, msg Message) error {
 	fmt.Fprintf(&buf, "Message-ID: %s\r\n", mid)
 	fmt.Fprint(&buf, "MIME-Version: 1.0\r\n")
 	// Caller-supplied custom headers (e.g. Auto-Submitted).
+	//
+	// Defense-in-depth: reject any header key or value that contains
+	// CR, LF, or NUL. RFC 5322 §2.2 limits field-names to printable
+	// ASCII excluding ":", and field-values to printable ASCII with
+	// CRLF reserved for folding only — so a key or value containing
+	// raw CR/LF could be used to inject arbitrary additional headers
+	// (e.g. a malicious workspace_name value smuggling a "Bcc:
+	// attacker@example.com" line). Today the only call-site passes
+	// the hardcoded {"Auto-Submitted": "auto-generated"} map, so the
+	// pre-condition holds — but a future call-site that forwards
+	// user-controlled metadata would silently introduce a header
+	// injection vulnerability without this guard. Validating at the
+	// writer (instead of documenting "callers must not pass untrusted
+	// values") follows the same principle as Go's net/http header
+	// validation: parsers/writers reject malformed input rather than
+	// relying on callers to remember.
 	for k, v := range msg.Headers {
 		// Skip headers we manage to keep RFC 5322 sanity.
 		switch strings.ToLower(k) {
 		case "from", "to", "subject", "date", "message-id", "mime-version",
 			"content-type", "content-transfer-encoding":
 			continue
+		}
+		if err := validateHeaderKV(k, v); err != nil {
+			return fmt.Errorf("email: invalid custom header %q: %w", k, err)
 		}
 		fmt.Fprintf(&buf, "%s: %s\r\n", k, v)
 	}
@@ -378,4 +397,41 @@ func randomBoundary() (string, error) {
 		return "", fmt.Errorf("email: random boundary: %w", err)
 	}
 	return "_=_" + base64.RawURLEncoding.EncodeToString(buf[:]), nil
+}
+
+// validateHeaderKV rejects a header key/value pair that would
+// violate RFC 5322 §2.2 or enable header injection. Rules:
+//
+//   - Key MUST be a non-empty sequence of printable ASCII chars
+//     excluding ":" (field-name = 1*ftext, where ftext is %d33-57
+//     / %d59-126 — i.e., any printable except colon). We reject
+//     anything outside that range to keep parity with net/textproto.
+//   - Key MUST NOT contain CR (0x0D), LF (0x0A), or NUL (0x00).
+//   - Value MUST NOT contain CR, LF, or NUL. RFC 5322 reserves CRLF
+//     exclusively for header folding; an embedded CRLF in a value
+//     terminates the current header and starts a new one, which is
+//     the classic header-injection vector.
+//
+// The rules deliberately do NOT attempt RFC 5322 long-line folding
+// or any other normalisation — they're a strict guard, not a
+// rewrite. If a future call-site needs to emit values longer than
+// 998 octets it can do its own folding before passing the value in.
+func validateHeaderKV(key, value string) error {
+	if key == "" {
+		return errors.New("empty header key")
+	}
+	for i := 0; i < len(key); i++ {
+		c := key[i]
+		// Allow only printable ASCII (0x21-0x7E) excluding ":".
+		if c <= 0x20 || c >= 0x7f || c == ':' {
+			return fmt.Errorf("header key contains invalid byte 0x%02x at offset %d", c, i)
+		}
+	}
+	for i := 0; i < len(value); i++ {
+		c := value[i]
+		if c == '\r' || c == '\n' || c == 0 {
+			return fmt.Errorf("header value contains forbidden byte 0x%02x at offset %d (CR/LF/NUL would enable header injection)", c, i)
+		}
+	}
+	return nil
 }

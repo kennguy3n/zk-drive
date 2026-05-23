@@ -184,15 +184,40 @@ func run() error {
 		WithDisplayResolvers(
 			func(ctx context.Context, workspaceID uuid.UUID) (string, error) {
 				ws, err := wsSvc.GetByID(ctx, workspaceID)
-				if err != nil || ws == nil {
+				if err != nil {
 					return "", err
+				}
+				// nil-without-err is a real data-integrity signal:
+				// it means the invite row references a workspace
+				// the workspace service can't find (e.g. workspace
+				// hard-deleted out from under an outstanding invite,
+				// or a foreign-key drift). The Resolve* fallbacks in
+				// internal/sharing.Service render a generic "your
+				// workspace" string so the email still goes out
+				// gracefully — but the operator needs visibility so
+				// the drift gets reconciled. Emitting a warn here
+				// (instead of upstream in Resolve*) keeps the signal
+				// at the actual data-source boundary; the sharing
+				// package can't tell "service returned (nil, nil)"
+				// apart from "resolver was never wired" without
+				// leaking presence-checks into its public surface.
+				if ws == nil {
+					slog.Warn("guest-invite display resolver: workspace not found",
+						"workspace_id", workspaceID)
+					return "", nil
 				}
 				return ws.Name, nil
 			},
 			func(ctx context.Context, workspaceID, folderID uuid.UUID) (string, error) {
 				f, err := folderSvc.GetByID(ctx, workspaceID, folderID)
-				if err != nil || f == nil {
+				if err != nil {
 					return "", err
+				}
+				if f == nil {
+					slog.Warn("guest-invite display resolver: folder not found",
+						"workspace_id", workspaceID,
+						"folder_id", folderID)
+					return "", nil
 				}
 				return f.Name, nil
 			},

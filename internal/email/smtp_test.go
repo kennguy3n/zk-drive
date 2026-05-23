@@ -2,6 +2,7 @@ package email
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -393,6 +394,106 @@ func TestSMTPClient_HangingRelayDoesNotLeakGoroutine(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatalf("Send blocked >2s against a hanging relay — conn.SetDeadline was not applied post-dial; goroutine would leak in production")
+	}
+}
+
+// TestWriteRFC5322_RejectsCRLFInjectionInCustomHeaders pins the
+// defense-in-depth guard in writeRFC5322. Today the only call-site
+// passes a hardcoded {"Auto-Submitted": "auto-generated"} so the
+// pre-condition holds, but a future call-site forwarding
+// user-controlled metadata (e.g. workspace_name as a header) would
+// silently introduce a header injection vector. Validating at the
+// writer instead of documenting "callers must not pass untrusted
+// values" matches the pattern Go's net/http uses to reject
+// malformed inputs at the boundary.
+//
+// Regression test for ANALYSIS_0005 from the fourth Devin Review
+// pass on PR #66.
+func TestWriteRFC5322_RejectsCRLFInjectionInCustomHeaders(t *testing.T) {
+	cases := []struct {
+		name   string
+		header map[string]string
+	}{
+		{
+			name:   "LF in value smuggles second header",
+			header: map[string]string{"X-Custom": "innocent\nBcc: attacker@example.com"},
+		},
+		{
+			name:   "CR in value smuggles second header",
+			header: map[string]string{"X-Custom": "innocent\rBcc: attacker@example.com"},
+		},
+		{
+			name:   "CRLF in value smuggles second header",
+			header: map[string]string{"X-Custom": "innocent\r\nBcc: attacker@example.com"},
+		},
+		{
+			name:   "NUL in value rejected",
+			header: map[string]string{"X-Custom": "innocent\x00trailing"},
+		},
+		{
+			name:   "LF in key rejected",
+			header: map[string]string{"X-Custom\nBcc": "value"},
+		},
+		{
+			name:   "colon in key rejected",
+			header: map[string]string{"X:Custom": "value"},
+		},
+		{
+			name:   "space in key rejected",
+			header: map[string]string{"X Custom": "value"},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			err := writeRFC5322(&buf, SMTPConfig{
+				FromAddress: "noreply@drive.example.com",
+				FromName:    "Drive",
+			}, Message{
+				To:       "bob@example.com",
+				Subject:  "hi",
+				TextBody: "body",
+				Headers:  tc.header,
+			})
+			if err == nil {
+				// If we wrote successfully, look for the injection
+				// pattern in the body — that's a real bug.
+				out := buf.String()
+				if strings.Contains(strings.ToLower(out), "bcc:") {
+					t.Fatalf("CRLF injection succeeded — output contains Bcc header that the caller did NOT explicitly set: %q", out)
+				}
+				t.Fatalf("writeRFC5322 accepted malformed header where it should reject: %q", tc.header)
+			}
+			// Verify the error mentions header validation so a
+			// future refactor of the error wrapping doesn't silently
+			// regress.
+			if !strings.Contains(err.Error(), "invalid custom header") &&
+				!strings.Contains(err.Error(), "header") {
+				t.Errorf("expected error to mention header validation; got %v", err)
+			}
+		})
+	}
+}
+
+// TestWriteRFC5322_AcceptsValidCustomHeader pins that the guard
+// doesn't false-positive on the legitimate production header.
+func TestWriteRFC5322_AcceptsValidCustomHeader(t *testing.T) {
+	var buf bytes.Buffer
+	err := writeRFC5322(&buf, SMTPConfig{
+		FromAddress: "noreply@drive.example.com",
+		FromName:    "Drive",
+	}, Message{
+		To:       "bob@example.com",
+		Subject:  "hi",
+		TextBody: "body",
+		Headers:  map[string]string{"Auto-Submitted": "auto-generated"},
+	})
+	if err != nil {
+		t.Fatalf("writeRFC5322 rejected legitimate Auto-Submitted header: %v", err)
+	}
+	if !strings.Contains(buf.String(), "Auto-Submitted: auto-generated") {
+		t.Errorf("expected Auto-Submitted header in output; got %q", buf.String())
 	}
 }
 
