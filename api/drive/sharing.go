@@ -245,18 +245,28 @@ func (h *Handler) dispatchGuestInviteEmail(r *http.Request, inv *sharing.GuestIn
 	if h.email == nil {
 		return
 	}
+	// Build the detached context with a fresh logger value bound
+	// via logging.WithContext (NOT logging.Enrich, which would
+	// mutate the request-scoped logger slot that AccessLog is
+	// still reading to write the access-log line at response
+	// complete — racy AND would leak invite_id into the access
+	// log of the inbound HTTP request, which is the wrong frame).
+	// The new logger carries invite_id so Service.SendGuestInvite
+	// → logSendOutcome emits a single fully-enriched slog line per
+	// failure (template / outcome / err / invite_id) and the
+	// handler does not need its own redundant log call.
 	detached := context.WithoutCancel(r.Context())
+	detached = logging.WithContext(detached, logging.FromContext(detached).With("invite_id", inv.ID))
 	sendCtx, cancel := context.WithTimeout(detached, guestInviteEmailDispatchTimeout)
 	detachedR := r.Clone(sendCtx)
 	go func() {
 		defer cancel()
-		log := logging.FromContext(sendCtx).With("invite_id", inv.ID)
 
 		inviterName := h.resolveInviterDisplayName(sendCtx, inv.WorkspaceID, inviterID)
 		workspaceName := h.sharing.ResolveWorkspaceName(sendCtx, inv.WorkspaceID)
 		folderName := h.sharing.ResolveFolderName(sendCtx, inv.WorkspaceID, inv.FolderID)
 
-		outcome, err := h.email.SendGuestInvite(sendCtx, email.SendGuestInviteInput{
+		outcome, _ := h.email.SendGuestInvite(sendCtx, email.SendGuestInviteInput{
 			Email:         inv.Email,
 			InviterName:   inviterName,
 			WorkspaceName: workspaceName,
@@ -265,9 +275,11 @@ func (h *Handler) dispatchGuestInviteEmail(r *http.Request, inv *sharing.GuestIn
 			InviteID:      inv.ID.String(),
 			ExpiresAt:     inv.ExpiresAt,
 		})
-		if err != nil {
-			log.Warn("guest invite email failed", "outcome", string(outcome), "err", err)
-		}
+		// Service.SendGuestInvite has already logged the outcome
+		// via logSendOutcome — the audit row is the second
+		// observable artefact, capturing the same outcome plus
+		// the actor/workspace/IP fields the audit log already
+		// owns.
 		h.logAudit(sendCtx, detachedR, audit.ActionGuestInviteEmailed, "guest_invite", &inv.ID, map[string]any{
 			"outcome": string(outcome),
 		})

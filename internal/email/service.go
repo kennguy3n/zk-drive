@@ -60,9 +60,10 @@ type MetricsRecorder interface {
 // notification.Service shape and keeps subject lines / template
 // IDs out of the call-site.
 type Service struct {
-	sender    Sender
-	publicURL string
-	metrics   MetricsRecorder
+	sender         Sender
+	publicURL      string
+	metrics        MetricsRecorder
+	disabledReason string
 }
 
 // ServiceConfig is the dependency bundle for NewService. PublicURL
@@ -72,6 +73,13 @@ type Service struct {
 type ServiceConfig struct {
 	Sender    Sender
 	PublicURL string
+	// DisabledReason is an optional structured explanation surfaced
+	// by LogStartup when the wired Sender is a NoopClient for a
+	// reason OTHER than "SMTP_HOST is unset" — for example, when
+	// cmd/server's buildEmailService forces NoopClient because
+	// PUBLIC_URL is missing. Leave empty for the default
+	// "set SMTP_HOST/..." message.
+	DisabledReason string
 }
 
 // NewService constructs a Service. Both Sender and PublicURL are
@@ -86,8 +94,9 @@ func NewService(cfg ServiceConfig) (*Service, error) {
 	}
 	publicURL := trimTrailingSlash(cfg.PublicURL)
 	return &Service{
-		sender:    cfg.Sender,
-		publicURL: publicURL,
+		sender:         cfg.Sender,
+		publicURL:      publicURL,
+		disabledReason: cfg.DisabledReason,
 	}, nil
 }
 
@@ -105,14 +114,22 @@ func (s *Service) IsConfigured() bool { return s.sender.IsConfigured() }
 
 // LogStartup writes a single slog.Info / slog.Warn line at boot so
 // operators can see the transactional-email mode without grepping
-// for SMTP_HOST. Called by cmd/server.main once after Load().
+// for SMTP_HOST. Called by cmd/server.main once after Load(). When
+// the service is wired to a NoopClient with a DisabledReason (e.g.
+// PUBLIC_URL is missing even though SMTP_* are set), the warn line
+// includes that reason verbatim so the operator doesn't waste time
+// inspecting SMTP credentials when the actual cause is elsewhere.
 func (s *Service) LogStartup(ctx context.Context) {
 	log := logging.FromContext(ctx)
 	if s.IsConfigured() {
 		log.Info("transactional email enabled", "public_url", s.publicURL)
-	} else {
-		log.Warn("transactional email DISABLED — set SMTP_HOST/SMTP_PORT/SMTP_FROM_ADDRESS to enable guest-invite delivery (currently best-effort no-op)")
+		return
 	}
+	if s.disabledReason != "" {
+		log.Warn("transactional email DISABLED — guest-invite delivery is best-effort no-op", "reason", s.disabledReason)
+		return
+	}
+	log.Warn("transactional email DISABLED — set SMTP_HOST/SMTP_PORT/SMTP_FROM_ADDRESS to enable guest-invite delivery (currently best-effort no-op)")
 }
 
 // SendGuestInviteInput is the call-site-facing payload for the

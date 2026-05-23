@@ -457,6 +457,14 @@ func run() error {
 	metricsSurface := metrics.New()
 	metricsSurface.RegisterPgxPoolCollector(pool)
 	metricsSurface.RegisterRedisPoolCollector(redisClient)
+	// email.Service.WithMetrics uses a pointer receiver and
+	// returns the same *Service for ergonomic chaining; we use it
+	// as a fluent setter (return value intentionally discarded —
+	// the s.metrics field is already mutated through the pointer)
+	// because emailSvc was constructed inside buildEmailService
+	// where the metrics surface is not yet available. Reassigning
+	// would be a no-op staticcheck/SA4006 (same pointer comes back),
+	// so we keep the discard form.
 	emailSvc.WithMetrics(metricsSurface)
 
 	r := chi.NewRouter()
@@ -853,20 +861,24 @@ func (a folderCreatorAdapter) Create(ctx context.Context, workspaceID uuid.UUID,
 // that confuse recipients, so we'd rather degrade gracefully than
 // ship invalid links.
 func buildEmailService(cfg *config.Config) (*email.Service, error) {
-	var sender email.Sender
 	switch {
 	case cfg.PublicURL == "":
 		// No external base URL → composed accept-invite links would
 		// be malformed; refuse to send and surface the
-		// missing-config in LogStartup. Use a stable placeholder so
-		// NewService doesn't reject empty PublicURL.
-		sender = email.NewNoopClient()
+		// missing-config in LogStartup so an operator with
+		// SMTP_HOST already set doesn't waste time inspecting SMTP
+		// credentials. Use a stable placeholder so NewService
+		// doesn't reject empty PublicURL.
 		return email.NewService(email.ServiceConfig{
-			Sender:    sender,
-			PublicURL: "http://invalid.local",
+			Sender:         email.NewNoopClient(),
+			PublicURL:      "http://invalid.local",
+			DisabledReason: "PUBLIC_URL is not set — composed accept-invite links would be malformed; set PUBLIC_URL to the externally-reachable frontend base URL (e.g. https://drive.example.com) to enable guest-invite delivery",
 		})
 	case cfg.SMTPHost == "":
-		sender = email.NewNoopClient()
+		return email.NewService(email.ServiceConfig{
+			Sender:    email.NewNoopClient(),
+			PublicURL: cfg.PublicURL,
+		})
 	default:
 		c, err := email.NewSMTPClient(email.SMTPConfig{
 			Host:                  cfg.SMTPHost,
@@ -882,10 +894,9 @@ func buildEmailService(cfg *config.Config) (*email.Service, error) {
 		if err != nil {
 			return nil, err
 		}
-		sender = c
+		return email.NewService(email.ServiceConfig{
+			Sender:    c,
+			PublicURL: cfg.PublicURL,
+		})
 	}
-	return email.NewService(email.ServiceConfig{
-		Sender:    sender,
-		PublicURL: cfg.PublicURL,
-	})
 }

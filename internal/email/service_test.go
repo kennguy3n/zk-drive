@@ -1,13 +1,17 @@
 package email
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/kennguy3n/zk-drive/internal/logging"
 )
 
 // recordingSender is a Sender that captures every Send call so
@@ -254,6 +258,79 @@ func TestNewService_TrimsTrailingSlash(t *testing.T) {
 	}
 	if !strings.Contains(got, "drive.example.com/invites/INVITEID") {
 		t.Fatalf("composed URL not present: %s", got)
+	}
+}
+
+// TestLogStartup_DisabledReasonSurfaced pins the operator-facing
+// contract: when ServiceConfig.DisabledReason is set (e.g. because
+// PUBLIC_URL is missing even though SMTP_* are configured),
+// LogStartup must surface that reason instead of telling the
+// operator to "set SMTP_HOST/SMTP_PORT/SMTP_FROM_ADDRESS" — which
+// would be actively misleading.
+func TestLogStartup_DisabledReasonSurfaced(t *testing.T) {
+	var buf bytes.Buffer
+	log := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn}))
+	svc, err := NewService(ServiceConfig{
+		Sender:         &recordingSender{configured: false},
+		PublicURL:      "http://invalid.local",
+		DisabledReason: "PUBLIC_URL is not set — composed accept-invite links would be malformed",
+	})
+	if err != nil {
+		t.Fatalf("NewService: %v", err)
+	}
+	ctx := logging.WithContext(context.Background(), log)
+	svc.LogStartup(ctx)
+	out := buf.String()
+	if !strings.Contains(out, "PUBLIC_URL is not set") {
+		t.Errorf("LogStartup did not surface DisabledReason; got %q", out)
+	}
+	if strings.Contains(out, "SMTP_HOST/SMTP_PORT") {
+		t.Errorf("LogStartup misleadingly told operator to set SMTP_* even though DisabledReason was set; got %q", out)
+	}
+}
+
+// TestLogStartup_DefaultDisabledMessage pins the no-reason path:
+// when DisabledReason is empty and the Sender is NoopClient
+// (i.e. SMTP_HOST is the missing config), the warn message
+// instructs the operator to set SMTP_*.
+func TestLogStartup_DefaultDisabledMessage(t *testing.T) {
+	var buf bytes.Buffer
+	log := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn}))
+	svc, err := NewService(ServiceConfig{
+		Sender:    &recordingSender{configured: false},
+		PublicURL: "https://drive.example.com",
+	})
+	if err != nil {
+		t.Fatalf("NewService: %v", err)
+	}
+	ctx := logging.WithContext(context.Background(), log)
+	svc.LogStartup(ctx)
+	out := buf.String()
+	if !strings.Contains(out, "SMTP_HOST/SMTP_PORT") {
+		t.Errorf("LogStartup default-disabled message missing SMTP_* hint; got %q", out)
+	}
+}
+
+// TestLogStartup_EnabledLogsInfo pins the happy path: a configured
+// Sender produces an info line (not a warning) with the public URL.
+func TestLogStartup_EnabledLogsInfo(t *testing.T) {
+	var buf bytes.Buffer
+	log := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	svc, err := NewService(ServiceConfig{
+		Sender:    &recordingSender{configured: true},
+		PublicURL: "https://drive.example.com",
+	})
+	if err != nil {
+		t.Fatalf("NewService: %v", err)
+	}
+	ctx := logging.WithContext(context.Background(), log)
+	svc.LogStartup(ctx)
+	out := buf.String()
+	if !strings.Contains(out, "transactional email enabled") {
+		t.Errorf("LogStartup enabled-path missing expected message; got %q", out)
+	}
+	if !strings.Contains(out, "https://drive.example.com") {
+		t.Errorf("LogStartup enabled-path missing public_url; got %q", out)
 	}
 }
 
