@@ -146,6 +146,31 @@ type Config struct {
 	// consult this field. The reconciler binary is short-
 	// lived and does not export metrics; see README.
 	WorkerMetricsAddr string
+
+	// PublicURL is the canonical externally-reachable base URL of
+	// the frontend (e.g. "https://drive.example.com"). The email
+	// service uses it to compose invite-accept links; when empty,
+	// transactional email is forcibly disabled (links would point
+	// at an unrouted host). Trailing slashes are stripped at
+	// consumption time so operators can paste either form.
+	PublicURL string
+
+	// SMTP — transactional email transport. The email service
+	// boots into a NoopClient when SMTPHost is empty (logged at
+	// startup), so dev environments don't fail to come up. In
+	// production, leaving SMTPHost unset means guest-invite
+	// emails are silently no-ops; the operator README documents
+	// the trade-off and the in-app notification path that still
+	// fires for known users.
+	SMTPHost                  string
+	SMTPPort                  int
+	SMTPUsername              string
+	SMTPPassword              string
+	SMTPFromAddress           string
+	SMTPFromName              string
+	SMTPTLSMode               string // "starttls" (default), "implicit", "none"
+	SMTPTLSServerName         string
+	SMTPTLSInsecureSkipVerify bool
 }
 
 // Load reads configuration from environment variables and returns a populated
@@ -200,6 +225,18 @@ func Load() (*Config, error) {
 		// collapse both into the default, breaking the operator's
 		// expectation that `=` disables the server.
 		WorkerMetricsAddr: workerMetricsAddrFromEnv(),
+
+		PublicURL: strings.TrimSpace(os.Getenv("PUBLIC_URL")),
+
+		SMTPHost:                  strings.TrimSpace(os.Getenv("SMTP_HOST")),
+		SMTPPort:                  parseIntDefault(os.Getenv("SMTP_PORT"), 587),
+		SMTPUsername:              os.Getenv("SMTP_USERNAME"),
+		SMTPPassword:              os.Getenv("SMTP_PASSWORD"),
+		SMTPFromAddress:           strings.TrimSpace(os.Getenv("SMTP_FROM_ADDRESS")),
+		SMTPFromName:              os.Getenv("SMTP_FROM_NAME"),
+		SMTPTLSMode:               getEnvDefault("SMTP_TLS_MODE", "starttls"),
+		SMTPTLSServerName:         os.Getenv("SMTP_TLS_SERVER_NAME"),
+		SMTPTLSInsecureSkipVerify: parseBoolDefault(os.Getenv("SMTP_TLS_INSECURE_SKIP_VERIFY"), false),
 	}
 
 	var missing []string

@@ -749,3 +749,90 @@ func TestAccessLogDropsHostileRequestIDAndGeneratesFresh(t *testing.T) {
 		t.Fatalf("access log line missing request_id field: %s", out)
 	}
 }
+
+// TestDetachForBackground_CapturesSlotSnapshot pins the core
+// contract: after detach, FromContext returns a logger that
+// reflects the slot's CURRENT state at detach time AND can be
+// further enriched via WithContext WITHOUT mutating the original
+// slot the parent request is still reading.
+func TestDetachForBackground_CapturesSlotSnapshot(t *testing.T) {
+	var parentBuf, childBuf bytes.Buffer
+	parentHandler := slog.NewJSONHandler(&parentBuf, nil)
+
+	// Simulate the AccessLog-seeded request context: the slot
+	// holds a logger that already has workspace_id enriched onto
+	// it (as the auth middleware would).
+	parentLogger := slog.New(parentHandler).With("workspace_id", "ws-123")
+	parentCtx := withRequestScopedLogger(context.Background(), httptest.NewRequest(http.MethodGet, "/x", nil), parentLogger)
+
+	// Detach and enrich with invite_id (the goroutine-only
+	// correlation attribute).
+	detached := DetachForBackground(parentCtx)
+	childHandler := slog.NewJSONHandler(&childBuf, nil)
+	childLogger := FromContext(detached).Handler() // capture so we can confirm a child-write doesn't reach parentBuf
+	if childLogger == nil {
+		t.Fatalf("FromContext on detached ctx returned nil handler")
+	}
+	detached = WithContext(detached, slog.New(childHandler).With("workspace_id", "ws-123").With("invite_id", "inv-abc"))
+
+	// FromContext on detached must return the child-enriched
+	// logger (not the parent's slot logger).
+	got := FromContext(detached)
+	got.Info("child emit")
+	if !strings.Contains(childBuf.String(), `"invite_id":"inv-abc"`) {
+		t.Errorf("detached FromContext did not return the enriched logger; childBuf=%q", childBuf.String())
+	}
+
+	// The parent's slot logger must NOT have invite_id — i.e. the
+	// detach did not mutate the slot.
+	parentLogger.Info("parent emit")
+	if strings.Contains(parentBuf.String(), "invite_id") {
+		t.Errorf("DetachForBackground leaked invite_id into the parent slot; parentBuf=%q", parentBuf.String())
+	}
+
+	// And calling FromContext on the parent ctx still resolves
+	// through the slot and returns the slot's (un-enriched-by-child) logger.
+	parentResolved := FromContext(parentCtx)
+	parentResolved.Info("parent resolved")
+	if strings.Contains(parentBuf.String(), "invite_id") {
+		t.Errorf("FromContext(parentCtx) leaked invite_id; parentBuf=%q", parentBuf.String())
+	}
+}
+
+// TestDetachForBackground_EnrichOnDetachedDoesNotPanic pins the
+// guard added to Enrich: calling Enrich on a DetachForBackground'd
+// context must take the non-HTTP branch (WithContext) instead of
+// trying to mutate the typed-nil slot sentinel and panicking on a
+// nil-receiver RLock.
+func TestDetachForBackground_EnrichOnDetachedDoesNotPanic(t *testing.T) {
+	var buf bytes.Buffer
+	parentLogger := slog.New(slog.NewJSONHandler(&buf, nil))
+	parentCtx := withRequestScopedLogger(context.Background(), httptest.NewRequest(http.MethodGet, "/x", nil), parentLogger)
+
+	detached := DetachForBackground(parentCtx)
+	enriched := Enrich(detached, "invite_id", "inv-abc")
+	FromContext(enriched).Info("after enrich")
+	if !strings.Contains(buf.String(), `"invite_id":"inv-abc"`) {
+		t.Errorf("Enrich on detached ctx did not surface invite_id; buf=%q", buf.String())
+	}
+}
+
+// TestDetachForBackground_NilContextSafe — defensive guard.
+func TestDetachForBackground_NilContextSafe(t *testing.T) {
+	defer func() {
+		if r := recover(); r != nil {
+			t.Fatalf("DetachForBackground(nil) panicked: %v", r)
+		}
+	}()
+	// Pass a typed-nil context.Context interface — staticcheck's
+	// SA1012 forbids `nil` literal but a deliberately-nil context
+	// is still a code path callers can stumble into in production
+	// (e.g. a future caller that forgot to set the field). Pin
+	// that we don't crash on it.
+	var nilCtx context.Context
+	ctx := DetachForBackground(nilCtx) //nolint:staticcheck // SA1012: intentionally pass nil to exercise the guard
+	if ctx == nil {
+		t.Fatalf("DetachForBackground(nil) returned nil context")
+	}
+	_ = FromContext(ctx) // must not panic
+}

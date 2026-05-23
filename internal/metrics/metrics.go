@@ -177,6 +177,12 @@ type Metrics struct {
 	// reconciler runs are dominated by per-workspace SUM
 	// (single SQL aggregate per workspace).
 	gcRunDuration prometheus.Histogram
+
+	// emailSentTotal counts every transactional email Send
+	// attempt, partitioned by template name and outcome. Bounded
+	// cardinality: templates are a closed set defined in
+	// internal/email; outcomes are the SendOutcome enum.
+	emailSentTotal *prometheus.CounterVec
 }
 
 // New constructs a Metrics with a fresh private registry and the
@@ -289,6 +295,8 @@ func New() *Metrics {
 		Help:    "Wall time per GCAll invocation. Tracked separately from the reconciler histogram because GC runs are dominated by per-orphan DeleteObject latency.",
 		Buckets: gcRunBuckets,
 	})
+
+	m.registerEmailMetrics(reg)
 
 	return m
 }

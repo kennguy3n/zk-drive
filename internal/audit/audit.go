@@ -43,6 +43,14 @@ const (
 	ActionAdminBillingUpdate    = "admin.billing_update"
 	ActionAdminBillingCheckout  = "admin.billing_checkout_session"
 	ActionAdminBillingPortal    = "admin.billing_portal_session"
+	// Guest-invite delivery (WS-21). Recorded on the same audit_log
+	// stream as the auth + permission events so operators can join
+	// "invite created → email delivered" on resource_id and surface
+	// undelivered invites in compliance reports. The metadata blob
+	// carries the SendOutcome (`ok` / `smtp_error` /
+	// `template_error` / `address_invalid` / `disabled`) so a
+	// failed delivery is still visible without dropping the row.
+	ActionGuestInviteEmailed = "sharing.guest_invite_emailed"
 )
 
 // Entry mirrors a single audit_log row. ActorID is nullable because

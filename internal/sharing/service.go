@@ -51,9 +51,11 @@ type PermissionRef struct {
 // handling, and coordination with the permission service for guest
 // invites.
 type Service struct {
-	repo        Repository
-	permissions PermissionGranter
-	now         func() time.Time
+	repo          Repository
+	permissions   PermissionGranter
+	now           func() time.Time
+	workspaceName WorkspaceNameResolver
+	folderName    FolderNameResolver
 }
 
 // NewService returns a Service backed by the given repository and
@@ -252,6 +254,127 @@ func (s *Service) RevokeGuestInvite(ctx context.Context, workspaceID, id uuid.UU
 // to look up an invite before confirming / revoking it.
 func (s *Service) GetGuestInviteByID(ctx context.Context, workspaceID, id uuid.UUID) (*GuestInvite, error) {
 	return s.repo.GetGuestInviteByID(ctx, workspaceID, id)
+}
+
+// GuestInvitePreview is the display-safe projection of an invite
+// returned by the pre-auth /invites/{id}/preview endpoint. It
+// intentionally omits secrets (permission_id, created_by) and
+// internal IDs that the recipient doesn't need to act on the
+// invite; the email address is included so the landing page can
+// auto-fill the signup form and the recipient can confirm the
+// invite was sent to them, not a colleague.
+type GuestInvitePreview struct {
+	ID            uuid.UUID  `json:"id"`
+	WorkspaceID   uuid.UUID  `json:"workspace_id"`
+	WorkspaceName string     `json:"workspace_name"`
+	FolderName    string     `json:"folder_name"`
+	Email         string     `json:"email"`
+	Role          string     `json:"role"`
+	ExpiresAt     *time.Time `json:"expires_at,omitempty"`
+	AcceptedAt    *time.Time `json:"accepted_at,omitempty"`
+	// Status is the server-evaluated state of the invite:
+	//   - "pending" — usable; the recipient should be offered the
+	//     accept flow.
+	//   - "accepted" — already redeemed (AcceptedAt is set).
+	//   - "expired" — past ExpiresAt and not yet accepted.
+	// Evaluated server-side against the service's clock so the
+	// frontend has a single authoritative source of truth and
+	// cannot accidentally show an "accept" button for an
+	// already-stale invite.
+	Status string `json:"status"`
+}
+
+// Invite status string constants used by GuestInvitePreview.Status.
+// Exposed so handler / frontend type-safety can pin against the
+// same literals.
+const (
+	GuestInviteStatusPending  = "pending"
+	GuestInviteStatusAccepted = "accepted"
+	GuestInviteStatusExpired  = "expired"
+)
+
+// WorkspaceNameResolver looks up a workspace's display name.
+// Injected via WithWorkspaceNameResolver so the sharing service
+// does not depend on the workspace package directly.
+type WorkspaceNameResolver func(ctx context.Context, workspaceID uuid.UUID) (string, error)
+
+// FolderNameResolver looks up a folder's display name.
+type FolderNameResolver func(ctx context.Context, workspaceID, folderID uuid.UUID) (string, error)
+
+// WithDisplayResolvers attaches the workspace + folder name
+// resolvers used by GetGuestInvitePreview. Optional: when either
+// is nil the preview falls back to placeholder strings, so the
+// endpoint still works in degraded form.
+func (s *Service) WithDisplayResolvers(ws WorkspaceNameResolver, folder FolderNameResolver) *Service {
+	s.workspaceName = ws
+	s.folderName = folder
+	return s
+}
+
+// GetGuestInvitePreview returns the display-safe projection of an
+// invite for the unauthenticated landing page. Looks up the row via
+// GetGuestInviteByIDAnyWorkspace (bypassing RLS the same way
+// public share-link resolution does), then enriches it with
+// workspace / folder names and a server-evaluated Status (pending /
+// accepted / expired) so the frontend cannot accidentally offer an
+// "accept" flow for a stale invite.
+func (s *Service) GetGuestInvitePreview(ctx context.Context, id uuid.UUID) (*GuestInvitePreview, error) {
+	inv, err := s.repo.GetGuestInviteByIDAnyWorkspace(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	preview := &GuestInvitePreview{
+		ID:            inv.ID,
+		WorkspaceID:   inv.WorkspaceID,
+		Email:         inv.Email,
+		Role:          inv.Role,
+		ExpiresAt:     inv.ExpiresAt,
+		AcceptedAt:    inv.AcceptedAt,
+		WorkspaceName: s.ResolveWorkspaceName(ctx, inv.WorkspaceID),
+		FolderName:    s.ResolveFolderName(ctx, inv.WorkspaceID, inv.FolderID),
+		Status:        s.computeInviteStatus(inv),
+	}
+	return preview, nil
+}
+
+// computeInviteStatus evaluates the invite state against the
+// service's now() clock. Acceptance trumps expiry: an invite that
+// was accepted before it would have expired is "accepted", not
+// "expired" — matches what the audit log already records.
+func (s *Service) computeInviteStatus(inv *GuestInvite) string {
+	if inv.AcceptedAt != nil {
+		return GuestInviteStatusAccepted
+	}
+	if inv.ExpiresAt != nil && !inv.ExpiresAt.After(s.now()) {
+		return GuestInviteStatusExpired
+	}
+	return GuestInviteStatusPending
+}
+
+// ResolveWorkspaceName returns the workspace's display name via
+// the resolver wired by WithDisplayResolvers, or a safe fallback
+// when the resolver is unset / fails. Exposed so other call sites
+// (notably api/drive's email-dispatch path) share the same
+// fallback semantics as GetGuestInvitePreview — closes the
+// duplicate-resolver gap the original WS-21 wiring left behind.
+func (s *Service) ResolveWorkspaceName(ctx context.Context, workspaceID uuid.UUID) string {
+	if s.workspaceName != nil {
+		if name, err := s.workspaceName(ctx, workspaceID); err == nil && name != "" {
+			return name
+		}
+	}
+	return "your workspace"
+}
+
+// ResolveFolderName mirrors ResolveWorkspaceName for the folder
+// name. Same fallback contract — never returns an empty string.
+func (s *Service) ResolveFolderName(ctx context.Context, workspaceID, folderID uuid.UUID) string {
+	if s.folderName != nil {
+		if name, err := s.folderName(ctx, workspaceID, folderID); err == nil && name != "" {
+			return name
+		}
+	}
+	return "a shared folder"
 }
 
 // ListGuestInvitesByFolder returns all invites for a folder, newest

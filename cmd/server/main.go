@@ -33,6 +33,7 @@ import (
 	"github.com/kennguy3n/zk-drive/internal/config"
 	cryptopkg "github.com/kennguy3n/zk-drive/internal/crypto"
 	"github.com/kennguy3n/zk-drive/internal/database"
+	"github.com/kennguy3n/zk-drive/internal/email"
 	"github.com/kennguy3n/zk-drive/internal/fabric"
 	"github.com/kennguy3n/zk-drive/internal/file"
 	"github.com/kennguy3n/zk-drive/internal/folder"
@@ -179,7 +180,48 @@ func run() error {
 	activitySvc := activity.NewService(activity.NewPostgresRepository(pool))
 	defer activitySvc.Close()
 
-	sharingSvc := sharing.NewService(sharing.NewPostgresRepository(pool), wiring.NewPermissionGranter(permissionSvc))
+	sharingSvc := sharing.NewService(sharing.NewPostgresRepository(pool), wiring.NewPermissionGranter(permissionSvc)).
+		WithDisplayResolvers(
+			func(ctx context.Context, workspaceID uuid.UUID) (string, error) {
+				ws, err := wsSvc.GetByID(ctx, workspaceID)
+				if err != nil {
+					return "", err
+				}
+				// nil-without-err is a real data-integrity signal:
+				// it means the invite row references a workspace
+				// the workspace service can't find (e.g. workspace
+				// hard-deleted out from under an outstanding invite,
+				// or a foreign-key drift). The Resolve* fallbacks in
+				// internal/sharing.Service render a generic "your
+				// workspace" string so the email still goes out
+				// gracefully — but the operator needs visibility so
+				// the drift gets reconciled. Emitting a warn here
+				// (instead of upstream in Resolve*) keeps the signal
+				// at the actual data-source boundary; the sharing
+				// package can't tell "service returned (nil, nil)"
+				// apart from "resolver was never wired" without
+				// leaking presence-checks into its public surface.
+				if ws == nil {
+					slog.Warn("guest-invite display resolver: workspace not found",
+						"workspace_id", workspaceID)
+					return "", nil
+				}
+				return ws.Name, nil
+			},
+			func(ctx context.Context, workspaceID, folderID uuid.UUID) (string, error) {
+				f, err := folderSvc.GetByID(ctx, workspaceID, folderID)
+				if err != nil {
+					return "", err
+				}
+				if f == nil {
+					slog.Warn("guest-invite display resolver: folder not found",
+						"workspace_id", workspaceID,
+						"folder_id", folderID)
+					return "", nil
+				}
+				return f.Name, nil
+			},
+		)
 	searchSvc := search.NewService(pool)
 	clientRoomSvc := sharing.NewClientRoomService(
 		sharing.NewPostgresClientRoomRepository(pool),
@@ -310,6 +352,20 @@ func run() error {
 
 	notificationSvc := notification.NewService(notification.NewPostgresRepository(pool)).
 		WithPublisher(notificationPublisher)
+
+	// emailSvc owns transactional email delivery (guest-invite
+	// notifications today; future password-reset / MFA notices
+	// follow the same call shape). When SMTP_HOST is unset the
+	// service boots into a NoopClient mode so dev environments
+	// keep working — LogStartup emits a single startup warning
+	// so operators see the disabled state at deploy time, not
+	// when their first invitee fails to receive an email.
+	emailSvc, err := buildEmailService(cfg)
+	if err != nil {
+		return fmt.Errorf("build email service: %w", err)
+	}
+	emailSvc.LogStartup(ctx)
+
 	previewRepo := preview.NewPostgresRepository(pool)
 	auditSvc := audit.NewService(audit.NewPostgresRepository(pool))
 	defer auditSvc.Close()
@@ -378,6 +434,7 @@ func run() error {
 		WithClientRooms(clientRoomSvc).
 		WithJobs(jobPublisher).
 		WithNotifications(notificationSvc).
+		WithEmail(emailSvc).
 		WithPreviews(previewRepo).
 		WithAudit(auditSvc).
 		WithBilling(billingSvc)
@@ -425,6 +482,15 @@ func run() error {
 	metricsSurface := metrics.New()
 	metricsSurface.RegisterPgxPoolCollector(pool)
 	metricsSurface.RegisterRedisPoolCollector(redisClient)
+	// email.Service.WithMetrics uses a pointer receiver and
+	// returns the same *Service for ergonomic chaining; we use it
+	// as a fluent setter (return value intentionally discarded —
+	// the s.metrics field is already mutated through the pointer)
+	// because emailSvc was constructed inside buildEmailService
+	// where the metrics surface is not yet available. Reassigning
+	// would be a no-op staticcheck/SA4006 (same pointer comes back),
+	// so we keep the discard form.
+	emailSvc.WithMetrics(metricsSurface)
 
 	r := chi.NewRouter()
 	// chimw.RequestID is intentionally omitted: the request_id
@@ -686,6 +752,13 @@ func run() error {
 		r.Get("/share-links/{token}", driveHandler.ResolveShareLink)
 		r.Post("/share-links/{token}", driveHandler.ResolveShareLink)
 
+		// Public guest-invite preview — mirrors the unauthenticated
+		// share-link resolution route. The invite ID is a UUIDv4, so
+		// guessing is infeasible; the response is the
+		// GuestInvitePreview projection (workspace/folder names,
+		// recipient email, role, expiry) with no secrets.
+		r.Get("/guest-invites/{id}/preview", driveHandler.PreviewGuestInvite)
+
 		// Stripe billing webhook — deliberately outside the auth
 		// middleware group. Stripe authenticates itself via the
 		// Stripe-Signature header rather than a JWT, which the
@@ -800,4 +873,27 @@ func (a folderCreatorAdapter) Create(ctx context.Context, workspaceID uuid.UUID,
 		return sharing.FolderRef{}, err
 	}
 	return sharing.FolderRef{ID: f.ID}, nil
+}
+
+// buildEmailService composes the transactional-email service from
+// the loaded config. The graceful-degradation contract — "omit any
+// one required env var to leave email disabled, server boots
+// cleanly in disabled mode" — lives in email.BuildFromOperatorConfig
+// so the contract is testable from the email-package test suite
+// without requiring cmd/server to grow a test target. This wrapper
+// is a thin adapter that maps the loaded *config.Config onto the
+// email-package's OperatorConfig view.
+func buildEmailService(cfg *config.Config) (*email.Service, error) {
+	return email.BuildFromOperatorConfig(email.OperatorConfig{
+		PublicURL:                 cfg.PublicURL,
+		SMTPHost:                  cfg.SMTPHost,
+		SMTPPort:                  cfg.SMTPPort,
+		SMTPUsername:              cfg.SMTPUsername,
+		SMTPPassword:              cfg.SMTPPassword,
+		SMTPFromAddress:           cfg.SMTPFromAddress,
+		SMTPFromName:              cfg.SMTPFromName,
+		SMTPTLSMode:               cfg.SMTPTLSMode,
+		SMTPTLSServerName:         cfg.SMTPTLSServerName,
+		SMTPTLSInsecureSkipVerify: cfg.SMTPTLSInsecureSkipVerify,
+	})
 }
