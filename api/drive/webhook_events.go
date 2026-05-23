@@ -2,7 +2,6 @@ package drive
 
 import (
 	"context"
-	"log/slog"
 
 	"github.com/google/uuid"
 
@@ -71,11 +70,7 @@ func (h *Handler) publishWebhookFileEvent(ctx context.Context, t webhooks.EventT
 		MimeType:  f.MimeType,
 		SizeBytes: sizeBytes,
 	}); err != nil {
-		log := logging.FromContext(ctx)
-		if log == nil {
-			log = slog.Default()
-		}
-		log.Error("drive publish webhook file event failed",
+		logging.FromContext(ctx).Error("drive publish webhook file event failed",
 			"event_type", string(t),
 			"file_id", f.ID,
 			"workspace_id", workspaceID,
@@ -104,11 +99,7 @@ func (h *Handler) publishWebhookPermissionEvent(ctx context.Context, t webhooks.
 		GranteeID:    granteePtr,
 		Role:         role,
 	}); err != nil {
-		log := logging.FromContext(ctx)
-		if log == nil {
-			log = slog.Default()
-		}
-		log.Error("drive publish webhook permission event failed",
+		logging.FromContext(ctx).Error("drive publish webhook permission event failed",
 			"event_type", string(t),
 			"resource_id", resourceID,
 			"workspace_id", workspaceID,
@@ -154,11 +145,7 @@ func (h *Handler) snapshotFilesForFolderSubtreeDelete(ctx context.Context, works
 	}
 	snaps, err := h.files.ListInFolderSubtree(ctx, workspaceID, folderID)
 	if err != nil {
-		log := logging.FromContext(ctx)
-		if log == nil {
-			log = slog.Default()
-		}
-		log.Error("drive failed to snapshot folder subtree for file.deleted webhook cascade",
+		logging.FromContext(ctx).Error("drive failed to snapshot folder subtree for file.deleted webhook cascade",
 			"folder_id", folderID,
 			"workspace_id", workspaceID,
 			"err", err,
