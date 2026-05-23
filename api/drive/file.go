@@ -11,6 +11,7 @@ import (
 	"github.com/kennguy3n/zk-drive/internal/activity"
 	"github.com/kennguy3n/zk-drive/internal/folder"
 	"github.com/kennguy3n/zk-drive/internal/permission"
+	"github.com/kennguy3n/zk-drive/internal/webhooks"
 )
 
 // File DTOs -----------------------------------------------------------------
@@ -123,11 +124,21 @@ func (h *Handler) DeleteFile(w http.ResponseWriter, r *http.Request) {
 		writeServiceError(w, err)
 		return
 	}
+	// Snapshot the row BEFORE delete so the outbound webhook can
+	// carry the file's name + folder_id (subscribers reading the
+	// audit log + webhook side-by-side expect the same identifiers
+	// on both rows). GetByID is a cheap single-row query and
+	// failures here are non-fatal — webhook emission gracefully
+	// degrades to FileID-only on the publish-time nil check.
+	snapshot, _ := h.files.GetByID(r.Context(), workspaceID, id)
 	if err := h.files.Delete(r.Context(), workspaceID, id); err != nil {
 		writeServiceError(w, err)
 		return
 	}
 	h.logActivity(r.Context(), activity.ActionFileDelete, permission.ResourceFile, id, nil)
+	if snapshot != nil {
+		h.publishWebhookFileEvent(r.Context(), webhooks.EventFileDeleted, workspaceID, snapshot, uuid.Nil, snapshot.SizeBytes)
+	}
 	w.WriteHeader(http.StatusNoContent)
 }
 

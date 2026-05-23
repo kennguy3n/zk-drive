@@ -790,6 +790,113 @@ Each object is GZIP-compressed JSONL. The `batch_id` UUID suffix
 makes every PUT idempotent (the same row content uploaded twice
 produces two distinct objects; the restore tool dedupes by row id).
 
+### Outbound webhooks (WS-24)
+
+Workspace admins can register HTTPS endpoints that receive
+notifications when state changes inside the workspace. The
+subscriber's URL is hit with a JSON `POST`; payloads are signed with
+an HMAC-SHA256 so the subscriber can confirm the request came from
+zk-drive. Subscriptions are stored in `webhook_subscriptions` (one
+per (workspace, URL, event_type) triple) and every attempt is
+recorded in `webhook_deliveries` for replay / debugging.
+
+#### Event catalogue
+
+Each event ships as a versioned envelope. The `data` payload differs
+by event type, but the envelope is stable:
+
+```
+{
+  "id": "<event uuid>",          // stable across retries; subscribers de-dupe on this
+  "type": "file.upload.confirmed",
+  "workspace_id": "<workspace uuid>",
+  "actor_id": "<user uuid|null>",
+  "created_at": "2026-05-21T23:24:11.123456Z",
+  "data": { /* event-type-specific payload */ }
+}
+```
+
+| Event type                  | When it fires                                                  | `data` fields                                                  |
+| --------------------------- | -------------------------------------------------------------- | -------------------------------------------------------------- |
+| `file.upload.confirmed`     | A presigned upload completes and the file row is committed     | `file_id`, `version_id`, `folder_id`, `name`, `mime_type`, `size_bytes` |
+| `file.deleted`              | A file is soft-deleted via API or bulk-delete                  | `file_id`, `folder_id`, `name`                                 |
+| `file.restored`             | A previously soft-deleted file is restored                     | `file_id`, `folder_id`, `name`                                 |
+| `permission.granted`        | A file or folder permission is added                           | `resource_type`, `resource_id`, `grantee_id`, `role`           |
+| `permission.revoked`        | A file or folder permission is removed                         | `resource_type`, `resource_id`, `grantee_id`, `role`           |
+| `member.joined`             | An admin invites a new user to the workspace                   | `user_id`, `email`, `role`                                     |
+| `member.removed`            | A user is deactivated from the workspace                       | `user_id`, `email`, `role`                                     |
+
+#### HTTP headers on every request
+
+| Header                  | Purpose                                                                                              |
+| ----------------------- | ---------------------------------------------------------------------------------------------------- |
+| `Content-Type`          | Always `application/json; charset=utf-8`.                                                            |
+| `User-Agent`            | `zkdrive-webhooks/<version>` — useful for filtering test traffic in your reverse proxy.              |
+| `X-ZkDrive-Signature`   | `t=<unix>,v1=<hex>` HMAC-SHA256 over `<unix>.<body>` keyed on the subscription secret. See below.     |
+| `X-ZkDrive-Event-Id`    | Stable across retries. Subscribers de-dupe on this.                                                  |
+| `X-ZkDrive-Event-Type`  | Same as `type` in the body — lets a subscriber route to a per-type handler without parsing the body. |
+| `X-ZkDrive-Delivery-Id` | Unique per attempt. Useful for cross-referencing the per-attempt row in `/api/admin/webhooks/{id}/deliveries`. |
+
+#### Verifying the signature
+
+The signature is the canonical Stripe-style scheme. Pseudocode for a
+subscriber:
+
+```python
+import hmac, hashlib, time
+
+def verify(secret: str, header: str, body: bytes) -> bool:
+    parts = dict(p.split("=", 1) for p in header.split(",") if "=" in p)
+    ts = int(parts["t"])
+    if abs(time.time() - ts) > 300:        # 5-minute window
+        return False
+    expected = hmac.new(secret.encode(), f"{ts}.".encode() + body,
+                        hashlib.sha256).hexdigest()
+    return hmac.compare_digest(expected, parts["v1"])
+```
+
+The 5-minute window matches Stripe's default and is enforced by the
+reference `Verify` implementation in `internal/webhooks/signer.go`.
+
+#### Reliability semantics
+
+- **At-least-once.** Subscribers MUST be idempotent on
+  `X-ZkDrive-Event-Id` — a network blip can produce a duplicate
+  delivery. The signature does NOT prove uniqueness; the event id
+  does.
+- **Retries: 5 attempts total** (initial + 4) on the schedule
+  `0s, 1s, 2s, 4s, 8s` for `2xx`-checking. Non-2xx responses,
+  network errors, and `outcome=blocked` all retry; only 2xx is
+  treated as success.
+- **Auto-pause after 50 consecutive failures.** A persistently broken
+  endpoint is paused (admin sees `auto_paused_at` on the
+  subscription). Re-enable via
+  `POST /api/admin/webhooks/{id}/resume` — the consecutive-failure
+  counter resets to zero on resume.
+- **Per-workspace cap: 20 active subscriptions.** A request that
+  would push the workspace over the cap returns `409 Conflict`.
+- **SSRF defence.** URLs are syntactically validated (HTTPS only in
+  production, no userinfo) and the host is resolved at every
+  delivery attempt to defend against DNS rebinding. Any IP in
+  loopback, RFC1918, link-local, RFC6598, IPv6 ULA, multicast, or
+  the documentation ranges is rejected with `outcome=blocked` and
+  no request is sent.
+
+#### Admin REST surface
+
+All endpoints sit under `/api/admin/webhooks` and require the
+`admin` role on the workspace.
+
+| Method   | Path                                | Purpose                                                        |
+| -------- | ----------------------------------- | -------------------------------------------------------------- |
+| `POST`   | `/api/admin/webhooks`               | Create a subscription. Response includes the secret **once**.   |
+| `GET`    | `/api/admin/webhooks`               | List subscriptions (secrets redacted).                          |
+| `GET`    | `/api/admin/webhooks/{id}`          | Get a single subscription (secret redacted).                    |
+| `DELETE` | `/api/admin/webhooks/{id}`          | Hard-delete a subscription.                                     |
+| `GET`    | `/api/admin/webhooks/{id}/deliveries` | List recent attempt rows for the subscription.                |
+| `POST`   | `/api/admin/webhooks/{id}/test`     | Enqueue a synthetic event to verify connectivity end-to-end.    |
+| `POST`   | `/api/admin/webhooks/{id}/resume`   | Re-activate an auto-paused subscription.                        |
+
 ## Running tests
 
 ### Go unit tests

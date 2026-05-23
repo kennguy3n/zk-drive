@@ -55,6 +55,7 @@ import (
 	"github.com/kennguy3n/zk-drive/internal/storage"
 	"github.com/kennguy3n/zk-drive/internal/tracing"
 	"github.com/kennguy3n/zk-drive/internal/version"
+	"github.com/kennguy3n/zk-drive/internal/webhooks"
 	"github.com/kennguy3n/zk-drive/internal/wiring"
 )
 
@@ -433,7 +434,7 @@ func startMetricsServer(_ context.Context, listenAddr string, m *metrics.Metrics
 func ensureStream(js nats.JetStreamContext) error {
 	cfg := &nats.StreamConfig{
 		Name:      streamName,
-		Subjects:  []string{jobs.SubjectPreview, jobs.SubjectScan, jobs.SubjectIndex, jobs.SubjectArchive, jobs.SubjectRetention, jobs.SubjectClassify},
+		Subjects:  []string{jobs.SubjectPreview, jobs.SubjectScan, jobs.SubjectIndex, jobs.SubjectArchive, jobs.SubjectRetention, jobs.SubjectClassify, webhooks.SubjectEvents},
 		Storage:   nats.FileStorage,
 		Retention: nats.WorkQueuePolicy,
 		MaxAge:    7 * 24 * time.Hour,
@@ -456,6 +457,20 @@ func ensureStream(js nats.JetStreamContext) error {
 // (subject, result) labels land on zkdrive_worker_jobs_total and
 // the duration histogram captures wall time per subject.
 func subscribeAll(ctx context.Context, js nats.JetStreamContext, pool *pgxpool.Pool, m *metrics.Metrics, previewSvc *preview.Service, scanSvc *scan.Service, archiveSvc *retention.ArchiveService, indexSvc *index.Service, classifySvc *classify.Service) ([]*nats.Subscription, error) {
+	// Webhook delivery worker (WS-24). Constructed once and shared
+	// across all webhook.events deliveries; the DeliveryClient
+	// holds an http.Client + URLValidator that are both safe for
+	// concurrent use. The repository is the pgx-backed
+	// implementation which the worker runs WITHOUT setting
+	// app.workspace_id so the RLS bypass branch fires (same
+	// pattern as the audit archiver).
+	webhookRepo := webhooks.NewPostgresRepository(pool)
+	webhookDeliveryClient := webhooks.NewDeliveryClient(webhooks.NewURLValidator(), 0)
+	webhookWorker, werr := webhooks.NewDeliveryWorker(webhookRepo, webhookDeliveryClient, m)
+	if werr != nil {
+		return nil, fmt.Errorf("build webhook delivery worker: %w", werr)
+	}
+
 	subjects := []struct {
 		subject string
 		durable string
@@ -466,6 +481,7 @@ func subscribeAll(ctx context.Context, js nats.JetStreamContext, pool *pgxpool.P
 		{jobs.SubjectIndex, "drive-index", m.InstrumentJob(ctx, jobs.SubjectIndex, traceJob(jobs.SubjectIndex, indexHandler(pool, indexSvc)))},
 		{jobs.SubjectArchive, "drive-archive", m.InstrumentJob(ctx, jobs.SubjectArchive, traceJob(jobs.SubjectArchive, archiveHandler(archiveSvc)))},
 		{jobs.SubjectClassify, "drive-classify", m.InstrumentJob(ctx, jobs.SubjectClassify, traceJob(jobs.SubjectClassify, classifyHandler(pool, classifySvc)))},
+		{webhooks.SubjectEvents, "webhook-deliveries", m.InstrumentJob(ctx, webhooks.SubjectEvents, traceJob(webhooks.SubjectEvents, webhookDeliveryHandler(webhookWorker)))},
 	}
 	var subs []*nats.Subscription
 	for _, s := range subjects {
@@ -938,6 +954,37 @@ func traceJob(subject string, h metrics.JobHandler) metrics.JobHandler {
 	})
 	return func(ctx context.Context, msg *nats.Msg) metrics.JobResult {
 		return metrics.JobResult(wrapped(ctx, msg))
+	}
+}
+
+// webhookDeliveryHandler adapts webhooks.DeliveryWorker.Consume to
+// the JobHandler signature. Per the JobHandler contract in
+// internal/metrics/worker.go, the handler is responsible for calling
+// msg.Ack / Nak / Term itself — we translate Consume's string result:
+//
+//   - "ok" / "skip": Ack — fully fanned out OR no matching
+//     subscribers (skip).
+//   - "error":       Nak — at least one subscriber failed and the
+//     attempt count hasn't hit MaxAttempts yet. JetStream re-queues
+//     for redelivery on the configured AckWait cadence; the
+//     per-subscription webhook_deliveries row already records the
+//     failure detail.
+//   - "dropped":     Term — terminal (poison payload or MaxAttempts
+//     exhausted); stop redelivery so the stream doesn't spin on an
+//     undelivable event. Operators see the final state on the
+//     webhook_deliveries row.
+func webhookDeliveryHandler(w *webhooks.DeliveryWorker) metrics.JobHandler {
+	return func(ctx context.Context, msg *nats.Msg) metrics.JobResult {
+		result := w.Consume(ctx, msg)
+		switch result {
+		case "ok", "skip":
+			_ = msg.Ack()
+		case "dropped":
+			_ = msg.Term()
+		default:
+			_ = msg.Nak()
+		}
+		return metrics.JobResult(result)
 	}
 }
 
