@@ -3,6 +3,8 @@ package integration
 import (
 	"net/http"
 	"testing"
+
+	"github.com/kennguy3n/zk-drive/internal/webhooks"
 )
 
 func TestBulkMoveCrossWorkspaceRejected(t *testing.T) {
@@ -63,6 +65,31 @@ func TestBulkDeleteSoftDeletes(t *testing.T) {
 		status, _ := env.httpRequest(http.MethodGet, "/api/files/"+fid, tok.Token, nil)
 		if status != http.StatusNotFound {
 			t.Errorf("expected 404 for soft-deleted file %s, got %d", fid, status)
+		}
+	}
+
+	// Webhook contract: BulkDelete MUST emit one file.deleted event
+	// per soft-deleted file so subscribers see the same event stream
+	// regardless of whether the admin used the single-file DELETE
+	// /api/files/{id} endpoint or the batch /api/bulk/delete
+	// endpoint. Without this assertion the gap is silent — the bulk
+	// path soft-deletes the rows but webhook subscribers never see
+	// the events, which is exactly the consistency bug reviewed in
+	// PR #69 (Devin Review finding bulk.go:138).
+	deletedEvents := env.webhooks.fileEventsByType(webhooks.EventFileDeleted)
+	if len(deletedEvents) != 2 {
+		t.Fatalf("expected 2 file.deleted webhook events for bulk delete, got %d", len(deletedEvents))
+	}
+	gotIDs := map[string]bool{}
+	for _, e := range deletedEvents {
+		gotIDs[e.Data.FileID.String()] = true
+		if e.Data.Name == "" {
+			t.Errorf("expected webhook payload to carry pre-delete name snapshot, got empty for file %s", e.Data.FileID)
+		}
+	}
+	for _, want := range []string{a.ID.String(), b.ID.String()} {
+		if !gotIDs[want] {
+			t.Errorf("expected file.deleted webhook for %s, got events %+v", want, deletedEvents)
 		}
 	}
 }

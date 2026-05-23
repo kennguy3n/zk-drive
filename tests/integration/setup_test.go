@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -44,6 +45,7 @@ import (
 	"github.com/kennguy3n/zk-drive/internal/storage"
 	"github.com/kennguy3n/zk-drive/internal/totp"
 	"github.com/kennguy3n/zk-drive/internal/user"
+	"github.com/kennguy3n/zk-drive/internal/webhooks"
 	"github.com/kennguy3n/zk-drive/internal/workspace"
 
 	"github.com/alicebob/miniredis/v2"
@@ -67,6 +69,60 @@ type testEnv struct {
 	provisioner  *fabric.Provisioner
 	miniredis    *miniredis.Miniredis
 	sessionStore *session.RedisSessionStore
+	webhooks     *webhookCapture
+}
+
+// webhookCapture is the test-only WebhookEventPublisher used by the
+// integration harness to assert outbound-webhook emission without
+// standing up a real NATS/JetStream server. Records every call in
+// order, guarded by a mutex so tests that exercise concurrent
+// handler paths (e.g. bulk operations) can read the slice safely.
+type webhookCapture struct {
+	mu          sync.Mutex
+	FileEvents  []capturedFileEvent
+	PermEvents  []capturedPermEvent
+}
+
+type capturedFileEvent struct {
+	Type        webhooks.EventType
+	WorkspaceID uuid.UUID
+	ActorID     *uuid.UUID
+	Data        webhooks.FileEventData
+}
+
+type capturedPermEvent struct {
+	Type        webhooks.EventType
+	WorkspaceID uuid.UUID
+	ActorID     *uuid.UUID
+	Data        webhooks.PermissionEventData
+}
+
+func (c *webhookCapture) PublishFileEvent(ctx context.Context, t webhooks.EventType, workspaceID uuid.UUID, actorID *uuid.UUID, data webhooks.FileEventData) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.FileEvents = append(c.FileEvents, capturedFileEvent{Type: t, WorkspaceID: workspaceID, ActorID: actorID, Data: data})
+	return nil
+}
+
+func (c *webhookCapture) PublishPermissionEvent(ctx context.Context, t webhooks.EventType, workspaceID uuid.UUID, actorID *uuid.UUID, data webhooks.PermissionEventData) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.PermEvents = append(c.PermEvents, capturedPermEvent{Type: t, WorkspaceID: workspaceID, ActorID: actorID, Data: data})
+	return nil
+}
+
+// fileEventsByType returns a copy of the captured file events filtered by
+// type. Safe for concurrent test inspection.
+func (c *webhookCapture) fileEventsByType(t webhooks.EventType) []capturedFileEvent {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	var out []capturedFileEvent
+	for _, e := range c.FileEvents {
+		if e.Type == t {
+			out = append(out, e)
+		}
+	}
+	return out
 }
 
 // setupEnv connects to Postgres, runs migrations, wires the API, and starts
@@ -155,6 +211,7 @@ func setupEnv(t *testing.T) *testEnv {
 		WithAudit(auditSvc).
 		WithTOTP(totpSvc).
 		WithSessionRevoker(sessionStore)
+	webhookCap := &webhookCapture{}
 	driveHandler := drive.NewHandler(pool, wsSvc, folderSvc, fileSvc, userSvc, storageClient, permissionSvc, activitySvc).
 		WithSharing(sharingSvc).
 		WithSearch(searchSvc).
@@ -162,7 +219,8 @@ func setupEnv(t *testing.T) *testEnv {
 		WithNotifications(notificationSvc).
 		WithPreviews(previewRepo).
 		WithAudit(auditSvc).
-		WithBilling(billingSvc)
+		WithBilling(billingSvc).
+		WithWebhooks(webhookCap)
 	// Wire a Postgres-backed fabric provisioner with no console URL
 	// so admin endpoints that only need persistence (CMK) work; the
 	// FabricClient interface is left nil because no test fakes the
@@ -379,6 +437,7 @@ func setupEnv(t *testing.T) *testEnv {
 		provisioner:  provisioner,
 		miniredis:    mr,
 		sessionStore: sessionStore,
+		webhooks:     webhookCap,
 	}
 	t.Cleanup(func() {
 		srv.Close()

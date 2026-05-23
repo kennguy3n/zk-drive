@@ -22,6 +22,7 @@ import (
 	"github.com/kennguy3n/zk-drive/internal/permission"
 	"github.com/kennguy3n/zk-drive/internal/scan"
 	"github.com/kennguy3n/zk-drive/internal/storage"
+	"github.com/kennguy3n/zk-drive/internal/webhooks"
 )
 
 // MaxBulkItems caps the number of resources (files + folders) a single
@@ -153,11 +154,23 @@ func (h *Handler) BulkDelete(w http.ResponseWriter, r *http.Request) {
 			resp.Failed = append(resp.Failed, bulkFailure{ID: raw, Error: err.Error()})
 			continue
 		}
+		// Snapshot the file pre-delete so the file.deleted webhook
+		// carries name/size/mime/folder context. Mirrors the
+		// single-file DeleteFile path (api/drive/file.go) — webhook
+		// emission must be consistent across single-vs-bulk because
+		// subscribers cannot tell which API path the admin used and
+		// must not see silent drops on bulk operations. GetByID is a
+		// cheap single-row read and a nil snapshot makes the emit a
+		// no-op rather than failing the delete.
+		snapshot, _ := h.files.GetByID(r.Context(), workspaceID, id)
 		if err := h.files.Delete(r.Context(), workspaceID, id); err != nil {
 			resp.Failed = append(resp.Failed, bulkFailure{ID: raw, Error: err.Error()})
 			continue
 		}
 		h.logActivity(r.Context(), activity.ActionFileBulkDelete, permission.ResourceFile, id, nil)
+		if snapshot != nil {
+			h.publishWebhookFileEvent(r.Context(), webhooks.EventFileDeleted, workspaceID, snapshot, uuid.Nil, snapshot.SizeBytes)
+		}
 		resp.Succeeded = append(resp.Succeeded, raw)
 	}
 	for _, raw := range req.FolderIDs {

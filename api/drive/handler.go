@@ -64,7 +64,7 @@ type Handler struct {
 	previews       preview.Repository
 	audit          *audit.Service
 	billing        *billing.Service
-	webhooks       *webhooks.Publisher
+	webhooks       WebhookEventPublisher
 }
 
 // NewHandler constructs a Handler from the underlying services. The pool is
@@ -112,7 +112,21 @@ func (h *Handler) WithBilling(b *billing.Service) *Handler {
 // publisher disables event emission (every Publish call becomes a
 // no-op) so the metadata plane keeps working in tests / deployments
 // without NATS configured. Mirrors the WithJobs nil-safe pattern.
-func (h *Handler) WithWebhooks(p *webhooks.Publisher) *Handler {
+func (h *Handler) WithWebhooks(p WebhookEventPublisher) *Handler {
+	// Guard against passing a typed-nil concrete *webhooks.Publisher,
+	// which would compare != nil under the interface comparison and
+	// then NPE inside the emit helpers. The concrete publisher's
+	// own methods are nil-safe (PublishFileEvent on a nil *Publisher
+	// returns nil) — but going through the interface here keeps the
+	// nil check at the boundary where it's obvious.
+	if p == nil {
+		h.webhooks = nil
+		return h
+	}
+	if pub, ok := p.(*webhooks.Publisher); ok && pub == nil {
+		h.webhooks = nil
+		return h
+	}
 	h.webhooks = p
 	return h
 }

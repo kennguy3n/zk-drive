@@ -12,6 +12,19 @@ import (
 	"github.com/kennguy3n/zk-drive/internal/webhooks"
 )
 
+// WebhookEventPublisher is the narrow interface the drive handler
+// depends on for outbound-webhook emission. Defined here (in the
+// consumer) rather than re-using *webhooks.Publisher directly so
+// (a) tests can inject a fake publisher without standing up a real
+// NATS/JetStream connection, and (b) the handler's surface area on
+// the publisher is documented to exactly the two emit-helpers it
+// uses. The concrete *webhooks.Publisher in internal/webhooks
+// satisfies this interface, so production wiring is unchanged.
+type WebhookEventPublisher interface {
+	PublishFileEvent(ctx context.Context, t webhooks.EventType, workspaceID uuid.UUID, actorID *uuid.UUID, data webhooks.FileEventData) error
+	PublishPermissionEvent(ctx context.Context, t webhooks.EventType, workspaceID uuid.UUID, actorID *uuid.UUID, data webhooks.PermissionEventData) error
+}
+
 // webhookActorID extracts the authenticated user's id from ctx and
 // returns it as a pointer for embedding in an Event envelope. Returns
 // nil when no user is present (e.g. background tasks / cron),
