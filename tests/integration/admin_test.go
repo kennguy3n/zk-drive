@@ -10,6 +10,7 @@ import (
 
 	"github.com/kennguy3n/zk-drive/internal/audit"
 	"github.com/kennguy3n/zk-drive/internal/permission"
+	"github.com/kennguy3n/zk-drive/internal/webhooks"
 )
 
 // listAuditEntries fetches the audit log for the caller's workspace.
@@ -120,6 +121,62 @@ func TestAdminDeactivateUser(t *testing.T) {
 		if u.ID == invited.ID && u.DeactivatedAt == nil {
 			t.Fatal("expected invited user to have deactivated_at set after DELETE")
 		}
+	}
+}
+
+// TestAdminInviteUser_EmitsMemberJoinedWebhook pins the integration
+// contract that POST /api/admin/users emits a member.joined webhook
+// event with the invited user's identifiers + role. The drive
+// handler's webhook emission has had integration coverage since the
+// initial WS-24 PR; this test closes the matching gap for the admin
+// handler that the round-7 review surfaced.
+func TestAdminInviteUser_EmitsMemberJoinedWebhook(t *testing.T) {
+	env := setupEnv(t)
+	tok := env.signupAndLogin("Acme", "admin@acme.test", "Alice", "pw")
+
+	status, body := env.httpRequest(http.MethodPost, "/api/admin/users", tok.Token, map[string]string{
+		"email":    "carol@acme.test",
+		"name":     "Carol",
+		"password": "pw-carol",
+		"role":     "member",
+	})
+	if status != http.StatusCreated {
+		t.Fatalf("invite user: status=%d body=%s", status, string(body))
+	}
+	var invited struct {
+		ID    uuid.UUID `json:"id"`
+		Email string    `json:"email"`
+		Role  string    `json:"role"`
+	}
+	env.decodeJSON(body, &invited)
+
+	joined := env.webhooks.memberEventsByType(webhooks.EventMemberJoined)
+	if len(joined) != 1 {
+		t.Fatalf("member.joined events: got=%d want=1", len(joined))
+	}
+	e := joined[0]
+	if e.Data.UserID != invited.ID {
+		t.Errorf("member.joined UserID: got=%s want=%s", e.Data.UserID, invited.ID)
+	}
+	if e.Data.Email != invited.Email {
+		t.Errorf("member.joined Email: got=%q want=%q", e.Data.Email, invited.Email)
+	}
+	if e.Data.Role != invited.Role {
+		t.Errorf("member.joined Role: got=%q want=%q", e.Data.Role, invited.Role)
+	}
+
+	// Deactivating the invited user also emits member.removed so
+	// subscribers can drive offboarding workflows symmetrically.
+	status, _ = env.httpRequest(http.MethodDelete, "/api/admin/users/"+invited.ID.String(), tok.Token, nil)
+	if status != http.StatusNoContent {
+		t.Fatalf("deactivate user: status=%d", status)
+	}
+	removed := env.webhooks.memberEventsByType(webhooks.EventMemberRemoved)
+	if len(removed) != 1 {
+		t.Fatalf("member.removed events: got=%d want=1", len(removed))
+	}
+	if removed[0].Data.UserID != invited.ID {
+		t.Errorf("member.removed UserID: got=%s want=%s", removed[0].Data.UserID, invited.ID)
 	}
 }
 

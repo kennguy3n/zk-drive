@@ -72,15 +72,23 @@ type testEnv struct {
 	webhooks     *webhookCapture
 }
 
-// webhookCapture is the test-only WebhookEventPublisher used by the
-// integration harness to assert outbound-webhook emission without
-// standing up a real NATS/JetStream server. Records every call in
-// order, guarded by a mutex so tests that exercise concurrent
-// handler paths (e.g. bulk operations) can read the slice safely.
+// webhookCapture is the test-only publisher used by the integration
+// harness to assert outbound-webhook emission without standing up a
+// real NATS/JetStream server. Records every call in order, guarded
+// by a mutex so tests that exercise concurrent handler paths (e.g.
+// bulk operations) can read the slice safely.
+//
+// Implements three narrow interfaces — api/drive.WebhookEventPublisher
+// (file + permission events) and api/admin.MemberEventPublisher
+// (member events) — so a single capturer can be wired into both the
+// drive handler and the admin handler. This mirrors how the
+// concrete *webhooks.Publisher in internal/webhooks satisfies both
+// in production.
 type webhookCapture struct {
-	mu          sync.Mutex
-	FileEvents  []capturedFileEvent
-	PermEvents  []capturedPermEvent
+	mu           sync.Mutex
+	FileEvents   []capturedFileEvent
+	PermEvents   []capturedPermEvent
+	MemberEvents []capturedMemberEvent
 }
 
 type capturedFileEvent struct {
@@ -97,6 +105,13 @@ type capturedPermEvent struct {
 	Data        webhooks.PermissionEventData
 }
 
+type capturedMemberEvent struct {
+	Type        webhooks.EventType
+	WorkspaceID uuid.UUID
+	ActorID     *uuid.UUID
+	Data        webhooks.MemberEventData
+}
+
 func (c *webhookCapture) PublishFileEvent(ctx context.Context, t webhooks.EventType, workspaceID uuid.UUID, actorID *uuid.UUID, data webhooks.FileEventData) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -111,6 +126,13 @@ func (c *webhookCapture) PublishPermissionEvent(ctx context.Context, t webhooks.
 	return nil
 }
 
+func (c *webhookCapture) PublishMemberEvent(ctx context.Context, t webhooks.EventType, workspaceID uuid.UUID, actorID *uuid.UUID, data webhooks.MemberEventData) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.MemberEvents = append(c.MemberEvents, capturedMemberEvent{Type: t, WorkspaceID: workspaceID, ActorID: actorID, Data: data})
+	return nil
+}
+
 // fileEventsByType returns a copy of the captured file events filtered by
 // type. Safe for concurrent test inspection.
 func (c *webhookCapture) fileEventsByType(t webhooks.EventType) []capturedFileEvent {
@@ -118,6 +140,20 @@ func (c *webhookCapture) fileEventsByType(t webhooks.EventType) []capturedFileEv
 	defer c.mu.Unlock()
 	var out []capturedFileEvent
 	for _, e := range c.FileEvents {
+		if e.Type == t {
+			out = append(out, e)
+		}
+	}
+	return out
+}
+
+// memberEventsByType returns a copy of the captured member events
+// filtered by type. Safe for concurrent test inspection.
+func (c *webhookCapture) memberEventsByType(t webhooks.EventType) []capturedMemberEvent {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	var out []capturedMemberEvent
+	for _, e := range c.MemberEvents {
 		if e.Type == t {
 			out = append(out, e)
 		}
@@ -230,7 +266,8 @@ func setupEnv(t *testing.T) *testEnv {
 		WithBilling(billingSvc).
 		WithStripe(stripeService).
 		WithFabric(nil, provisioner, nil).
-		WithWorkspaces(wsSvc)
+		WithWorkspaces(wsSvc).
+		WithWebhooks(webhookCap)
 
 	// KChat service: same wiring as cmd/server/main.go, with a fallback
 	// storage factory so AttachmentUploadURL can mint signed URLs in

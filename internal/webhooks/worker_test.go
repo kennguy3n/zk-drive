@@ -234,6 +234,76 @@ func TestWorker_Consume_PartialFailure(t *testing.T) {
 	}
 }
 
+// TestWorker_Consume_NextRetryAtAnchoredPostDelivery pins the
+// staleness fix: NextRetryAt on the persisted Delivery row must be
+// anchored to the post-delivery "now" (the second w.now() call),
+// not the pre-delivery attempt-start ts (the first w.now() call).
+// This matters for fan-outs that take non-trivial time: the actual
+// JetStream NakWithDelay only fires AFTER the entire fan-out loop,
+// so anchoring at the per-attempt start would store a NextRetryAt
+// that is up to (N-1) * delivery-time in the past relative to the
+// real Nak. The admin UI reads this column directly.
+func TestWorker_Consume_NextRetryAtAnchoredPostDelivery(t *testing.T) {
+	t.Parallel()
+	// 500 server so the delivery records as a retryable
+	// http_error outcome and NextRetryAt is populated.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+	workspaceID := uuid.New()
+	repo := &fakeRepo{subs: []*Subscription{makeSub(workspaceID, srv.URL, EventFileUploadConfirmed)}}
+
+	// Step `now` forward on each call so the first call (ts) and
+	// the second call (NextRetryAt anchor) return distinct values.
+	// If the worker used ts for NextRetryAt the assertion below
+	// would catch the regression: NextRetryAt would be off by the
+	// gap between t0 and t1.
+	v := loopbackValidator(t, srv)
+	client := NewDeliveryClient(v, 5*time.Second)
+	w, err := NewDeliveryWorker(repo, client, &recorder{})
+	if err != nil {
+		t.Fatalf("NewDeliveryWorker: %v", err)
+	}
+	t0 := time.Unix(1_700_000_000, 0).UTC()
+	t1 := t0.Add(3 * time.Second)
+	var calls int
+	w.now = func() time.Time {
+		calls++
+		if calls == 1 {
+			return t0
+		}
+		return t1
+	}
+
+	ev := makeEvent(EventFileUploadConfirmed, workspaceID)
+	body, _ := json.Marshal(ev)
+	msg := &nats.Msg{Data: body, Subject: SubjectEvents}
+	if got := w.Consume(context.Background(), msg); got != "error" {
+		t.Fatalf("Consume: got=%q want=error", got)
+	}
+	if len(repo.deliveries) != 1 {
+		t.Fatalf("repo.deliveries: got=%d want=1", len(repo.deliveries))
+	}
+	d := repo.deliveries[0]
+	if d.NextRetryAt == nil {
+		t.Fatalf("NextRetryAt: got=nil want=non-nil for retryable failure")
+	}
+	// AttemptedAt anchors at the FIRST w.now() call (t0) — that's
+	// the moment we started the HTTP attempt.
+	if !d.AttemptedAt.Equal(t0) {
+		t.Errorf("AttemptedAt: got=%s want=%s (must equal pre-delivery ts)", d.AttemptedAt, t0)
+	}
+	// NextRetryAt anchors at the SECOND w.now() call (t1) plus the
+	// configured backoff for attempt+1. If the regression resurfaces
+	// (anchor reverts to ts/t0), the .Equal check fails by exactly
+	// the t1-t0 gap.
+	wantNR := t1.Add(BackoffDelay(2)).UTC()
+	if !d.NextRetryAt.Equal(wantNR) {
+		t.Errorf("NextRetryAt: got=%s want=%s (must anchor post-delivery, not at attempt start)", *d.NextRetryAt, wantNR)
+	}
+}
+
 func TestWorker_Consume_DroppedOnMalformedPayload(t *testing.T) {
 	t.Parallel()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))

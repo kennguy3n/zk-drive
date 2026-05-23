@@ -60,7 +60,7 @@ type Handler struct {
 	fabric       FabricClient
 	provisioner  *fabric.Provisioner
 	storeFactory *storage.ClientFactory
-	webhooks     *webhooks.Publisher
+	webhooks     MemberEventPublisher
 }
 
 // NewHandler constructs a Handler. Pass nil for services that are
@@ -90,7 +90,23 @@ func (h *Handler) WithBilling(b *billing.Service) *Handler {
 // DeactivateUser emit member.* events. Nil-safe: when no publisher
 // is configured (NATS unavailable), the helper methods on Handler
 // short-circuit and admin operations behave exactly as before.
-func (h *Handler) WithWebhooks(p *webhooks.Publisher) *Handler {
+func (h *Handler) WithWebhooks(p MemberEventPublisher) *Handler {
+	// Guard against passing a typed-nil concrete *webhooks.Publisher,
+	// which would compare != nil under the interface comparison and
+	// then NPE inside the emit helper. The concrete publisher's own
+	// PublishMemberEvent method IS nil-safe (returns nil on a nil
+	// receiver), but going through the interface here keeps the
+	// invariant "no publisher configured = no emission" expressed at
+	// the wire-up boundary where it is obvious. Mirrors the equivalent
+	// guard on api/drive.Handler.WithWebhooks.
+	if p == nil {
+		h.webhooks = nil
+		return h
+	}
+	if pub, ok := p.(*webhooks.Publisher); ok && pub == nil {
+		h.webhooks = nil
+		return h
+	}
 	h.webhooks = p
 	return h
 }

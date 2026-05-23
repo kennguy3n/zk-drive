@@ -205,7 +205,21 @@ func (w *DeliveryWorker) deliverOne(ctx context.Context, ev *Event, sub *Subscri
 		AttemptedAt:    ts.UTC(),
 	}
 	if res.Outcome != OutcomeSuccess && !terminal {
-		nr := ts.Add(BackoffDelay(attempt + 1)).UTC()
+		// Compute NextRetryAt from "now" (post-delivery), NOT from ts
+		// (the moment this attempt started). For a fan-out to N
+		// subscriptions, the actual JetStream NakWithDelay is only
+		// called by webhookDeliveryHandler AFTER the entire fan-out
+		// loop completes (cmd/worker/main.go). Using ts here means
+		// the row for subscription #1 of an N-subscription fan-out
+		// records a NextRetryAt that is up to (N-1) * delivery-time
+		// in the past relative to the real Nak delay. Using w.now()
+		// post-Deliver shifts the per-row anchor forward by the time
+		// the attempt actually took, leaving only the
+		// remaining-fan-out time as drift (typically <1s per
+		// successful sub) instead of cumulative-fan-out time. The
+		// admin UI's "next attempt in N seconds" display reads this
+		// column directly, so the smaller skew matters.
+		nr := w.now().Add(BackoffDelay(attempt + 1)).UTC()
 		d.NextRetryAt = &nr
 	}
 	if err := w.repo.InsertDelivery(ctx, &d); err != nil {
@@ -248,7 +262,11 @@ func (w *DeliveryWorker) recordFailure(
 		AttemptedAt:    ts.UTC(),
 	}
 	if outcome != OutcomeSuccess && !terminal {
-		nr := ts.Add(BackoffDelay(attempt + 1)).UTC()
+		// Anchor NextRetryAt at w.now() rather than the per-attempt
+		// ts so a long fan-out doesn't push subscription #1's stored
+		// next-attempt timestamp into the past. See the matching
+		// branch in deliverOne for the full rationale.
+		nr := w.now().Add(BackoffDelay(attempt + 1)).UTC()
 		d.NextRetryAt = &nr
 	}
 	if err := w.repo.InsertDelivery(ctx, &d); err != nil {
