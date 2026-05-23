@@ -74,7 +74,7 @@ func (s *Service) IndexFile(ctx context.Context, fileID, versionID uuid.UUID) er
 	if err != nil {
 		return err
 	}
-	text, err := ExtractText(row.mimeType, body)
+	text, err := ExtractTextWithContext(ctx, row.mimeType, body)
 	if err != nil {
 		if errors.Is(err, ErrUnsupportedMimeType) {
 			return nil
@@ -97,11 +97,31 @@ func (s *Service) PersistContent(ctx context.Context, fileID uuid.UUID, text str
 }
 
 // ExtractText returns plain text for an object body. text/* mime
-// types are passed through verbatim (truncated to MaxIndexBytes
-// characters); application/pdf returns ErrUnsupportedMimeType for
-// now — a future change will shell out to pdftotext or wire a
-// pure-Go extractor.
+// types and the structured-text application/json|xml subtypes are
+// passed through verbatim (truncated to MaxIndexBytes characters on
+// a UTF-8 rune boundary).
+//
+// application/pdf shells out to pdftotext (poppler-utils) — see
+// extractPDFText for the graceful-skip semantics when the binary is
+// missing.
+//
+// application/vnd.openxmlformats-officedocument.wordprocessingml.document
+// (.docx) is parsed in-process via archive/zip + encoding/xml —
+// see extractDOCXText.
+//
+// All other mime types return ErrUnsupportedMimeType so the worker
+// acks the message without writing partial content — the file is
+// still searchable by name + tags.
 func ExtractText(mimeType string, body []byte) (string, error) {
+	return ExtractTextWithContext(context.Background(), mimeType, body)
+}
+
+// ExtractTextWithContext is the context-aware form of ExtractText.
+// Used by the worker path (IndexFile) so a slow pdftotext invocation
+// can be cancelled when the job context expires. Existing callers
+// that don't have a context can continue to use ExtractText, which
+// passes context.Background().
+func ExtractTextWithContext(ctx context.Context, mimeType string, body []byte) (string, error) {
 	mt := strings.ToLower(strings.TrimSpace(mimeType))
 	if mt == "" {
 		return "", ErrUnsupportedMimeType
@@ -111,6 +131,18 @@ func ExtractText(mimeType string, body []byte) (string, error) {
 		return truncateUTF8(string(body), MaxIndexBytes), nil
 	case mt == "application/json", mt == "application/xml":
 		return truncateUTF8(string(body), MaxIndexBytes), nil
+	case mt == "application/pdf":
+		text, err := extractPDFText(ctx, body)
+		if err != nil {
+			return "", err
+		}
+		return truncateUTF8(text, MaxIndexBytes), nil
+	case mt == "application/vnd.openxmlformats-officedocument.wordprocessingml.document":
+		text, err := extractDOCXText(body)
+		if err != nil {
+			return "", err
+		}
+		return truncateUTF8(text, MaxIndexBytes), nil
 	default:
 		return "", ErrUnsupportedMimeType
 	}
