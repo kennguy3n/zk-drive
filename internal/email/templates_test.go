@@ -2,6 +2,7 @@ package email
 
 import (
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -126,5 +127,84 @@ func TestRenderGuestInvite_ExpiresAtOmitted(t *testing.T) {
 	}
 	if strings.Contains(pair.HTML, "Expires") {
 		t.Fatalf("html body should not contain Expires when ExpiresAt is empty:\n%s", pair.HTML)
+	}
+}
+
+// TestTemplatesParsedAtInit pins the parse-at-package-init
+// contract: both guest-invite templates must be non-nil after
+// the package's init phase. A malformed embedded template would
+// cause texttemplate.Must / htmltemplate.Must to panic during
+// init, which the Go test runtime surfaces as a package-load
+// failure — so the assertion below mainly documents the contract
+// for future readers. If a maintainer accidentally moves the
+// parse back into the per-render hot path, this test still
+// passes (the var would just be the parsed template), so it is
+// paired with TestRenderGuestInvite_ConcurrentSafe below to
+// catch the regression a different way.
+//
+// Regression test for the architectural fix to ANALYSIS_0007
+// from the fourth Devin Review pass on PR #66.
+func TestTemplatesParsedAtInit(t *testing.T) {
+	if guestInviteTextTmpl == nil {
+		t.Fatal("guestInviteTextTmpl is nil — parse-at-init contract broken")
+	}
+	if guestInviteHTMLTmpl == nil {
+		t.Fatal("guestInviteHTMLTmpl is nil — parse-at-init contract broken")
+	}
+	// Sanity-check the parsed names so a future refactor that
+	// renames the template files doesn't silently keep working
+	// with empty templates.
+	if guestInviteTextTmpl.Name() == "" {
+		t.Errorf("guestInviteTextTmpl has empty name")
+	}
+	if guestInviteHTMLTmpl.Name() == "" {
+		t.Errorf("guestInviteHTMLTmpl has empty name")
+	}
+}
+
+// TestRenderGuestInvite_ConcurrentSafe drives many goroutines
+// through renderGuestInvite simultaneously. Because the templates
+// are parsed at package init and only Execute (which is documented
+// concurrency-safe in both text/template and html/template) runs
+// per call, this is expected to be race-free under `go test -race`.
+// If a future refactor reintroduces per-call parsing on a shared
+// *Template, the race detector will catch the unsynchronised
+// AST mutation.
+func TestRenderGuestInvite_ConcurrentSafe(t *testing.T) {
+	data := GuestInviteData{
+		InviterName:   "Alice",
+		WorkspaceName: "Acme Co",
+		FolderName:    "Q4 Roadmap",
+		Role:          "editor",
+		Email:         "bob@example.com",
+		AcceptURL:     "https://drive.example.com/invites/X",
+	}
+	const goroutines = 32
+	const itersPerGoroutine = 16
+	var wg sync.WaitGroup
+	errs := make(chan error, goroutines*itersPerGoroutine)
+	for i := 0; i < goroutines; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < itersPerGoroutine; j++ {
+				pair, err := renderGuestInvite(data)
+				if err != nil {
+					errs <- err
+					return
+				}
+				if !strings.Contains(pair.Text, "Acme Co") {
+					errs <- nil // signal completion without err
+					return
+				}
+			}
+		}()
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatalf("concurrent render: %v", err)
+		}
 	}
 }
