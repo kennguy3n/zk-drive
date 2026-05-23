@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -68,6 +69,10 @@ func (f *fakeRepo) Create(ctx context.Context, s *webhooks.Subscription) error {
 	return nil
 }
 
+// GetByID matches the production contract: the secret IS returned
+// on the in-memory Subscription so callers like TestDispatcher can
+// sign payloads. The handler is responsible for masking the secret
+// before serialising to JSON (see toView's includeSecret arg).
 func (f *fakeRepo) GetByID(ctx context.Context, workspaceID, id uuid.UUID) (*webhooks.Subscription, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -77,7 +82,6 @@ func (f *fakeRepo) GetByID(ctx context.Context, workspaceID, id uuid.UUID) (*web
 	for _, s := range f.subs {
 		if s.WorkspaceID == workspaceID && s.ID == id {
 			cp := *s
-			cp.Secret = ""
 			return &cp, nil
 		}
 	}
@@ -90,11 +94,14 @@ func (f *fakeRepo) List(ctx context.Context, workspaceID uuid.UUID) ([]*webhooks
 	if f.failList != nil {
 		return nil, f.failList
 	}
+	// Matches production: List returns secrets; the handler is
+	// responsible for masking them at the view boundary. The
+	// TestHandler_List_HidesSecret regression test exercises that
+	// handler-side masking path.
 	out := []*webhooks.Subscription{}
 	for _, s := range f.subs {
 		if s.WorkspaceID == workspaceID {
 			cp := *s
-			cp.Secret = ""
 			out = append(out, &cp)
 		}
 	}
@@ -165,10 +172,15 @@ func (f *fakeRepo) ListDeliveries(ctx context.Context, workspaceID, subID uuid.U
 
 // testValidator wires a URLValidator with a resolver that maps any
 // hostname to a routable public IP, so SSRF checks pass without
-// touching DNS.
+// touching DNS. AllowHTTP + AllowLoopback are enabled so the
+// dispatcher tests can drive a real httptest.Server (which binds to
+// http://127.0.0.1:port and would otherwise be rejected by the
+// production SSRF policy).
 func testValidator() *webhooks.URLValidator {
 	v := webhooks.NewURLValidator()
 	v.Resolver = &fakeResolver{ipForHost: net.ParseIP("1.1.1.1")}
+	v.AllowHTTP = true
+	v.AllowLoopback = true
 	return v
 }
 
@@ -419,7 +431,12 @@ func TestHandler_Resume_ReactivatesSubscription(t *testing.T) {
 	}
 }
 
-func TestHandler_Test_RequiresPublisher(t *testing.T) {
+// TestHandler_Test_RequiresDispatcher pins the contract that the
+// POST /test endpoint is gated on a wired TestDispatcher (not on the
+// JetStream publisher — those are independent now). With no
+// dispatcher the route returns 503 so the UI can show a "test not
+// available, NATS/Postgres degraded" banner.
+func TestHandler_Test_RequiresDispatcher(t *testing.T) {
 	t.Parallel()
 	repo := &fakeRepo{}
 	h := NewHandler(repo).WithValidator(testValidator())
@@ -434,6 +451,103 @@ func TestHandler_Test_RequiresPublisher(t *testing.T) {
 	r.ServeHTTP(rec, req)
 	if rec.Code != http.StatusServiceUnavailable {
 		t.Fatalf("status: got=%d want=503 body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestHandler_Test_DispatchesToTargetSubscriptionOnly is the
+// regression test for Devin Review pr-review-job-c492c9c4_0002 —
+// the prior implementation published a synthetic event onto
+// JetStream, which fanned out to every active subscription matching
+// (workspace_id, event_type) instead of only the targeted
+// subscription. The new TestDispatcher path delivers synchronously
+// to exactly one subscriber and ignores the workspace's other
+// subscriptions. This test pins that contract by registering two
+// httptest.Servers for the same event type and verifying ONLY the
+// targeted one receives a hit.
+func TestHandler_Test_DispatchesToTargetSubscriptionOnly(t *testing.T) {
+	t.Parallel()
+	var targetHits, otherHits int32
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&targetHits, 1)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer target.Close()
+	other := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&otherHits, 1)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer other.Close()
+	// Negative path: NewTestDispatcher must reject nil deps so a
+	// mis-wired cmd/server can't silently end up with a tester that
+	// crashes on the first request.
+	if _, err := webhooks.NewTestDispatcher(nil, nil); err == nil {
+		t.Fatalf("expected error for nil repo/client")
+	}
+	repo := &fakeRepo{}
+	targetID, otherID := uuid.New(), uuid.New()
+	workspaceID := uuid.New()
+	repo.subs = []*webhooks.Subscription{
+		{ID: targetID, WorkspaceID: workspaceID, URL: target.URL, EventType: webhooks.EventFileUploadConfirmed, Active: true, Secret: "shhh-secret-shhh-secret-shhh-secret"},
+		{ID: otherID, WorkspaceID: workspaceID, URL: other.URL, EventType: webhooks.EventFileUploadConfirmed, Active: true, Secret: "shhh-secret-shhh-secret-shhh-secret"},
+	}
+	v := testValidator()
+	client := webhooks.NewDeliveryClient(v, 5*time.Second)
+	dispatcher, err := webhooks.NewTestDispatcher(repo, client)
+	if err != nil {
+		t.Fatalf("NewTestDispatcher: %v", err)
+	}
+	h := NewHandler(repo).WithValidator(v).WithTestDispatcher(dispatcher)
+	r := newRouter(h)
+	req := httptest.NewRequest(http.MethodPost, "/webhooks/"+targetID.String()+"/test", nil)
+	req = req.WithContext(newAdminCtx(workspaceID, uuid.New()))
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status: got=%d want=200 body=%s", rec.Code, rec.Body.String())
+	}
+	if got := atomic.LoadInt32(&targetHits); got != 1 {
+		t.Errorf("target endpoint hits: got=%d want=1", got)
+	}
+	if got := atomic.LoadInt32(&otherHits); got != 0 {
+		t.Errorf("other endpoint hits: got=%d want=0 (test must NOT fan out)", got)
+	}
+	// Test deliveries must NOT touch consecutive_failures.
+	if repo.subs[0].ConsecutiveFailures != 0 || repo.subs[1].ConsecutiveFailures != 0 {
+		t.Errorf("test delivery moved consecutive_failures: target=%d other=%d", repo.subs[0].ConsecutiveFailures, repo.subs[1].ConsecutiveFailures)
+	}
+}
+
+// TestHandler_Test_NonSuccessReturns502 verifies that a failing test
+// delivery surfaces as 502 Bad Gateway, so a UI that checks the HTTP
+// status of the probe response gets the right answer without parsing
+// the body. The full DeliveryAttempt detail is still in the body.
+func TestHandler_Test_NonSuccessReturns502(t *testing.T) {
+	t.Parallel()
+	failing := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte("boom"))
+	}))
+	defer failing.Close()
+	repo := &fakeRepo{}
+	id := uuid.New()
+	workspaceID := uuid.New()
+	repo.subs = []*webhooks.Subscription{
+		{ID: id, WorkspaceID: workspaceID, URL: failing.URL, EventType: webhooks.EventFileUploadConfirmed, Active: true, Secret: "shhh-secret-shhh-secret-shhh-secret"},
+	}
+	v := testValidator()
+	client := webhooks.NewDeliveryClient(v, 5*time.Second)
+	dispatcher, err := webhooks.NewTestDispatcher(repo, client)
+	if err != nil {
+		t.Fatalf("NewTestDispatcher: %v", err)
+	}
+	h := NewHandler(repo).WithValidator(v).WithTestDispatcher(dispatcher)
+	r := newRouter(h)
+	req := httptest.NewRequest(http.MethodPost, "/webhooks/"+id.String()+"/test", nil)
+	req = req.WithContext(newAdminCtx(workspaceID, uuid.New()))
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("status: got=%d want=502 body=%s", rec.Code, rec.Body.String())
 	}
 }
 

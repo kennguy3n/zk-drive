@@ -37,13 +37,16 @@ import (
 
 // Handler is the chi-compatible HTTP handler. Constructed with the
 // repository (required) plus optional publisher + audit / URL
-// validator. A nil publisher disables the "test" endpoint (returns
+// validator. A nil tester disables the "test" endpoint (returns
 // 503 Service Unavailable); a nil audit service silently drops audit
 // trail entries; a nil validator falls back to the production
-// default.
+// default. The publisher is no longer used by Test (which now
+// dispatches synchronously via TestDispatcher) but is retained on
+// the struct for future endpoints that need to enqueue events.
 type Handler struct {
 	repo      webhooks.Repository
 	publisher *webhooks.Publisher
+	tester    *webhooks.TestDispatcher
 	validator *webhooks.URLValidator
 	audit     *audit.Service
 }
@@ -55,11 +58,24 @@ func NewHandler(repo webhooks.Repository) *Handler {
 	return &Handler{repo: repo, validator: webhooks.NewURLValidator()}
 }
 
-// WithPublisher wires the JetStream publisher so the POST /test
-// endpoint can enqueue synthetic events. A nil publisher disables
-// the test endpoint.
+// WithPublisher wires the JetStream publisher. The publisher is not
+// used by the current set of routes (POST /test moved to synchronous
+// TestDispatcher dispatch), but the hook is retained so future
+// endpoints that need to enqueue events can use it without a
+// constructor signature change.
 func (h *Handler) WithPublisher(p *webhooks.Publisher) *Handler {
 	h.publisher = p
+	return h
+}
+
+// WithTestDispatcher wires the synchronous test-dispatch helper.
+// A nil dispatcher disables POST /test (returns 503). The dispatcher
+// is a separate dependency from the publisher because production
+// events fan out asynchronously via JetStream but admin-triggered
+// tests deliver synchronously to a SINGLE subscription — see
+// internal/webhooks/test_dispatch.go for the design rationale.
+func (h *Handler) WithTestDispatcher(d *webhooks.TestDispatcher) *Handler {
+	h.tester = d
 	return h
 }
 
@@ -364,16 +380,21 @@ func (h *Handler) ListDeliveries(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"deliveries": out})
 }
 
-// Test POST /api/workspaces/{ws}/webhooks/{id}/test
-// Enqueues a synthetic event onto the JetStream subject so the
-// admin can verify connectivity end-to-end (subscription -> worker
-// -> subscriber endpoint -> response captured in delivery history).
+// Test POST /api/admin/webhooks/{id}/test
+//
+// Dispatches a synthetic event SYNCHRONOUSLY to the targeted
+// subscription ONLY (not via the publisher fan-out which would
+// also deliver to every other subscription of the same event_type
+// in the workspace). Returns the resulting delivery row inline so
+// the admin sees immediate pass/fail feedback. See the
+// TestDispatcher docs in internal/webhooks/test_dispatch.go for why
+// this path bypasses JetStream and does NOT touch consecutive_failures.
 func (h *Handler) Test(w http.ResponseWriter, r *http.Request) {
 	if !h.requireAdmin(w, r) {
 		return
 	}
-	if h.publisher == nil {
-		http.Error(w, "webhook publisher not configured (NATS unavailable)", http.StatusServiceUnavailable)
+	if h.tester == nil {
+		http.Error(w, "webhook test dispatcher not configured", http.StatusServiceUnavailable)
 		return
 	}
 	workspaceID, _ := middleware.WorkspaceIDFromContext(r.Context())
@@ -391,22 +412,30 @@ func (h *Handler) Test(w http.ResponseWriter, r *http.Request) {
 		writeServerError(r.Context(), w, "get subscription", err)
 		return
 	}
-	// Build a synthetic event of the subscription's event_type so
-	// the worker's fan-out logic matches a real production
-	// delivery. The Data payload carries a "test": true marker
-	// subscribers can recognise.
-	actorID, _ := middleware.UserIDFromContext(r.Context())
-	raw, _ := json.Marshal(map[string]any{"test": true, "subscription_id": sub.ID})
-	ev := webhooks.NewEvent(sub.EventType, workspaceID, &actorID, raw)
-	if err := h.publisher.Publish(r.Context(), ev); err != nil {
-		writeServerError(r.Context(), w, "publish test event", err)
+	row, dispatchErr := h.tester.Dispatch(r.Context(), sub)
+	if row == nil {
+		writeServerError(r.Context(), w, "dispatch test event", dispatchErr)
 		return
 	}
-	writeJSON(w, http.StatusAccepted, map[string]any{
-		"event_id":   ev.ID,
-		"event_type": string(sub.EventType),
-		"status":     "enqueued",
-	})
+	// Audit the test so the access log shows who triggered it.
+	if h.audit != nil {
+		actorID, _ := middleware.UserIDFromContext(r.Context())
+		subID := sub.ID
+		h.audit.LogAction(r.Context(), workspaceID, &actorID, audit.ActionWebhookSubscriptionTest, "webhook_subscription", &subID, r, map[string]any{
+			"event_type":  string(sub.EventType),
+			"outcome":     string(row.Outcome),
+			"status_code": row.StatusCode,
+		})
+	}
+	status := http.StatusOK
+	if row.Outcome != webhooks.OutcomeSuccess {
+		// Surface non-success outcomes as 502 Bad Gateway so a
+		// dashboard treating the response status as the probe
+		// result gets the right answer without having to parse
+		// the JSON body. The body still carries the full detail.
+		status = http.StatusBadGateway
+	}
+	writeJSON(w, status, toDeliveryView(row))
 }
 
 // Resume POST /api/workspaces/{ws}/webhooks/{id}/resume

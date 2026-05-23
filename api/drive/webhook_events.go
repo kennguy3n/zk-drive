@@ -36,10 +36,24 @@ func (h *Handler) publishWebhookFileEvent(ctx context.Context, t webhooks.EventT
 	if h.webhooks == nil || f == nil {
 		return
 	}
+	// Pass nil for VersionID / FolderID when the value is zero so
+	// the JSON output omits the field entirely (FileEventData now
+	// uses pointers — see the docblock there for why uuid.UUID's
+	// fixed-size [16]byte shape defeats `omitempty`).
+	var versionPtr *uuid.UUID
+	if versionID != uuid.Nil {
+		v := versionID
+		versionPtr = &v
+	}
+	var folderPtr *uuid.UUID
+	if f.FolderID != uuid.Nil {
+		fid := f.FolderID
+		folderPtr = &fid
+	}
 	if err := h.webhooks.PublishFileEvent(ctx, t, workspaceID, webhookActorID(ctx), webhooks.FileEventData{
 		FileID:    f.ID,
-		VersionID: versionID,
-		FolderID:  f.FolderID,
+		VersionID: versionPtr,
+		FolderID:  folderPtr,
 		Name:      f.Name,
 		MimeType:  f.MimeType,
 		SizeBytes: sizeBytes,
@@ -63,10 +77,18 @@ func (h *Handler) publishWebhookPermissionEvent(ctx context.Context, t webhooks.
 	if h.webhooks == nil {
 		return
 	}
+	// Zero-valued grantee_id (e.g. guest-link grant where no user
+	// account exists yet) becomes nil so the JSON field is omitted
+	// rather than serialised as the zero UUID.
+	var granteePtr *uuid.UUID
+	if granteeID != uuid.Nil {
+		g := granteeID
+		granteePtr = &g
+	}
 	if err := h.webhooks.PublishPermissionEvent(ctx, t, workspaceID, webhookActorID(ctx), webhooks.PermissionEventData{
 		ResourceType: resourceType,
 		ResourceID:   resourceID,
-		GranteeID:    granteeID,
+		GranteeID:    granteePtr,
 		Role:         role,
 	}); err != nil {
 		log := logging.FromContext(ctx)

@@ -183,21 +183,33 @@ type Event struct {
 // labels a subscriber typically needs to route the event without an
 // extra round-trip; richer details (full path, ACL, version history)
 // are re-fetched via the regular drive API.
+//
+// VersionID and FolderID are pointers so that `omitempty` actually
+// works. uuid.UUID is a [16]byte array, and encoding/json never
+// considers fixed-size arrays empty, so a zero-valued uuid.UUID
+// would have leaked as "00000000-0000-0000-0000-000000000000" into
+// the wire payload for events that don't carry one (e.g. file.deleted
+// has no version). Pointers also make the absence intent explicit:
+// callers pass nil rather than uuid.Nil when the field doesn't apply.
 type FileEventData struct {
-	FileID    uuid.UUID `json:"file_id"`
-	VersionID uuid.UUID `json:"version_id,omitempty"`
-	FolderID  uuid.UUID `json:"folder_id,omitempty"`
-	Name      string    `json:"name"`
-	MimeType  string    `json:"mime_type,omitempty"`
-	SizeBytes int64     `json:"size_bytes,omitempty"`
+	FileID    uuid.UUID  `json:"file_id"`
+	VersionID *uuid.UUID `json:"version_id,omitempty"`
+	FolderID  *uuid.UUID `json:"folder_id,omitempty"`
+	Name      string     `json:"name"`
+	MimeType  string     `json:"mime_type,omitempty"`
+	SizeBytes int64      `json:"size_bytes,omitempty"`
 }
 
 // PermissionEventData is the Data payload shape for permission.*
 // events. Identifies WHAT was shared, WITH WHOM, and AT WHAT level.
+//
+// GranteeID is a pointer for the same reason as FileEventData.VersionID:
+// for guest-link / external-email grants no user account exists yet,
+// and we don't want zero UUIDs leaking into subscriber payloads.
 type PermissionEventData struct {
-	ResourceType string    `json:"resource_type"` // "file" or "folder"
-	ResourceID   uuid.UUID `json:"resource_id"`
-	GranteeID    uuid.UUID `json:"grantee_id,omitempty"`
+	ResourceType string     `json:"resource_type"` // "file" or "folder"
+	ResourceID   uuid.UUID  `json:"resource_id"`
+	GranteeID    *uuid.UUID `json:"grantee_id,omitempty"`
 	// GranteeEmail is set for guest-link / external-email grants when
 	// no user account exists; for user-level grants it is empty and
 	// GranteeID carries the user UUID.

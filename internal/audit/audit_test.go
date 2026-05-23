@@ -23,7 +23,7 @@ func TestActionConstantsAreDotted(t *testing.T) {
 		ActionRetentionPolicyUpsert, ActionRetentionPolicyDelete,
 		ActionAdminBillingUpdate, ActionAdminBillingCheckout, ActionAdminBillingPortal,
 		ActionGuestInviteEmailed,
-		ActionWebhookSubscriptionCreate, ActionWebhookSubscriptionDelete, ActionWebhookSubscriptionResume,
+		ActionWebhookSubscriptionCreate, ActionWebhookSubscriptionDelete, ActionWebhookSubscriptionResume, ActionWebhookSubscriptionTest,
 	}
 	seen := make(map[string]bool, len(actions))
 	for _, a := range actions {

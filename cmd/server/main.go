@@ -516,12 +516,19 @@ func run() error {
 
 	// Outbound-webhook subscription admin handler (WS-24). Mounted
 	// under /api/admin/webhooks so it inherits the admin-only +
-	// tenant-guarded middleware stack. A nil webhookPublisher
-	// disables only the synthetic-test endpoint; CRUD on
-	// subscriptions still works against the database.
+	// tenant-guarded middleware stack. CRUD on subscriptions still
+	// works without NATS; POST /test additionally requires a
+	// TestDispatcher (which only needs the repo + a DeliveryClient,
+	// not JetStream — tests dispatch synchronously to the single
+	// targeted subscription, see internal/webhooks/test_dispatch.go).
 	webhookRepo := webhooks.NewPostgresRepository(pool)
+	webhookTester, err := webhooks.NewTestDispatcher(webhookRepo, webhooks.NewDeliveryClient(webhooks.NewURLValidator(), webhooks.DefaultDeliveryTimeout))
+	if err != nil {
+		return fmt.Errorf("webhooks/test-dispatcher: %w", err)
+	}
 	webhookHandler := apiwebhooks.NewHandler(webhookRepo).
 		WithPublisher(webhookPublisher).
+		WithTestDispatcher(webhookTester).
 		WithAudit(auditSvc)
 
 	kchatSvc := kchat.NewRoomService(

@@ -121,6 +121,17 @@ func (w *DeliveryWorker) Consume(ctx context.Context, msg *nats.Msg) string {
 	terminal := attempt >= MaxAttempts
 	allSucceeded := true
 	for _, s := range subs {
+		// Extend the JetStream ack deadline before each
+		// per-subscription delivery so the worst-case fan-out
+		// (MaxSubscriptionsPerWorkspace × DefaultDeliveryTimeout
+		// = 20 × 30s = 10min) can never exceed the consumer's
+		// AckWait window (configured at 5min in cmd/worker).
+		// Without InProgress() JetStream would assume the worker
+		// died mid-fan-out and redeliver the message, causing a
+		// thundering-herd of duplicates against subscribers that
+		// already received the event. InProgress is documented to
+		// reset the deadline by AckWait on each call.
+		_ = msg.InProgress()
 		ok := w.deliverOne(ctx, &ev, s, body, attempt, terminal)
 		if !ok {
 			allSucceeded = false

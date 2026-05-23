@@ -58,6 +58,7 @@ const (
 	ActionWebhookSubscriptionCreate = "webhooks.subscription_create"
 	ActionWebhookSubscriptionDelete = "webhooks.subscription_delete"
 	ActionWebhookSubscriptionResume = "webhooks.subscription_resume"
+	ActionWebhookSubscriptionTest   = "webhooks.subscription_test"
 )
 
 // Entry mirrors a single audit_log row. ActorID is nullable because
