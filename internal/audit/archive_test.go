@@ -247,10 +247,15 @@ func less(a, b WorkspaceAuditMonth) bool {
 
 // fakeStorage is an in-memory ArchiveStorage that records every
 // PutObject call so tests can assert object key shapes and JSONL.gz
-// payload contents. The failures map keys are object keys; the
-// special key "*" matches any object and lets a test pre-stub a
-// failure for the FIRST PutObject call without knowing the
-// UUID-suffixed key in advance.
+// payload contents. The failures map keys are object keys and match
+// EXACTLY — there is no wildcard support. To fail the FIRST
+// PutObject call without knowing the UUID-suffixed key in advance,
+// use the failingFirstPut decorator (defined below in this file)
+// which wraps a fakeStorage and rejects the first call positionally.
+// An earlier version of this docstring claimed a "*" wildcard key
+// existed; it never did and the failingFirstPut pattern obsoletes
+// the need. See WS-23 PR #68 Devin Review finding
+// ANALYSIS_pr-review-job-8cfa30b85fb14cd7832897b92f636bf0_0003.
 type fakeStorage struct {
 	mu        sync.Mutex
 	objects   map[string][]byte

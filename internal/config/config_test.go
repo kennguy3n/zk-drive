@@ -59,6 +59,22 @@ func requireEnv(t *testing.T, envs map[string]string) {
 		"AUDIT_LOG_ARCHIVE_ENABLED", "AUDIT_LOG_RETENTION_DAYS",
 		"AUDIT_LOG_ARCHIVE_PREFIX", "AUDIT_LOG_ARCHIVE_BUCKET",
 		"AUDIT_LOG_ARCHIVE_MAX_ROWS_PER_BATCH",
+		// SMTP transactional email + PUBLIC_URL env vars (WS-21).
+		// These were introduced in PR #66 (commit 939fa4d) but the
+		// matching requireEnv update was missed at the time. Adding
+		// them here closes the consistency gap with the same
+		// rationale documented in the OTEL block above: any env var
+		// buildConfigFromEnv reads must live in this list so a CI
+		// runner with e.g. SMTP_HOST exported doesn't bleed into
+		// tests that exercise the "email disabled" default. See
+		// WS-23 PR #68 Devin Review finding
+		// ANALYSIS_pr-review-job-8cfa30b85fb14cd7832897b92f636bf0_0001.
+		"PUBLIC_URL",
+		"SMTP_HOST", "SMTP_PORT",
+		"SMTP_USERNAME", "SMTP_PASSWORD",
+		"SMTP_FROM_ADDRESS", "SMTP_FROM_NAME",
+		"SMTP_TLS_MODE", "SMTP_TLS_SERVER_NAME",
+		"SMTP_TLS_INSECURE_SKIP_VERIFY",
 	}
 	// WORKER_METRICS_ADDR is intentionally NOT included in the keys
 	// list above. t.Setenv(k, "") makes os.LookupEnv return
