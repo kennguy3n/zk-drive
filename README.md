@@ -405,6 +405,69 @@ first 4 MiB of extracted body. DOCX archives are also bounded at
 64 MiB uncompressed XML (`docxMaxUncompressedBytes`) to defend
 against zip-bomb inputs.
 
+### Transactional email (guest-invite delivery)
+
+ZK Drive sends a templated email to every guest invitee created via
+`POST /api/guest-invites` (WS-21). Closes the historical gap where
+external invitees were never told about the invite — the row was
+written to the database, but the user only found out via Slack /
+verbal handoff.
+
+**Required env vars** (omit any one to leave email disabled — the
+server boots cleanly in disabled mode and logs a single
+`transactional email DISABLED` warning at startup so operators see
+the gap at deploy time, not when the first invitee fails to arrive):
+
+| Variable             | Purpose                                                                                                            |
+| -------------------- | ------------------------------------------------------------------------------------------------------------------ |
+| `PUBLIC_URL`         | Canonical externally-reachable base URL of the frontend (e.g. `https://drive.example.com`). Used to compose `/invites/{id}` links inside the email. Trailing slashes are normalised. |
+| `SMTP_HOST`          | Hostname of the SMTP relay. Anything that speaks SMTP-AUTH works (Postmark, Mailgun, AWS SES, Gmail App Passwords, corporate Exchange).  |
+| `SMTP_FROM_ADDRESS`  | Envelope sender (`MAIL FROM`) AND From-header address. Required when `SMTP_HOST` is set.                            |
+
+Optional:
+
+| Variable                            | Default     | Purpose                                                                                            |
+| ----------------------------------- | ----------- | -------------------------------------------------------------------------------------------------- |
+| `SMTP_PORT`                         | `587`       | TCP port. `465` = implicit TLS, `587` = STARTTLS, `25`/`2525` = plain (dev only).                  |
+| `SMTP_USERNAME`                     | empty       | SMTP-AUTH username (PLAIN). Skipped when both username + password are empty (anonymous relay).     |
+| `SMTP_PASSWORD`                     | empty       | SMTP-AUTH password.                                                                                |
+| `SMTP_FROM_NAME`                    | empty       | Display name in From header (`"ZK Drive" <noreply@…>`).                                            |
+| `SMTP_TLS_MODE`                     | `starttls`  | One of `implicit`, `starttls`, `none`. `none` is plain text — local dev only.                      |
+| `SMTP_TLS_SERVER_NAME`              | `SMTP_HOST` | SNI / cert-verify hostname override. Set this when the relay is reachable by IP but presents a hostname certificate. |
+| `SMTP_TLS_INSECURE_SKIP_VERIFY`     | `false`     | Disable certificate verification. Operators with self-signed dev relays only — keep `false` in production. |
+
+**Delivery model.** Email send is **best-effort**: a relay outage
+does NOT roll back the invite row. The HTTP response is the same
+either way (`201 Created` with the new invite). The audit log
+records the outcome (`ok`, `smtp_error`, `template_error`,
+`address_invalid`, `disabled`) per invite under the
+`sharing.guest_invite_emailed` action, so operators can join
+"invite created → email delivered" on `resource_id` and surface
+undelivered invites in compliance reports.
+
+**Metrics.** `zkdrive_email_sent_total{template, outcome}` is
+emitted on every `Send` attempt. Cardinality is bounded: one label
+combination per (template, outcome) pair, no recipient/inviter
+fields. Use this to alert on a sustained `smtp_error` rate or a
+non-zero `template_error` rate (the latter is always a server
+bug — should be 0 in steady state).
+
+**Provider notes.**
+
+- **Postmark**: `SMTP_HOST=smtp.postmarkapp.com`, `SMTP_PORT=587`, `SMTP_USERNAME` and `SMTP_PASSWORD` are both the server token. Standard STARTTLS.
+- **AWS SES**: `SMTP_HOST=email-smtp.<region>.amazonaws.com`, `SMTP_PORT=587`. Credentials are SES-specific SMTP credentials (generated via the SES console), NOT IAM access keys.
+- **Mailgun**: `SMTP_HOST=smtp.mailgun.org`, `SMTP_PORT=587`. Username is `postmaster@<domain>`, password is the SMTP password from the domain settings page.
+- **Gmail App Passwords**: `SMTP_HOST=smtp.gmail.com`, `SMTP_PORT=587`. Username is the full Gmail address, password is the 16-char app password — works for low-volume internal tooling only, not customer-facing transactional mail.
+
+**Pre-auth invite preview.** The email links recipients to
+`{PUBLIC_URL}/invites/{invite_id}`. The frontend hits
+`GET /api/guest-invites/{id}/preview` (public, no auth required —
+same RLS-bypass posture as `/api/share-links/{token}`) to fetch
+the display-safe projection (workspace name, folder name,
+recipient email, role, expiry). Secrets such as the permission row
+ID and the inviter user ID are NOT exposed; invite IDs are
+UUIDv4 so guessing is infeasible.
+
 ### Quick start with the zk-object-fabric Docker demo
 
 When running alongside zk-object-fabric's Docker demo, point ZK Drive

@@ -32,6 +32,7 @@ import (
 	"github.com/kennguy3n/zk-drive/internal/preview"
 	"github.com/kennguy3n/zk-drive/internal/search"
 	"github.com/kennguy3n/zk-drive/internal/sharing"
+	"github.com/kennguy3n/zk-drive/internal/email"
 	"github.com/kennguy3n/zk-drive/internal/storage"
 	"github.com/kennguy3n/zk-drive/internal/user"
 	"github.com/kennguy3n/zk-drive/internal/workspace"
@@ -58,6 +59,7 @@ type Handler struct {
 	clientRooms    *sharing.ClientRoomService
 	jobs           *jobs.Publisher
 	notifications  *notification.Service
+	email          *email.Service
 	previews       preview.Repository
 	audit          *audit.Service
 	billing        *billing.Service
@@ -147,6 +149,16 @@ func (h *Handler) WithJobs(p *jobs.Publisher) *Handler {
 // notifications.
 func (h *Handler) WithNotifications(s *notification.Service) *Handler {
 	h.notifications = s
+	return h
+}
+
+// WithEmail wires the transactional-email service so guest-invite
+// creation can notify external recipients out-of-band. A nil
+// service disables email delivery (the in-app notification path
+// still fires for known users). Mirrors WithNotifications so test
+// wiring stays cheap.
+func (h *Handler) WithEmail(s *email.Service) *Handler {
+	h.email = s
 	return h
 }
 

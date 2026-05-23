@@ -1,0 +1,18 @@
+Hi,
+
+{{.InviterName}} invited you to collaborate on a folder in {{.WorkspaceName}} on ZK Drive.
+
+Folder: {{.FolderName}}
+Role:   {{.Role}}
+{{- if .ExpiresAt}}
+Expires: {{.ExpiresAt}}
+{{- end}}
+
+Accept the invite:
+{{.AcceptURL}}
+
+If you don't already have an account, you can sign up with this email address ({{.Email}}) at that link.
+
+You're receiving this email because someone shared a folder with you on ZK Drive. If you weren't expecting it, you can safely ignore this message — no action will be taken on your behalf.
+
+ZK Drive

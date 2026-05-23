@@ -30,6 +30,7 @@ type Repository interface {
 
 	CreateGuestInvite(ctx context.Context, invite *GuestInvite) error
 	GetGuestInviteByID(ctx context.Context, workspaceID, id uuid.UUID) (*GuestInvite, error)
+	GetGuestInviteByIDAnyWorkspace(ctx context.Context, id uuid.UUID) (*GuestInvite, error)
 	ListGuestInvitesByFolder(ctx context.Context, workspaceID, folderID uuid.UUID) ([]*GuestInvite, error)
 	AcceptGuestInvite(ctx context.Context, workspaceID, id uuid.UUID, acceptedAt time.Time) error
 	DeleteGuestInvite(ctx context.Context, workspaceID, id uuid.UUID) error
@@ -192,6 +193,25 @@ RETURNING created_at`
 func (r *PostgresRepository) GetGuestInviteByID(ctx context.Context, workspaceID, id uuid.UUID) (*GuestInvite, error) {
 	q := "SELECT " + guestInviteColumns + " FROM guest_invites WHERE workspace_id = $1 AND id = $2"
 	return scanGuestInvite(r.pool.QueryRow(ctx, q, workspaceID, id))
+}
+
+// GetGuestInviteByIDAnyWorkspace fetches an invite by ID across all
+// workspaces. Used by the unauthenticated invite-preview endpoint:
+// the recipient clicks the link in their email, the frontend lands
+// on /invites/{id}, and we need to resolve the workspace context
+// before the user has logged in.
+//
+// Safe for the public path because (a) invite IDs are UUIDv4
+// (unguessable, 122 bits of entropy), (b) the call-site only
+// surfaces non-secret display fields (workspace name, folder name,
+// role) plus the email the recipient already knows, and (c) the
+// RLS policy on guest_invites bypasses tenant isolation when
+// app.workspace_id is unset — which is exactly the case for the
+// pre-auth invite-preview request. Same posture share-link
+// resolution has used since migration 024.
+func (r *PostgresRepository) GetGuestInviteByIDAnyWorkspace(ctx context.Context, id uuid.UUID) (*GuestInvite, error) {
+	q := "SELECT " + guestInviteColumns + " FROM guest_invites WHERE id = $1"
+	return scanGuestInvite(r.pool.QueryRow(ctx, q, id))
 }
 
 // ListGuestInvitesByFolder returns every invite targeting a folder in a

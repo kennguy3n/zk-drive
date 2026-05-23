@@ -51,9 +51,11 @@ type PermissionRef struct {
 // handling, and coordination with the permission service for guest
 // invites.
 type Service struct {
-	repo        Repository
-	permissions PermissionGranter
-	now         func() time.Time
+	repo          Repository
+	permissions   PermissionGranter
+	now           func() time.Time
+	workspaceName WorkspaceNameResolver
+	folderName    FolderNameResolver
 }
 
 // NewService returns a Service backed by the given repository and
@@ -252,6 +254,75 @@ func (s *Service) RevokeGuestInvite(ctx context.Context, workspaceID, id uuid.UU
 // to look up an invite before confirming / revoking it.
 func (s *Service) GetGuestInviteByID(ctx context.Context, workspaceID, id uuid.UUID) (*GuestInvite, error) {
 	return s.repo.GetGuestInviteByID(ctx, workspaceID, id)
+}
+
+// GuestInvitePreview is the display-safe projection of an invite
+// returned by the pre-auth /invites/{id}/preview endpoint. It
+// intentionally omits secrets (permission_id, created_by) and
+// internal IDs that the recipient doesn't need to act on the
+// invite; the email address is included so the landing page can
+// auto-fill the signup form and the recipient can confirm the
+// invite was sent to them, not a colleague.
+type GuestInvitePreview struct {
+	ID            uuid.UUID  `json:"id"`
+	WorkspaceID   uuid.UUID  `json:"workspace_id"`
+	WorkspaceName string     `json:"workspace_name"`
+	FolderName    string     `json:"folder_name"`
+	Email         string     `json:"email"`
+	Role          string     `json:"role"`
+	ExpiresAt     *time.Time `json:"expires_at,omitempty"`
+	AcceptedAt    *time.Time `json:"accepted_at,omitempty"`
+}
+
+// WorkspaceNameResolver looks up a workspace's display name.
+// Injected via WithWorkspaceNameResolver so the sharing service
+// does not depend on the workspace package directly.
+type WorkspaceNameResolver func(ctx context.Context, workspaceID uuid.UUID) (string, error)
+
+// FolderNameResolver looks up a folder's display name.
+type FolderNameResolver func(ctx context.Context, workspaceID, folderID uuid.UUID) (string, error)
+
+// WithDisplayResolvers attaches the workspace + folder name
+// resolvers used by GetGuestInvitePreview. Optional: when either
+// is nil the preview falls back to placeholder strings, so the
+// endpoint still works in degraded form.
+func (s *Service) WithDisplayResolvers(ws WorkspaceNameResolver, folder FolderNameResolver) *Service {
+	s.workspaceName = ws
+	s.folderName = folder
+	return s
+}
+
+// GetGuestInvitePreview returns the display-safe projection of an
+// invite for the unauthenticated landing page. Looks up the row via
+// GetGuestInviteByIDAnyWorkspace (bypassing RLS the same way
+// public share-link resolution does), then enriches it with
+// workspace / folder names.
+func (s *Service) GetGuestInvitePreview(ctx context.Context, id uuid.UUID) (*GuestInvitePreview, error) {
+	inv, err := s.repo.GetGuestInviteByIDAnyWorkspace(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	preview := &GuestInvitePreview{
+		ID:          inv.ID,
+		WorkspaceID: inv.WorkspaceID,
+		Email:       inv.Email,
+		Role:        inv.Role,
+		ExpiresAt:   inv.ExpiresAt,
+		AcceptedAt:  inv.AcceptedAt,
+	}
+	preview.WorkspaceName = "your workspace"
+	if s.workspaceName != nil {
+		if name, err := s.workspaceName(ctx, inv.WorkspaceID); err == nil && name != "" {
+			preview.WorkspaceName = name
+		}
+	}
+	preview.FolderName = "a shared folder"
+	if s.folderName != nil {
+		if name, err := s.folderName(ctx, inv.WorkspaceID, inv.FolderID); err == nil && name != "" {
+			preview.FolderName = name
+		}
+	}
+	return preview, nil
 }
 
 // ListGuestInvitesByFolder returns all invites for a folder, newest

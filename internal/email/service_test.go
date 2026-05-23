@@ -1,0 +1,246 @@
+package email
+
+import (
+	"context"
+	"errors"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+)
+
+// recordingSender is a Sender that captures every Send call so
+// tests can assert end-to-end wiring (template rendering, headers,
+// metric outcomes) without standing up a real SMTP listener.
+type recordingSender struct {
+	mu          sync.Mutex
+	calls       []Message
+	configured  bool
+	sendErr     error
+}
+
+func (r *recordingSender) Send(_ context.Context, msg Message) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.calls = append(r.calls, msg)
+	if r.sendErr != nil {
+		return r.sendErr
+	}
+	return nil
+}
+
+func (r *recordingSender) IsConfigured() bool { return r.configured }
+
+// recordingMetrics implements MetricsRecorder, capturing every
+// emit so tests can assert the outcome label is exactly right.
+type recordingMetrics struct {
+	mu     sync.Mutex
+	emits  []emit
+}
+
+type emit struct{ template, outcome string }
+
+func (r *recordingMetrics) RecordEmailSent(template, outcome string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.emits = append(r.emits, emit{template, outcome})
+}
+
+func mustService(t *testing.T, sender Sender) (*Service, *recordingMetrics) {
+	t.Helper()
+	s, err := NewService(ServiceConfig{
+		Sender:    sender,
+		PublicURL: "https://drive.example.com",
+	})
+	if err != nil {
+		t.Fatalf("NewService: %v", err)
+	}
+	m := &recordingMetrics{}
+	s.WithMetrics(m)
+	return s, m
+}
+
+// TestSendGuestInvite_HappyPath asserts the service composes the
+// accept URL correctly, threads template data into the Message,
+// and emits the "ok" metric outcome.
+func TestSendGuestInvite_HappyPath(t *testing.T) {
+	sender := &recordingSender{configured: true}
+	svc, m := mustService(t, sender)
+	exp := time.Date(2025, 12, 31, 23, 59, 0, 0, time.UTC)
+	outcome, err := svc.SendGuestInvite(context.Background(), SendGuestInviteInput{
+		Email:         "bob@example.com",
+		InviterName:   "Alice",
+		WorkspaceName: "Acme Co",
+		FolderName:    "Q4 Roadmap",
+		Role:          "editor",
+		InviteID:      "INVITEID",
+		ExpiresAt:     &exp,
+	})
+	if err != nil {
+		t.Fatalf("SendGuestInvite: %v", err)
+	}
+	if outcome != OutcomeOK {
+		t.Fatalf("outcome = %s, want ok", outcome)
+	}
+	if len(sender.calls) != 1 {
+		t.Fatalf("calls = %d, want 1", len(sender.calls))
+	}
+	got := sender.calls[0]
+	if got.To != "bob@example.com" {
+		t.Errorf("To = %q, want bob@example.com", got.To)
+	}
+	if !strings.Contains(got.Subject, "Acme Co") {
+		t.Errorf("Subject = %q, want substring 'Acme Co'", got.Subject)
+	}
+	if !strings.Contains(got.TextBody, "https://drive.example.com/invites/INVITEID") {
+		t.Errorf("TextBody missing accept URL: %s", got.TextBody)
+	}
+	if got.Headers["Auto-Submitted"] != "auto-generated" {
+		t.Errorf("Auto-Submitted = %q, want auto-generated", got.Headers["Auto-Submitted"])
+	}
+	if len(m.emits) != 1 || m.emits[0].template != "guest_invite" || m.emits[0].outcome != "ok" {
+		t.Errorf("metric emits = %+v, want one {guest_invite, ok}", m.emits)
+	}
+}
+
+// TestSendGuestInvite_DisabledSenderEmitsDisabledMetric pins the
+// branchless-no-op contract: when SMTP isn't configured the call
+// returns (OutcomeDisabled, nil) so the caller's hot path stays
+// simple.
+func TestSendGuestInvite_DisabledSenderEmitsDisabledMetric(t *testing.T) {
+	sender := &recordingSender{configured: false, sendErr: ErrNotConfigured}
+	svc, m := mustService(t, sender)
+	outcome, err := svc.SendGuestInvite(context.Background(), SendGuestInviteInput{
+		Email:         "bob@example.com",
+		InviterName:   "Alice",
+		WorkspaceName: "Acme Co",
+		FolderName:    "Q4 Roadmap",
+		Role:          "editor",
+		InviteID:      "INVITEID",
+	})
+	if err != nil {
+		t.Fatalf("SendGuestInvite returned err for disabled sender: %v", err)
+	}
+	if outcome != OutcomeDisabled {
+		t.Fatalf("outcome = %s, want disabled", outcome)
+	}
+	if len(m.emits) != 1 || m.emits[0].outcome != "disabled" {
+		t.Errorf("metric outcome = %+v, want disabled", m.emits)
+	}
+}
+
+// TestSendGuestInvite_SMTPErrorIsClassifiedAndReturned asserts a
+// transport-level failure surfaces as an error AND a smtp_error
+// metric. The caller is expected to log + continue.
+func TestSendGuestInvite_SMTPErrorIsClassifiedAndReturned(t *testing.T) {
+	sender := &recordingSender{configured: true, sendErr: errors.New("dial failed")}
+	svc, m := mustService(t, sender)
+	outcome, err := svc.SendGuestInvite(context.Background(), SendGuestInviteInput{
+		Email:         "bob@example.com",
+		InviterName:   "Alice",
+		WorkspaceName: "Acme Co",
+		FolderName:    "Q4 Roadmap",
+		Role:          "editor",
+		InviteID:      "INVITEID",
+	})
+	if err == nil {
+		t.Fatalf("expected error from SMTP failure")
+	}
+	if outcome != OutcomeSMTPError {
+		t.Fatalf("outcome = %s, want smtp_error", outcome)
+	}
+	if len(m.emits) != 1 || m.emits[0].outcome != "smtp_error" {
+		t.Errorf("metric outcome = %+v, want smtp_error", m.emits)
+	}
+}
+
+// TestSendGuestInvite_TemplateErrorReturnsBeforeSend asserts a
+// render failure (missing required field) is classified as
+// template_error AND the sender is NOT called \u2014 keeping the
+// metric semantics honest.
+func TestSendGuestInvite_TemplateErrorReturnsBeforeSend(t *testing.T) {
+	sender := &recordingSender{configured: true}
+	svc, m := mustService(t, sender)
+	outcome, err := svc.SendGuestInvite(context.Background(), SendGuestInviteInput{
+		Email:    "bob@example.com",
+		InviteID: "X",
+	})
+	if err == nil {
+		t.Fatalf("expected error for missing template fields")
+	}
+	if outcome != OutcomeTemplateError {
+		t.Fatalf("outcome = %s, want template_error", outcome)
+	}
+	if len(sender.calls) != 0 {
+		t.Fatalf("sender called %d times; should be 0 when template fails", len(sender.calls))
+	}
+	if len(m.emits) != 1 || m.emits[0].outcome != "template_error" {
+		t.Errorf("metric outcome = %+v, want template_error", m.emits)
+	}
+}
+
+// TestNewService_RejectsEmptySender enforces the NewService
+// contract \u2014 a programming error at boot fails fast, not at
+// first Send.
+func TestNewService_RejectsEmptySender(t *testing.T) {
+	_, err := NewService(ServiceConfig{PublicURL: "https://drive.example.com"})
+	if err == nil {
+		t.Fatalf("expected error for nil Sender")
+	}
+}
+
+// TestNewService_RejectsEmptyPublicURL enforces the NewService
+// contract \u2014 forgetting PUBLIC_URL means every invite link is
+// broken; better to fail at boot than to ship corrupt URLs.
+func TestNewService_RejectsEmptyPublicURL(t *testing.T) {
+	_, err := NewService(ServiceConfig{Sender: &recordingSender{}})
+	if err == nil {
+		t.Fatalf("expected error for empty PublicURL")
+	}
+}
+
+// TestNewService_TrimsTrailingSlash keeps the URL composer
+// branchless \u2014 either form is accepted, the composed URL never
+// contains a double slash.
+func TestNewService_TrimsTrailingSlash(t *testing.T) {
+	sender := &recordingSender{configured: true}
+	svc, err := NewService(ServiceConfig{Sender: sender, PublicURL: "https://drive.example.com/"})
+	if err != nil {
+		t.Fatalf("NewService: %v", err)
+	}
+	if _, err := svc.SendGuestInvite(context.Background(), SendGuestInviteInput{
+		Email:         "bob@example.com",
+		InviterName:   "Alice",
+		WorkspaceName: "Acme Co",
+		FolderName:    "Q4 Roadmap",
+		Role:          "editor",
+		InviteID:      "INVITEID",
+	}); err != nil {
+		t.Fatalf("SendGuestInvite: %v", err)
+	}
+	got := sender.calls[0].TextBody
+	if strings.Contains(got, "drive.example.com//invites") {
+		t.Fatalf("composed URL has double slash: %s", got)
+	}
+	if !strings.Contains(got, "drive.example.com/invites/INVITEID") {
+		t.Fatalf("composed URL not present: %s", got)
+	}
+}
+
+// TestMaskEmail rounds out the small surface: PII redaction
+// happens before slog so per-send observability lines never leak a
+// full address. Lock the format so future changes don't regress.
+func TestMaskEmail(t *testing.T) {
+	cases := []struct{ in, want string }{
+		{"alice@example.com", "a***@example.com"},
+		{"a@example.com", "a***@example.com"},
+		{"", "***"},
+		{"no-at-sign", "***"},
+		{"@bad", "***"},
+	}
+	for _, c := range cases {
+		if got := maskEmail(c.in); got != c.want {
+			t.Errorf("maskEmail(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+}

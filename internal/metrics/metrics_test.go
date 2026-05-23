@@ -394,6 +394,9 @@ func TestHandler_ScrapeIntegratesAllSurfaces(t *testing.T) {
 		TotalDriftBytes: 1024,
 	}, nil, time.Now().Add(-50*time.Millisecond))
 
+	// Email surface — one RecordEmailSent call. Bounded labels.
+	m.RecordEmailSent("guest_invite", "ok")
+
 	mReq := httptest.NewRequest(http.MethodGet, "/metrics", nil)
 	mW := httptest.NewRecorder()
 	r.ServeHTTP(mW, mReq)
@@ -410,6 +413,7 @@ func TestHandler_ScrapeIntegratesAllSurfaces(t *testing.T) {
 		`zkdrive_reconciler_workspaces_scanned_total 5`,
 		`zkdrive_reconciler_workspaces_updated_total 2`,
 		`zkdrive_reconciler_drift_bytes_total 1024`,
+		`zkdrive_email_sent_total{outcome="ok",template="guest_invite"} 1`,
 	}
 	for _, line := range expectedLines {
 		if !strings.Contains(bodyStr, line) {

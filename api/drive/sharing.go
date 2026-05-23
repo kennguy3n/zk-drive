@@ -1,6 +1,7 @@
 package drive
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -10,6 +11,9 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/kennguy3n/zk-drive/api/middleware"
+	"github.com/kennguy3n/zk-drive/internal/audit"
+	"github.com/kennguy3n/zk-drive/internal/email"
+	"github.com/kennguy3n/zk-drive/internal/logging"
 	"github.com/kennguy3n/zk-drive/internal/notification"
 	"github.com/kennguy3n/zk-drive/internal/permission"
 	"github.com/kennguy3n/zk-drive/internal/sharing"
@@ -190,10 +194,18 @@ func (h *Handler) CreateGuestInvite(w http.ResponseWriter, r *http.Request) {
 		writeSharingError(w, err)
 		return
 	}
-	// Best-effort invitee notification: only users who already have an
-	// account in this workspace get an in-app notification. External
-	// invitees receive an email out-of-band (out of scope for this
-	// sprint).
+	// Invitee notifications run on two parallel paths:
+	//
+	//   1. In-app notification — fires only when the invitee already
+	//      has a user row in this workspace. The notification.Service
+	//      schema requires a user_id, so external invitees skip this
+	//      branch by design.
+	//   2. Transactional email — fires for every invitee whose address
+	//      is well-formed, closing the historical "external invitees
+	//      receive an email out-of-band (out of scope)" gap. Failures
+	//      are best-effort: a relay outage MUST NOT roll back the
+	//      invite row, because the operator can re-notify out-of-band
+	//      and the invite is already redeemable via its ID.
 	if h.users != nil && h.notifications != nil {
 		if u, uerr := h.users.GetByEmail(r.Context(), workspaceID, req.Email); uerr == nil && u != nil {
 			h.notify(r.Context(), func(n *notification.Service) error {
@@ -201,7 +213,102 @@ func (h *Handler) CreateGuestInvite(w http.ResponseWriter, r *http.Request) {
 			})
 		}
 	}
+	h.dispatchGuestInviteEmail(r, inv, userID)
 	writeJSON(w, http.StatusCreated, inv)
+}
+
+// dispatchGuestInviteEmail composes and sends the guest-invite
+// email, resolving the inviter / workspace / folder display data
+// from the existing services. Errors are logged and never returned
+// to the caller — the invite row already exists, so a failed email
+// should not change the HTTP response.
+func (h *Handler) dispatchGuestInviteEmail(r *http.Request, inv *sharing.GuestInvite, inviterID uuid.UUID) {
+	if h.email == nil {
+		return
+	}
+	ctx := r.Context()
+	log := logging.FromContext(ctx)
+
+	inviterName := h.resolveInviterDisplayName(ctx, inv.WorkspaceID, inviterID)
+	workspaceName := h.resolveWorkspaceName(ctx, inv.WorkspaceID)
+	folderName := h.resolveFolderName(ctx, inv.WorkspaceID, inv.FolderID)
+
+	outcome, err := h.email.SendGuestInvite(ctx, email.SendGuestInviteInput{
+		Email:         inv.Email,
+		InviterName:   inviterName,
+		WorkspaceName: workspaceName,
+		FolderName:    folderName,
+		Role:          inv.Role,
+		InviteID:      inv.ID.String(),
+		ExpiresAt:     inv.ExpiresAt,
+	})
+	if err != nil {
+		log.Warn("guest invite email failed", "invite_id", inv.ID, "outcome", string(outcome), "err", err)
+	}
+	h.logAudit(ctx, r, audit.ActionGuestInviteEmailed, "guest_invite", &inv.ID, map[string]any{
+		"outcome": string(outcome),
+	})
+}
+
+func (h *Handler) resolveInviterDisplayName(ctx context.Context, workspaceID, userID uuid.UUID) string {
+	if h.users == nil || userID == uuid.Nil {
+		return "A workspace member"
+	}
+	u, err := h.users.GetByID(ctx, workspaceID, userID)
+	if err != nil || u == nil {
+		return "A workspace member"
+	}
+	if u.Name != "" {
+		return u.Name
+	}
+	return u.Email
+}
+
+func (h *Handler) resolveWorkspaceName(ctx context.Context, workspaceID uuid.UUID) string {
+	if h.workspaces == nil {
+		return "your workspace"
+	}
+	ws, err := h.workspaces.GetByID(ctx, workspaceID)
+	if err != nil || ws == nil {
+		return "your workspace"
+	}
+	return ws.Name
+}
+
+func (h *Handler) resolveFolderName(ctx context.Context, workspaceID, folderID uuid.UUID) string {
+	if h.folders == nil {
+		return "a shared folder"
+	}
+	f, err := h.folders.GetByID(ctx, workspaceID, folderID)
+	if err != nil || f == nil {
+		return "a shared folder"
+	}
+	return f.Name
+}
+
+// PreviewGuestInvite returns display-safe metadata for a guest
+// invite by ID. Public (unauthenticated) endpoint — the recipient
+// follows the link in their email and needs workspace / folder /
+// inviter context before they decide whether to sign up or log in.
+// Same posture as ResolveShareLink: UUIDv4 IDs are unguessable, the
+// response excludes secrets, and RLS bypasses for the unauth path.
+func (h *Handler) PreviewGuestInvite(w http.ResponseWriter, r *http.Request) {
+	if h.sharing == nil {
+		http.Error(w, "sharing not configured", http.StatusNotImplemented)
+		return
+	}
+	idStr := chi.URLParam(r, "id")
+	id, err := uuid.Parse(idStr)
+	if err != nil {
+		http.Error(w, "invalid id", http.StatusBadRequest)
+		return
+	}
+	preview, err := h.sharing.GetGuestInvitePreview(r.Context(), id)
+	if err != nil {
+		writeSharingError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, preview)
 }
 
 // AcceptGuestInvite marks an invite accepted. Authenticated endpoint —
