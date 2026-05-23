@@ -169,6 +169,36 @@ func (c *SMTPClient) Send(ctx context.Context, msg Message) error {
 	}
 	defer func() { _ = conn.Close() }()
 
+	// Stamp a wall-clock deadline on the connection so subsequent
+	// reads/writes (EHLO, STARTTLS, AUTH, MAIL FROM, RCPT TO, DATA,
+	// body write, QUIT) cannot block indefinitely. The net/smtp
+	// package's high-level API does NOT accept a context, so
+	// without this deadline a relay that accepts the TCP connection
+	// then hangs mid-conversation would leak this goroutine forever
+	// — the outer context.WithTimeout(ctx, c.cfg.Timeout) only
+	// governs the dial phase, not the subsequent application-layer
+	// reads/writes against the established socket.
+	//
+	// Deadline source priority:
+	//   1. Outer ctx's deadline (preferred — matches caller intent,
+	//      e.g. the goroutine-detach in dispatchGuestInviteEmail
+	//      wraps everything in context.WithTimeout(detached, 60s)).
+	//   2. Fall back to time.Now() + c.cfg.Timeout when the caller
+	//      passes a deadline-free context (rare in production but
+	//      possible — context.Background() in tests, scripts, etc.).
+	//
+	// The deadline applies to the underlying TCP socket for both
+	// plaintext and STARTTLS-upgraded conversations; for implicit
+	// TLS the tls.Conn wraps the deadlined net.Conn so handshake
+	// reads/writes inherit the same wall-clock bound.
+	convDeadline := time.Now().Add(c.cfg.Timeout)
+	if d, ok := ctx.Deadline(); ok {
+		convDeadline = d
+	}
+	if err := conn.SetDeadline(convDeadline); err != nil {
+		return fmt.Errorf("email: set conn deadline: %w", err)
+	}
+
 	if c.cfg.TLSMode == TLSModeImplicit {
 		tlsConn := tls.Client(conn, c.tlsConfig())
 		if err := tlsConn.HandshakeContext(dialCtx); err != nil {

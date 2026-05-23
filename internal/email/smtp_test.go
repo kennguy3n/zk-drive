@@ -317,6 +317,85 @@ func TestNewSMTPClient_UnconfiguredHostBootsCleanly(t *testing.T) {
 	}
 }
 
+// TestSMTPClient_HangingRelayDoesNotLeakGoroutine pins the
+// post-dial deadline guarantee: a relay that accepts the TCP
+// connection then hangs mid-conversation must NOT block Send
+// forever. The fix sets conn.SetDeadline based on ctx.Deadline()
+// after dial, so subsequent reads/writes against the socket
+// time out at the same wall-clock instant as the outer context.
+//
+// Regression test for ANALYSIS_0001 from the third Devin Review
+// pass on PR #66 — the comment on guestInviteEmailDispatchTimeout
+// previously claimed "the goroutine cannot leak even if the
+// relay accepts the connection and then hangs indefinitely on a
+// write," which was false until SetDeadline was wired through.
+func TestSMTPClient_HangingRelayDoesNotLeakGoroutine(t *testing.T) {
+	// A "hanging" relay: accept the connection, send the 220
+	// banner, but NEVER respond to EHLO. The client should
+	// detect ctx.Deadline() passing and return an error within
+	// ~the outer context timeout — NOT block forever.
+	c, err := NewSMTPClient(SMTPConfig{
+		Host:        "fake.local",
+		Port:        2525,
+		FromAddress: "noreply@drive.example.com",
+		TLSMode:     TLSModeNone,
+		Timeout:     30 * time.Second, // generous outer fallback — not what the test exercises
+	})
+	if err != nil {
+		t.Fatalf("NewSMTPClient: %v", err)
+	}
+	c.dialer = func(ctx context.Context, network, addr string) (net.Conn, error) {
+		clientSide, serverSide := net.Pipe()
+		// Server side: send the 220 banner, then DELIBERATELY
+		// stop responding. Any subsequent read on clientSide
+		// will block indefinitely without our deadline fix.
+		go func() {
+			defer func() { _ = serverSide.Close() }()
+			bw := bufio.NewWriter(serverSide)
+			_, _ = bw.WriteString("220 hanging-relay\r\n")
+			_ = bw.Flush()
+			// Hang forever: read but never reply. This simulates
+			// a misbehaving relay that consumed our EHLO but
+			// won't send a 250 response.
+			_, _ = io.Copy(io.Discard, serverSide)
+		}()
+		return clientSide, nil
+	}
+
+	// Drive Send with a SHORT outer-context deadline. The fix
+	// must convert this into a conn.SetDeadline so the EHLO
+	// read returns with an i/o-timeout error before the test
+	// wall-clock budget elapses.
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+
+	done := make(chan error, 1)
+	go func() {
+		done <- c.Send(ctx, Message{To: "bob@example.com", Subject: "x", TextBody: "y"})
+	}()
+
+	// 2 seconds is 10x the conn-deadline window — generous
+	// enough to absorb CI scheduling jitter, tight enough to
+	// catch a regression where SetDeadline is removed (the test
+	// would then block until the t.Deadline harness kills it).
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatalf("Send against a hanging relay returned nil; expected a timeout error")
+		}
+		// We don't assert the exact error string (net.OpError
+		// vs context.DeadlineExceeded depending on Go version),
+		// only that Send completed within the bounded window.
+		if !strings.Contains(strings.ToLower(err.Error()), "timeout") &&
+			!strings.Contains(strings.ToLower(err.Error()), "deadline") &&
+			!strings.Contains(strings.ToLower(err.Error()), "i/o") {
+			t.Logf("Send error against hanging relay (acceptable variants: timeout / deadline / i/o): %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatalf("Send blocked >2s against a hanging relay — conn.SetDeadline was not applied post-dial; goroutine would leak in production")
+	}
+}
+
 // TestGenerateMessageID_StablyShaped pins the Message-ID format
 // (RFC 2822 angle-bracketed, contains an "@" + From domain) so a
 // future refactor that breaks Postmark / SES dedup is caught.

@@ -217,13 +217,17 @@ func (h *Handler) CreateGuestInvite(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, inv)
 }
 
-// guestInviteEmailDispatchTimeout caps how long the goroutine
-// spawned by dispatchGuestInviteEmail will wait for the SMTP
-// send (incl. connect + EHLO + STARTTLS + AUTH + DATA). The
-// SMTPClient already enforces its own per-send timeout (default
-// 30s) via the dial-context, but this outer cap guarantees the
-// goroutine cannot leak even if the relay accepts the connection
-// and then hangs indefinitely on a write.
+// guestInviteEmailDispatchTimeout caps the wall-clock budget for
+// the entire detached SMTP send (dial + EHLO + optional STARTTLS +
+// optional AUTH + MAIL FROM + RCPT TO + DATA + body write + QUIT).
+// It feeds the context the goroutine passes to SMTPClient.Send;
+// the SMTPClient threads ctx.Deadline() onto the TCP connection
+// via conn.SetDeadline so post-dial reads and writes ALSO honour
+// the bound (the net/smtp package's higher-level commands don't
+// accept a context themselves, so without the conn-deadline plumbing
+// a relay that accepts the connection then hangs mid-conversation
+// would leak this goroutine forever — see the SetDeadline comment
+// in internal/email/smtp.go).
 const guestInviteEmailDispatchTimeout = 60 * time.Second
 
 // dispatchGuestInviteEmail composes and sends the guest-invite

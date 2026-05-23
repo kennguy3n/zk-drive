@@ -851,52 +851,24 @@ func (a folderCreatorAdapter) Create(ctx context.Context, workspaceID uuid.UUID,
 }
 
 // buildEmailService composes the transactional-email service from
-// the loaded config. When SMTP_HOST is unset, the service is wired
-// to a NoopClient — Send calls return ErrNotConfigured which the
-// service classifies as OutcomeDisabled (not an error), so dev
-// environments without an SMTP relay still boot cleanly. When
-// PUBLIC_URL is unset the service is also forced to NoopClient
-// regardless of SMTP_HOST: composing an invite link without a
-// public base URL would produce broken "https:///invites/..." URLs
-// that confuse recipients, so we'd rather degrade gracefully than
-// ship invalid links.
+// the loaded config. The graceful-degradation contract — "omit any
+// one required env var to leave email disabled, server boots
+// cleanly in disabled mode" — lives in email.BuildFromOperatorConfig
+// so the contract is testable from the email-package test suite
+// without requiring cmd/server to grow a test target. This wrapper
+// is a thin adapter that maps the loaded *config.Config onto the
+// email-package's OperatorConfig view.
 func buildEmailService(cfg *config.Config) (*email.Service, error) {
-	switch {
-	case cfg.PublicURL == "":
-		// No external base URL → composed accept-invite links would
-		// be malformed; refuse to send and surface the
-		// missing-config in LogStartup so an operator with
-		// SMTP_HOST already set doesn't waste time inspecting SMTP
-		// credentials. Use a stable placeholder so NewService
-		// doesn't reject empty PublicURL.
-		return email.NewService(email.ServiceConfig{
-			Sender:         email.NewNoopClient(),
-			PublicURL:      "http://invalid.local",
-			DisabledReason: "PUBLIC_URL is not set — composed accept-invite links would be malformed; set PUBLIC_URL to the externally-reachable frontend base URL (e.g. https://drive.example.com) to enable guest-invite delivery",
-		})
-	case cfg.SMTPHost == "":
-		return email.NewService(email.ServiceConfig{
-			Sender:    email.NewNoopClient(),
-			PublicURL: cfg.PublicURL,
-		})
-	default:
-		c, err := email.NewSMTPClient(email.SMTPConfig{
-			Host:                  cfg.SMTPHost,
-			Port:                  cfg.SMTPPort,
-			Username:              cfg.SMTPUsername,
-			Password:              cfg.SMTPPassword,
-			FromAddress:           cfg.SMTPFromAddress,
-			FromName:              cfg.SMTPFromName,
-			TLSMode:               cfg.SMTPTLSMode,
-			TLSServerName:         cfg.SMTPTLSServerName,
-			TLSInsecureSkipVerify: cfg.SMTPTLSInsecureSkipVerify,
-		})
-		if err != nil {
-			return nil, err
-		}
-		return email.NewService(email.ServiceConfig{
-			Sender:    c,
-			PublicURL: cfg.PublicURL,
-		})
-	}
+	return email.BuildFromOperatorConfig(email.OperatorConfig{
+		PublicURL:                 cfg.PublicURL,
+		SMTPHost:                  cfg.SMTPHost,
+		SMTPPort:                  cfg.SMTPPort,
+		SMTPUsername:              cfg.SMTPUsername,
+		SMTPPassword:              cfg.SMTPPassword,
+		SMTPFromAddress:           cfg.SMTPFromAddress,
+		SMTPFromName:              cfg.SMTPFromName,
+		SMTPTLSMode:               cfg.SMTPTLSMode,
+		SMTPTLSServerName:         cfg.SMTPTLSServerName,
+		SMTPTLSInsecureSkipVerify: cfg.SMTPTLSInsecureSkipVerify,
+	})
 }
