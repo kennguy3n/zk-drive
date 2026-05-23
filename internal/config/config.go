@@ -229,11 +229,18 @@ type Config struct {
 	// AuditLogRetentionDays is the hot-tier retention window
 	// (rows older than now() - this many days are eligible for
 	// archival). 90 days is the typical SOC2 Type II hot tier;
-	// values <= 0 disable archival even when AuditArchiveEnabled
-	// is true so a misconfigured 0 doesn't silently archive
-	// everything. The maximum allowed value (10 years) is
-	// clamped at config-load time to catch a stray multiplier
-	// typo.
+	// the value is clamped at config-load time by
+	// clampAuditRetentionDays so a non-positive (<=0) input
+	// silently becomes 90 (the operator most likely forgot to
+	// set the var) and a value above 10 years also clamps to
+	// 10 years (catches stray multiplier typos). The clamped
+	// value is logged at startup so an operator can confirm
+	// the effective setting. AUDIT_LOG_ARCHIVE_ENABLED=false
+	// is the supported way to disable archival; setting
+	// AUDIT_LOG_RETENTION_DAYS=0 does NOT disable archival —
+	// it just runs at the 90-day default. See WS-23 PR #68
+	// Devin Review finding
+	// BUG_pr-review-job-00ec8888db2a410b892f764609056529_0001.
 	AuditLogRetentionDays int
 	// AuditArchivePrefix is the S3 key prefix every archive
 	// object is written under. Defaults to "audit-archive/".

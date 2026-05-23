@@ -33,6 +33,18 @@ func requireEnv(t *testing.T, envs map[string]string) {
 		"SECURITY_HEADERS_DISABLE_HSTS", "SECURITY_HEADERS_CSP_REPORT_ONLY",
 		"SECURITY_HEADERS_CSP_REPORT_URI", "SECURITY_HEADERS_CSP_CONNECT_EXTRA",
 		"SECURITY_HEADERS_CSP_IMG_EXTRA",
+		// Audit-log cold archival env vars (WS-23). MUST be in this
+		// list so tests like TestLoadAuditArchiveDefaults observe the
+		// production "unset" state regardless of what the parent
+		// shell / CI runner has exported. The defaults are validated
+		// inside buildConfigFromEnv (e.g. AUDIT_LOG_RETENTION_DAYS
+		// becomes 90 when unset), so the convention is: any env var
+		// touched by buildConfigFromEnv lives here. See WS-23 PR #68
+		// Devin Review finding
+		// BUG_pr-review-job-00ec8888db2a410b892f764609056529_0002.
+		"AUDIT_LOG_ARCHIVE_ENABLED", "AUDIT_LOG_RETENTION_DAYS",
+		"AUDIT_LOG_ARCHIVE_PREFIX", "AUDIT_LOG_ARCHIVE_BUCKET",
+		"AUDIT_LOG_ARCHIVE_MAX_ROWS_PER_BATCH",
 	}
 	// WORKER_METRICS_ADDR is intentionally NOT included in the keys
 	// list above. t.Setenv(k, "") makes os.LookupEnv return
