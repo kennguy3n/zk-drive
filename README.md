@@ -683,8 +683,12 @@ server / worker / reconciler / orphan-gc) is a one-shot CronJob that:
 1. Selects audit rows older than `AUDIT_LOG_RETENTION_DAYS`.
 2. Groups them by `(workspace_id, year-month)`.
 3. For each bucket, uploads the rows to S3 as compressed JSONL at
-   the key `{prefix}{workspace_id}/{YYYY-MM}/{run_id}.jsonl.gz`.
-4. Records the run in `audit_log_archive_runs` (run_id, workspace_id,
+   the key `{prefix}{workspace_id}/{YYYY-MM}/{batch_id}.jsonl.gz`.
+   A single (workspace, month) bucket that exceeds
+   `AUDIT_LOG_ARCHIVE_MAX_ROWS_PER_BATCH` is split into multiple
+   pages, each with its own `batch_id` UUID so pages within the
+   same bucket never overwrite each other in S3.
+4. Records each batch in `audit_log_archive_runs` (run_id, workspace_id,
    cutoff_time, year_month, archive_object_key, rows_archived,
    bytes_uploaded, started_at, completed_at, error_message).
 5. Deletes the archived rows from the hot table.
@@ -692,7 +696,7 @@ server / worker / reconciler / orphan-gc) is a one-shot CronJob that:
 The archiver is **idempotent**: a crash between steps 3-5 leaves the
 S3 object + the `audit_log_archive_runs` row committed but the rows
 still in the hot tier. The next run re-uploads the same rows under
-a new `run_id`-suffixed key; the cold tier may carry duplicate
+a fresh `batch_id`-suffixed key; the cold tier may carry duplicate
 objects which the restore CLI dedupes by row id.
 
 #### Configuration
@@ -700,7 +704,7 @@ objects which the restore CLI dedupes by row id.
 | Variable | Default | Purpose |
 | -------- | ------- | ------- |
 | `AUDIT_LOG_ARCHIVE_ENABLED` | `false` | **Opt-in safety floor.** The archiver refuses to delete rows when unset. Set to `true` after you've confirmed retention + bucket settings. |
-| `AUDIT_LOG_RETENTION_DAYS` | `90` | Rows older than `now() - retention_days` are eligible for archival. Clamped to `[1, 3650]` (10 years). |
+| `AUDIT_LOG_RETENTION_DAYS` | `90` | Rows older than `now() - retention_days` are eligible for archival. Clamped to `[7, 3650]` (7 days – 10 years). Values below the 7-day safety floor are silently raised to 7 with a startup-log notice so a typo like `5` doesn't aggressively prune legitimately-recent audit history; `0`/empty falls back to `90` (the default). |
 | `AUDIT_LOG_ARCHIVE_PREFIX` | `audit-archive/` | S3 key prefix. Normalised to a single trailing slash. |
 | `AUDIT_LOG_ARCHIVE_BUCKET` | _(empty — use `S3_BUCKET`)_ | Optional dedicated bucket with Glacier transition / object-lock retention rules. |
 | `AUDIT_LOG_ARCHIVE_MAX_ROWS_PER_BATCH` | `50000` | Batch size for the FetchBatch → encode → PUT loop. ~25 MB uncompressed, ~5 MB compressed per batch. |
@@ -762,14 +766,14 @@ jq -r 'select(.action | startswith("admin.")) | [.created_at, .actor_id, .action
 #### S3 object layout
 
 ```
-{AUDIT_LOG_ARCHIVE_PREFIX}{workspace_id}/{YYYY-MM}/{run_id}.jsonl.gz
+{AUDIT_LOG_ARCHIVE_PREFIX}{workspace_id}/{YYYY-MM}/{batch_id}.jsonl.gz
 
 audit-archive/00000000-1111-2222-3333-444444444444/2024-01/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee.jsonl.gz
 audit-archive/00000000-1111-2222-3333-444444444444/2024-01/ffffffff-1111-2222-3333-444444444444.jsonl.gz   # duplicate from a crashed earlier run
 audit-archive/00000000-1111-2222-3333-444444444444/2024-02/cccccccc-dddd-eeee-ffff-000000000000.jsonl.gz
 ```
 
-Each object is GZIP-compressed JSONL. The `run_id` UUID suffix
+Each object is GZIP-compressed JSONL. The `batch_id` UUID suffix
 makes every PUT idempotent (the same row content uploaded twice
 produces two distinct objects; the restore tool dedupes by row id).
 

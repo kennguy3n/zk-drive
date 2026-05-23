@@ -20,11 +20,27 @@
 //  1. Computes a single cutoff = now() - retention_days.
 //  2. Enumerates (workspace, year-month) buckets with rows older
 //     than cutoff via a GROUP BY query.
-//  3. For each bucket: streams rows out in id-ordered pages, writes
-//     a JSONL.gz buffer in memory, uploads to S3 as
-//     {prefix}{workspace_id}/{year-month}/{run_id}.jsonl.gz, then
-//     deletes the just-archived rows from audit_log and records an
-//     audit_log_archive_runs row.
+//  3. For each bucket: streams rows out in id-ordered pages and for
+//     each page writes a JSONL.gz buffer in memory, uploads to S3 as
+//     {prefix}{workspace_id}/{year-month}/{batch_id}.jsonl.gz (where
+//     batch_id is a fresh per-page UUID, NOT the run-level runID),
+//     records an audit_log_archive_runs row carrying that batch_id
+//     as archive_object_key, then deletes the just-archived rows
+//     from audit_log. Each page is its own independently-durable
+//     commit unit; the per-batch UUID guarantees no two pages within
+//     the same run can share an S3 key.
+//
+//     The run-level runID is preserved on every archive_runs record
+//     so an operator can correlate "all batches from one CronJob
+//     tick" via WHERE run_id = ?. The S3 key itself is keyed by
+//     batch_id rather than runID because a single (workspace, month)
+//     bucket may exceed MaxRowsPerBatch and split into multiple
+//     pages — if those pages all shared runID in the key, page 2
+//     would silently overwrite page 1 in S3 while page 1's rows had
+//     already been deleted from the hot tier (permanent audit
+//     data loss). See WS-23 PR #68 Devin Review finding
+//     BUG_pr-review-job-92fe43f0a26c44ea817db9bacbc6c88d_0001 for
+//     the original walkthrough.
 //
 // The (workspace, month) shard size is the load-bearing trade-off:
 // large enough that the cold tier doesn't degrade into millions of
@@ -42,13 +58,13 @@
 //
 //   - Crash after PutObject, before RecordRun → S3 object is
 //     orphaned but rows are still in the hot tier. The next run
-//     re-archives them to a DIFFERENT object key (new run_id UUID
-//     suffix). Operators can sweep orphans by diffing ListObjects
-//     against audit_log_archive_runs.archive_object_key.
+//     re-archives them to a DIFFERENT object key (fresh batch_id
+//     UUID suffix). Operators can sweep orphans by diffing
+//     ListObjects against audit_log_archive_runs.archive_object_key.
 //   - Crash after RecordRun, before DeleteBatch → both the S3
 //     object and the run record committed, but rows are still in
 //     the hot tier. The next run re-archives them under a new
-//     run_id; the cold tier carries duplicate objects which the
+//     batch_id; the cold tier carries duplicate objects which the
 //     restore CLI dedupes by row id at read time.
 //   - DeleteBatch failure (after PutObject + RecordRun both
 //     succeeded) → same as the crash-after-RecordRun case: the
@@ -85,12 +101,21 @@ import (
 	"go.opentelemetry.io/otel/codes"
 )
 
-// minRetentionDays is the smallest hot-tier retention the archiver
+// MinRetentionDays is the smallest hot-tier retention the archiver
 // will execute against. Values below this likely indicate operator
 // error (e.g. mistyped "1" for "100") and would aggressively prune
 // legitimately-recent audit history. The CLI surfaces a clear error
 // rather than silently archiving.
-const minRetentionDays = 7
+//
+// Exported so internal/config can pin its clampAuditRetentionDays
+// ceiling/floor to the same constant and reject malformed env vars
+// at startup rather than letting them bubble up to NewArchiveService.
+const MinRetentionDays = 7
+
+// minRetentionDays is the unexported alias kept for compactness in
+// archive.go's own callers. Both names point at the same value;
+// MinRetentionDays is the canonical export.
+const minRetentionDays = MinRetentionDays
 
 // defaultMaxRowsPerBatch caps a single JSONL.gz upload. At ~500
 // bytes per audit row, 50k rows produces a ~25 MB uncompressed /
@@ -261,18 +286,31 @@ func (a *ArchiveService) Run(ctx context.Context) (*RunResult, error) {
 	// Group buckets by workspace so we can apply WorkspaceTimeout
 	// uniformly across one workspace's months and short-circuit a
 	// runaway tenant without affecting peers.
+	//
+	// Defense-in-depth grouping: ArchiveRepository.EnumerateWorkspaceMonths
+	// documents an ORDER BY workspace_id, year_month contract (see the
+	// interface docstring + PostgresArchiveRepository's SQL), so adjacent
+	// entries SHOULD share a workspace_id and a sequential collapse would
+	// work. We deliberately don't rely on that here — a future repository
+	// implementation (or a stale snapshot of one) returning unsorted rows
+	// would otherwise silently split one workspace into multiple groups,
+	// each starting its own WorkspaceTimeout clock. The two-pass map+slice
+	// grouping below is O(n) and produces a single group per workspace
+	// regardless of input ordering.
 	type wsBuckets struct {
 		workspaceID uuid.UUID
 		months      []WorkspaceAuditMonth
 	}
 	groups := make([]wsBuckets, 0)
-	currentWS := uuid.Nil
+	indexByWS := make(map[uuid.UUID]int, len(buckets))
 	for _, b := range buckets {
-		if b.WorkspaceID != currentWS {
+		idx, seen := indexByWS[b.WorkspaceID]
+		if !seen {
 			groups = append(groups, wsBuckets{workspaceID: b.WorkspaceID})
-			currentWS = b.WorkspaceID
+			idx = len(groups) - 1
+			indexByWS[b.WorkspaceID] = idx
 		}
-		groups[len(groups)-1].months = append(groups[len(groups)-1].months, b)
+		groups[idx].months = append(groups[idx].months, b)
 	}
 
 	for _, g := range groups {
@@ -310,15 +348,26 @@ func (a *ArchiveService) archiveWorkspace(
 		attribute.Int("audit.archive.workspace_buckets", len(months)),
 	)
 
+	// wsProcessed tracks how many of THIS workspace's months we've
+	// fully attempted (success or failure) so the timeout branch can
+	// correctly attribute the remaining months to the timeout. Using
+	// the run-level RunResult.WorkspaceMonthsOK + WorkspaceMonthsFailed
+	// counters here would be wrong — those are cumulative across all
+	// workspaces, so months processed by a prior workspace would
+	// inflate the "processed" count and undercount this workspace's
+	// timed-out remainder.
+	wsProcessed := 0
 	for _, m := range months {
 		if err := wsCtx.Err(); err != nil {
-			result.WorkspaceMonthsFailed += len(months) - result.workspaceMonthsProcessed(workspaceID, months)
-			result.Errors = append(result.Errors, fmt.Errorf("workspace %s timed out: %w", workspaceID, err))
+			remaining := len(months) - wsProcessed
+			result.WorkspaceMonthsFailed += remaining
+			result.Errors = append(result.Errors, fmt.Errorf("workspace %s timed out with %d month(s) unprocessed: %w", workspaceID, remaining, err))
 			span.RecordError(err)
 			span.SetStatus(codes.Error, "workspace timeout")
 			return
 		}
 		rows, bytesUp, err := a.archiveBucket(wsCtx, runID, cutoff, m)
+		wsProcessed++
 		if err != nil {
 			result.WorkspaceMonthsFailed++
 			result.Errors = append(result.Errors, fmt.Errorf("workspace %s month %s: %w", workspaceID, m.YearMonth, err))
@@ -336,26 +385,6 @@ func (a *ArchiveService) archiveWorkspace(
 			a.metrics.RecordAuditArchiveBucket(archiveBucketResultOK, rows, bytesUp)
 		}
 	}
-}
-
-// workspaceMonthsProcessed is a small accounting helper used when
-// a WorkspaceTimeout fires mid-loop so the RunResult correctly
-// counts the unprocessed months as failures rather than as silent
-// successes.
-func (r *RunResult) workspaceMonthsProcessed(_ uuid.UUID, months []WorkspaceAuditMonth) int {
-	// All processed buckets — successful or failed — are already
-	// counted in OK + Failed; the difference from len(months) is
-	// the unprocessed remainder. We deliberately keep this on
-	// RunResult so the timeout branch can compute it without
-	// caching state externally.
-	processed := r.WorkspaceMonthsOK + r.WorkspaceMonthsFailed
-	// Clamp to len(months) in case a future change makes this
-	// path reachable mid-aggregate (currently it's only called
-	// per-workspace, so processed <= len(months) holds).
-	if processed > len(months) {
-		return len(months)
-	}
-	return processed
 }
 
 // archiveBucket uploads + deletes one (workspace, month) batch. May
@@ -395,7 +424,16 @@ func (a *ArchiveService) archiveBucket(ctx context.Context, runID uuid.UUID, cut
 			return totalRows, totalBytes, fmt.Errorf("encode jsonl.gz: %w", err)
 		}
 
-		objectKey := a.buildObjectKey(m.WorkspaceID, m.YearMonth, runID)
+		// batchID identifies THIS upload page uniquely within the
+		// (workspace, month) bucket. runID is reused across batches
+		// (one run can produce many batches), but the S3 key MUST
+		// be per-batch — otherwise a second batch within the same
+		// bucket would overwrite the first one in S3 while the
+		// first batch's rows had already been deleted from the hot
+		// tier (permanent audit data loss). See package docstring
+		// "Design" section.
+		batchID := uuid.New()
+		objectKey := a.buildObjectKey(m.WorkspaceID, m.YearMonth, batchID)
 
 		uploadCtx, cancel := context.WithTimeout(ctx, a.cfg.UploadTimeout)
 		err = a.storage.PutObject(uploadCtx, objectKey, "application/gzip", body)
@@ -470,26 +508,28 @@ func (a *ArchiveService) archiveBucket(ctx context.Context, runID uuid.UUID, cut
 // stable so the restore tool can list a workspace's full archive
 // history with a single prefix scan:
 //
-//	{prefix}{workspace_id}/{year-month}/{run_id}.jsonl.gz
+//	{prefix}{workspace_id}/{year-month}/{batch_id}.jsonl.gz
 //
-// run_id is per-archiver-invocation, not per-bucket, so multiple
-// buckets that share a run still produce distinct keys via the
-// different {year-month} segment. Within a single (workspace, month)
-// bucket, multiple JSONL.gz uploads (when MaxRowsPerBatch overflows)
-// share the run_id but the FetchBatch cursor advances, so each
-// upload is a distinct slice of rows — duplicates are not produced
-// on the happy path.
+// batch_id is a fresh UUID generated PER S3 upload, not per
+// archiver invocation. This is load-bearing: a single (workspace,
+// month) bucket whose row count exceeds MaxRowsPerBatch produces
+// multiple pages, and each page MUST land at a distinct S3 key —
+// otherwise the second page would silently overwrite the first
+// while the first page's rows had already been deleted from the
+// hot tier (permanent audit data loss). The per-invocation runID
+// is preserved on the audit_log_archive_runs record so an operator
+// can correlate all batches from one tick via WHERE run_id = ?.
 //
-// However, when a previous run failed AFTER S3 upload but BEFORE
-// the DELETE+RecordRun transaction, the next run sees the same
-// rows and uploads them under a NEW run_id, producing a duplicate
-// object. The restore tool dedupes by id.
-func (a *ArchiveService) buildObjectKey(workspaceID uuid.UUID, yearMonth string, runID uuid.UUID) string {
+// When a previous run failed AFTER S3 upload but BEFORE the
+// DELETE+RecordRun transaction, the next run sees the same rows
+// and uploads them under a NEW batch_id, producing a duplicate
+// object. The restore tool dedupes by row id at read time.
+func (a *ArchiveService) buildObjectKey(workspaceID uuid.UUID, yearMonth string, batchID uuid.UUID) string {
 	return fmt.Sprintf("%s%s/%s/%s.jsonl.gz",
 		a.cfg.ArchivePrefix,
 		workspaceID.String(),
 		yearMonth,
-		runID.String(),
+		batchID.String(),
 	)
 }
 

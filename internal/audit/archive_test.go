@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"sort"
 	"strings"
 	"sync"
 	"testing"
@@ -83,7 +84,14 @@ func (f *fakeArchiveRepo) FetchBatch(_ context.Context, workspaceID uuid.UUID, y
 	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	var out []*Entry
+	// Production PostgresArchiveRepository.FetchBatch sorts by id ASC
+	// and paginates via id > $after. Mirror that contract here:
+	// iterate over a copy sorted by UUID-string and apply the cursor
+	// in the same order. Iterating in insertion order while filtering
+	// by UUID-string comparison would produce inconsistent pagination
+	// when row IDs aren't generated in lexicographic order (which is
+	// the case for uuid.New() in tests).
+	candidates := make([]*Entry, 0, len(f.rows))
 	for _, r := range f.rows {
 		if f.deleted[r.ID] {
 			continue
@@ -97,15 +105,18 @@ func (f *fakeArchiveRepo) FetchBatch(_ context.Context, workspaceID uuid.UUID, y
 		if r.CreatedAt.UTC().Format("2006-01") != yearMonth {
 			continue
 		}
-		if r.ID.String() <= after.String() && after != uuid.Nil {
+		if after != uuid.Nil && r.ID.String() <= after.String() {
 			continue
 		}
-		out = append(out, r)
-		if len(out) >= limit {
-			break
-		}
+		candidates = append(candidates, r)
 	}
-	return out, nil
+	sort.Slice(candidates, func(i, j int) bool {
+		return candidates[i].ID.String() < candidates[j].ID.String()
+	})
+	if len(candidates) > limit {
+		candidates = candidates[:limit]
+	}
+	return candidates, nil
 }
 
 func (f *fakeArchiveRepo) DeleteBatch(_ context.Context, workspaceID uuid.UUID, ids []uuid.UUID) (int, error) {
@@ -336,6 +347,72 @@ func TestArchiveService_Run_RejectsLowRetention(t *testing.T) {
 	}
 }
 
+// TestArchiveService_archiveWorkspace_TimeoutAttributesRemainingMonths
+// is the regression test for the WS-23 PR #68 yellow-flag finding
+// (BUG_pr-review-job-92fe43f0a26c44ea817db9bacbc6c88d_0002): when
+// WorkspaceTimeout fired mid-loop, the previous workspaceMonthsProcessed
+// helper summed the RUN-LEVEL WorkspaceMonthsOK + WorkspaceMonthsFailed
+// counters, which are cumulative across ALL workspaces — so months
+// processed by an earlier workspace inflated the "processed" count for
+// this workspace and undercounted its timed-out remainder. The fix
+// tracks a local per-workspace wsProcessed counter inside
+// archiveWorkspace. This test exercises a 2-workspace, 3-month-each
+// layout where workspace 1 finishes all 3 months OK; then workspace 2
+// has its context already cancelled at function entry so all 3 of its
+// months should land in WorkspaceMonthsFailed.
+func TestArchiveService_archiveWorkspace_TimeoutAttributesRemainingMonths(t *testing.T) {
+	ws1 := uuid.New()
+	ws2 := uuid.New()
+	now := time.Date(2024, 6, 15, 12, 0, 0, 0, time.UTC)
+	old := now.AddDate(0, 0, -45)
+
+	repo := newFakeRepo(nil)
+	store := newFakeStorage()
+	svc := newTestService(t, repo, store)
+	svc.nowFn = func() time.Time { return now }
+
+	// Pre-fill the result as if workspace 1 had completed 3 months
+	// successfully (run-level counters are nonzero before workspace
+	// 2 starts). The bug would observe these counters when computing
+	// workspace 2's unprocessed remainder.
+	result := &RunResult{
+		RunID:                uuid.New(),
+		CutoffTime:           old,
+		WorkspaceMonthsOK:    3, // ws1's 3 months
+		WorkspaceMonthsTotal: 6,
+	}
+
+	// Workspace 2 has 3 months pending; we cancel the parent ctx
+	// immediately so the wsCtx.Err() check fires before the first
+	// archiveBucket call. All 3 ws2 months must be attributed to
+	// Failed, not undercounted as 0 (which is what the bug
+	// produced when ws1's OK=3 made the helper return processed=3
+	// and thus remaining = 3 - 3 = 0).
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	months := []WorkspaceAuditMonth{
+		{WorkspaceID: ws2, YearMonth: "2024-01", RowCount: 1},
+		{WorkspaceID: ws2, YearMonth: "2024-02", RowCount: 1},
+		{WorkspaceID: ws2, YearMonth: "2024-03", RowCount: 1},
+	}
+	svc.archiveWorkspace(ctx, result.RunID, old, ws2, months, result)
+
+	if result.WorkspaceMonthsFailed != 3 {
+		t.Fatalf("WorkspaceMonthsFailed = %d, want 3 (all ws2 months attributed to timeout)", result.WorkspaceMonthsFailed)
+	}
+	if result.WorkspaceMonthsOK != 3 {
+		t.Errorf("WorkspaceMonthsOK = %d, want 3 (ws1's pre-existing count unchanged)", result.WorkspaceMonthsOK)
+	}
+	if len(result.Errors) != 1 {
+		t.Fatalf("Errors = %d, want 1 timeout error", len(result.Errors))
+	}
+	if !strings.Contains(result.Errors[0].Error(), "3 month(s) unprocessed") {
+		t.Errorf("err = %v, want '3 month(s) unprocessed' attribution", result.Errors[0])
+	}
+	_ = ws1 // ws1 only appears in the result counters
+}
+
 func TestArchiveService_Run_NoRowsEligible(t *testing.T) {
 	ws := uuid.New()
 	now := time.Date(2024, 6, 15, 12, 0, 0, 0, time.UTC)
@@ -498,11 +575,115 @@ func TestArchiveService_buildObjectKey_Format(t *testing.T) {
 		t.Fatal(err)
 	}
 	ws := uuid.MustParse("11111111-2222-3333-4444-555555555555")
-	runID := uuid.MustParse("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee")
-	got := svc.buildObjectKey(ws, "2024-03", runID)
+	batchID := uuid.MustParse("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee")
+	got := svc.buildObjectKey(ws, "2024-03", batchID)
 	want := "audit-archive/11111111-2222-3333-4444-555555555555/2024-03/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee.jsonl.gz"
 	if got != want {
 		t.Errorf("buildObjectKey = %q, want %q", got, want)
+	}
+}
+
+// TestArchiveService_Run_MultipleBatchesProduceDistinctKeys is the
+// regression test for the WS-23 PR #68 critical bug
+// (BUG_pr-review-job-92fe43f0a26c44ea817db9bacbc6c88d_0001):
+// when one (workspace, month) bucket exceeded MaxRowsPerBatch, the
+// archiveBucket loop used to call buildObjectKey with the run-level
+// runID for every page, so the second page silently overwrote the
+// first page's S3 object while page 1's rows had already been
+// deleted from the hot tier (permanent audit data loss). The fix
+// generates a fresh batchID per loop iteration and threads it into
+// the S3 key. This test pins three invariants:
+//
+//   - Multiple PutObject calls happen (one per page).
+//   - Each PutObject lands at a DISTINCT S3 key.
+//   - All input rows survive into the union of all uploaded objects
+//     (decoded payloads cover every original row id) — i.e. no page
+//     was overwritten in S3.
+func TestArchiveService_Run_MultipleBatchesProduceDistinctKeys(t *testing.T) {
+	ws := uuid.New()
+	now := time.Date(2024, 6, 15, 12, 0, 0, 0, time.UTC)
+	old := now.AddDate(0, 0, -45)
+
+	// 5 rows in the same (workspace, month) bucket, all archive-
+	// eligible. With MaxRowsPerBatch=2 below, this forces three
+	// FetchBatch iterations (2 + 2 + 1) inside archiveBucket.
+	rows := []*Entry{
+		makeEntry(t, ws, old.Add(0*time.Minute)),
+		makeEntry(t, ws, old.Add(1*time.Minute)),
+		makeEntry(t, ws, old.Add(2*time.Minute)),
+		makeEntry(t, ws, old.Add(3*time.Minute)),
+		makeEntry(t, ws, old.Add(4*time.Minute)),
+	}
+
+	repo := newFakeRepo(rows)
+	store := newFakeStorage()
+	svc, err := NewArchiveService(repo, store, ArchiveServiceConfig{
+		RetentionDays:   30,
+		ArchivePrefix:   "audit-archive/",
+		MaxRowsPerBatch: 2,
+	})
+	if err != nil {
+		t.Fatalf("NewArchiveService: %v", err)
+	}
+	svc.nowFn = func() time.Time { return now }
+
+	result, err := svc.Run(context.Background())
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if result.RowsArchived != len(rows) {
+		t.Fatalf("RowsArchived = %d, want %d", result.RowsArchived, len(rows))
+	}
+	if len(result.Errors) != 0 {
+		t.Fatalf("Errors = %v, want none", result.Errors)
+	}
+
+	// Three PUTs (2+2+1). Each must land at a distinct S3 key.
+	if store.putCount != 3 {
+		t.Fatalf("store.putCount = %d, want 3", store.putCount)
+	}
+	store.mu.Lock()
+	keys := make([]string, 0, len(store.objects))
+	for k := range store.objects {
+		keys = append(keys, k)
+	}
+	store.mu.Unlock()
+	if len(keys) != 3 {
+		t.Fatalf("distinct object keys = %d, want 3 (pages collided in S3): %v", len(keys), keys)
+	}
+
+	// Every input row must be present in exactly one uploaded
+	// object — i.e. no page was overwritten by a subsequent PUT.
+	seen := make(map[uuid.UUID]int)
+	for _, k := range keys {
+		for _, e := range store.decodeJSONLGz(t, k) {
+			seen[e.ID]++
+		}
+	}
+	if len(seen) != len(rows) {
+		t.Fatalf("unique rows decoded = %d, want %d (data loss across batches): seen = %v", len(seen), len(rows), seen)
+	}
+	for _, r := range rows {
+		if seen[r.ID] != 1 {
+			t.Errorf("row %v decoded %d times across all archive objects, want exactly 1", r.ID, seen[r.ID])
+		}
+	}
+
+	// Each batch must also produce its own audit_log_archive_runs
+	// row carrying that batch's S3 key — otherwise the orphan-
+	// sweep query (ListObjects minus archive_object_key) would
+	// false-positive every successful page beyond the first.
+	if len(repo.runs) != 3 {
+		t.Fatalf("runs recorded = %d, want 3 (one per batch)", len(repo.runs))
+	}
+	runKeys := make(map[string]bool, 3)
+	for _, r := range repo.runs {
+		runKeys[r.ArchiveObjectKey] = true
+	}
+	for _, k := range keys {
+		if !runKeys[k] {
+			t.Errorf("S3 key %q has no matching audit_log_archive_runs row", k)
+		}
 	}
 }
 
