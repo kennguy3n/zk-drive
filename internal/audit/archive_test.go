@@ -26,10 +26,24 @@ type fakeArchiveRepo struct {
 	runs     []*ArchiveRunRecord   // append-only insertion order
 	deleted  map[uuid.UUID]bool    // ids the archiver asked to delete
 	failures map[string]error      // method -> error to return next time
+	// failureAfterN[method] = N schedules an error on the (N+1)-th
+	// call to that method, so a test can let the first N calls run
+	// normally and only fail the N+1-th. Useful for pinning
+	// partial-page accounting: page 1 succeeds end-to-end, page 2
+	// fails at a specific step. Decremented on each call until 0,
+	// at which point the failure fires + the entry is cleared.
+	failureAfterN map[string]int
+	failureAfterErr map[string]error
 }
 
 func newFakeRepo(rows []*Entry) *fakeArchiveRepo {
-	return &fakeArchiveRepo{rows: rows, deleted: make(map[uuid.UUID]bool), failures: make(map[string]error)}
+	return &fakeArchiveRepo{
+		rows:            rows,
+		deleted:         make(map[uuid.UUID]bool),
+		failures:        make(map[string]error),
+		failureAfterN:   make(map[string]int),
+		failureAfterErr: make(map[string]error),
+	}
 }
 
 func (f *fakeArchiveRepo) injectFailure(method string, err error) {
@@ -38,15 +52,37 @@ func (f *fakeArchiveRepo) injectFailure(method string, err error) {
 	f.failures[method] = err
 }
 
+// injectFailureAfter schedules an error on the (n+1)-th call to method.
+// n=0 fails the very next call (same as injectFailure). n=1 lets the
+// first call through and fails the second. Used by
+// TestArchiveService_Run_PartialPageSuccessIsAttributed to fail the
+// SECOND DeleteBatch (page 2) while letting page 1 complete
+// end-to-end — the configuration the partial-page accounting fix
+// must handle correctly.
+func (f *fakeArchiveRepo) injectFailureAfter(method string, n int, err error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.failureAfterN[method] = n
+	f.failureAfterErr[method] = err
+}
+
 func (f *fakeArchiveRepo) consumeFailure(method string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	err, ok := f.failures[method]
-	if !ok {
-		return nil
+	if err, ok := f.failures[method]; ok {
+		delete(f.failures, method)
+		return err
 	}
-	delete(f.failures, method)
-	return err
+	if n, ok := f.failureAfterN[method]; ok {
+		if n <= 0 {
+			err := f.failureAfterErr[method]
+			delete(f.failureAfterN, method)
+			delete(f.failureAfterErr, method)
+			return err
+		}
+		f.failureAfterN[method] = n - 1
+	}
+	return nil
 }
 
 func (f *fakeArchiveRepo) EnumerateWorkspaceMonths(_ context.Context, cutoff time.Time) ([]WorkspaceAuditMonth, error) {
@@ -82,6 +118,10 @@ func (f *fakeArchiveRepo) FetchBatch(_ context.Context, workspaceID uuid.UUID, y
 	if err := f.consumeFailure("FetchBatch"); err != nil {
 		return nil, err
 	}
+	monthStart, monthEnd, err := parseYearMonthRange(yearMonth)
+	if err != nil {
+		return nil, err
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	// Production PostgresArchiveRepository.FetchBatch sorts by id ASC
@@ -91,6 +131,11 @@ func (f *fakeArchiveRepo) FetchBatch(_ context.Context, workspaceID uuid.UUID, y
 	// by UUID-string comparison would produce inconsistent pagination
 	// when row IDs aren't generated in lexicographic order (which is
 	// the case for uuid.New() in tests).
+	//
+	// Month membership uses the same [monthStart, monthEnd) half-open
+	// range the production SQL applies via parseYearMonthRange, so a
+	// row created at exactly midnight on the first of a month belongs
+	// to that month (and not the prior one's last-second boundary).
 	candidates := make([]*Entry, 0, len(f.rows))
 	for _, r := range f.rows {
 		if f.deleted[r.ID] {
@@ -102,7 +147,8 @@ func (f *fakeArchiveRepo) FetchBatch(_ context.Context, workspaceID uuid.UUID, y
 		if r.CreatedAt.After(cutoff) || r.CreatedAt.Equal(cutoff) {
 			continue
 		}
-		if r.CreatedAt.UTC().Format("2006-01") != yearMonth {
+		created := r.CreatedAt.UTC()
+		if created.Before(monthStart) || !created.Before(monthEnd) {
 			continue
 		}
 		if after != uuid.Nil && r.ID.String() <= after.String() {
@@ -495,13 +541,21 @@ func (f *failingFirstPut) PutObject(ctx context.Context, key, ct string, body []
 }
 
 func TestArchiveService_Run_DeleteFailureProducesPartialSuccess(t *testing.T) {
-	// The DELETE step in archiveBucket runs AFTER RecordRun
-	// commits, so a delete failure means: S3 object exists,
-	// run record exists, hot rows still present. The next run
-	// will see the same rows and re-upload them under a new
-	// run_id; the cold tier has a duplicate object. We assert
-	// that the bucket returns an error and the rows ARE NOT
-	// counted as successfully archived in the metrics aggregate.
+	// The DELETE step in archiveBucket runs AFTER PutObject +
+	// RecordRun commit, so a DeleteBatch failure on a single-page
+	// bucket means: S3 object exists, archive_runs row exists,
+	// hot rows still present. The next run sees the same rows and
+	// re-uploads them under a fresh batch_id; the cold tier
+	// carries one duplicate object. We assert:
+	//
+	//   - the bucket is flagged as failed (WorkspaceMonthsFailed=1)
+	//   - the row WAS durably committed to cold storage (the row
+	//     count + bytes ARE attributed to RowsArchived /
+	//     BytesUploaded so operators see honest counters even
+	//     when the hot-tier delete failed)
+	//   - the hot row is still present (no false delete)
+	//   - the audit_log_archive_runs INSERT did happen
+	//   - the S3 PUT did happen
 	ws := uuid.New()
 	now := time.Date(2024, 6, 15, 12, 0, 0, 0, time.UTC)
 	old := now.AddDate(0, 0, -45)
@@ -511,6 +565,8 @@ func TestArchiveService_Run_DeleteFailureProducesPartialSuccess(t *testing.T) {
 	store := newFakeStorage()
 	svc := newTestService(t, repo, store)
 	svc.nowFn = func() time.Time { return now }
+	spy := &spyMetricsRecorder{}
+	svc.WithMetrics(spy)
 
 	repo.injectFailure("DeleteBatch", errors.New("simulated DB error"))
 
@@ -520,6 +576,16 @@ func TestArchiveService_Run_DeleteFailureProducesPartialSuccess(t *testing.T) {
 	}
 	if result.WorkspaceMonthsFailed != 1 {
 		t.Fatalf("WorkspaceMonthsFailed = %d, want 1", result.WorkspaceMonthsFailed)
+	}
+	// Fix WS-23 PR #68 finding #1: the page DID upload + record;
+	// the rows it represents MUST be counted in the aggregate
+	// (otherwise zkdrive_audit_archive_rows_total undercounts
+	// actual cold-tier activity).
+	if result.RowsArchived != 1 {
+		t.Errorf("RowsArchived = %d, want 1 (DELETE failed AFTER S3 + RecordRun committed; rows are in cold storage)", result.RowsArchived)
+	}
+	if result.BytesUploaded <= 0 {
+		t.Errorf("BytesUploaded = %d, want > 0 (the page WAS uploaded)", result.BytesUploaded)
 	}
 	if repo.deleted[rows[0].ID] {
 		t.Errorf("row was unexpectedly deleted despite DeleteBatch failure")
@@ -532,6 +598,193 @@ func TestArchiveService_Run_DeleteFailureProducesPartialSuccess(t *testing.T) {
 	if store.putCount != 1 {
 		t.Errorf("store.putCount = %d, want 1", store.putCount)
 	}
+	// Bucket metric: the failed-after-commit path emits the
+	// "partial" label (rows>0 alongside err), distinguishing the
+	// "rows are durably in cold storage" case from the "nothing
+	// got committed" case.
+	if len(spy.buckets) != 1 {
+		t.Fatalf("metric bucket calls = %d, want 1", len(spy.buckets))
+	}
+	if spy.buckets[0].result != archiveBucketResultPartial {
+		t.Errorf("bucket result label = %q, want %q (single-page commit followed by DELETE failure)", spy.buckets[0].result, archiveBucketResultPartial)
+	}
+	if spy.buckets[0].rows != 1 {
+		t.Errorf("bucket metric rows = %d, want 1 (the partial-page count must be passed through, not zeroed)", spy.buckets[0].rows)
+	}
+}
+
+// TestArchiveService_Run_PartialPageSuccessIsAttributed is the
+// regression test for the WS-23 PR #68 finding #1
+// (ANALYSIS_pr-review-job-275fde026190462681d85c491dca8a38_0001):
+// when a (workspace, month) bucket exceeds MaxRowsPerBatch and
+// the bucket fails on page N AFTER pages 1..N-1 have been durably
+// committed, the successfully-committed pages' rows and bytes
+// MUST be counted in RunResult.RowsArchived / BytesUploaded and
+// the bucket metric MUST receive a non-zero rows count with the
+// "partial" label \u2014 otherwise operators see a sustained
+// undercount in zkdrive_audit_archive_rows_total relative to
+// actual cold-tier activity.
+func TestArchiveService_Run_PartialPageSuccessIsAttributed(t *testing.T) {
+	ws := uuid.New()
+	now := time.Date(2024, 6, 15, 12, 0, 0, 0, time.UTC)
+	old := now.AddDate(0, 0, -45)
+
+	// 4 rows in one (workspace, month) bucket; MaxRowsPerBatch=2
+	// yields two pages (2 + 2). Page 1 completes end-to-end; the
+	// SECOND DeleteBatch call fails so page 2 fails mid-flight
+	// but page 1 is durably in cold storage.
+	rows := []*Entry{
+		makeEntry(t, ws, old.Add(0*time.Minute)),
+		makeEntry(t, ws, old.Add(1*time.Minute)),
+		makeEntry(t, ws, old.Add(2*time.Minute)),
+		makeEntry(t, ws, old.Add(3*time.Minute)),
+	}
+
+	repo := newFakeRepo(rows)
+	store := newFakeStorage()
+	svc, err := NewArchiveService(repo, store, ArchiveServiceConfig{
+		RetentionDays:   30,
+		ArchivePrefix:   "audit-archive/",
+		MaxRowsPerBatch: 2,
+	})
+	if err != nil {
+		t.Fatalf("NewArchiveService: %v", err)
+	}
+	svc.nowFn = func() time.Time { return now }
+	spy := &spyMetricsRecorder{}
+	svc.WithMetrics(spy)
+
+	// n=1: first DeleteBatch succeeds, second fails. So page 1
+	// goes all the way through (PUT + RecordRun + DELETE); page 2
+	// completes PUT + RecordRun but fails at DELETE.
+	repo.injectFailureAfter("DeleteBatch", 1, errors.New("simulated DB error on page 2"))
+
+	result, err := svc.Run(context.Background())
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	// Bucket is marked failed.
+	if result.WorkspaceMonthsFailed != 1 {
+		t.Errorf("WorkspaceMonthsFailed = %d, want 1", result.WorkspaceMonthsFailed)
+	}
+	if result.WorkspaceMonthsOK != 0 {
+		t.Errorf("WorkspaceMonthsOK = %d, want 0", result.WorkspaceMonthsOK)
+	}
+
+	// Page 1 (2 rows) committed end-to-end: hot rows deleted, S3
+	// object present. Page 2 (2 rows) uploaded + recorded but
+	// hot rows still present. Both pages' rows + bytes are real
+	// cold-tier activity and MUST be counted.
+	if result.RowsArchived != 4 {
+		t.Errorf("RowsArchived = %d, want 4 (both pages were durably uploaded to S3 + recorded in audit_log_archive_runs before page 2's DELETE failed)", result.RowsArchived)
+	}
+	if result.BytesUploaded <= 0 {
+		t.Errorf("BytesUploaded = %d, want > 0", result.BytesUploaded)
+	}
+
+	// Both S3 PUTs happened and produced distinct objects.
+	if store.putCount != 2 {
+		t.Errorf("store.putCount = %d, want 2 (one per page)", store.putCount)
+	}
+	if len(repo.runs) != 2 {
+		t.Errorf("runs recorded = %d, want 2 (one per page, both pages reached RecordRun)", len(repo.runs))
+	}
+
+	// Page 1's hot rows were deleted (page 1's DELETE
+	// succeeded); page 2's hot rows were NOT deleted (page 2's
+	// DELETE failed).
+	deletedCount := 0
+	for _, r := range rows {
+		if repo.deleted[r.ID] {
+			deletedCount++
+		}
+	}
+	if deletedCount != 2 {
+		t.Errorf("deleted hot rows = %d, want 2 (page 1's 2 rows; page 2's 2 rows must remain in hot tier for next run)", deletedCount)
+	}
+
+	// Bucket-level metric: ONE call with label="partial" and
+	// rows=4 (all uploaded pages, NOT zero). This is the precise
+	// signal an operator watching zkdrive_audit_archive_rows_total
+	// vs zkdrive_audit_archive_buckets_total{result="partial"}
+	// needs to see honest counter movement on partial-failure
+	// runs.
+	if len(spy.buckets) != 1 {
+		t.Fatalf("metric bucket calls = %d, want 1", len(spy.buckets))
+	}
+	if spy.buckets[0].result != archiveBucketResultPartial {
+		t.Errorf("bucket result label = %q, want %q", spy.buckets[0].result, archiveBucketResultPartial)
+	}
+	if spy.buckets[0].rows != 4 {
+		t.Errorf("bucket metric rows = %d, want 4 (partial pages' rows must NOT be zeroed)", spy.buckets[0].rows)
+	}
+	if spy.buckets[0].bytes <= 0 {
+		t.Errorf("bucket metric bytes = %d, want > 0", spy.buckets[0].bytes)
+	}
+}
+
+// TestArchiveService_Run_StartedAndCompletedDiffer is the regression
+// test for the WS-23 PR #68 finding #3
+// (ANALYSIS_pr-review-job-275fde026190462681d85c491dca8a38_0003):
+// audit_log_archive_runs.started_at MUST reflect the moment the
+// page's processing began (before FetchBatch), and completed_at
+// MUST reflect the moment after the S3 upload finished. Capturing
+// both at the same instant produced an always-zero-duration column
+// that future admin-console / duration dashboards could not use.
+func TestArchiveService_Run_StartedAndCompletedDiffer(t *testing.T) {
+	ws := uuid.New()
+	now := time.Date(2024, 6, 15, 12, 0, 0, 0, time.UTC)
+	old := now.AddDate(0, 0, -45)
+	rows := []*Entry{makeEntry(t, ws, old)}
+
+	repo := newFakeRepo(rows)
+	store := newFakeStorage()
+	svc := newTestService(t, repo, store)
+
+	// nowFn returns monotonically increasing instants on each
+	// call so we can observe whether the service captures two
+	// distinct samples (started + completed) per page.
+	var nowCalls int
+	svc.nowFn = func() time.Time {
+		nowCalls++
+		return now.Add(time.Duration(nowCalls) * time.Millisecond)
+	}
+
+	result, err := svc.Run(context.Background())
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if result.RowsArchived != 1 {
+		t.Fatalf("RowsArchived = %d, want 1", result.RowsArchived)
+	}
+	if len(repo.runs) != 1 {
+		t.Fatalf("runs recorded = %d, want 1", len(repo.runs))
+	}
+	rec := repo.runs[0]
+	if !rec.CompletedAt.After(rec.StartedAt) {
+		t.Errorf("CompletedAt (%s) must be strictly after StartedAt (%s); they were captured as the same instant (zero-duration row)", rec.CompletedAt, rec.StartedAt)
+	}
+}
+
+// spyMetricsRecorder captures every RecordAuditArchiveBucket call
+// so tests can assert per-bucket label + counts (notably for the
+// partial-page accounting fix).
+type spyMetricsRecorder struct {
+	mu      sync.Mutex
+	buckets []spyBucketCall
+}
+
+type spyBucketCall struct {
+	result string
+	rows   int
+	bytes  int64
+}
+
+func (s *spyMetricsRecorder) RecordAuditArchiveBucket(result string, rows int, bytes int64) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.buckets = append(s.buckets, spyBucketCall{result: result, rows: rows, bytes: bytes})
 }
 
 func TestArchiveService_Run_MultipleWorkspaces(t *testing.T) {
@@ -684,6 +937,64 @@ func TestArchiveService_Run_MultipleBatchesProduceDistinctKeys(t *testing.T) {
 		if !runKeys[k] {
 			t.Errorf("S3 key %q has no matching audit_log_archive_runs row", k)
 		}
+	}
+}
+
+// TestParseYearMonthRange pins the boundary semantics the SQL
+// FetchBatch query depends on after the WS-23 PR #68 finding #2
+// fix (ANALYSIS_pr-review-job-275fde026190462681d85c491dca8a38_0002):
+// the half-open [monthStart, monthEnd) UTC range replacing the
+// non-SARGable to_char(date_trunc(...)) predicate must include
+// the first instant of the month and exclude the first instant
+// of the next month \u2014 anything else silently re-classifies rows
+// near the month boundary.
+func TestParseYearMonthRange(t *testing.T) {
+	cases := []struct {
+		yearMonth string
+		wantStart time.Time
+		wantEnd   time.Time
+		wantErr   bool
+	}{
+		{
+			yearMonth: "2024-03",
+			wantStart: time.Date(2024, 3, 1, 0, 0, 0, 0, time.UTC),
+			wantEnd:   time.Date(2024, 4, 1, 0, 0, 0, 0, time.UTC),
+		},
+		{
+			// Year rollover: December's monthEnd is the next year's January 1.
+			yearMonth: "2024-12",
+			wantStart: time.Date(2024, 12, 1, 0, 0, 0, 0, time.UTC),
+			wantEnd:   time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC),
+		},
+		{
+			// Leap February: 2024-02 ends at 2024-03-01.
+			yearMonth: "2024-02",
+			wantStart: time.Date(2024, 2, 1, 0, 0, 0, 0, time.UTC),
+			wantEnd:   time.Date(2024, 3, 1, 0, 0, 0, 0, time.UTC),
+		},
+		{yearMonth: "2024-13", wantErr: true},
+		{yearMonth: "not-a-month", wantErr: true},
+		{yearMonth: "", wantErr: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.yearMonth, func(t *testing.T) {
+			start, end, err := parseYearMonthRange(tc.yearMonth)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("parseYearMonthRange(%q) err = nil, want error", tc.yearMonth)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("parseYearMonthRange(%q) err = %v", tc.yearMonth, err)
+			}
+			if !start.Equal(tc.wantStart) {
+				t.Errorf("start = %s, want %s", start, tc.wantStart)
+			}
+			if !end.Equal(tc.wantEnd) {
+				t.Errorf("end = %s, want %s", end, tc.wantEnd)
+			}
+		})
 	}
 }
 

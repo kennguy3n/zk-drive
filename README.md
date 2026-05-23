@@ -542,7 +542,7 @@ Exported series (under the `zkdrive_` prefix):
 - `zkdrive_gc_workspace_errors_total` — counter
 - `zkdrive_gc_run_duration_seconds` — histogram
 - `zkdrive_audit_archive_runs_total{result}` — counter (`result` ∈ `ok|partial|error|cancelled`)
-- `zkdrive_audit_archive_buckets_total{result}` — counter (per `(workspace, year-month)` bucket; `result` ∈ `ok|error`)
+- `zkdrive_audit_archive_buckets_total{result}` — counter (per `(workspace, year-month)` bucket; `result` ∈ `ok|partial|error`). `partial` means the bucket exceeded `AUDIT_LOG_ARCHIVE_MAX_ROWS_PER_BATCH` and split across multiple pages, of which some completed (S3 PUT + RecordRun + hot-tier DELETE) before a later page failed; the durably-committed pages' rows + bytes ARE included in `zkdrive_audit_archive_rows_total` / `_bytes_total`. The remaining rows are still in the hot tier and will be picked up by the next run.
 - `zkdrive_audit_archive_rows_total` — counter (audit rows successfully moved to cold tier)
 - `zkdrive_audit_archive_bytes_total` — counter (uncompressed JSONL bytes uploaded)
 - `zkdrive_audit_archive_run_duration_seconds` — histogram

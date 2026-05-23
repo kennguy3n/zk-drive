@@ -16,12 +16,22 @@ const (
 	AuditArchiveResultCancelled = "cancelled"
 )
 
-// AuditArchiveBucketResultOK / Error are the bucket-level label
-// values for auditArchiveBucketsTotal. Bucket here means one
+// AuditArchiveBucketResultOK / Error / Partial are the bucket-level
+// label values for auditArchiveBucketsTotal. Bucket here means one
 // (workspace, year-month) tuple.
+//
+// "partial" means the bucket exceeded MaxRowsPerBatch and split
+// into multiple pages; pages 1..N-1 were durably committed (S3
+// PUT + RecordRun + DeleteBatch all succeeded) but page N failed.
+// Those committed pages' rows + bytes ARE counted in
+// auditArchiveRowsTotal / auditArchiveBytesTotal — "partial" just
+// signals that the bucket as a whole did not finish. The remaining
+// rows are still in the hot tier and will be archived on the next
+// run under a fresh batch_id.
 const (
-	AuditArchiveBucketResultOK    = "ok"
-	AuditArchiveBucketResultError = "error"
+	AuditArchiveBucketResultOK      = "ok"
+	AuditArchiveBucketResultError   = "error"
+	AuditArchiveBucketResultPartial = "partial"
 )
 
 // RecordAuditArchiveRun emits the per-invocation run counter and
@@ -35,10 +45,19 @@ func (m *Metrics) RecordAuditArchiveRun(result string, durationSeconds float64) 
 
 // RecordAuditArchiveBucket emits the per-(workspace, month) bucket
 // counter, the cumulative rows-archived counter, and the cumulative
-// bytes-uploaded counter. Called once per successful bucket. On
-// failure the caller passes 0 for rows and bytes so the counters
-// don't go up — divergence between buckets and rows is a real
-// signal of partial-failure ingestion.
+// bytes-uploaded counter. Called once per bucket attempt regardless
+// of outcome:
+//
+//   - result="ok" with rows>0 / bytes>0: the bucket finished
+//     entirely; rows/bytes are the total moved to cold storage.
+//   - result="partial" with rows>0 / bytes>0: the bucket split
+//     into multiple pages, some pages succeeded and were durably
+//     committed before a later page failed. rows/bytes are the
+//     SUCCESSFUL pages' totals — they MUST be counted so the
+//     rows_total / bytes_total counters reflect actual cold-tier
+//     activity.
+//   - result="error" with rows=0 / bytes=0: the bucket failed
+//     before any page was durably committed.
 func (m *Metrics) RecordAuditArchiveBucket(result string, rows int, bytes int64) {
 	m.auditArchiveBucketsTotal.WithLabelValues(result).Inc()
 	if rows > 0 {
@@ -73,7 +92,7 @@ func (m *Metrics) registerAuditArchiveMetrics(reg prometheus.Registerer) {
 
 	m.auditArchiveBucketsTotal = auto.NewCounterVec(prometheus.CounterOpts{
 		Name: "zkdrive_audit_archive_buckets_total",
-		Help: "Total (workspace, year-month) buckets the archiver attempted, partitioned by result ('ok' = upload+delete+record committed; 'error' = upload, delete, or record failed; rows still in hot tier for next run). NOT labelled by workspace_id (unbounded cardinality).",
+		Help: "Total (workspace, year-month) buckets the archiver attempted, partitioned by result ('ok' = all pages of the bucket fully committed; 'partial' = bucket split across multiple pages, some succeeded before a later page failed — the successful pages' rows ARE counted in zkdrive_audit_archive_rows_total; 'error' = bucket failed before any page was durably committed, rows still in hot tier for next run). NOT labelled by workspace_id (unbounded cardinality).",
 	}, []string{"result"})
 
 	m.auditArchiveRunDuration = auto.NewHistogram(prometheus.HistogramOpts{

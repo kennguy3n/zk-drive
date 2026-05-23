@@ -125,9 +125,16 @@ ORDER BY workspace_id, year_month`
 
 // FetchBatch pulls a single page of audit_log rows. The page is
 // bounded by limit and starts strictly after the supplied cursor
-// (uuid.Nil yields the first page). The (workspace_id, created_at
-// DESC) index covers the WHERE clause; the id ORDER BY is satisfied
-// from the index's tiebreaker which is the implicit primary key.
+// (uuid.Nil yields the first page).
+//
+// The month predicate is expressed as a [monthStart, monthEnd)
+// half-open timestamp range so the (workspace_id, created_at DESC)
+// index covers the entire WHERE clause as a single range scan. A
+// previous shape used to_char(date_trunc('month', created_at),
+// 'YYYY-MM') = $3, which forced the planner to evaluate the
+// function per candidate row and prevented index use for the
+// month predicate — a slow path on workspaces with millions of
+// audit rows. The id ORDER BY is satisfied by the primary key.
 func (r *PostgresArchiveRepository) FetchBatch(
 	ctx context.Context,
 	workspaceID uuid.UUID,
@@ -139,21 +146,43 @@ func (r *PostgresArchiveRepository) FetchBatch(
 	if limit <= 0 {
 		return nil, errors.New("audit archive: fetch limit must be positive")
 	}
+	monthStart, monthEnd, err := parseYearMonthRange(yearMonth)
+	if err != nil {
+		return nil, fmt.Errorf("fetch audit batch: %w", err)
+	}
 	const q = `
 SELECT ` + auditColumns + `
 FROM audit_log
 WHERE workspace_id = $1
   AND created_at < $2
-  AND to_char(date_trunc('month', created_at), 'YYYY-MM') = $3
-  AND id > $4
+  AND created_at >= $3
+  AND created_at < $4
+  AND id > $5
 ORDER BY id ASC
-LIMIT $5`
-	rows, err := r.pool.Query(ctx, q, workspaceID, cutoff, yearMonth, after, limit)
+LIMIT $6`
+	rows, err := r.pool.Query(ctx, q, workspaceID, cutoff, monthStart, monthEnd, after, limit)
 	if err != nil {
 		return nil, fmt.Errorf("fetch audit batch: %w", err)
 	}
 	defer rows.Close()
 	return scanRows(rows)
+}
+
+// parseYearMonthRange converts a canonical "YYYY-MM" string into
+// the half-open [monthStart, monthEnd) UTC timestamp range that
+// fully covers it. Used by FetchBatch (and the fake repository in
+// archive_test.go) so the production SQL and the test fake apply
+// the same month-boundary semantics. Returns an error if the
+// string is malformed — EnumerateWorkspaceMonths produces well-
+// formed values, so this error path indicates a programming bug.
+func parseYearMonthRange(yearMonth string) (time.Time, time.Time, error) {
+	t, err := time.ParseInLocation("2006-01", yearMonth, time.UTC)
+	if err != nil {
+		return time.Time{}, time.Time{}, fmt.Errorf("parse year-month %q: %w", yearMonth, err)
+	}
+	monthStart := t.UTC()
+	monthEnd := monthStart.AddDate(0, 1, 0)
+	return monthStart, monthEnd, nil
 }
 
 // DeleteBatch removes the supplied ids. The workspace_id predicate

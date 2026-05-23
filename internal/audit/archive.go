@@ -140,16 +140,26 @@ type ArchiveMetricsRecorder interface {
 	RecordAuditArchiveBucket(result string, rows int, bytes int64)
 }
 
-// archiveBucketResultOK / Error mirror the constants in
+// archiveBucketResultOK / Error / Partial mirror the constants in
 // internal/metrics. Defined as untyped string literals here so the
 // archive service can emit metrics through the interface without
 // importing the metrics package. internal/metrics' exported
 // AuditArchiveBucketResult* constants MUST stay in sync — both
 // places carry the same literal so a single source-of-truth audit
 // can find them via grep.
+//
+// "partial" distinguishes the case where a bucket failed mid-way
+// through its pagination loop AFTER one or more pages had already
+// been durably committed to S3 + audit_log_archive_runs + the hot
+// tier had been deleted. Those committed rows are real archive
+// activity and must be counted in the rows/bytes totals; the
+// label simply signals to operators that the bucket as a whole
+// did not finish (the remaining rows will be archived on the
+// next run).
 const (
-	archiveBucketResultOK    = "ok"
-	archiveBucketResultError = "error"
+	archiveBucketResultOK      = "ok"
+	archiveBucketResultError   = "error"
+	archiveBucketResultPartial = "partial"
 )
 
 // ArchiveServiceConfig bundles archive-service tunables sourced from
@@ -368,19 +378,36 @@ func (a *ArchiveService) archiveWorkspace(
 		}
 		rows, bytesUp, err := a.archiveBucket(wsCtx, runID, cutoff, m)
 		wsProcessed++
+		// archiveBucket may return rows > 0 alongside a non-nil err
+		// when a multi-page bucket failed AFTER some pages had been
+		// durably committed (S3 PUT + RecordRun + DeleteBatch all
+		// succeeded for pages 1..N-1, page N failed). Those rows are
+		// real archive activity that already moved to the cold tier
+		// and must NOT be lost from RunResult.RowsArchived /
+		// BytesUploaded — otherwise operators monitoring
+		// zkdrive_audit_archive_rows_total would see a sustained
+		// undercount relative to the rows actually moved. The
+		// per-bucket metric label distinguishes "ok" (fully
+		// finished), "partial" (some rows committed before failure),
+		// and "error" (failed before any commit).
+		result.RowsArchived += rows
+		result.BytesUploaded += bytesUp
 		if err != nil {
 			result.WorkspaceMonthsFailed++
 			result.Errors = append(result.Errors, fmt.Errorf("workspace %s month %s: %w", workspaceID, m.YearMonth, err))
 			slog.ErrorContext(wsCtx, "audit archive bucket failed",
-				"workspace_id", workspaceID, "year_month", m.YearMonth, "err", err)
+				"workspace_id", workspaceID, "year_month", m.YearMonth,
+				"partial_rows", rows, "partial_bytes", bytesUp, "err", err)
 			if a.metrics != nil {
-				a.metrics.RecordAuditArchiveBucket(archiveBucketResultError, 0, 0)
+				label := archiveBucketResultError
+				if rows > 0 {
+					label = archiveBucketResultPartial
+				}
+				a.metrics.RecordAuditArchiveBucket(label, rows, bytesUp)
 			}
 			continue
 		}
 		result.WorkspaceMonthsOK++
-		result.RowsArchived += rows
-		result.BytesUploaded += bytesUp
 		if a.metrics != nil {
 			a.metrics.RecordAuditArchiveBucket(archiveBucketResultOK, rows, bytesUp)
 		}
@@ -407,6 +434,15 @@ func (a *ArchiveService) archiveBucket(ctx context.Context, runID uuid.UUID, cut
 	totalRows := 0
 	totalBytes := int64(0)
 	for {
+		// Capture per-page startedAt BEFORE the fetch so the
+		// audit_log_archive_runs.started_at column reflects the
+		// actual moment this page's processing began. completedAt
+		// is captured below right before RecordRun. Together they
+		// give operators a real duration to plot in dashboards
+		// ("how long did one S3 PUT + Postgres write take?") rather
+		// than the always-zero-duration the single-shared-now would
+		// produce.
+		startedAt := a.nowFn().UTC()
 		entries, err := a.repo.FetchBatch(ctx, m.WorkspaceID, m.YearMonth, cutoff, a.cfg.MaxRowsPerBatch, after)
 		if err != nil {
 			span.RecordError(err)
@@ -449,17 +485,17 @@ func (a *ArchiveService) archiveBucket(ctx context.Context, runID uuid.UUID, cut
 			ids = append(ids, e.ID)
 		}
 
-		now := a.nowFn().UTC()
+		completedAt := a.nowFn().UTC()
 		record := &ArchiveRunRecord{
 			RunID:            runID,
 			WorkspaceID:      m.WorkspaceID,
 			CutoffTime:       cutoff,
 			YearMonth:        m.YearMonth,
 			ArchiveObjectKey: objectKey,
-			RowsArchived:    len(entries),
+			RowsArchived:     len(entries),
 			BytesUploaded:    byteCount,
-			StartedAt:        now,
-			CompletedAt:      now,
+			StartedAt:        startedAt,
+			CompletedAt:      completedAt,
 		}
 		if err := a.repo.RecordRun(ctx, record); err != nil {
 			span.RecordError(err)
