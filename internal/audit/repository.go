@@ -2,7 +2,6 @@ package audit
 
 import (
 	"context"
-	"errors"
 	"fmt"
 
 	"github.com/google/uuid"
@@ -94,9 +93,10 @@ func scanRows(rows pgx.Rows) ([]*Entry, error) {
 			&e.ID, &e.WorkspaceID, &e.ActorID, &e.Action,
 			&e.ResourceType, &e.ResourceID, &ipAddress, &userAgent, &metadata, &e.CreatedAt,
 		); err != nil {
-			if errors.Is(err, pgx.ErrNoRows) {
-				return out, nil
-			}
+			// pgx.ErrNoRows is returned by QueryRow().Scan(), never
+			// by iteration via rows.Next() + rows.Scan(); rows.Next()
+			// returns false once exhausted, so a no-rows condition
+			// cannot reach this Scan call.
 			return nil, err
 		}
 		if ipAddress != nil {

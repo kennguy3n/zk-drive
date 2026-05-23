@@ -7,7 +7,6 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -227,9 +226,10 @@ ORDER BY completed_at DESC`
 			&rec.ArchiveObjectKey, &rec.RowsArchived, &rec.BytesUploaded,
 			&rec.StartedAt, &rec.CompletedAt, &rec.ErrorMessage,
 		); err != nil {
-			if errors.Is(err, pgx.ErrNoRows) {
-				return out, nil
-			}
+			// Note: pgx.ErrNoRows is returned by QueryRow().Scan(), never
+			// by iteration via rows.Next() + rows.Scan(); rows.Next()
+			// returns false once exhausted, so a no-rows condition cannot
+			// reach this Scan call. Any error here is a real scan failure.
 			return nil, fmt.Errorf("scan archive run: %w", err)
 		}
 		out = append(out, rec)
