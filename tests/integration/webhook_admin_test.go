@@ -68,24 +68,29 @@ func TestAdminWebhooks_CRUDLifecycle(t *testing.T) {
 	}
 
 	// LIST — returns the subscription with secret masked (the
-	// "never returned again after create" contract).
+	// "never returned again after create" contract). The handler
+	// wraps the slice in {"subscriptions": [...]} so admin
+	// clients can pin pagination metadata later without a wire-
+	// format break.
 	status, body = env.httpRequest(http.MethodGet, "/api/admin/webhooks/", tok.Token, nil)
 	if status != http.StatusOK {
 		t.Fatalf("list: status=%d body=%s", status, string(body))
 	}
-	var listResp []struct {
-		ID     uuid.UUID `json:"id"`
-		Secret string    `json:"secret"`
+	var listResp struct {
+		Subscriptions []struct {
+			ID     uuid.UUID `json:"id"`
+			Secret string    `json:"secret"`
+		} `json:"subscriptions"`
 	}
 	env.decodeJSON(body, &listResp)
-	if len(listResp) != 1 {
-		t.Fatalf("list: got %d subscriptions, want 1", len(listResp))
+	if len(listResp.Subscriptions) != 1 {
+		t.Fatalf("list: got %d subscriptions, want 1", len(listResp.Subscriptions))
 	}
-	if listResp[0].ID != created.ID {
-		t.Errorf("list ID: got=%s want=%s", listResp[0].ID, created.ID)
+	if listResp.Subscriptions[0].ID != created.ID {
+		t.Errorf("list ID: got=%s want=%s", listResp.Subscriptions[0].ID, created.ID)
 	}
-	if listResp[0].Secret != "" {
-		t.Errorf("list MUST mask secret (returned only once on create), got=%q", listResp[0].Secret)
+	if listResp.Subscriptions[0].Secret != "" {
+		t.Errorf("list MUST mask secret (returned only once on create), got=%q", listResp.Subscriptions[0].Secret)
 	}
 
 	// GET — same contract: secret masked on read-back.
@@ -107,21 +112,31 @@ func TestAdminWebhooks_CRUDLifecycle(t *testing.T) {
 	}
 
 	// LIST DELIVERIES — empty for a brand-new subscription.
+	// Handler returns {"deliveries": [...]} (matching the List shape).
 	status, body = env.httpRequest(http.MethodGet, "/api/admin/webhooks/"+created.ID.String()+"/deliveries", tok.Token, nil)
 	if status != http.StatusOK {
 		t.Fatalf("list deliveries: status=%d body=%s", status, string(body))
 	}
-	var deliveries []any
-	env.decodeJSON(body, &deliveries)
-	if len(deliveries) != 0 {
-		t.Errorf("list deliveries (fresh sub): got %d, want 0", len(deliveries))
+	var deliveriesResp struct {
+		Deliveries []any `json:"deliveries"`
+	}
+	env.decodeJSON(body, &deliveriesResp)
+	if len(deliveriesResp.Deliveries) != 0 {
+		t.Errorf("list deliveries (fresh sub): got %d, want 0", len(deliveriesResp.Deliveries))
 	}
 
-	// RESUME — idempotent on an already-active subscription (still
-	// returns 200, Active stays true, ConsecutiveFailures stays 0).
+	// RESUME — idempotent on an already-active subscription. The
+	// handler returns 204 No Content (consistent with the
+	// DeactivateUser pattern in api/admin/handler.go); the
+	// invariants the resume action establishes (Active=true,
+	// ConsecutiveFailures=0) are observable on the next GET.
 	status, body = env.httpRequest(http.MethodPost, "/api/admin/webhooks/"+created.ID.String()+"/resume", tok.Token, nil)
+	if status != http.StatusNoContent {
+		t.Fatalf("resume: status=%d body=%s want=204", status, string(body))
+	}
+	status, body = env.httpRequest(http.MethodGet, "/api/admin/webhooks/"+created.ID.String(), tok.Token, nil)
 	if status != http.StatusOK {
-		t.Fatalf("resume: status=%d body=%s", status, string(body))
+		t.Fatalf("get after resume: status=%d body=%s", status, string(body))
 	}
 	var resumed struct {
 		Active              bool `json:"active"`
@@ -149,10 +164,10 @@ func TestAdminWebhooks_CRUDLifecycle(t *testing.T) {
 	if status != http.StatusOK {
 		t.Fatalf("list after delete: status=%d body=%s", status, string(body))
 	}
-	listResp = nil
+	listResp.Subscriptions = nil
 	env.decodeJSON(body, &listResp)
-	if len(listResp) != 0 {
-		t.Errorf("list after delete: got %d subscriptions, want 0", len(listResp))
+	if len(listResp.Subscriptions) != 0 {
+		t.Errorf("list after delete: got %d subscriptions, want 0", len(listResp.Subscriptions))
 	}
 }
 
