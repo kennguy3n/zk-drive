@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"sort"
 	"strings"
@@ -189,9 +190,27 @@ func (f *fakeArchiveRepo) RecordRun(_ context.Context, rec *ArchiveRunRecord) er
 	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if rec.ID == uuid.Nil {
+		rec.ID = uuid.New()
+	}
 	copyRec := *rec
 	f.runs = append(f.runs, &copyRec)
 	return nil
+}
+
+func (f *fakeArchiveRepo) SetRunError(_ context.Context, id uuid.UUID, errMsg string) error {
+	if err := f.consumeFailure("SetRunError"); err != nil {
+		return err
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for i := range f.runs {
+		if f.runs[i].ID == id {
+			f.runs[i].ErrorMessage = &errMsg
+			return nil
+		}
+	}
+	return fmt.Errorf("fakeArchiveRepo: SetRunError no row with id=%s", id)
 }
 
 func (f *fakeArchiveRepo) ListRuns(_ context.Context, workspaceID uuid.UUID) ([]*ArchiveRunRecord, error) {
@@ -521,9 +540,28 @@ func TestArchiveService_Run_S3UploadFailureLeavesHotRows(t *testing.T) {
 			t.Errorf("row %v deleted despite S3 failure", r.ID)
 		}
 	}
-	// No run record either.
-	if len(repo.runs) != 0 {
-		t.Errorf("runs recorded = %d, want 0 (no successful upload)", len(repo.runs))
+	// Failure row IS recorded so the partial-failure dashboard
+	// (idx_audit_log_archive_runs_failures) surfaces the attempt.
+	// rows_archived == 0, bytes_uploaded == 0, error_message != nil.
+	// See WS-23 PR #68 Devin Review finding
+	// ANALYSIS_pr-review-job-d2a9e87dcd554aae916858730442da4c_0001.
+	if len(repo.runs) != 1 {
+		t.Fatalf("runs recorded = %d, want 1 (the pre-upload failure row)", len(repo.runs))
+	}
+	failRec := repo.runs[0]
+	if failRec.ErrorMessage == nil {
+		t.Errorf("failure row ErrorMessage = nil, want non-nil (so partial-failure dashboard lights up)")
+	} else if !strings.Contains(*failRec.ErrorMessage, "simulated S3 transient") {
+		t.Errorf("failure row ErrorMessage = %q, want it to wrap the underlying upload error", *failRec.ErrorMessage)
+	}
+	if failRec.RowsArchived != 0 {
+		t.Errorf("failure row RowsArchived = %d, want 0 (no rows landed in cold storage)", failRec.RowsArchived)
+	}
+	if failRec.BytesUploaded != 0 {
+		t.Errorf("failure row BytesUploaded = %d, want 0 (no bytes landed in cold storage)", failRec.BytesUploaded)
+	}
+	if failRec.ArchiveObjectKey == "" {
+		t.Errorf("failure row ArchiveObjectKey is empty; the would-have-been key must be recorded so operators can cross-reference S3 ListObjects")
 	}
 }
 
@@ -592,7 +630,17 @@ func TestArchiveService_Run_DeleteFailureProducesPartialSuccess(t *testing.T) {
 	}
 	// The run record DID get inserted before DELETE failed.
 	if len(repo.runs) != 1 {
-		t.Errorf("runs recorded = %d, want 1", len(repo.runs))
+		t.Fatalf("runs recorded = %d, want 1", len(repo.runs))
+	}
+	// And its error_message column was stamped by SetRunError so
+	// the partial-failure dashboard (idx_audit_log_archive_runs_failures)
+	// lights up on this DELETE failure even though the upload +
+	// row insert both succeeded. See WS-23 PR #68 Devin Review
+	// finding ANALYSIS_pr-review-job-d2a9e87dcd554aae916858730442da4c_0001.
+	if repo.runs[0].ErrorMessage == nil {
+		t.Errorf("run record ErrorMessage = nil after DeleteBatch failure; want non-nil (idx_audit_log_archive_runs_failures relies on this)")
+	} else if !strings.Contains(*repo.runs[0].ErrorMessage, "simulated DB error") {
+		t.Errorf("run record ErrorMessage = %q, want it to wrap the underlying DeleteBatch error", *repo.runs[0].ErrorMessage)
 	}
 	// And the S3 object WAS uploaded.
 	if store.putCount != 1 {
@@ -688,7 +736,24 @@ func TestArchiveService_Run_PartialPageSuccessIsAttributed(t *testing.T) {
 		t.Errorf("store.putCount = %d, want 2 (one per page)", store.putCount)
 	}
 	if len(repo.runs) != 2 {
-		t.Errorf("runs recorded = %d, want 2 (one per page, both pages reached RecordRun)", len(repo.runs))
+		t.Fatalf("runs recorded = %d, want 2 (one per page, both pages reached RecordRun)", len(repo.runs))
+	}
+	// Page 1's run has no error (DELETE succeeded). Page 2's run
+	// has error_message stamped by SetRunError because its
+	// DeleteBatch failed AFTER the upload + RecordRun committed.
+	// The 2-row layout means the dashboard query
+	// `WHERE error_message IS NOT NULL` correctly surfaces just
+	// the failed page. Order of repo.runs matches RecordRun call
+	// order (page 1 first, then page 2), pinned by fakeArchiveRepo's
+	// append-on-insert semantics. See WS-23 PR #68 Devin Review
+	// finding ANALYSIS_pr-review-job-d2a9e87dcd554aae916858730442da4c_0001.
+	if repo.runs[0].ErrorMessage != nil {
+		t.Errorf("page 1 ErrorMessage = %q, want nil (page 1 committed end-to-end)", *repo.runs[0].ErrorMessage)
+	}
+	if repo.runs[1].ErrorMessage == nil {
+		t.Errorf("page 2 ErrorMessage = nil, want non-nil (page 2's DELETE failed after S3 + RecordRun committed)")
+	} else if !strings.Contains(*repo.runs[1].ErrorMessage, "simulated DB error on page 2") {
+		t.Errorf("page 2 ErrorMessage = %q, want it to wrap the underlying DeleteBatch error", *repo.runs[1].ErrorMessage)
 	}
 
 	// Page 1's hot rows were deleted (page 1's DELETE

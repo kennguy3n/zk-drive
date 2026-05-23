@@ -475,6 +475,20 @@ func (a *ArchiveService) archiveBucket(ctx context.Context, runID uuid.UUID, cut
 		err = a.storage.PutObject(uploadCtx, objectKey, "application/gzip", body)
 		cancel()
 		if err != nil {
+			// Record a failure-row in audit_log_archive_runs so the
+			// partial-failure dashboard (driven by
+			// idx_audit_log_archive_runs_failures) surfaces the
+			// attempt. rows_archived = 0 + bytes_uploaded = 0
+			// because nothing landed in S3; archive_object_key is
+			// the would-have-been key (the operator can correlate
+			// it with the cold-tier ListObjects result to confirm
+			// the object never appeared). If the failure-row
+			// INSERT itself fails we log + carry on — the primary
+			// error is what the caller cares about and operators
+			// still see the structured-log entry. See WS-23 PR #68
+			// Devin Review finding
+			// ANALYSIS_pr-review-job-d2a9e87dcd554aae916858730442da4c_0001.
+			a.recordPreUploadFailure(ctx, runID, m.WorkspaceID, cutoff, m.YearMonth, objectKey, startedAt, err)
 			span.RecordError(err)
 			span.SetStatus(codes.Error, "s3 upload failed")
 			return totalRows, totalBytes, fmt.Errorf("s3 upload: %w", err)
@@ -511,6 +525,16 @@ func (a *ArchiveService) archiveBucket(ctx context.Context, runID uuid.UUID, cut
 			// uploaded under a fresh UUID key, and the cycle
 			// retries the delete. Total cost: one orphan S3
 			// object + one orphan archive_runs row.
+			//
+			// Surface the failure on the operator dashboard by
+			// stamping error_message onto the row we just
+			// committed via RecordRun. Best-effort: if the UPDATE
+			// itself errors (e.g. admin manually purged the row
+			// mid-flight), we still return the primary DeleteBatch
+			// error — operators have structured logs covering both
+			// paths. See WS-23 PR #68 Devin Review finding
+			// ANALYSIS_pr-review-job-d2a9e87dcd554aae916858730442da4c_0001.
+			a.markRunDeleteFailure(ctx, record.ID, err)
 			span.RecordError(err)
 			span.SetStatus(codes.Error, "delete batch failed")
 			return totalRows + len(entries), totalBytes + byteCount, fmt.Errorf("delete batch (S3 + run record both committed): %w", err)
@@ -538,6 +562,67 @@ func (a *ArchiveService) archiveBucket(ctx context.Context, runID uuid.UUID, cut
 		attribute.Int64("audit.archive.bytes_uploaded", totalBytes),
 	)
 	return totalRows, totalBytes, nil
+}
+
+// recordPreUploadFailure inserts an audit_log_archive_runs row for
+// a (workspace, month) batch whose PutObject step failed. The row
+// has rows_archived=0, bytes_uploaded=0, error_message != nil so
+// idx_audit_log_archive_runs_failures surfaces it on the operator
+// dashboard. The S3 object did NOT land at archive_object_key
+// (that's what error_message says) but the planned key is recorded
+// for cross-referencing the operator's S3 ListObjects audit.
+//
+// Errors from the INSERT itself are logged but not returned: the
+// primary failure is the PutObject error, and a secondary
+// audit_log_archive_runs INSERT failure is itself surfaced via the
+// structured log so an operator running with both `kubectl logs
+// audit-archiver` and the dashboard sees the same incident from
+// two angles.
+func (a *ArchiveService) recordPreUploadFailure(
+	ctx context.Context,
+	runID, workspaceID uuid.UUID,
+	cutoff time.Time,
+	yearMonth, plannedObjectKey string,
+	startedAt time.Time,
+	uploadErr error,
+) {
+	completedAt := a.nowFn().UTC()
+	errMsg := fmt.Sprintf("s3 upload: %v", uploadErr)
+	rec := &ArchiveRunRecord{
+		RunID:            runID,
+		WorkspaceID:      workspaceID,
+		CutoffTime:       cutoff,
+		YearMonth:        yearMonth,
+		ArchiveObjectKey: plannedObjectKey,
+		RowsArchived:     0,
+		BytesUploaded:    0,
+		StartedAt:        startedAt,
+		CompletedAt:      completedAt,
+		ErrorMessage:     &errMsg,
+	}
+	if err := a.repo.RecordRun(ctx, rec); err != nil {
+		slog.WarnContext(ctx, "audit archive: failed to persist pre-upload failure row",
+			"workspace_id", workspaceID,
+			"year_month", yearMonth,
+			"upload_err", uploadErr.Error(),
+			"record_err", err.Error())
+	}
+}
+
+// markRunDeleteFailure stamps error_message on an existing
+// audit_log_archive_runs row whose post-RecordRun DeleteBatch
+// step failed. Best-effort: if the row is missing (admin purged
+// it mid-flight, schema drift, etc.) or the UPDATE itself fails,
+// we log structured context and return; the caller's primary
+// DeleteBatch error still propagates.
+func (a *ArchiveService) markRunDeleteFailure(ctx context.Context, runRecordID uuid.UUID, deleteErr error) {
+	errMsg := fmt.Sprintf("delete batch (S3 + run record both committed): %v", deleteErr)
+	if err := a.repo.SetRunError(ctx, runRecordID, errMsg); err != nil {
+		slog.WarnContext(ctx, "audit archive: failed to stamp error_message on run record",
+			"run_record_id", runRecordID,
+			"delete_err", deleteErr.Error(),
+			"update_err", err.Error())
+	}
 }
 
 // buildObjectKey assembles the cold-tier S3 key. The format is

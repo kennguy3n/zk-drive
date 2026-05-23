@@ -77,10 +77,24 @@ type ArchiveRepository interface {
 	DeleteBatch(ctx context.Context, workspaceID uuid.UUID, ids []uuid.UUID) (int, error)
 
 	// RecordRun INSERTs an audit_log_archive_runs row. Called
-	// once per successful (workspace, month) batch. The id
-	// column is populated by the database default if record.ID
-	// is uuid.Nil.
+	// per (workspace, month) batch — both on the success path
+	// (record.ErrorMessage == nil) and on the pre-upload failure
+	// path (record.ErrorMessage != nil, rows_archived == 0,
+	// bytes_uploaded == 0). The id column is populated by
+	// uuid.New() in the call if record.ID is uuid.Nil so the
+	// caller can later SetRunError() against it.
 	RecordRun(ctx context.Context, record *ArchiveRunRecord) error
+
+	// SetRunError mutates an existing audit_log_archive_runs row
+	// to record an error that occurred AFTER RecordRun returned
+	// successfully — currently just the DeleteBatch step
+	// failing once PutObject + RecordRun have already committed.
+	// The success-shape fields (rows_archived, bytes_uploaded,
+	// archive_object_key) stay as-is because the upload + ledger
+	// row legitimately reflect a cold-tier commit; error_message
+	// is the only column we mutate so the partial-failure
+	// dashboard via idx_audit_log_archive_runs_failures lights up.
+	SetRunError(ctx context.Context, id uuid.UUID, errMsg string) error
 
 	// ListRuns returns every archive-run record for the given
 	// workspace, newest first. Used by the audit-restore CLI to
@@ -210,12 +224,23 @@ func (r *PostgresArchiveRepository) DeleteBatch(ctx context.Context, workspaceID
 	return int(tag.RowsAffected()), nil
 }
 
-// RecordRun persists one audit_log_archive_runs row. Called after
-// the S3 upload completes; the DELETE happens inside the same
-// caller-owned flow so a crash between upload and delete leaves
-// the rows in place for the next sweep (no audit row is lost; the
-// cold tier may carry an orphan object that a future reconciliation
-// can detect via the missing DB record).
+// RecordRun persists one audit_log_archive_runs row. Called both:
+//
+//   - On the happy path AFTER the S3 PutObject completes and
+//     BEFORE the DeleteBatch fires. record.ErrorMessage is nil so
+//     idx_audit_log_archive_runs_failures stays cold for this row.
+//
+//   - On the pre-upload failure path (PutObject returns an error).
+//     record.ErrorMessage is the wrapped upload error;
+//     rows_archived == 0 and bytes_uploaded == 0 because nothing
+//     landed in the cold tier. The row exists so operators have a
+//     durable record of the attempt instead of relying on
+//     ephemeral stdout logs from the CronJob.
+//
+// In both cases the DELETE happens inside the same caller-owned
+// flow; a crash between upload and delete leaves the rows in
+// place for the next sweep and produces an orphan S3 object that
+// a future reconciliation can detect via the missing DB record.
 func (r *PostgresArchiveRepository) RecordRun(ctx context.Context, record *ArchiveRunRecord) error {
 	if record.ID == uuid.Nil {
 		record.ID = uuid.New()
@@ -237,6 +262,35 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`
 	}
 	return nil
 }
+
+// SetRunError UPDATE-s the error_message column on an existing
+// audit_log_archive_runs row. Used when DeleteBatch fails after
+// the row was inserted on the success path — the row already
+// reflects the (durably-committed) S3 PUT + ledger insert; we
+// only need to surface the post-commit DELETE failure via
+// error_message so idx_audit_log_archive_runs_failures lights up
+// on the operator dashboard. Returns errArchiveRunNotFound if the
+// id does not match a row so the caller can distinguish
+// "already-deleted by an admin cleanup" from "unexpected schema
+// drift".
+func (r *PostgresArchiveRepository) SetRunError(ctx context.Context, id uuid.UUID, errMsg string) error {
+	const q = `UPDATE audit_log_archive_runs SET error_message = $2 WHERE id = $1`
+	tag, err := r.pool.Exec(ctx, q, id, errMsg)
+	if err != nil {
+		return fmt.Errorf("set archive run error: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("set archive run error: %w (id=%s)", errArchiveRunNotFound, id)
+	}
+	return nil
+}
+
+// errArchiveRunNotFound is returned when SetRunError is called
+// against a run id that does not exist. The caller logs but does
+// not propagate this error so a missing row (e.g. admin manually
+// purged the runs table during incident response) does not mask
+// the original DeleteBatch error.
+var errArchiveRunNotFound = errors.New("audit_log_archive_runs row not found")
 
 // ListRuns returns every archive run for the workspace ordered by
 // completion time DESC so the restore tool can produce a chronological
