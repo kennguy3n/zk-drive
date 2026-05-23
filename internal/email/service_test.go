@@ -111,7 +111,13 @@ func TestSendGuestInvite_HappyPath(t *testing.T) {
 // TestSendGuestInvite_DisabledSenderEmitsDisabledMetric pins the
 // branchless-no-op contract: when SMTP isn't configured the call
 // returns (OutcomeDisabled, nil) so the caller's hot path stays
-// simple.
+// simple AND short-circuits BEFORE template render / Message
+// construction. The latter property matters when the wired Sender
+// is a NoopClient paired with a placeholder publicURL ("http://invalid.local"
+// in buildEmailService's PUBLIC_URL-missing arm) — composing the
+// accept URL there is pure waste, and worse, a future regression
+// that exposes the rendered Message somewhere visible would leak
+// the malformed URL.
 func TestSendGuestInvite_DisabledSenderEmitsDisabledMetric(t *testing.T) {
 	sender := &recordingSender{configured: false, sendErr: ErrNotConfigured}
 	svc, m := mustService(t, sender)
@@ -131,6 +137,15 @@ func TestSendGuestInvite_DisabledSenderEmitsDisabledMetric(t *testing.T) {
 	}
 	if len(m.emits) != 1 || m.emits[0].outcome != "disabled" {
 		t.Errorf("metric outcome = %+v, want disabled", m.emits)
+	}
+	// Critical: assert the disabled short-circuit fired BEFORE
+	// any template/render work or Sender.Send call. The
+	// recordingSender records every Send invocation, so zero calls
+	// here means we never reached the render+send block.
+	sender.mu.Lock()
+	defer sender.mu.Unlock()
+	if len(sender.calls) != 0 {
+		t.Errorf("disabled sender saw %d Send call(s); expected 0 — sendGuestInvite should short-circuit BEFORE render+Send", len(sender.calls))
 	}
 }
 
@@ -258,6 +273,43 @@ func TestNewService_TrimsTrailingSlash(t *testing.T) {
 	}
 	if !strings.Contains(got, "drive.example.com/invites/INVITEID") {
 		t.Fatalf("composed URL not present: %s", got)
+	}
+}
+
+// TestNewService_TrimsMultipleTrailingSlashes pins the multi-slash
+// guard: an operator who sets PUBLIC_URL="https://drive.example.com///"
+// (typo, copy-paste from a config that ended in a path separator,
+// or template rendering glitch) MUST NOT produce a triple-slash
+// accept URL. The single-trim implementation would leave "x.com//"
+// which composes to "x.com//invites/abc" — most browsers/clients
+// normalize but some routers/CDNs treat that as a different path.
+// strings.TrimRight handles every trailing-slash count in one pass.
+func TestNewService_TrimsMultipleTrailingSlashes(t *testing.T) {
+	for _, suffix := range []string{"//", "///", "////"} {
+		t.Run(suffix, func(t *testing.T) {
+			sender := &recordingSender{configured: true}
+			svc, err := NewService(ServiceConfig{Sender: sender, PublicURL: "https://drive.example.com" + suffix})
+			if err != nil {
+				t.Fatalf("NewService: %v", err)
+			}
+			if _, err := svc.SendGuestInvite(context.Background(), SendGuestInviteInput{
+				Email:         "bob@example.com",
+				InviterName:   "Alice",
+				WorkspaceName: "Acme Co",
+				FolderName:    "Q4 Roadmap",
+				Role:          "editor",
+				InviteID:      "INVITEID",
+			}); err != nil {
+				t.Fatalf("SendGuestInvite: %v", err)
+			}
+			got := sender.calls[0].TextBody
+			if strings.Contains(got, "drive.example.com//") {
+				t.Fatalf("composed URL retained a double slash for suffix %q: %s", suffix, got)
+			}
+			if !strings.Contains(got, "drive.example.com/invites/INVITEID") {
+				t.Fatalf("composed URL not present for suffix %q: %s", suffix, got)
+			}
+		})
 	}
 }
 

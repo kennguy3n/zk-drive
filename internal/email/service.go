@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"strings"
 	"time"
 
 	"github.com/kennguy3n/zk-drive/internal/logging"
@@ -160,6 +161,19 @@ func (s *Service) SendGuestInvite(ctx context.Context, in SendGuestInviteInput) 
 }
 
 func (s *Service) sendGuestInvite(ctx context.Context, in SendGuestInviteInput) (SendOutcome, error) {
+	// Short-circuit BEFORE template render / Message construction
+	// when the wired Sender is a NoopClient. Two reasons:
+	//   1. Saves a wasted text + html render per disabled send (in
+	//      buildEmailService's PUBLIC_URL-missing arm we are GUARANTEED
+	//      to discard the output, so doing the render is pure waste).
+	//   2. Avoids composing accept URLs against the placeholder
+	//      publicURL ("http://invalid.local") only to throw them away —
+	//      a future regression where Sender.Send forwards the rendered
+	//      Message somewhere visible (audit body capture, dev sink)
+	//      would surface the malformed URL. Better to never construct it.
+	if !s.sender.IsConfigured() {
+		return OutcomeDisabled, nil
+	}
 	data := GuestInviteData{
 		InviterName:   in.InviterName,
 		WorkspaceName: in.WorkspaceName,
@@ -267,13 +281,24 @@ func maskEmail(addr string) string {
 	return string(addr[0]) + "***" + addr[at:]
 }
 
-// trimTrailingSlash removes a single trailing "/" if present, so
-// callers can pass either "https://drive.example.com" or
-// "https://drive.example.com/" without composing a double-slash
-// URL like ".../invites//abc".
+// trimTrailingSlash removes ALL trailing slashes so callers can
+// pass any of "https://drive.example.com", ".../", or even ".//"
+// (a misconfigured operator value) without composing a double-slash
+// URL like ".../invites//abc". strings.TrimRight covers the
+// multi-slash case in one pass instead of the previous single-pass
+// implementation which left "x.com//" → "x.com/".
+//
+// Edge case: a degenerate "http://" or "https://" value (just the
+// scheme) would become "http:/" / "https:/" after trimming, but
+// that input is already broken regardless of how we trim — the
+// accept-URL composition would produce an unreachable link either
+// way, and the operator sees the issue immediately on the very
+// first invite send via the startup public_url log line and the
+// audit-row's outcome field.
 func trimTrailingSlash(s string) string {
-	if len(s) > 0 && s[len(s)-1] == '/' {
-		return s[:len(s)-1]
+	trimmed := strings.TrimRight(s, "/")
+	if trimmed != "" {
+		return trimmed
 	}
 	return s
 }
