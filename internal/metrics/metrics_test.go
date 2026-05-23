@@ -397,6 +397,17 @@ func TestHandler_ScrapeIntegratesAllSurfaces(t *testing.T) {
 	// Email surface — one RecordEmailSent call. Bounded labels.
 	m.RecordEmailSent("guest_invite", "ok")
 
+	// Audit-archive surface — one run + three buckets (1 OK, 1 partial,
+	// 1 error). Run records duration ~150ms. OK bucket records 100
+	// rows / 4096 bytes (full bucket committed). Partial bucket records
+	// 40 rows / 1024 bytes (some pages committed before a later page
+	// failed — those rows ARE counted toward the rows/bytes totals).
+	// Error bucket records 0 rows / 0 bytes (failed before any commit).
+	m.RecordAuditArchiveRun(metrics.AuditArchiveResultPartial, 0.15)
+	m.RecordAuditArchiveBucket(metrics.AuditArchiveBucketResultOK, 100, 4096)
+	m.RecordAuditArchiveBucket(metrics.AuditArchiveBucketResultPartial, 40, 1024)
+	m.RecordAuditArchiveBucket(metrics.AuditArchiveBucketResultError, 0, 0)
+
 	mReq := httptest.NewRequest(http.MethodGet, "/metrics", nil)
 	mW := httptest.NewRecorder()
 	r.ServeHTTP(mW, mReq)
@@ -414,6 +425,12 @@ func TestHandler_ScrapeIntegratesAllSurfaces(t *testing.T) {
 		`zkdrive_reconciler_workspaces_updated_total 2`,
 		`zkdrive_reconciler_drift_bytes_total 1024`,
 		`zkdrive_email_sent_total{outcome="ok",template="guest_invite"} 1`,
+		`zkdrive_audit_archive_runs_total{result="partial"} 1`,
+		`zkdrive_audit_archive_buckets_total{result="ok"} 1`,
+		`zkdrive_audit_archive_buckets_total{result="partial"} 1`,
+		`zkdrive_audit_archive_buckets_total{result="error"} 1`,
+		`zkdrive_audit_archive_rows_total 140`,
+		`zkdrive_audit_archive_bytes_total 5120`,
 	}
 	for _, line := range expectedLines {
 		if !strings.Contains(bodyStr, line) {

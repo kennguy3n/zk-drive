@@ -76,6 +76,54 @@ func TestRequireMinMigrationVersionAcceptsMigratedDatabase(t *testing.T) {
 	if err := database.RequireMinMigrationVersion(ctx, pool); err != nil {
 		t.Fatalf("RequireMinMigrationVersion(migrated db): %v", err)
 	}
+	// audit-archiver has its own precondition constant pointing at
+	// migration 027. Pin that on a fully-migrated database too so
+	// future migration renumbering doesn't silently leave the
+	// archiver gated on a stale version. WS-23 PR #68 Devin Review
+	// finding ANALYSIS_pr-review-job-ad89da4c3a1449c5b914d6045dc4ffb8_0002.
+	if err := database.RequireMinMigrationVersionFor(
+		ctx, pool, database.MinRequiredMigrationVersionAuditArchiver,
+	); err != nil {
+		t.Fatalf("RequireMinMigrationVersionFor(audit-archiver, migrated db): %v", err)
+	}
+}
+
+// TestRequireMinMigrationVersionForCustomVersion verifies the
+// parameterised form rejects a synthetic future version that does
+// NOT exist in schema_migrations, even on a fully-migrated database.
+// Pins the contract that any new binary adding a higher-watermark
+// constant will fail-fast against an older schema rather than
+// silently passing on the server/worker baseline. WS-23 PR #68
+// Devin Review finding ANALYSIS_pr-review-job-ad89da4c3a1449c5b914d6045dc4ffb8_0002.
+func TestRequireMinMigrationVersionForCustomVersion(t *testing.T) {
+	if os.Getenv("TEST_DATABASE_URL") == "" {
+		t.Skip("TEST_DATABASE_URL not set; skipping integration test")
+	}
+
+	dbName := freshTestDatabase(t)
+	dsn := dsnForDatabase(t, dbName)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	pool, err := database.Connect(ctx, dsn)
+	if err != nil {
+		t.Fatalf("connect fresh db: %v", err)
+	}
+	t.Cleanup(pool.Close)
+
+	migrationsDir := findMigrationsDir(t)
+	if err := database.Migrate(ctx, pool, migrationsDir); err != nil {
+		t.Fatalf("Migrate: %v", err)
+	}
+
+	err = database.RequireMinMigrationVersionFor(ctx, pool, "999_future_migration_that_does_not_exist")
+	if err == nil {
+		t.Fatalf("RequireMinMigrationVersionFor(unknown version) returned nil, want ErrMigrationsOutOfDate")
+	}
+	if !errors.Is(err, database.ErrMigrationsOutOfDate) {
+		t.Fatalf("RequireMinMigrationVersionFor(unknown version) returned %v, want wrapping ErrMigrationsOutOfDate", err)
+	}
 }
 
 // TestMigrateAdvisoryLockSerializesConcurrentRuns starts two Migrate

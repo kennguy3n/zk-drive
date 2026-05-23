@@ -183,6 +183,39 @@ type Metrics struct {
 	// cardinality: templates are a closed set defined in
 	// internal/email; outcomes are the SendOutcome enum.
 	emailSentTotal *prometheus.CounterVec
+
+	// auditArchiveRunsTotal counts audit-log archiver
+	// invocations partitioned by result. "ok" = full pass with
+	// zero bucket-level errors; "partial" = pass completed but
+	// at least one (workspace, month) bucket failed (rows still
+	// in the hot tier, will be retried on the next run); "error"
+	// = the run itself failed before bucket iteration (e.g.
+	// enumerate query failed); "cancelled" = SIGTERM /
+	// activeDeadlineSeconds tripped mid-run.
+	auditArchiveRunsTotal *prometheus.CounterVec
+
+	// auditArchiveRowsTotal counts audit_log rows successfully
+	// moved from the hot tier to the cold tier. Cumulative across
+	// all runs. Diverges from auditArchiveBucketsTotal because a
+	// single bucket can contain many rows.
+	auditArchiveRowsTotal prometheus.Counter
+
+	// auditArchiveBytesTotal counts uncompressed JSONL bytes
+	// uploaded. Plotted alongside auditArchiveRowsTotal to track
+	// per-row size trends (a sudden bytes-per-row jump indicates
+	// audit_log.metadata blobs growing, worth investigating).
+	auditArchiveBytesTotal prometheus.Counter
+
+	// auditArchiveBucketsTotal counts (workspace, month) buckets
+	// processed, partitioned by result ("ok" / "error"). NOT
+	// labelled by workspace_id (unbounded cardinality); use
+	// structured logs for per-workspace investigation.
+	auditArchiveBucketsTotal *prometheus.CounterVec
+
+	// auditArchiveRunDuration observes wall time per archiver
+	// invocation. Useful for validating the archival CronJob
+	// completes within its scheduled cadence.
+	auditArchiveRunDuration prometheus.Histogram
 }
 
 // New constructs a Metrics with a fresh private registry and the
@@ -297,6 +330,7 @@ func New() *Metrics {
 	})
 
 	m.registerEmailMetrics(reg)
+	m.registerAuditArchiveMetrics(reg)
 
 	return m
 }

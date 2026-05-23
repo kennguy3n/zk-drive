@@ -217,6 +217,54 @@ type Config struct {
 	// (preferred to setting endpoint="" if you want the SDK
 	// initialised but no traces exported).
 	OTELSamplerRatio float64
+
+	// Audit-log cold archival (WS-23). When AuditArchiveEnabled
+	// is false (the default), the audit-archiver binary refuses
+	// to run — operators must explicitly opt in so a fresh
+	// install can't accidentally start deleting audit history
+	// before the operator has confirmed the S3 archive prefix
+	// is writable and the retention window matches their
+	// compliance posture.
+	AuditArchiveEnabled bool
+	// AuditLogRetentionDays is the hot-tier retention window
+	// (rows older than now() - this many days are eligible for
+	// archival). 90 days is the typical SOC2 Type II hot tier;
+	// the value is clamped at config-load time by
+	// clampAuditRetentionDays so a non-positive (<=0) input
+	// silently becomes 90 (the operator most likely forgot to
+	// set the var) and a value above 10 years also clamps to
+	// 10 years (catches stray multiplier typos). The clamped
+	// value is logged at startup so an operator can confirm
+	// the effective setting. AUDIT_LOG_ARCHIVE_ENABLED=false
+	// is the supported way to disable archival; setting
+	// AUDIT_LOG_RETENTION_DAYS=0 does NOT disable archival —
+	// it just runs at the 90-day default. See WS-23 PR #68
+	// Devin Review finding
+	// BUG_pr-review-job-00ec8888db2a410b892f764609056529_0001.
+	AuditLogRetentionDays int
+	// AuditArchivePrefix is the S3 key prefix every archive
+	// object is written under. Defaults to "audit-archive/".
+	// Operators wanting to use a dedicated bucket can set
+	// AuditArchiveBucket; when empty the configured S3_BUCKET
+	// is reused so a single-bucket deployment is the default.
+	AuditArchivePrefix string
+	// AuditArchiveBucket overrides S3_BUCKET for archive
+	// writes. Empty means use S3_BUCKET. Useful when the
+	// operator wants compliance-grade lifecycle policies (e.g.
+	// Glacier transition, object-lock retention) on the
+	// archive bucket independent of the live file store.
+	AuditArchiveBucket string
+	// AuditArchiveMaxRowsPerBatch caps the number of audit_log
+	// rows packed into a single (workspace, month) JSONL.gz
+	// upload. Defaults to 50000 — at ~512 bytes per audit
+	// entry that's roughly a 25 MB uncompressed / 5 MB
+	// compressed object, comfortably below S3's 5 GB single-
+	// upload limit and small enough that a single PUT round-
+	// trip stays under the 60s exporter context budget. When
+	// a (workspace, month) batch exceeds this, the archiver
+	// writes multiple JSONL.gz objects with distinct UUID
+	// suffixes — the restore tool joins them transparently.
+	AuditArchiveMaxRowsPerBatch int
 }
 
 // Load reads configuration from environment variables and returns a populated
@@ -228,7 +276,34 @@ type Config struct {
 // bucket, access key, and secret key must also be set — a half-configured
 // storage client would only fail at request time.
 func Load() (*Config, error) {
-	cfg := &Config{
+	cfg := buildConfigFromEnv()
+
+	var missing []string
+	if strings.TrimSpace(cfg.DatabaseURL) == "" {
+		missing = append(missing, "DATABASE_URL")
+	}
+	if strings.TrimSpace(cfg.JWTSecret) == "" {
+		missing = append(missing, "JWT_SECRET")
+	}
+	if len(missing) > 0 {
+		return nil, errors.New("missing required environment variables: " + strings.Join(missing, ", "))
+	}
+
+	if err := validateS3Group(cfg); err != nil {
+		return nil, err
+	}
+	return cfg, nil
+}
+
+// buildConfigFromEnv populates a *Config purely from environment
+// variables WITHOUT applying required-variable validation. Shared
+// between Load (which adds the DATABASE_URL + JWT_SECRET + S3-group
+// checks) and LoadStorageOnly (which only validates the S3 group).
+// Keep all per-field defaulting + parsing rules in this single
+// function so adding a new field doesn't require touching multiple
+// constructors.
+func buildConfigFromEnv() *Config {
+	return &Config{
 		DatabaseURL:           os.Getenv("DATABASE_URL"),
 		JWTSecret:             os.Getenv("JWT_SECRET"),
 		ListenAddr:            getEnvDefault("LISTEN_ADDR", ":8080"),
@@ -291,35 +366,67 @@ func Load() (*Config, error) {
 		OTELServiceName:             getEnvDefault("OTEL_SERVICE_NAME", "zk-drive"),
 		OTELDeploymentEnvironment:   os.Getenv("OTEL_DEPLOYMENT_ENVIRONMENT"),
 		OTELSamplerRatio:            parseFloatDefault(os.Getenv("OTEL_TRACES_SAMPLER_ARG"), 0.1),
-	}
 
-	var missing []string
-	if strings.TrimSpace(cfg.DatabaseURL) == "" {
-		missing = append(missing, "DATABASE_URL")
+		AuditArchiveEnabled:         parseBoolDefault(os.Getenv("AUDIT_LOG_ARCHIVE_ENABLED"), false),
+		AuditLogRetentionDays:       clampAuditRetentionDays(parseIntDefault(os.Getenv("AUDIT_LOG_RETENTION_DAYS"), 90)),
+		AuditArchivePrefix:          normaliseArchivePrefix(getEnvDefault("AUDIT_LOG_ARCHIVE_PREFIX", "audit-archive/")),
+		AuditArchiveBucket:          strings.TrimSpace(os.Getenv("AUDIT_LOG_ARCHIVE_BUCKET")),
+		AuditArchiveMaxRowsPerBatch: clampAuditMaxRowsPerBatch(parseIntDefault(os.Getenv("AUDIT_LOG_ARCHIVE_MAX_ROWS_PER_BATCH"), defaultAuditArchiveMaxRowsPerBatch)),
 	}
-	if strings.TrimSpace(cfg.JWTSecret) == "" {
-		missing = append(missing, "JWT_SECRET")
-	}
-	if len(missing) > 0 {
-		return nil, errors.New("missing required environment variables: " + strings.Join(missing, ", "))
-	}
+}
 
-	if strings.TrimSpace(cfg.S3Endpoint) != "" {
-		var missingS3 []string
-		if strings.TrimSpace(cfg.S3Bucket) == "" {
-			missingS3 = append(missingS3, "S3_BUCKET")
-		}
-		if strings.TrimSpace(cfg.S3AccessKey) == "" {
-			missingS3 = append(missingS3, "S3_ACCESS_KEY")
-		}
-		if strings.TrimSpace(cfg.S3SecretKey) == "" {
-			missingS3 = append(missingS3, "S3_SECRET_KEY")
-		}
-		if len(missingS3) > 0 {
-			return nil, errors.New("S3_ENDPOINT is set but missing required variables: " + strings.Join(missingS3, ", "))
-		}
+// LoadStorageOnly reads configuration from environment variables and
+// returns a populated Config WITHOUT enforcing DATABASE_URL or
+// JWT_SECRET. The S3 group is still validated as a coherent set
+// (S3_ENDPOINT requires S3_BUCKET + S3_ACCESS_KEY + S3_SECRET_KEY).
+//
+// Intended for read-only binaries that never touch Postgres or the
+// HTTP request lifecycle — currently just cmd/audit-restore, which
+// streams gzipped JSONL audit objects out of S3 for incident
+// investigation. Forcing those operators to supply DATABASE_URL /
+// JWT_SECRET (per the README workaround `JWT_SECRET=unused-but-required`)
+// is friction during incident response: an on-call engineer may have
+// S3 credentials in hand but not the running Postgres password.
+// See WS-23 PR #68 Devin Review finding
+// ANALYSIS_pr-review-job-ad89da4c3a1449c5b914d6045dc4ffb8_0001.
+//
+// Any new binary that wants this slim variant should call
+// LoadStorageOnly explicitly; the default Load remains strict so
+// server / worker startup still fails fast if those env vars are
+// missing.
+func LoadStorageOnly() (*Config, error) {
+	cfg := buildConfigFromEnv()
+	if err := validateS3Group(cfg); err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(cfg.S3Endpoint) == "" {
+		return nil, errors.New("audit-restore / storage-only binaries require S3_ENDPOINT to be configured")
 	}
 	return cfg, nil
+}
+
+// validateS3Group enforces the coherent-S3-group invariant: if
+// S3_ENDPOINT is set, the bucket + access key + secret key must
+// also be set. Shared between Load and LoadStorageOnly so the two
+// entrypoints can't drift on S3 validation rules.
+func validateS3Group(cfg *Config) error {
+	if strings.TrimSpace(cfg.S3Endpoint) == "" {
+		return nil
+	}
+	var missingS3 []string
+	if strings.TrimSpace(cfg.S3Bucket) == "" {
+		missingS3 = append(missingS3, "S3_BUCKET")
+	}
+	if strings.TrimSpace(cfg.S3AccessKey) == "" {
+		missingS3 = append(missingS3, "S3_ACCESS_KEY")
+	}
+	if strings.TrimSpace(cfg.S3SecretKey) == "" {
+		missingS3 = append(missingS3, "S3_SECRET_KEY")
+	}
+	if len(missingS3) > 0 {
+		return errors.New("S3_ENDPOINT is set but missing required variables: " + strings.Join(missingS3, ", "))
+	}
+	return nil
 }
 
 func getEnvDefault(key, def string) string {
@@ -374,6 +481,117 @@ func parsePriceTierMap(s string) map[string]string {
 		return nil
 	}
 	return out
+}
+
+// maxAuditRetentionDays caps AUDIT_LOG_RETENTION_DAYS at ten years
+// (3650 days) so a typo like "9000000" (intended "90") doesn't
+// degenerate into "archive nothing ever" and let the hot tier grow
+// unboundedly with no operator-visible warning. Ten years exceeds
+// every common compliance retention window (SOC2 = 1 year minimum,
+// HIPAA = 6 years) and the clamp log makes the corrected value
+// surface in startup logs.
+const maxAuditRetentionDays = 3650
+
+// minAuditRetentionDays mirrors internal/audit.MinRetentionDays (= 7)
+// — the service-level floor that ArchiveService refuses to operate
+// below. They MUST stay locked-step: a value that passes config but
+// fails the service produces a confusing operator experience where
+// the binary loads successfully and then aborts at archive start.
+// internal/config/config_test.go pins the equality with a Go-level
+// assertion so a future change in either constant fails CI.
+const minAuditRetentionDays = 7
+
+// clampAuditRetentionDays bounds AUDIT_LOG_RETENTION_DAYS at sensible
+// limits. Returns the configured value when valid; otherwise:
+//   - non-positive input clamps to 90 (the default — assume the
+//     operator forgot to set it rather than intentionally set 0).
+//   - input in the range [1, minAuditRetentionDays-1] (i.e. 1–6 days)
+//     clamps UP to minAuditRetentionDays. Values that low almost
+//     certainly indicate a typo and aggressively pruning legitimately-
+//     recent audit history would compound the mistake. Clamping up
+//     preserves audit history rather than deleting it.
+//   - input > maxAuditRetentionDays clamps to maxAuditRetentionDays.
+//
+// The caller surfaces the clamped value at startup via the boot logs
+// so an operator can confirm the effective setting.
+func clampAuditRetentionDays(d int) int {
+	if d <= 0 {
+		return 90
+	}
+	if d < minAuditRetentionDays {
+		return minAuditRetentionDays
+	}
+	if d > maxAuditRetentionDays {
+		return maxAuditRetentionDays
+	}
+	return d
+}
+
+// maxAuditArchiveMaxRowsPerBatch caps AUDIT_LOG_ARCHIVE_MAX_ROWS_PER_BATCH
+// at 1,000,000 rows so an operator typo like "10000000" (intended
+// "100000") doesn't cause the archiver to try to encode 10M rows of
+// JSONL.gz in memory and OOM-kill the CronJob pod
+// (deploy/k8s/audit-archiver-cronjob.yaml sets a 512Mi memory limit;
+// at ~500B per row, 1M rows = ~500MB uncompressed encoded, which
+// gzip-streams comfortably within that ceiling while still being a
+// dramatic upper bound vs the 50k default).
+//
+// Defense-in-depth: NewArchiveService already rejects non-positive
+// values (defaultMaxRowsPerBatch substitution), but had no upper
+// guard. This clamp matches the retention-days pattern — bound at
+// both ends in config so the service receives only sane values.
+const maxAuditArchiveMaxRowsPerBatch = 1_000_000
+
+// defaultAuditArchiveMaxRowsPerBatch mirrors
+// internal/audit.defaultMaxRowsPerBatch so the env-unset default and
+// the service-level fallback never drift. Kept locally to avoid an
+// internal/config → internal/audit import cycle (audit already
+// depends on config types via the ArchiveServiceConfig struct).
+const defaultAuditArchiveMaxRowsPerBatch = 50000
+
+// clampAuditMaxRowsPerBatch bounds AUDIT_LOG_ARCHIVE_MAX_ROWS_PER_BATCH
+// at sensible limits. Returns the configured value when valid;
+// otherwise:
+//   - non-positive input clamps to defaultAuditArchiveMaxRowsPerBatch
+//     (the default — assume the operator forgot to set it rather
+//     than intentionally set 0, which would archive nothing).
+//   - input > maxAuditArchiveMaxRowsPerBatch clamps to the ceiling
+//     so a malformed env var can't OOM-kill the archiver pod.
+//
+// The caller surfaces the clamped value at startup via the boot
+// logs so an operator can confirm the effective setting. See WS-23
+// PR #68 Devin Review finding
+// ANALYSIS_pr-review-job-667bb339b9654552bfaa74d3720a8d0b_0005.
+func clampAuditMaxRowsPerBatch(n int) int {
+	if n <= 0 {
+		return defaultAuditArchiveMaxRowsPerBatch
+	}
+	if n > maxAuditArchiveMaxRowsPerBatch {
+		return maxAuditArchiveMaxRowsPerBatch
+	}
+	return n
+}
+
+// normaliseArchivePrefix ensures the prefix ends with exactly one
+// trailing slash so callers can concatenate the per-workspace key
+// suffix without bookkeeping. Empty input falls back to the default
+// "audit-archive/" — never an empty prefix, because writing to the
+// bucket root would tangle archive objects with live file objects.
+func normaliseArchivePrefix(s string) string {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return "audit-archive/"
+	}
+	// Strip every trailing slash first, then re-add exactly one,
+	// so "audit/", "audit//", and "audit///" all normalise to
+	// "audit/".
+	s = strings.TrimRight(s, "/")
+	if s == "" {
+		// Was just slashes — fall back to default rather than
+		// returning the bucket root.
+		return "audit-archive/"
+	}
+	return s + "/"
 }
 
 // parseBoolDefault parses the common boolean env-var values

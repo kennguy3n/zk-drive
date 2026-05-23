@@ -4,6 +4,8 @@ import (
 	"os"
 	"strings"
 	"testing"
+
+	"github.com/kennguy3n/zk-drive/internal/audit"
 )
 
 // requireEnv installs envs for the duration of t and restores the
@@ -31,6 +33,48 @@ func requireEnv(t *testing.T, envs map[string]string) {
 		"SECURITY_HEADERS_DISABLE_HSTS", "SECURITY_HEADERS_CSP_REPORT_ONLY",
 		"SECURITY_HEADERS_CSP_REPORT_URI", "SECURITY_HEADERS_CSP_CONNECT_EXTRA",
 		"SECURITY_HEADERS_CSP_IMG_EXTRA",
+		// OpenTelemetry env vars (WS-22 distributed tracing). Same
+		// rationale as the audit-archival block below: any env var
+		// read by buildConfigFromEnv must be in this list so a CI
+		// runner with e.g. OTEL_EXPORTER_OTLP_ENDPOINT exported
+		// doesn't bleed into tests that exercise the tracing-off
+		// default. No test currently asserts on these fields, but
+		// the convention is "every env Load reads goes here" — the
+		// list is the source of truth for what tests are protected
+		// against. See WS-23 PR #68 Devin Review finding
+		// ANALYSIS_pr-review-job-336ff0c949fb48ea98da61b605622dd2_0001.
+		"OTEL_EXPORTER_OTLP_ENDPOINT", "OTEL_EXPORTER_OTLP_HEADERS",
+		"OTEL_EXPORTER_OTLP_INSECURE", "OTEL_EXPORTER_OTLP_COMPRESSION",
+		"OTEL_SERVICE_NAME", "OTEL_DEPLOYMENT_ENVIRONMENT",
+		"OTEL_TRACES_SAMPLER_ARG",
+		// Audit-log cold archival env vars (WS-23). MUST be in this
+		// list so tests like TestLoadAuditArchiveDefaults observe the
+		// production "unset" state regardless of what the parent
+		// shell / CI runner has exported. The defaults are validated
+		// inside buildConfigFromEnv (e.g. AUDIT_LOG_RETENTION_DAYS
+		// becomes 90 when unset), so the convention is: any env var
+		// touched by buildConfigFromEnv lives here. See WS-23 PR #68
+		// Devin Review finding
+		// BUG_pr-review-job-00ec8888db2a410b892f764609056529_0002.
+		"AUDIT_LOG_ARCHIVE_ENABLED", "AUDIT_LOG_RETENTION_DAYS",
+		"AUDIT_LOG_ARCHIVE_PREFIX", "AUDIT_LOG_ARCHIVE_BUCKET",
+		"AUDIT_LOG_ARCHIVE_MAX_ROWS_PER_BATCH",
+		// SMTP transactional email + PUBLIC_URL env vars (WS-21).
+		// These were introduced in PR #66 (commit 939fa4d) but the
+		// matching requireEnv update was missed at the time. Adding
+		// them here closes the consistency gap with the same
+		// rationale documented in the OTEL block above: any env var
+		// buildConfigFromEnv reads must live in this list so a CI
+		// runner with e.g. SMTP_HOST exported doesn't bleed into
+		// tests that exercise the "email disabled" default. See
+		// WS-23 PR #68 Devin Review finding
+		// ANALYSIS_pr-review-job-8cfa30b85fb14cd7832897b92f636bf0_0001.
+		"PUBLIC_URL",
+		"SMTP_HOST", "SMTP_PORT",
+		"SMTP_USERNAME", "SMTP_PASSWORD",
+		"SMTP_FROM_ADDRESS", "SMTP_FROM_NAME",
+		"SMTP_TLS_MODE", "SMTP_TLS_SERVER_NAME",
+		"SMTP_TLS_INSECURE_SKIP_VERIFY",
 	}
 	// WORKER_METRICS_ADDR is intentionally NOT included in the keys
 	// list above. t.Setenv(k, "") makes os.LookupEnv return
@@ -173,6 +217,72 @@ func TestLoadCompleteS3(t *testing.T) {
 	}
 	if cfg.MigrationsDir != "/srv/migrations" {
 		t.Fatalf("expected MigrationsDir override, got %q", cfg.MigrationsDir)
+	}
+}
+
+// TestLoadStorageOnly verifies the audit-restore-friendly slim
+// loader: it returns a populated Config WITHOUT requiring
+// DATABASE_URL or JWT_SECRET. S3_ENDPOINT is required (since the
+// loader is for storage-only binaries); the S3 group remains
+// coherent-validated. Added for WS-23 PR #68 Devin Review finding
+// ANALYSIS_pr-review-job-ad89da4c3a1449c5b914d6045dc4ffb8_0001.
+func TestLoadStorageOnly(t *testing.T) {
+	requireEnv(t, map[string]string{
+		// Intentionally NO DATABASE_URL / JWT_SECRET.
+		"S3_ENDPOINT":              "https://s3.example.com",
+		"S3_BUCKET":                "drive-prod",
+		"S3_ACCESS_KEY":            "AKIA...",
+		"S3_SECRET_KEY":            "supersecret",
+		"AUDIT_LOG_ARCHIVE_PREFIX": "audit-archive/",
+	})
+	cfg, err := LoadStorageOnly()
+	if err != nil {
+		t.Fatalf("LoadStorageOnly failed: %v", err)
+	}
+	if cfg.S3Endpoint != "https://s3.example.com" || cfg.S3Bucket != "drive-prod" {
+		t.Fatalf("S3 fields not propagated: %+v", cfg)
+	}
+	if cfg.AuditArchivePrefix != "audit-archive/" {
+		t.Fatalf("AuditArchivePrefix not propagated: %q", cfg.AuditArchivePrefix)
+	}
+	// DatabaseURL / JWTSecret may be empty — that's the whole point.
+}
+
+// TestLoadStorageOnlyRequiresS3Endpoint verifies that the slim
+// loader still refuses to run if S3_ENDPOINT is absent — without
+// S3 access there's nothing for audit-restore to read.
+func TestLoadStorageOnlyRequiresS3Endpoint(t *testing.T) {
+	requireEnv(t, map[string]string{
+		// No S3_ENDPOINT.
+	})
+	_, err := LoadStorageOnly()
+	if err == nil {
+		t.Fatalf("expected error when S3_ENDPOINT is unset")
+	}
+	if !strings.Contains(err.Error(), "S3_ENDPOINT") {
+		t.Fatalf("expected error to mention S3_ENDPOINT, got: %v", err)
+	}
+}
+
+// TestLoadStorageOnlyEnforcesS3Group asserts the slim loader still
+// applies the coherent-S3-group invariant (S3_ENDPOINT requires
+// bucket + access key + secret key). Drift between Load and
+// LoadStorageOnly on S3 validation would mean an operator could
+// run audit-restore with half-configured S3 and get cryptic
+// failures only when the first ListObjects call fires.
+func TestLoadStorageOnlyEnforcesS3Group(t *testing.T) {
+	requireEnv(t, map[string]string{
+		"S3_ENDPOINT": "https://s3.example.com",
+		// Intentionally missing S3_BUCKET / S3_ACCESS_KEY / S3_SECRET_KEY.
+	})
+	_, err := LoadStorageOnly()
+	if err == nil {
+		t.Fatalf("expected error when S3 group is incomplete")
+	}
+	for _, sub := range []string{"S3_BUCKET", "S3_ACCESS_KEY", "S3_SECRET_KEY"} {
+		if !strings.Contains(err.Error(), sub) {
+			t.Fatalf("expected error to mention %s, got: %v", sub, err)
+		}
 	}
 }
 
@@ -357,6 +467,155 @@ func TestWorkerMetricsAddrFromEnv(t *testing.T) {
 				t.Errorf("workerMetricsAddrFromEnv() = %q, want %q", got, tc.want)
 			}
 		})
+	}
+}
+
+// TestClampAuditRetentionDays exercises every branch of the
+// retention-day clamp so a future refactor that drops one of the
+// safety floors (negative input, zero input, sub-service-floor input,
+// max ceiling) trips a regression. The branches matter because each
+// one prevents a different operator footgun:
+//
+//   - non-positive input -> 90 (default) so an empty / malformed
+//     env var doesn't disable archival silently
+//   - input in [1, minAuditRetentionDays-1] (1-6 days) -> clamps UP
+//     to minAuditRetentionDays so the value is accepted by both
+//     config Load() AND audit.NewArchiveService rather than getting
+//     accepted at config-load time then rejected at archive start
+//   - input above maxAuditRetentionDays -> ceiling (3650 = 10y) so
+//     a typo'd "9999" doesn't keep archived rows in the hot tier
+//     for 27 years
+func TestClampAuditRetentionDays(t *testing.T) {
+	cases := []struct {
+		name  string
+		input int
+		want  int
+	}{
+		{"negative falls back to default", -7, 90},
+		{"zero falls back to default", 0, 90},
+		{"valid passes through", 365, 365},
+		{"one clamps to service floor", 1, minAuditRetentionDays},
+		{"six clamps to service floor", 6, minAuditRetentionDays},
+		{"at service floor passes through", minAuditRetentionDays, minAuditRetentionDays},
+		{"above ceiling clamps to max", 9999, maxAuditRetentionDays},
+		{"at ceiling passes through", maxAuditRetentionDays, maxAuditRetentionDays},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := clampAuditRetentionDays(tc.input)
+			if got != tc.want {
+				t.Errorf("clampAuditRetentionDays(%d) = %d, want %d", tc.input, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestAuditRetentionFloorMatchesService pins minAuditRetentionDays
+// to audit.MinRetentionDays so a future change in one constant
+// without the other fails CI rather than at archive-start runtime.
+// Same-package import is allowed for tests; the production binary
+// doesn't import audit from config.
+func TestAuditRetentionFloorMatchesService(t *testing.T) {
+	if minAuditRetentionDays != audit.MinRetentionDays {
+		t.Fatalf("minAuditRetentionDays (%d) != audit.MinRetentionDays (%d). "+
+			"They must stay locked-step so a config-accepted value cannot be "+
+			"rejected by ArchiveService at archive-start.",
+			minAuditRetentionDays, audit.MinRetentionDays)
+	}
+}
+
+// TestClampAuditMaxRowsPerBatch exercises every branch of the
+// rows-per-batch clamp so a future refactor can't drop the upper
+// bound without failing CI. The upper bound is load-bearing: the
+// CronJob pod (deploy/k8s/audit-archiver-cronjob.yaml) is limited to
+// 512Mi memory, and the JSONL.gz encoder buffers an entire page in
+// memory before uploading. A malformed env var like
+// AUDIT_LOG_ARCHIVE_MAX_ROWS_PER_BATCH=10000000 (intended 100k) would
+// OOM-kill the pod without this clamp. See WS-23 PR #68 Devin Review
+// finding ANALYSIS_pr-review-job-667bb339b9654552bfaa74d3720a8d0b_0005.
+func TestClampAuditMaxRowsPerBatch(t *testing.T) {
+	cases := []struct {
+		name  string
+		input int
+		want  int
+	}{
+		{"negative falls back to default", -42, defaultAuditArchiveMaxRowsPerBatch},
+		{"zero falls back to default", 0, defaultAuditArchiveMaxRowsPerBatch},
+		{"one passes through (valid floor)", 1, 1},
+		{"default passes through", defaultAuditArchiveMaxRowsPerBatch, defaultAuditArchiveMaxRowsPerBatch},
+		{"at ceiling passes through", maxAuditArchiveMaxRowsPerBatch, maxAuditArchiveMaxRowsPerBatch},
+		{"above ceiling clamps to max", maxAuditArchiveMaxRowsPerBatch + 1, maxAuditArchiveMaxRowsPerBatch},
+		{"far above ceiling clamps to max (OOM-prevention)", 10_000_000, maxAuditArchiveMaxRowsPerBatch},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := clampAuditMaxRowsPerBatch(tc.input)
+			if got != tc.want {
+				t.Errorf("clampAuditMaxRowsPerBatch(%d) = %d, want %d", tc.input, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestNormaliseArchivePrefix walks every input shape that an
+// operator might paste into AUDIT_LOG_ARCHIVE_PREFIX. The
+// trailing-slash normalisation is critical because the archive
+// service concatenates the workspace UUID directly onto the
+// configured prefix — without normalisation, "audit-archive" and
+// "audit-archive/" would produce different S3 key layouts on the
+// same bucket, breaking restore enumeration.
+func TestNormaliseArchivePrefix(t *testing.T) {
+	cases := []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{"empty falls back to default", "", "audit-archive/"},
+		{"whitespace falls back to default", "   ", "audit-archive/"},
+		{"only-slashes falls back to default", "///", "audit-archive/"},
+		{"missing trailing slash adds one", "audit", "audit/"},
+		{"single trailing slash passes through", "audit/", "audit/"},
+		{"double trailing slash collapses", "audit//", "audit/"},
+		{"deep prefix preserved", "compliance/audit-archive/", "compliance/audit-archive/"},
+		{"deep prefix missing slash gets one", "compliance/audit-archive", "compliance/audit-archive/"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := normaliseArchivePrefix(tc.input)
+			if got != tc.want {
+				t.Errorf("normaliseArchivePrefix(%q) = %q, want %q", tc.input, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestLoadAuditArchiveDefaults verifies the env-free Load() path
+// produces the documented defaults: archive disabled, 90-day
+// retention, "audit-archive/" prefix, no bucket override, 50k
+// rows-per-batch cap.
+func TestLoadAuditArchiveDefaults(t *testing.T) {
+	requireEnv(t, map[string]string{
+		"DATABASE_URL": "postgres://localhost/zkdrive",
+		"JWT_SECRET":   "test-secret",
+	})
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.AuditArchiveEnabled {
+		t.Errorf("AuditArchiveEnabled = true, want false (opt-in)")
+	}
+	if cfg.AuditLogRetentionDays != 90 {
+		t.Errorf("AuditLogRetentionDays = %d, want 90", cfg.AuditLogRetentionDays)
+	}
+	if cfg.AuditArchivePrefix != "audit-archive/" {
+		t.Errorf("AuditArchivePrefix = %q, want audit-archive/", cfg.AuditArchivePrefix)
+	}
+	if cfg.AuditArchiveBucket != "" {
+		t.Errorf("AuditArchiveBucket = %q, want empty (S3_BUCKET fallback)", cfg.AuditArchiveBucket)
+	}
+	if cfg.AuditArchiveMaxRowsPerBatch != 50000 {
+		t.Errorf("AuditArchiveMaxRowsPerBatch = %d, want 50000", cfg.AuditArchiveMaxRowsPerBatch)
 	}
 }
 

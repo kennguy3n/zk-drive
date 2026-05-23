@@ -4,9 +4,11 @@
 package storage
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net/url"
 	"strings"
 	"time"
@@ -207,6 +209,108 @@ func (c *Client) DeleteObject(ctx context.Context, objectKey string) error {
 	})
 	if err != nil {
 		return fmt.Errorf("delete object: %w", err)
+	}
+	return nil
+}
+
+// PutObject uploads body to objectKey with the supplied contentType.
+// Unlike GenerateUploadURL (which signs a URL for the CLIENT to PUT),
+// this method is used when the API server itself is the producer —
+// e.g. the audit-log archiver writing JSONL.gz blobs to the cold tier,
+// or any future server-side direct write.
+//
+// The request is bounded by the supplied context (callers pass a
+// timeout). Idempotent at the S3 layer: re-uploading to the same key
+// overwrites the previous object atomically (zk-object-fabric tenants
+// are not versioned for ZK Drive), so retrying after a transient
+// network failure is safe. For idempotent batch writes that must NOT
+// collide on retry, the caller should construct a unique key per
+// attempt (the audit archiver uses a UUID suffix).
+func (c *Client) PutObject(ctx context.Context, objectKey, contentType string, body []byte) error {
+	if c == nil || c.s3 == nil {
+		return errors.New("storage: client not initialised")
+	}
+	if strings.TrimSpace(objectKey) == "" {
+		return errors.New("storage: object key is required")
+	}
+	in := &s3.PutObjectInput{
+		Bucket: aws.String(c.bucket),
+		Key:    aws.String(objectKey),
+		Body:   bytes.NewReader(body),
+	}
+	if strings.TrimSpace(contentType) != "" {
+		in.ContentType = aws.String(contentType)
+	}
+	if _, err := c.s3.PutObject(ctx, in); err != nil {
+		return fmt.Errorf("put object: %w", err)
+	}
+	return nil
+}
+
+// GetObject reads the bytes at objectKey. Used by the audit-restore
+// CLI to read back archived JSONL.gz blobs. Returns the full body in
+// memory — callers should keep individual archive object sizes
+// reasonable (the archiver naturally bounds them at one month per
+// workspace). NotFound surfaces as a wrapped error so callers can
+// errors.As against *s3types.NoSuchKey when they want to distinguish
+// "no archive for this period" from a real I/O failure.
+func (c *Client) GetObject(ctx context.Context, objectKey string) ([]byte, error) {
+	if c == nil || c.s3 == nil {
+		return nil, errors.New("storage: client not initialised")
+	}
+	if strings.TrimSpace(objectKey) == "" {
+		return nil, errors.New("storage: object key is required")
+	}
+	out, err := c.s3.GetObject(ctx, &s3.GetObjectInput{
+		Bucket: aws.String(c.bucket),
+		Key:    aws.String(objectKey),
+	})
+	if err != nil {
+		return nil, fmt.Errorf("get object %q: %w", objectKey, err)
+	}
+	defer func() { _ = out.Body.Close() }()
+	data, err := io.ReadAll(out.Body)
+	if err != nil {
+		return nil, fmt.Errorf("read object body: %w", err)
+	}
+	return data, nil
+}
+
+// ListObjects enumerates every object whose key starts with prefix
+// and invokes fn for each one. fn receiving a non-nil error short-
+// circuits the iteration. Paginated under the hood so a prefix
+// containing millions of keys still streams safely.
+//
+// Used by the audit-restore CLI to discover every archive object for
+// a workspace's history without round-tripping through Postgres —
+// the cold tier is the source of truth when audit_log_archive_runs
+// entries get pruned (which we don't do today but may add for very
+// long retention windows).
+func (c *Client) ListObjects(ctx context.Context, prefix string, fn func(key string, size int64) error) error {
+	if c == nil || c.s3 == nil {
+		return errors.New("storage: client not initialised")
+	}
+	paginator := s3.NewListObjectsV2Paginator(c.s3, &s3.ListObjectsV2Input{
+		Bucket: aws.String(c.bucket),
+		Prefix: aws.String(prefix),
+	})
+	for paginator.HasMorePages() {
+		page, err := paginator.NextPage(ctx)
+		if err != nil {
+			return fmt.Errorf("list objects: %w", err)
+		}
+		for _, obj := range page.Contents {
+			if obj.Key == nil {
+				continue
+			}
+			var size int64
+			if obj.Size != nil {
+				size = *obj.Size
+			}
+			if err := fn(*obj.Key, size); err != nil {
+				return err
+			}
+		}
 	}
 	return nil
 }
