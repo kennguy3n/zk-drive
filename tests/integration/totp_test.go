@@ -113,11 +113,12 @@ func TestTOTPLifecycle(t *testing.T) {
 		t.Fatalf("challenge token on data plane: status=%d, want 401", status)
 	}
 
-	// Disable 2FA. Requires password re-verify.
+	// Disable 2FA. Requires password re-verify. Returns 204 No Content
+	// on success — the handler has no useful payload to return.
 	status, body = env.httpRequest(http.MethodPost, "/api/auth/totp/disable", session.Token, map[string]string{
 		"password": "correct-horse",
 	})
-	if status != http.StatusOK {
+	if status != http.StatusNoContent {
 		t.Fatalf("disable: status=%d body=%s", status, string(body))
 	}
 
