@@ -53,6 +53,7 @@ import (
 	"github.com/kennguy3n/zk-drive/internal/scan"
 	"github.com/kennguy3n/zk-drive/internal/sharing"
 	"github.com/kennguy3n/zk-drive/internal/storage"
+	"github.com/kennguy3n/zk-drive/internal/tracing"
 	"github.com/kennguy3n/zk-drive/internal/version"
 	"github.com/kennguy3n/zk-drive/internal/wiring"
 )
@@ -80,6 +81,36 @@ func run() error {
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
+
+	// Tracing is initialised before any other subsystem so spans
+	// from database.Connect, the NATS subscribe, and per-message
+	// handlers flow through the same provider. Mirrors the
+	// cmd/server startup contract: missing OTEL_EXPORTER_OTLP_ENDPOINT
+	// short-circuits to a no-op provider that LogStartup announces
+	// at boot. Service name is the same "zk-drive" so the worker
+	// and server land under one logical service; service.instance.id
+	// distinguishes the two processes.
+	traceProvider, err := tracing.Init(ctx, tracing.BuildFromOperatorConfig(tracing.OperatorConfig{
+		Endpoint:              cfg.OTELExporterOTLPEndpoint,
+		Headers:               cfg.OTELExporterOTLPHeaders,
+		Insecure:              cfg.OTELExporterOTLPInsecure,
+		Compression:           cfg.OTELExporterOTLPCompression,
+		ServiceName:           cfg.OTELServiceName,
+		DeploymentEnvironment: cfg.OTELDeploymentEnvironment,
+		SamplerRatio:          cfg.OTELSamplerRatio,
+	}, version.Version))
+	if err != nil {
+		cancel()
+		return fmt.Errorf("init tracing: %w", err)
+	}
+	traceProvider.LogStartup(ctx)
+	defer func() {
+		shutCtx, shutCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer shutCancel()
+		if err := traceProvider.Shutdown(shutCtx); err != nil {
+			slog.Warn("tracing shutdown returned error", "err", err)
+		}
+	}()
 
 	pool, err := database.Connect(ctx, cfg.DatabaseURL)
 	if err != nil {
@@ -430,11 +461,11 @@ func subscribeAll(ctx context.Context, js nats.JetStreamContext, pool *pgxpool.P
 		durable string
 		handler nats.MsgHandler
 	}{
-		{jobs.SubjectPreview, "drive-preview", m.InstrumentJob(jobs.SubjectPreview, previewHandler(ctx, pool, previewSvc))},
-		{jobs.SubjectScan, "drive-scan", m.InstrumentJob(jobs.SubjectScan, scanHandler(ctx, pool, scanSvc))},
-		{jobs.SubjectIndex, "drive-index", m.InstrumentJob(jobs.SubjectIndex, indexHandler(ctx, pool, indexSvc))},
-		{jobs.SubjectArchive, "drive-archive", m.InstrumentJob(jobs.SubjectArchive, archiveHandler(ctx, archiveSvc))},
-		{jobs.SubjectClassify, "drive-classify", m.InstrumentJob(jobs.SubjectClassify, classifyHandler(ctx, pool, classifySvc))},
+		{jobs.SubjectPreview, "drive-preview", m.InstrumentJob(ctx, jobs.SubjectPreview, traceJob(jobs.SubjectPreview, previewHandler(pool, previewSvc)))},
+		{jobs.SubjectScan, "drive-scan", m.InstrumentJob(ctx, jobs.SubjectScan, traceJob(jobs.SubjectScan, scanHandler(pool, scanSvc)))},
+		{jobs.SubjectIndex, "drive-index", m.InstrumentJob(ctx, jobs.SubjectIndex, traceJob(jobs.SubjectIndex, indexHandler(pool, indexSvc)))},
+		{jobs.SubjectArchive, "drive-archive", m.InstrumentJob(ctx, jobs.SubjectArchive, traceJob(jobs.SubjectArchive, archiveHandler(archiveSvc)))},
+		{jobs.SubjectClassify, "drive-classify", m.InstrumentJob(ctx, jobs.SubjectClassify, traceJob(jobs.SubjectClassify, classifyHandler(pool, classifySvc)))},
 	}
 	var subs []*nats.Subscription
 	for _, s := range subjects {
@@ -466,8 +497,8 @@ func unsubscribeAll(subs []*nats.Subscription) {
 // AckWait cycle. Returning the JobResult lets metrics.InstrumentJob
 // emit the right (subject, result) label tuple — see
 // internal/metrics/worker.go for the contract.
-func previewHandler(ctx context.Context, pool *pgxpool.Pool, svc *preview.Service) metrics.JobHandler {
-	return func(msg *nats.Msg) metrics.JobResult {
+func previewHandler(pool *pgxpool.Pool, svc *preview.Service) metrics.JobHandler {
+	return func(ctx context.Context, msg *nats.Msg) metrics.JobResult {
 		var job jobs.FileJob
 		if err := json.Unmarshal(msg.Data, &job); err != nil {
 			slog.Error("worker malformed preview payload", "err", err)
@@ -508,8 +539,8 @@ func previewHandler(ctx context.Context, pool *pgxpool.Pool, svc *preview.Servic
 // failures (pending — typically clamd connectivity errors) are Nak'd
 // so NATS redelivers on the next AckWait cycle. The final status is
 // persisted to file_versions so operators can audit results via SQL.
-func scanHandler(ctx context.Context, pool *pgxpool.Pool, svc *scan.Service) metrics.JobHandler {
-	return func(msg *nats.Msg) metrics.JobResult {
+func scanHandler(pool *pgxpool.Pool, svc *scan.Service) metrics.JobHandler {
+	return func(ctx context.Context, msg *nats.Msg) metrics.JobResult {
 		var job jobs.FileJob
 		if err := json.Unmarshal(msg.Data, &job); err != nil {
 			slog.Error("worker malformed scan payload", "err", err)
@@ -544,8 +575,8 @@ func scanHandler(ctx context.Context, pool *pgxpool.Pool, svc *scan.Service) met
 // the cold archive key pattern, then stamps archived_at on the row.
 // Missing storage client -> ack and move on (the same pattern as
 // preview/scan).
-func archiveHandler(ctx context.Context, svc *retention.ArchiveService) metrics.JobHandler {
-	return func(msg *nats.Msg) metrics.JobResult {
+func archiveHandler(svc *retention.ArchiveService) metrics.JobHandler {
+	return func(ctx context.Context, msg *nats.Msg) metrics.JobResult {
 		var job jobs.FileJob
 		if err := json.Unmarshal(msg.Data, &job); err != nil {
 			slog.Error("worker malformed archive payload", "err", err)
@@ -823,8 +854,8 @@ func runStorageReconciler(ctx context.Context, rc *reconciler.Reconciler, m *met
 // back to the original logging-only behaviour so cold-start setups
 // (no S3_ENDPOINT) still drain the subject and don't queue up
 // JetStream messages.
-func indexHandler(ctx context.Context, pool *pgxpool.Pool, svc *index.Service) metrics.JobHandler {
-	return func(msg *nats.Msg) metrics.JobResult {
+func indexHandler(pool *pgxpool.Pool, svc *index.Service) metrics.JobHandler {
+	return func(ctx context.Context, msg *nats.Msg) metrics.JobResult {
 		var job jobs.FileJob
 		if err := json.Unmarshal(msg.Data, &job); err != nil {
 			slog.Error("worker malformed index payload", "err", err)
@@ -857,8 +888,8 @@ func indexHandler(ctx context.Context, pool *pgxpool.Pool, svc *index.Service) m
 // classifyHandler decodes the FileJob envelope and runs the
 // classification service. Strict-ZK files skip + ack so the server
 // never writes a label derived from plaintext it does not hold.
-func classifyHandler(ctx context.Context, pool *pgxpool.Pool, svc *classify.Service) metrics.JobHandler {
-	return func(msg *nats.Msg) metrics.JobResult {
+func classifyHandler(pool *pgxpool.Pool, svc *classify.Service) metrics.JobHandler {
+	return func(ctx context.Context, msg *nats.Msg) metrics.JobResult {
 		var job jobs.FileJob
 		if err := json.Unmarshal(msg.Data, &job); err != nil {
 			slog.Error("worker malformed classify payload", "err", err)
@@ -885,6 +916,28 @@ func classifyHandler(ctx context.Context, pool *pgxpool.Pool, svc *classify.Serv
 		slog.Info("worker classify ok", "file_id", job.FileID, "version_id", job.VersionID)
 		_ = msg.Ack()
 		return metrics.JobResultOK
+	}
+}
+
+// traceJob adapts a metrics.JobHandler (which now takes a per-message
+// ctx) into the same signature, but with a leading tracing wrapper
+// that extracts the W3C trace-context from msg.Header and starts a
+// consumer-kind span around the handler. The span name and result
+// attribute flow through tracing.WrapConsumer's handler signature,
+// which uses string results — we translate from / to
+// metrics.JobResult here so cmd/worker/main.go stays the only
+// site that imports both packages.
+//
+// When tracing is disabled (no-op provider), the WrapConsumer
+// wrapper still runs — it just creates no-op spans whose
+// SetAttributes / SetStatus calls are silent. The only cost is one
+// propagator Extract per message, which is microsecond-level.
+func traceJob(subject string, h metrics.JobHandler) metrics.JobHandler {
+	wrapped := tracing.WrapConsumer(subject, func(ctx context.Context, msg *nats.Msg) string {
+		return string(h(ctx, msg))
+	})
+	return func(ctx context.Context, msg *nats.Msg) metrics.JobResult {
+		return metrics.JobResult(wrapped(ctx, msg))
 	}
 }
 

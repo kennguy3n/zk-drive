@@ -18,7 +18,9 @@ import (
 	chimw "github.com/go-chi/chi/v5/middleware"
 	"github.com/google/uuid"
 	"github.com/nats-io/nats.go"
+	"github.com/redis/go-redis/extra/redisotel/v9"
 	"github.com/redis/go-redis/v9"
+	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 
 	"github.com/kennguy3n/zk-drive/api/admin"
 	apikchat "github.com/kennguy3n/zk-drive/api/kchat"
@@ -51,6 +53,7 @@ import (
 	"github.com/kennguy3n/zk-drive/internal/sharing"
 	"github.com/kennguy3n/zk-drive/internal/storage"
 	"github.com/kennguy3n/zk-drive/internal/totp"
+	"github.com/kennguy3n/zk-drive/internal/tracing"
 	"github.com/kennguy3n/zk-drive/internal/user"
 	"github.com/kennguy3n/zk-drive/internal/version"
 	"github.com/kennguy3n/zk-drive/internal/wiring"
@@ -74,6 +77,42 @@ func run() error {
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
+
+	// Tracing is initialised BEFORE any other subsystem so spans
+	// emitted by database.Connect, the Redis ping, NATS subscribe,
+	// and downstream handlers all flow through the same provider.
+	// When OTEL_EXPORTER_OTLP_ENDPOINT is unset, tracing.Init
+	// returns a no-op provider — span calls remain valid (so
+	// instrumented code stays compileable) but nothing exports.
+	// LogStartup announces the effective state in the same boot
+	// log slot as the database / redis / SMTP "X enabled/disabled"
+	// lines so operators see all three pillars at a glance.
+	traceProvider, err := tracing.Init(ctx, tracing.BuildFromOperatorConfig(tracing.OperatorConfig{
+		Endpoint:              cfg.OTELExporterOTLPEndpoint,
+		Headers:               cfg.OTELExporterOTLPHeaders,
+		Insecure:              cfg.OTELExporterOTLPInsecure,
+		Compression:           cfg.OTELExporterOTLPCompression,
+		ServiceName:           cfg.OTELServiceName,
+		DeploymentEnvironment: cfg.OTELDeploymentEnvironment,
+		SamplerRatio:          cfg.OTELSamplerRatio,
+	}, version.Version))
+	if err != nil {
+		cancel()
+		return fmt.Errorf("init tracing: %w", err)
+	}
+	traceProvider.LogStartup(ctx)
+	// Tracer shutdown defers BEFORE pool.Close so any spans
+	// emitted from a final pool close (rare but observed in
+	// pgxpool's draining path) still reach the exporter. Using a
+	// dedicated 10s context so a wedged exporter doesn't block
+	// process exit past the existing shutdown grace period.
+	defer func() {
+		shutCtx, shutCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer shutCancel()
+		if err := traceProvider.Shutdown(shutCtx); err != nil {
+			slog.Warn("tracing shutdown returned error", "err", err)
+		}
+	}()
 
 	pool, err := database.Connect(ctx, cfg.DatabaseURL)
 	if err != nil {
@@ -277,6 +316,24 @@ func run() error {
 			return fmt.Errorf("parse REDIS_URL: %w", perr)
 		}
 		redisClient = redis.NewClient(opts)
+		// Install the OpenTelemetry redis hook BEFORE the first
+		// command (the Ping below). The hook is global to the
+		// client — every command issued through redisClient or
+		// any tx/pipeline derived from it emits a span tagged
+		// with db.system=redis, db.statement (the command),
+		// network.peer.{address,port}. When tracing.Init wired
+		// the no-op tracer, the hook still runs but allocates
+		// nothing, matching the pgx tracer policy at
+		// internal/database/postgres.go.
+		//
+		// Failure to install the hook does NOT abort startup —
+		// Redis tracing is observability-grade infrastructure,
+		// not a correctness guard. A misconfigured hook surfaces
+		// as a one-time warning so the operator sees it without
+		// the server failing to boot.
+		if herr := redisotel.InstrumentTracing(redisClient); herr != nil {
+			slog.Warn("redis tracing hook install failed, redis spans will be missing", "err", herr)
+		}
 		if perr := redisClient.Ping(ctx).Err(); perr != nil {
 			slog.Warn("redis ping failed, continuing with in-memory fallbacks", "url", cfg.RedisURL, "err", perr)
 			// Close the broken client right now so it doesn't
@@ -505,6 +562,17 @@ func run() error {
 	// so handlers calling chimw.GetReqID continue to get the
 	// right value.
 	r.Use(chimw.RealIP)
+	// otelChiSpanRenamer reads the fully-resolved chi route
+	// pattern AFTER dispatch (via defer) and renames the
+	// otelhttp-created span (whose initial name is "http.server")
+	// to `GET /api/files/{id}` style bounded-cardinality names.
+	// Chi populates RoutePattern() incrementally through nested
+	// sub-routers, so reading must happen post-dispatch — the
+	// same timing used by metrics.HTTPMiddleware and AccessLog.
+	// Without this rename, a backend would see millions of
+	// distinct `/api/files/<uuid>` spans instead of one
+	// `GET /api/files/{id}` aggregate.
+	r.Use(otelChiSpanRenamer)
 	// SecurityHeaders runs BEFORE Recoverer so a panic in a
 	// downstream handler still produces a 500 page with the
 	// hardened header set — the Recoverer otherwise writes its
@@ -787,7 +855,22 @@ func run() error {
 		// expose the resolved RoutePattern until after routing,
 		// so the access logger has to sit at the http.Handler
 		// boundary to read it post-dispatch.
-		Handler: logging.AccessLog(r),
+		//
+		// otelhttp.NewHandler is the outermost wrapper so a
+		// single span covers the WHOLE request lifecycle
+		// (including AccessLog's pre/post-dispatch work). The
+		// span starts with the generic name "http.server" and is
+		// renamed post-dispatch by otelChiSpanRenamer (a chi
+		// middleware that reads the resolved RoutePattern AFTER
+		// chi finishes routing). This ensures spans group as
+		// `/api/files/{id}` rather than per-UUID. otelhttp also
+		// injects the active span into the request context, so
+		// downstream packages (slog, pgx, redis, NATS publisher)
+		// tag their child operations with the same trace id.
+		Handler: otelhttp.NewHandler(
+			logging.AccessLog(r),
+			"http.server",
+		),
 		// ReadHeaderTimeout is the first line of defence against
 		// slowloris-style attacks: caps how long a client can
 		// dribble out request headers before the server abandons
@@ -895,5 +978,37 @@ func buildEmailService(cfg *config.Config) (*email.Service, error) {
 		SMTPTLSMode:               cfg.SMTPTLSMode,
 		SMTPTLSServerName:         cfg.SMTPTLSServerName,
 		SMTPTLSInsecureSkipVerify: cfg.SMTPTLSInsecureSkipVerify,
+	})
+}
+
+// otelChiSpanRenamer is a chi middleware that renames the
+// otelhttp-created span to the resolved chi route pattern AFTER
+// dispatch. Chi only fully populates RoutePattern() as the request
+// passes through nested sub-routers, so reading it before
+// next.ServeHTTP would return an incomplete pattern (e.g. "/api/*"
+// instead of "/api/files/{id}"). The defer ensures the rename
+// fires even if the handler panics.
+//
+// When otelhttp is wired but tracing.Init installed the no-op
+// provider (OTEL_EXPORTER_OTLP_ENDPOINT unset), trace.SpanFromContext
+// returns a no-op span whose SetName / SetAttributes are silent
+// no-ops — so the middleware is safe to install unconditionally.
+func otelChiSpanRenamer(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer func() {
+			// Chi resolves RoutePattern incrementally during
+			// its tree walk through nested routers, so the full
+			// pattern is only available AFTER next.ServeHTTP
+			// returns — same timing used by metrics.HTTPMiddleware
+			// and logging.AccessLog. For 404s the pattern is
+			// empty — keep the otelhttp default "http.server"
+			// name.
+			if rctx := chi.RouteContext(r.Context()); rctx != nil {
+				if pattern := rctx.RoutePattern(); pattern != "" {
+					tracing.RenameHTTPServerSpan(r.Context(), r.Method, pattern)
+				}
+			}
+		}()
+		next.ServeHTTP(w, r)
 	})
 }

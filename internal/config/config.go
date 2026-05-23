@@ -171,6 +171,52 @@ type Config struct {
 	SMTPTLSMode               string // "starttls" (default), "implicit", "none"
 	SMTPTLSServerName         string
 	SMTPTLSInsecureSkipVerify bool
+
+	// OpenTelemetry tracing. When OTELExporterOTLPEndpoint is
+	// empty, the tracing subsystem installs a no-op tracer so the
+	// server boots without an exporter wired up. Setting the
+	// endpoint flips on the OTLP/HTTP exporter; the rest of the
+	// fields tune the exporter and sampler around that. All values
+	// are surfaced through tracing.LogStartup at server boot so an
+	// operator can confirm the configuration without grep'ing the
+	// pod's env.
+	//
+	// Endpoints follow the upstream OTEL_EXPORTER_OTLP_ENDPOINT
+	// convention: a base URL like "https://otlp.example.com:4318"
+	// (the package appends "/v1/traces"), or a full URL like
+	// "https://otlp.example.com:4318/v1/traces" — both forms
+	// work, the exporter normalises them at init time.
+	OTELExporterOTLPEndpoint string
+	// Headers is a comma-separated list of header_name=header_value
+	// pairs, matching the W3C-style OTEL_EXPORTER_OTLP_HEADERS
+	// env var (e.g. "x-honeycomb-team=KEY,x-tenant=acme"). Used
+	// to authenticate against managed backends. Parsed at load
+	// time so a malformed entry surfaces as a startup warning
+	// rather than a silent silent-drop at the first trace export.
+	OTELExporterOTLPHeaders map[string]string
+	// Insecure disables TLS for the exporter. Only set for a
+	// local collector running over plain HTTP — production should
+	// always terminate TLS.
+	OTELExporterOTLPInsecure bool
+	// Compression: "gzip" (default) or "none". Matches the
+	// upstream OTEL_EXPORTER_OTLP_COMPRESSION semantics.
+	OTELExporterOTLPCompression string
+	// ServiceName is the service.name resource attribute every
+	// span carries. Defaults to "zk-drive" so spans from the
+	// server and worker binaries land under the same logical
+	// service in the backend.
+	OTELServiceName string
+	// DeploymentEnvironment is the deployment.environment
+	// resource attribute (e.g. "production", "staging", "dev").
+	// Defaults to empty so dev environments don't accidentally
+	// tag themselves "production".
+	OTELDeploymentEnvironment string
+	// SamplerRatio is the parent-based ratio sampler value in
+	// [0,1]. Defaults to 0.1 (10%) for production. Set to 1.0
+	// for dev / debug; set to 0.0 to disable sampling entirely
+	// (preferred to setting endpoint="" if you want the SDK
+	// initialised but no traces exported).
+	OTELSamplerRatio float64
 }
 
 // Load reads configuration from environment variables and returns a populated
@@ -237,6 +283,14 @@ func Load() (*Config, error) {
 		SMTPTLSMode:               getEnvDefault("SMTP_TLS_MODE", "starttls"),
 		SMTPTLSServerName:         os.Getenv("SMTP_TLS_SERVER_NAME"),
 		SMTPTLSInsecureSkipVerify: parseBoolDefault(os.Getenv("SMTP_TLS_INSECURE_SKIP_VERIFY"), false),
+
+		OTELExporterOTLPEndpoint:    strings.TrimSpace(os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT")),
+		OTELExporterOTLPHeaders:     parseOTELHeaders(os.Getenv("OTEL_EXPORTER_OTLP_HEADERS")),
+		OTELExporterOTLPInsecure:    parseBoolDefault(os.Getenv("OTEL_EXPORTER_OTLP_INSECURE"), false),
+		OTELExporterOTLPCompression: strings.ToLower(strings.TrimSpace(getEnvDefault("OTEL_EXPORTER_OTLP_COMPRESSION", "gzip"))),
+		OTELServiceName:             getEnvDefault("OTEL_SERVICE_NAME", "zk-drive"),
+		OTELDeploymentEnvironment:   os.Getenv("OTEL_DEPLOYMENT_ENVIRONMENT"),
+		OTELSamplerRatio:            parseFloatDefault(os.Getenv("OTEL_TRACES_SAMPLER_ARG"), 0.1),
 	}
 
 	var missing []string
@@ -368,4 +422,61 @@ func parseIntDefault(s string, def int) int {
 		return def
 	}
 	return v
+}
+
+// parseFloatDefault parses a non-negative float env-var value. Empty
+// strings, parse failures, and negative results fall back to def —
+// the typical use is parsing a sampler ratio in [0,1], so silently
+// clamping a typo back to the default is preferable to crashing.
+// Values above 1.0 are passed through unchanged; the consumer
+// (tracing.Init) clamps to the legal sampler range with its own
+// startup warning so the limit is documented at one site.
+func parseFloatDefault(s string, def float64) float64 {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return def
+	}
+	v, err := strconv.ParseFloat(s, 64)
+	if err != nil || v < 0 {
+		return def
+	}
+	return v
+}
+
+// parseOTELHeaders parses a W3C-style comma-separated list of
+// `key=value` pairs into a header map. Matches the upstream
+// OTEL_EXPORTER_OTLP_HEADERS conventions, including treating
+// surrounding whitespace as ignorable. Returns nil for empty input
+// so the consumer can distinguish "no headers configured" from
+// "an empty map I should still iterate". Malformed pairs (no `=`,
+// empty key, empty value) are skipped rather than crashing — the
+// tracing package's startup log warns when the input was non-empty
+// but the parsed result is empty so a typo doesn't silently strip
+// auth headers from the exporter.
+func parseOTELHeaders(s string) map[string]string {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return nil
+	}
+	out := make(map[string]string)
+	for _, pair := range strings.Split(s, ",") {
+		pair = strings.TrimSpace(pair)
+		if pair == "" {
+			continue
+		}
+		idx := strings.Index(pair, "=")
+		if idx <= 0 || idx == len(pair)-1 {
+			continue
+		}
+		k := strings.TrimSpace(pair[:idx])
+		v := strings.TrimSpace(pair[idx+1:])
+		if k == "" || v == "" {
+			continue
+		}
+		out[k] = v
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }

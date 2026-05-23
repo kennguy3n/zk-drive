@@ -22,8 +22,21 @@ import (
 	"fmt"
 
 	"github.com/google/uuid"
+	"github.com/kennguy3n/zk-drive/internal/tracing"
 	"github.com/nats-io/nats.go"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	semconv "go.opentelemetry.io/otel/semconv/v1.26.0"
+	"go.opentelemetry.io/otel/trace"
 )
+
+// publisherTracerName is the instrumentation-scope name. Resolved
+// lazily via otel.Tracer on each Start call rather than cached at
+// init — a cached tracer would bind to the no-op global provider
+// that exists before tracing.Init runs and would never see the
+// installed exporter.
+const publisherTracerName = "github.com/kennguy3n/zk-drive/internal/jobs"
 
 // Subject constants. Keep these in sync with cmd/worker/main.go — the
 // worker uses the same strings when declaring JetStream consumers.
@@ -94,11 +107,41 @@ func (p *Publisher) publish(ctx context.Context, subject string, payload FileJob
 	if p == nil || p.js == nil {
 		return nil
 	}
+	// Wrap the publish in a producer-kind span so the resulting
+	// trace shows "API request → publish job" as a parent of
+	// "worker → consume job" once the consumer extracts the
+	// propagated context. Attributes follow the messaging.*
+	// semantic conventions so any OTel-aware backend can group
+	// publisher and consumer spans by destination subject without
+	// custom mapping.
+	ctx, span := otel.Tracer(publisherTracerName).Start(ctx,
+		"jetstream.publish "+subject,
+		trace.WithSpanKind(trace.SpanKindProducer),
+		trace.WithAttributes(
+			semconv.MessagingSystemKey.String("nats"),
+			semconv.MessagingDestinationName(subject),
+			semconv.MessagingOperationTypePublish,
+			attribute.String("messaging.nats.file_id", payload.FileID.String()),
+			attribute.String("messaging.nats.version_id", payload.VersionID.String()),
+		),
+	)
+	defer span.End()
+
 	body, err := json.Marshal(payload)
 	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "marshal payload")
 		return fmt.Errorf("marshal %s payload: %w", subject, err)
 	}
-	if _, err := p.js.PublishAsync(subject, body, nats.Context(ctx)); err != nil {
+	// Inject the W3C trace-context onto the outgoing message via
+	// nats.Msg headers so the consumer recreates the parent-child
+	// link. Using PublishMsgAsync rather than PublishAsync because
+	// the latter has no header-passing equivalent.
+	msg := &nats.Msg{Subject: subject, Data: body, Header: nats.Header{}}
+	otel.GetTextMapPropagator().Inject(ctx, tracing.NATSHeaderCarrier(msg.Header))
+	if _, err := p.js.PublishMsgAsync(msg, nats.Context(ctx)); err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "publish failed")
 		return fmt.Errorf("publish %s: %w", subject, err)
 	}
 	return nil

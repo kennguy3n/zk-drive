@@ -12,6 +12,7 @@ import (
 
 	"github.com/kennguy3n/zk-drive/internal/logging"
 	"github.com/kennguy3n/zk-drive/internal/tenantctx"
+	"github.com/kennguy3n/zk-drive/internal/tracing"
 )
 
 // TokenTTL is the default validity of issued session JWTs.
@@ -267,6 +268,12 @@ func AuthMiddleware(secret string, checker SessionChecker) func(http.Handler) ht
 				"user_id", claims.UserID.String(),
 				"role", claims.Role,
 			)
+			// Mirror identity onto the active span so traces are
+			// filterable by tenant in any OTel-compatible backend.
+			// SetSpanUser uses the OTel `enduser.*` semantic
+			// convention attributes — no-op when tracing is
+			// disabled or the span is not recording.
+			tracing.SetSpanUser(ctx, claims.UserID.String(), claims.WorkspaceID.String())
 			next.ServeHTTP(w, r.WithContext(ctx))
 		})
 	}

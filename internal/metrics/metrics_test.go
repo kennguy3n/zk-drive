@@ -217,7 +217,7 @@ func TestInstrumentJob_CountsByResult(t *testing.T) {
 	}
 	for _, r := range results {
 		want := r // pin in closure
-		wrapped := m.InstrumentJob(subject, func(_ *nats.Msg) metrics.JobResult {
+		wrapped := m.InstrumentJob(context.Background(), subject, func(_ context.Context, _ *nats.Msg) metrics.JobResult {
 			return want
 		})
 		wrapped(&nats.Msg{Subject: subject})
@@ -251,7 +251,7 @@ func TestInstrumentJob_DurationObserved(t *testing.T) {
 	m := metrics.New()
 	subject := "drive.test"
 
-	wrapped := m.InstrumentJob(subject, func(_ *nats.Msg) metrics.JobResult {
+	wrapped := m.InstrumentJob(context.Background(), subject, func(_ context.Context, _ *nats.Msg) metrics.JobResult {
 		return metrics.JobResultOK
 	})
 	for i := 0; i < 5; i++ {
@@ -382,7 +382,7 @@ func TestHandler_ScrapeIntegratesAllSurfaces(t *testing.T) {
 	r.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/api/files/abc", nil))
 
 	// Worker surface — one InstrumentJob invocation.
-	wrapped := m.InstrumentJob("drive.preview.generate", func(_ *nats.Msg) metrics.JobResult {
+	wrapped := m.InstrumentJob(context.Background(), "drive.preview.generate", func(_ context.Context, _ *nats.Msg) metrics.JobResult {
 		return metrics.JobResultOK
 	})
 	wrapped(&nats.Msg{Data: []byte("{}")})
