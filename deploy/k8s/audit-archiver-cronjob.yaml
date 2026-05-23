@@ -1,0 +1,74 @@
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: zk-drive-audit-archiver
+  namespace: zk-drive
+spec:
+  # Nightly cadence at 03:47 UTC. The minute offset (47) staggers
+  # against the reconciler (17 past) and orphan-gc (37 past) so
+  # Postgres + S3 are not hit by all three background jobs at the
+  # same minute.
+  #
+  # A nightly run is sufficient because:
+  #   - Audit-log volume on a SME-sized tenant is < 1k rows/day
+  #     under typical login + admin-action patterns; even at 10×
+  #     that the hot table stays under 100 MB before the next run.
+  #   - Retention policy is enforced AT EXPORT, not in real time,
+  #     so a single missed run shifts the cutoff by 24h on the next
+  #     run — not a compliance regression.
+  #   - Cold-tier S3 objects are append-only with unique UUID
+  #     suffixes, so a duplicate run from a stuck previous tick
+  #     produces a duplicate object, not a corrupted archive.
+  schedule: "47 3 * * *"
+  # Skip a tick if the previous run hasn't finished; a slow run on
+  # a workspace with a multi-million-row backlog could in principle
+  # stretch past 24h. concurrencyPolicy: Forbid means the next tick
+  # is skipped rather than starting a duplicate run that would race
+  # the same DeleteBatch / RecordRun pairs.
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  startingDeadlineSeconds: 600
+  jobTemplate:
+    spec:
+      # Archiver can take a long time on a cold-start with months
+      # or years of accumulated audit_log backlog. activeDeadline
+      # at 4h matches the histogram's top bucket and trips well
+      # before the next nightly tick.
+      activeDeadlineSeconds: 14400
+      backoffLimit: 2
+      ttlSecondsAfterFinished: 86400
+      template:
+        spec:
+          # Same image as every other entrypoint — Dockerfile
+          # builds /app/audit-archiver alongside /app/server,
+          # /app/worker, /app/migrate, /app/reconciler,
+          # /app/orphan-gc.
+          restartPolicy: OnFailure
+          containers:
+            - name: audit-archiver
+              image: ghcr.io/kennguy3n/zk-drive:0.1.0
+              command: ["/app/audit-archiver"]
+              env:
+                # AUDIT_LOG_ARCHIVE_ENABLED is the opt-in gate.
+                # Set to "true" on the configmap/secret to start
+                # archiving on the next scheduled tick.
+                - name: AUDIT_LOG_ARCHIVE_ENABLED
+                  value: "true"
+              envFrom:
+                - configMapRef:
+                    name: zk-drive-config
+                - secretRef:
+                    name: zk-drive-secrets
+              resources:
+                # Archiver is bound by S3 PUT latency and gzip
+                # CPU on the batch encoder. Memory peak is
+                # ~25 MB per batch (50k rows × ~500 bytes/row
+                # uncompressed); 256 MiB limit accommodates the
+                # encoder's working set + JSONL.gz scratch buffer.
+                requests:
+                  cpu: 100m
+                  memory: 128Mi
+                limits:
+                  cpu: 500m
+                  memory: 512Mi

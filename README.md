@@ -486,7 +486,7 @@ proxies file content.
 
 ## Deploying
 
-ZK Drive ships five binaries from a single container image:
+ZK Drive ships seven binaries from a single container image:
 
 - `/app/migrate` — applies pending SQL migrations to the database and exits.
 - `/app/server` — the HTTP API server. Refuses to start if migrations are out
@@ -502,6 +502,13 @@ ZK Drive ships five binaries from a single container image:
   S3 objects from presigned PUTs that completed but were never confirmed.
   Deploys that prefer dedicated CronJob scheduling set the worker's
   `GC_INTERVAL_MINUTES=0` and run `/app/orphan-gc` externally.
+- `/app/audit-archiver` — one-shot CronJob for audit-log cold archival.
+  Exports `audit_log` rows older than `AUDIT_LOG_RETENTION_DAYS` to S3 as
+  compressed JSONL (one object per workspace per calendar month) and
+  deletes them from the hot table. Opt-in via `AUDIT_LOG_ARCHIVE_ENABLED`.
+- `/app/audit-restore` — read-only CLI for the cold tier. Reads archived
+  audit rows back for incident investigation and compliance "produce all
+  admin actions in workspace X between two dates" requests. Run ad-hoc.
 
 ### Observability
 
@@ -534,6 +541,11 @@ Exported series (under the `zkdrive_` prefix):
 - `zkdrive_gc_objects_deleted_total` — counter (S3 objects deleted; diverges from `orphans_deleted` when per-workspace storage path is unconfigured or transiently failing)
 - `zkdrive_gc_workspace_errors_total` — counter
 - `zkdrive_gc_run_duration_seconds` — histogram
+- `zkdrive_audit_archive_runs_total{result}` — counter (`result` ∈ `ok|partial|error|cancelled`)
+- `zkdrive_audit_archive_buckets_total{result}` — counter (per `(workspace, year-month)` bucket; `result` ∈ `ok|error`)
+- `zkdrive_audit_archive_rows_total` — counter (audit rows successfully moved to cold tier)
+- `zkdrive_audit_archive_bytes_total` — counter (uncompressed JSONL bytes uploaded)
+- `zkdrive_audit_archive_run_duration_seconds` — histogram
 - `zkdrive_db_pool_*` — pgxpool live stats (total / acquired / idle / max / acquire count / acquire duration)
 - `zkdrive_redis_pool_*` — go-redis client pool stats (server only — worker does not use Redis directly today)
 - `go_*` / `process_*` — runtime + process collectors from `prometheus/client_golang`
@@ -654,6 +666,112 @@ docker run --rm \
   -e JWT_SECRET=unused-but-required \
   ghcr.io/kennguy3n/zk-drive:<version> /app/migrate
 ```
+
+### Audit log retention and cold archival
+
+ZK Drive's `audit_log` table records security-sensitive events (login,
+SSO link, MFA lifecycle, permission grant/revoke, admin user
+management, workspace settings changes, retention policy changes,
+billing changes, guest-invite delivery outcomes). For compliance
+reporting (SOC2 Type II, HIPAA, GDPR) operators typically need a
+retention window of 1 to 6 years — well beyond what the hot Postgres
+table should carry.
+
+The `audit-archiver` binary (Dockerfile builds it alongside the
+server / worker / reconciler / orphan-gc) is a one-shot CronJob that:
+
+1. Selects audit rows older than `AUDIT_LOG_RETENTION_DAYS`.
+2. Groups them by `(workspace_id, year-month)`.
+3. For each bucket, uploads the rows to S3 as compressed JSONL at
+   the key `{prefix}{workspace_id}/{YYYY-MM}/{run_id}.jsonl.gz`.
+4. Records the run in `audit_log_archive_runs` (run_id, workspace_id,
+   cutoff_time, year_month, archive_object_key, rows_archived,
+   bytes_uploaded, started_at, completed_at, error_message).
+5. Deletes the archived rows from the hot table.
+
+The archiver is **idempotent**: a crash between steps 3-5 leaves the
+S3 object + the `audit_log_archive_runs` row committed but the rows
+still in the hot tier. The next run re-uploads the same rows under
+a new `run_id`-suffixed key; the cold tier may carry duplicate
+objects which the restore CLI dedupes by row id.
+
+#### Configuration
+
+| Variable | Default | Purpose |
+| -------- | ------- | ------- |
+| `AUDIT_LOG_ARCHIVE_ENABLED` | `false` | **Opt-in safety floor.** The archiver refuses to delete rows when unset. Set to `true` after you've confirmed retention + bucket settings. |
+| `AUDIT_LOG_RETENTION_DAYS` | `90` | Rows older than `now() - retention_days` are eligible for archival. Clamped to `[1, 3650]` (10 years). |
+| `AUDIT_LOG_ARCHIVE_PREFIX` | `audit-archive/` | S3 key prefix. Normalised to a single trailing slash. |
+| `AUDIT_LOG_ARCHIVE_BUCKET` | _(empty — use `S3_BUCKET`)_ | Optional dedicated bucket with Glacier transition / object-lock retention rules. |
+| `AUDIT_LOG_ARCHIVE_MAX_ROWS_PER_BATCH` | `50000` | Batch size for the FetchBatch → encode → PUT loop. ~25 MB uncompressed, ~5 MB compressed per batch. |
+
+Typical compliance windows:
+
+- **SOC2 Type II** — 1 year minimum (`AUDIT_LOG_RETENTION_DAYS=365`).
+- **HIPAA** — 6 years from the date of creation
+  (`AUDIT_LOG_RETENTION_DAYS=2190`).
+- **GDPR** — retain as long as the lawful basis applies; revisit on
+  each policy change.
+
+When the binary runs with `AUDIT_LOG_ARCHIVE_ENABLED=false` (the
+default), it logs `audit-archiver disabled by AUDIT_LOG_ARCHIVE_ENABLED;
+exiting zero` and the K8s Job completes successfully — no rows
+deleted, no objects uploaded. This is the safe default for
+deployments that haven't yet configured a cold-tier bucket.
+
+The K8s CronJob ships in `deploy/k8s/audit-archiver-cronjob.yaml`
+with a nightly schedule (`47 3 * * *`) staggered against the
+reconciler (`17 */1 * * *`) and orphan-gc (`37 */6 * * *`) so
+Postgres + S3 are not hit by all three background jobs at the same
+minute. Skip a missed tick rather than overlapping
+(`concurrencyPolicy: Forbid`); `activeDeadlineSeconds: 14400`
+caps a single run at 4h to match the histogram's top bucket.
+
+#### Restore workflow
+
+The `audit-restore` binary reads archived rows back for incident
+investigation. It is read-only — no S3 PUT, no Postgres DELETE — so
+operators can run it freely against any historical period.
+
+```
+docker run --rm \
+  -e DATABASE_URL=postgres://... \
+  -e S3_ENDPOINT=https://... \
+  -e S3_ACCESS_KEY=... \
+  -e S3_SECRET_KEY=... \
+  -e S3_BUCKET=zk-drive-prod \
+  -e AUDIT_LOG_ARCHIVE_BUCKET=zk-drive-audit-archive \
+  -e AUDIT_LOG_ARCHIVE_PREFIX=audit-archive/ \
+  -e JWT_SECRET=unused-but-required \
+  ghcr.io/kennguy3n/zk-drive:<version> /app/audit-restore \
+    --workspace 00000000-1111-2222-3333-444444444444 \
+    --from 2024-01-01T00:00:00Z \
+    --to   2024-03-31T23:59:59Z \
+    --output /tmp/workspace-audit-q1-2024.jsonl
+```
+
+The output is newline-delimited JSON, one row per audit event,
+sorted chronologically (`created_at` ASC), deduplicated by row id.
+Pipe into `jq` for ad-hoc analysis:
+
+```
+jq -r 'select(.action | startswith("admin.")) | [.created_at, .actor_id, .action] | @tsv' \
+  workspace-audit-q1-2024.jsonl
+```
+
+#### S3 object layout
+
+```
+{AUDIT_LOG_ARCHIVE_PREFIX}{workspace_id}/{YYYY-MM}/{run_id}.jsonl.gz
+
+audit-archive/00000000-1111-2222-3333-444444444444/2024-01/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee.jsonl.gz
+audit-archive/00000000-1111-2222-3333-444444444444/2024-01/ffffffff-1111-2222-3333-444444444444.jsonl.gz   # duplicate from a crashed earlier run
+audit-archive/00000000-1111-2222-3333-444444444444/2024-02/cccccccc-dddd-eeee-ffff-000000000000.jsonl.gz
+```
+
+Each object is GZIP-compressed JSONL. The `run_id` UUID suffix
+makes every PUT idempotent (the same row content uploaded twice
+produces two distinct objects; the restore tool dedupes by row id).
 
 ## Running tests
 

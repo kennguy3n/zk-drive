@@ -32,6 +32,16 @@ RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w -X github.com/ke
 # `entrypoint: ["/app/orphan-gc"]` and set GC_INTERVAL_MINUTES=0 on
 # the worker to avoid duplicate runs.
 RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w -X github.com/kennguy3n/zk-drive/internal/version.Version=${APP_VERSION}" -o /out/orphan-gc ./cmd/orphan-gc
+# Audit-log archiver binary (WS-23). Same one-image-many-entrypoints
+# pattern as the other CronJob binaries. Deployed as a nightly K8s
+# CronJob that exports audit_log rows older than retention to S3
+# cold archive and then deletes them from the hot table.
+RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w -X github.com/kennguy3n/zk-drive/internal/version.Version=${APP_VERSION}" -o /out/audit-archiver ./cmd/audit-archiver
+# Audit-log restore CLI (WS-23). Read-only counterpart that reads
+# archived rows back from S3 for incident investigation /
+# compliance "produce all admin actions in workspace X between
+# two dates" requests. Operators run it ad-hoc, not on a schedule.
+RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w -X github.com/kennguy3n/zk-drive/internal/version.Version=${APP_VERSION}" -o /out/audit-restore ./cmd/audit-restore
 
 # ---- Runtime stage ----
 # debian:bookworm-slim (instead of distroless static) so the worker
@@ -55,6 +65,8 @@ COPY --from=builder /out/worker /app/worker
 COPY --from=builder /out/migrate /app/migrate
 COPY --from=builder /out/reconciler /app/reconciler
 COPY --from=builder /out/orphan-gc /app/orphan-gc
+COPY --from=builder /out/audit-archiver /app/audit-archiver
+COPY --from=builder /out/audit-restore /app/audit-restore
 COPY --from=builder /src/migrations /app/migrations
 
 USER nonroot:nonroot

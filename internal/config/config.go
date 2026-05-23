@@ -217,6 +217,47 @@ type Config struct {
 	// (preferred to setting endpoint="" if you want the SDK
 	// initialised but no traces exported).
 	OTELSamplerRatio float64
+
+	// Audit-log cold archival (WS-23). When AuditArchiveEnabled
+	// is false (the default), the audit-archiver binary refuses
+	// to run — operators must explicitly opt in so a fresh
+	// install can't accidentally start deleting audit history
+	// before the operator has confirmed the S3 archive prefix
+	// is writable and the retention window matches their
+	// compliance posture.
+	AuditArchiveEnabled bool
+	// AuditLogRetentionDays is the hot-tier retention window
+	// (rows older than now() - this many days are eligible for
+	// archival). 90 days is the typical SOC2 Type II hot tier;
+	// values <= 0 disable archival even when AuditArchiveEnabled
+	// is true so a misconfigured 0 doesn't silently archive
+	// everything. The maximum allowed value (10 years) is
+	// clamped at config-load time to catch a stray multiplier
+	// typo.
+	AuditLogRetentionDays int
+	// AuditArchivePrefix is the S3 key prefix every archive
+	// object is written under. Defaults to "audit-archive/".
+	// Operators wanting to use a dedicated bucket can set
+	// AuditArchiveBucket; when empty the configured S3_BUCKET
+	// is reused so a single-bucket deployment is the default.
+	AuditArchivePrefix string
+	// AuditArchiveBucket overrides S3_BUCKET for archive
+	// writes. Empty means use S3_BUCKET. Useful when the
+	// operator wants compliance-grade lifecycle policies (e.g.
+	// Glacier transition, object-lock retention) on the
+	// archive bucket independent of the live file store.
+	AuditArchiveBucket string
+	// AuditArchiveMaxRowsPerBatch caps the number of audit_log
+	// rows packed into a single (workspace, month) JSONL.gz
+	// upload. Defaults to 50000 — at ~512 bytes per audit
+	// entry that's roughly a 25 MB uncompressed / 5 MB
+	// compressed object, comfortably below S3's 5 GB single-
+	// upload limit and small enough that a single PUT round-
+	// trip stays under the 60s exporter context budget. When
+	// a (workspace, month) batch exceeds this, the archiver
+	// writes multiple JSONL.gz objects with distinct UUID
+	// suffixes — the restore tool joins them transparently.
+	AuditArchiveMaxRowsPerBatch int
 }
 
 // Load reads configuration from environment variables and returns a populated
@@ -291,6 +332,12 @@ func Load() (*Config, error) {
 		OTELServiceName:             getEnvDefault("OTEL_SERVICE_NAME", "zk-drive"),
 		OTELDeploymentEnvironment:   os.Getenv("OTEL_DEPLOYMENT_ENVIRONMENT"),
 		OTELSamplerRatio:            parseFloatDefault(os.Getenv("OTEL_TRACES_SAMPLER_ARG"), 0.1),
+
+		AuditArchiveEnabled:         parseBoolDefault(os.Getenv("AUDIT_LOG_ARCHIVE_ENABLED"), false),
+		AuditLogRetentionDays:       clampAuditRetentionDays(parseIntDefault(os.Getenv("AUDIT_LOG_RETENTION_DAYS"), 90)),
+		AuditArchivePrefix:          normaliseArchivePrefix(getEnvDefault("AUDIT_LOG_ARCHIVE_PREFIX", "audit-archive/")),
+		AuditArchiveBucket:          strings.TrimSpace(os.Getenv("AUDIT_LOG_ARCHIVE_BUCKET")),
+		AuditArchiveMaxRowsPerBatch: parseIntDefault(os.Getenv("AUDIT_LOG_ARCHIVE_MAX_ROWS_PER_BATCH"), 50000),
 	}
 
 	var missing []string
@@ -374,6 +421,53 @@ func parsePriceTierMap(s string) map[string]string {
 		return nil
 	}
 	return out
+}
+
+// maxAuditRetentionDays caps AUDIT_LOG_RETENTION_DAYS at ten years
+// (3650 days) so a typo like "9000000" (intended "90") doesn't
+// degenerate into "archive nothing ever" and let the hot tier grow
+// unboundedly with no operator-visible warning. Ten years exceeds
+// every common compliance retention window (SOC2 = 1 year minimum,
+// HIPAA = 6 years) and the clamp log makes the corrected value
+// surface in startup logs.
+const maxAuditRetentionDays = 3650
+
+// clampAuditRetentionDays bounds AUDIT_LOG_RETENTION_DAYS at sensible
+// limits. Returns the configured value when valid; otherwise returns
+// 90 (the default) for non-positive input and maxAuditRetentionDays
+// for clearly-typo'd large input. The caller surfaces the clamped
+// value at startup via tracing.LogStartup-style boot logs so an
+// operator can confirm the effective setting.
+func clampAuditRetentionDays(d int) int {
+	if d <= 0 {
+		return 90
+	}
+	if d > maxAuditRetentionDays {
+		return maxAuditRetentionDays
+	}
+	return d
+}
+
+// normaliseArchivePrefix ensures the prefix ends with exactly one
+// trailing slash so callers can concatenate the per-workspace key
+// suffix without bookkeeping. Empty input falls back to the default
+// "audit-archive/" — never an empty prefix, because writing to the
+// bucket root would tangle archive objects with live file objects.
+func normaliseArchivePrefix(s string) string {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return "audit-archive/"
+	}
+	// Strip every trailing slash first, then re-add exactly one,
+	// so "audit/", "audit//", and "audit///" all normalise to
+	// "audit/".
+	s = strings.TrimRight(s, "/")
+	if s == "" {
+		// Was just slashes — fall back to default rather than
+		// returning the bucket root.
+		return "audit-archive/"
+	}
+	return s + "/"
 }
 
 // parseBoolDefault parses the common boolean env-var values

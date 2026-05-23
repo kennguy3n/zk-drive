@@ -360,6 +360,102 @@ func TestWorkerMetricsAddrFromEnv(t *testing.T) {
 	}
 }
 
+// TestClampAuditRetentionDays exercises every branch of the
+// retention-day clamp so a future refactor that drops one of the
+// safety floors (negative input, zero input, max ceiling) trips a
+// regression. The branches matter because each one prevents a
+// different operator footgun:
+//
+//   - non-positive input -> 90 (default) so an empty / malformed
+//     env var doesn't disable archival silently
+//   - input above maxAuditRetentionDays -> ceiling (3650 = 10y) so
+//     a typo'd "9999" doesn't keep archived rows in the hot tier
+//     for 27 years
+func TestClampAuditRetentionDays(t *testing.T) {
+	cases := []struct {
+		name  string
+		input int
+		want  int
+	}{
+		{"negative falls back to default", -7, 90},
+		{"zero falls back to default", 0, 90},
+		{"valid passes through", 365, 365},
+		{"minimum-valid passes through", 1, 1},
+		{"above ceiling clamps to max", 9999, maxAuditRetentionDays},
+		{"at ceiling passes through", maxAuditRetentionDays, maxAuditRetentionDays},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := clampAuditRetentionDays(tc.input)
+			if got != tc.want {
+				t.Errorf("clampAuditRetentionDays(%d) = %d, want %d", tc.input, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestNormaliseArchivePrefix walks every input shape that an
+// operator might paste into AUDIT_LOG_ARCHIVE_PREFIX. The
+// trailing-slash normalisation is critical because the archive
+// service concatenates the workspace UUID directly onto the
+// configured prefix — without normalisation, "audit-archive" and
+// "audit-archive/" would produce different S3 key layouts on the
+// same bucket, breaking restore enumeration.
+func TestNormaliseArchivePrefix(t *testing.T) {
+	cases := []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{"empty falls back to default", "", "audit-archive/"},
+		{"whitespace falls back to default", "   ", "audit-archive/"},
+		{"only-slashes falls back to default", "///", "audit-archive/"},
+		{"missing trailing slash adds one", "audit", "audit/"},
+		{"single trailing slash passes through", "audit/", "audit/"},
+		{"double trailing slash collapses", "audit//", "audit/"},
+		{"deep prefix preserved", "compliance/audit-archive/", "compliance/audit-archive/"},
+		{"deep prefix missing slash gets one", "compliance/audit-archive", "compliance/audit-archive/"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := normaliseArchivePrefix(tc.input)
+			if got != tc.want {
+				t.Errorf("normaliseArchivePrefix(%q) = %q, want %q", tc.input, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestLoadAuditArchiveDefaults verifies the env-free Load() path
+// produces the documented defaults: archive disabled, 90-day
+// retention, "audit-archive/" prefix, no bucket override, 50k
+// rows-per-batch cap.
+func TestLoadAuditArchiveDefaults(t *testing.T) {
+	requireEnv(t, map[string]string{
+		"DATABASE_URL": "postgres://localhost/zkdrive",
+		"JWT_SECRET":   "test-secret",
+	})
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.AuditArchiveEnabled {
+		t.Errorf("AuditArchiveEnabled = true, want false (opt-in)")
+	}
+	if cfg.AuditLogRetentionDays != 90 {
+		t.Errorf("AuditLogRetentionDays = %d, want 90", cfg.AuditLogRetentionDays)
+	}
+	if cfg.AuditArchivePrefix != "audit-archive/" {
+		t.Errorf("AuditArchivePrefix = %q, want audit-archive/", cfg.AuditArchivePrefix)
+	}
+	if cfg.AuditArchiveBucket != "" {
+		t.Errorf("AuditArchiveBucket = %q, want empty (S3_BUCKET fallback)", cfg.AuditArchiveBucket)
+	}
+	if cfg.AuditArchiveMaxRowsPerBatch != 50000 {
+		t.Errorf("AuditArchiveMaxRowsPerBatch = %d, want 50000", cfg.AuditArchiveMaxRowsPerBatch)
+	}
+}
+
 // TestLoadErrorIsStdError guards against future refactors that wrap
 // the missing-env error in fmt.Errorf without %w — we want callers
 // to be able to programmatically detect "missing config" failures
