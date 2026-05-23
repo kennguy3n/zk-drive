@@ -174,11 +174,20 @@ func (h *Handler) DeleteFolder(w http.ResponseWriter, r *http.Request) {
 		writeServiceError(w, err)
 		return
 	}
+	// Snapshot every file in the subtree BEFORE the recursive
+	// folder soft-delete cascades to files.deleted_at — after that
+	// point the snapshot rows are no longer visible to the file
+	// repo's deleted_at IS NULL filter, so the emit-helper would
+	// silently miss them. Symmetric with the single-file DeleteFile
+	// path so subscribers see file.deleted events regardless of
+	// whether a file was removed individually or via folder cascade.
+	snaps := h.publishWebhookFileDeletedForFolderSubtree(r.Context(), workspaceID, id)
 	if err := h.folders.Delete(r.Context(), workspaceID, id); err != nil {
 		writeServiceError(w, err)
 		return
 	}
 	h.logActivity(r.Context(), activity.ActionFolderDelete, permission.ResourceFolder, id, nil)
+	h.emitWebhookFileDeletedBatch(r.Context(), workspaceID, snaps)
 	w.WriteHeader(http.StatusNoContent)
 }
 

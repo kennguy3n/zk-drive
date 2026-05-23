@@ -183,11 +183,19 @@ func (h *Handler) BulkDelete(w http.ResponseWriter, r *http.Request) {
 			resp.Failed = append(resp.Failed, bulkFailure{ID: raw, Error: err.Error()})
 			continue
 		}
+		// Snapshot every file in the subtree BEFORE folders.Delete
+		// cascades them — same rationale as the single-folder
+		// DeleteFolder handler. Emitting only after the delete
+		// succeeds keeps the webhook stream consistent with the
+		// persisted soft-delete (no phantom emits for a folder
+		// that failed to delete).
+		snaps := h.publishWebhookFileDeletedForFolderSubtree(r.Context(), workspaceID, id)
 		if err := h.folders.Delete(r.Context(), workspaceID, id); err != nil {
 			resp.Failed = append(resp.Failed, bulkFailure{ID: raw, Error: err.Error()})
 			continue
 		}
 		h.logActivity(r.Context(), activity.ActionFolderDelete, permission.ResourceFolder, id, nil)
+		h.emitWebhookFileDeletedBatch(r.Context(), workspaceID, snaps)
 		resp.Succeeded = append(resp.Succeeded, raw)
 	}
 	writeJSON(w, http.StatusOK, resp)

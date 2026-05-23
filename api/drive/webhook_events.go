@@ -117,6 +117,63 @@ func (h *Handler) publishWebhookPermissionEvent(ctx context.Context, t webhooks.
 	}
 }
 
+// publishWebhookFileDeletedForFolderSubtree snapshots every
+// non-deleted file under the given folder (including descendants)
+// and emits a file.deleted webhook per snapshot. Callers MUST invoke
+// this BEFORE calling folders.Delete — once the recursive folder
+// soft-delete cascades to files.deleted_at the rows would no longer
+// match the snapshotting query's deleted_at IS NULL filter, leaving
+// subscribers in the dark about cascaded files.
+//
+// Closes the asymmetry between single-file deletes (which already
+// emit file.deleted) and folder-cascade deletes (which used to emit
+// nothing for the contained files). The event catalog only defines
+// file.deleted (there's no folder.deleted yet) so subscribers who
+// register for file.deleted to drive "files in our workspace have
+// been removed" workflows now see the same stream regardless of
+// whether the file was deleted individually or via folder cascade.
+//
+// Snapshot errors are logged but do NOT block the folder delete —
+// webhook emission is a side-effect, not part of the success
+// contract of the parent HTTP handler. The same TOCTOU window that
+// exists for single-file emit (snapshot -> delete, microseconds
+// apart, no transaction) applies here and is accepted as part of
+// the documented at-least-once delivery contract: subscribers must
+// dedupe on X-ZkDrive-Event-Id.
+func (h *Handler) publishWebhookFileDeletedForFolderSubtree(ctx context.Context, workspaceID, folderID uuid.UUID) []*file.File {
+	if h.webhooks == nil {
+		return nil
+	}
+	snaps, err := h.files.ListInFolderSubtree(ctx, workspaceID, folderID)
+	if err != nil {
+		log := logging.FromContext(ctx)
+		if log == nil {
+			log = slog.Default()
+		}
+		log.Error("drive failed to snapshot folder subtree for file.deleted webhook cascade",
+			"folder_id", folderID,
+			"workspace_id", workspaceID,
+			"err", err,
+		)
+		return nil
+	}
+	return snaps
+}
+
+// emitWebhookFileDeletedBatch emits a file.deleted webhook for each
+// snapshot returned by publishWebhookFileDeletedForFolderSubtree.
+// Split into a separate call so handlers can interleave the actual
+// folder soft-delete between the snapshot and the emission, giving
+// callers the freedom to abort emission if the delete itself fails.
+func (h *Handler) emitWebhookFileDeletedBatch(ctx context.Context, workspaceID uuid.UUID, snaps []*file.File) {
+	if h.webhooks == nil || len(snaps) == 0 {
+		return
+	}
+	for _, f := range snaps {
+		h.publishWebhookFileEvent(ctx, webhooks.EventFileDeleted, workspaceID, f, uuid.Nil, f.SizeBytes)
+	}
+}
+
 // NOTE: member.* webhook emission lives in api/admin (not here)
 // because the invite / deactivate handlers are mounted there. The
 // admin handler has its own publishMemberEvent helper that mirrors
