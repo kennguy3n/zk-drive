@@ -12,6 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"mime"
 	"net/http"
 	"strings"
 	"time"
@@ -136,7 +137,7 @@ func ExtractText(mimeType string, body []byte) (string, error) {
 // that don't have a context can continue to use ExtractText, which
 // passes context.Background().
 func ExtractTextWithContext(ctx context.Context, mimeType string, body []byte) (string, error) {
-	mt := strings.ToLower(strings.TrimSpace(mimeType))
+	mt := normalizeMimeType(mimeType)
 	if mt == "" {
 		return "", ErrUnsupportedMimeType
 	}
@@ -160,6 +161,32 @@ func ExtractTextWithContext(ctx context.Context, mimeType string, body []byte) (
 	default:
 		return "", ErrUnsupportedMimeType
 	}
+}
+
+// normalizeMimeType strips RFC 2045 parameters (e.g.
+// "application/pdf; charset=utf-8" → "application/pdf"), lowercases
+// the result, and trims surrounding whitespace. This keeps the
+// switch-case dispatch above robust regardless of whether the upload
+// API ever starts persisting parameters on the files.mime_type
+// column. Today the frontend sends bare types (api/drive/upload.go),
+// so the parametrised case never fires in production — but parsing
+// here means a future change that does forward parameters will keep
+// hitting the correct extractor branch instead of falling through to
+// ErrUnsupportedMimeType.
+//
+// If the input is malformed and mime.ParseMediaType fails, we fall
+// back to the previous behaviour (lower + trim) so a legacy value
+// like "APPLICATION/PDF " (no parameters but bad casing) still
+// routes correctly.
+func normalizeMimeType(mimeType string) string {
+	trimmed := strings.TrimSpace(mimeType)
+	if trimmed == "" {
+		return ""
+	}
+	if mt, _, err := mime.ParseMediaType(trimmed); err == nil {
+		return strings.ToLower(mt)
+	}
+	return strings.ToLower(trimmed)
 }
 
 // truncateUTF8 trims s so it ends on a rune boundary and its byte

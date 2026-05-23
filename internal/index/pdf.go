@@ -19,11 +19,16 @@ var pdftotextBinary = "pdftotext"
 // as a subprocess, not linked, so it does not affect the proprietary
 // build) to read the plain-text content of a PDF blob.
 //
-// The PDF is written to a temp file, pdftotext writes UTF-8 text to
-// a sibling file, and both temp files are removed before returning.
-// Output is truncated to MaxIndexBytes on a rune boundary so the
-// caller can write it into files.content_text without violating
-// Postgres' UTF-8 invariant.
+// The PDF is written to a temp file, pdftotext is asked to stream
+// UTF-8 text to stdout (output path `-`), and the temp directory is
+// removed before returning. The returned string is the raw extractor
+// output with NO size cap applied here — the caller in
+// ExtractTextWithContext is responsible for the final
+// truncateUTF8(text, MaxIndexBytes) pass that pins the bytes written
+// to files.content_text. Keeping the cap in the caller means every
+// extractor branch (text/json/xml/pdf/docx) goes through one
+// rune-boundary truncate site and the per-branch contract stays
+// small.
 //
 // If pdftotext is not installed on the host, ErrUnsupportedMimeType
 // is returned so the worker treats the job as a graceful skip —

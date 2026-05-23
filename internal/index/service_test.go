@@ -76,3 +76,50 @@ func TestExtractTextUnsupported(t *testing.T) {
 		t.Fatal("expected unsupported mime error for empty type")
 	}
 }
+
+// TestExtractTextHandlesParametrisedMimeTypes pins the
+// normalizeMimeType behaviour: a future upload API that persists
+// mime types WITH RFC 2045 parameters (e.g. "text/plain; charset=utf-8"
+// or "application/pdf; version=1.7") must still hit the right
+// extractor branch. Today the frontend sends bare types so this case
+// is hypothetical, but the test prevents a silent FTS regression if
+// that ever changes.
+func TestExtractTextHandlesParametrisedMimeTypes(t *testing.T) {
+	body := []byte("hello world")
+	cases := []string{
+		"text/plain; charset=utf-8",
+		"TEXT/PLAIN; charset=UTF-8",
+		"  text/plain ;charset=utf-8 ",
+		"application/json; charset=utf-8",
+		"application/xml; charset=utf-8",
+	}
+	for _, mt := range cases {
+		got, err := ExtractText(mt, body)
+		if err != nil {
+			t.Fatalf("%q: unexpected ErrUnsupportedMimeType: %v", mt, err)
+		}
+		if got != string(body) {
+			t.Fatalf("%q: body round-trip mismatch: got=%q", mt, got)
+		}
+	}
+}
+
+// TestNormalizeMimeTypeFallback verifies that a malformed mime type
+// (one that mime.ParseMediaType rejects) still gets lowercased so
+// a legacy bare value like "APPLICATION/PDF" still routes correctly
+// through the switch in ExtractTextWithContext.
+func TestNormalizeMimeTypeFallback(t *testing.T) {
+	cases := map[string]string{
+		"application/pdf":                "application/pdf",
+		"  APPLICATION/PDF ":             "application/pdf",
+		"text/plain; charset=utf-8":      "text/plain",
+		"application/pdf; version=\"1.7":  "application/pdf; version=\"1.7", // unbalanced quote — parser fails, fallback path lowercases the original
+		"":                               "",
+	}
+	for in, want := range cases {
+		got := normalizeMimeType(in)
+		if got != want {
+			t.Fatalf("normalizeMimeType(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
