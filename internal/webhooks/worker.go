@@ -99,11 +99,21 @@ func (w *DeliveryWorker) Consume(ctx context.Context, msg *nats.Msg) string {
 	body, err := json.Marshal(ev)
 	if err != nil {
 		// Should never happen — the publisher already
-		// marshalled successfully — but record the failure
-		// rather than silently drop.
-		slog.ErrorContext(ctx, "webhooks worker failed to remarshal event",
+		// marshalled successfully — but if it does, the
+		// failure is deterministic: re-marshalling the SAME
+		// struct on the SAME process will produce the SAME
+		// error every time (the most likely cause is a custom
+		// MarshalJSON returning an error on a field that survived
+		// unmarshal because UnmarshalJSON has different validation
+		// — exotic but possible). Returning "error" would Nak the
+		// message for redelivery and the worker would loop on it
+		// until the stream's MaxAge (7 days). Treat as terminal /
+		// "dropped" so JetStream Terms the message and we don't
+		// thrash the consumer + Postgres. Mirrors the matching
+		// unmarshal failure branch above.
+		slog.ErrorContext(ctx, "webhooks worker failed to remarshal event; terminal",
 			"err", err, "event_id", ev.ID)
-		return "error"
+		return "dropped"
 	}
 
 	// MsgMetaData carries the JetStream delivery attempt counter

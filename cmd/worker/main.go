@@ -475,22 +475,41 @@ func subscribeAll(ctx context.Context, js nats.JetStreamContext, pool *pgxpool.P
 		subject string
 		durable string
 		handler nats.MsgHandler
+		// extraOpts is appended to the base subscribe options
+		// for this subject. Used to attach subject-specific
+		// settings (e.g. MaxDeliver for the webhook consumer)
+		// without leaking those settings onto unrelated drive
+		// job consumers that have different retry semantics.
+		extraOpts []nats.SubOpt
 	}{
-		{jobs.SubjectPreview, "drive-preview", m.InstrumentJob(ctx, jobs.SubjectPreview, traceJob(jobs.SubjectPreview, previewHandler(pool, previewSvc)))},
-		{jobs.SubjectScan, "drive-scan", m.InstrumentJob(ctx, jobs.SubjectScan, traceJob(jobs.SubjectScan, scanHandler(pool, scanSvc)))},
-		{jobs.SubjectIndex, "drive-index", m.InstrumentJob(ctx, jobs.SubjectIndex, traceJob(jobs.SubjectIndex, indexHandler(pool, indexSvc)))},
-		{jobs.SubjectArchive, "drive-archive", m.InstrumentJob(ctx, jobs.SubjectArchive, traceJob(jobs.SubjectArchive, archiveHandler(archiveSvc)))},
-		{jobs.SubjectClassify, "drive-classify", m.InstrumentJob(ctx, jobs.SubjectClassify, traceJob(jobs.SubjectClassify, classifyHandler(pool, classifySvc)))},
-		{webhooks.SubjectEvents, "webhook-deliveries", m.InstrumentJob(ctx, webhooks.SubjectEvents, traceJob(webhooks.SubjectEvents, webhookDeliveryHandler(webhookWorker)))},
+		{jobs.SubjectPreview, "drive-preview", m.InstrumentJob(ctx, jobs.SubjectPreview, traceJob(jobs.SubjectPreview, previewHandler(pool, previewSvc))), nil},
+		{jobs.SubjectScan, "drive-scan", m.InstrumentJob(ctx, jobs.SubjectScan, traceJob(jobs.SubjectScan, scanHandler(pool, scanSvc))), nil},
+		{jobs.SubjectIndex, "drive-index", m.InstrumentJob(ctx, jobs.SubjectIndex, traceJob(jobs.SubjectIndex, indexHandler(pool, indexSvc))), nil},
+		{jobs.SubjectArchive, "drive-archive", m.InstrumentJob(ctx, jobs.SubjectArchive, traceJob(jobs.SubjectArchive, archiveHandler(archiveSvc))), nil},
+		{jobs.SubjectClassify, "drive-classify", m.InstrumentJob(ctx, jobs.SubjectClassify, traceJob(jobs.SubjectClassify, classifyHandler(pool, classifySvc))), nil},
+		// MaxDeliver is server-side defense-in-depth for the
+		// webhook consumer. The application-side counter in
+		// internal/webhooks/worker.go also returns "dropped" once
+		// attempt >= MaxAttempts, which the webhookDeliveryHandler
+		// translates to msg.Term(). If that counter is ever bypassed
+		// (programmer error, a deterministic remarshal failure that
+		// historically returned "error" instead of "dropped", etc.),
+		// MaxDeliver=MaxAttempts ensures JetStream itself caps
+		// redeliveries at the same number rather than retrying for
+		// up to MaxAge (7 days). Sized identically to the
+		// application-side cap so the two layers agree.
+		{webhooks.SubjectEvents, "webhook-deliveries", m.InstrumentJob(ctx, webhooks.SubjectEvents, traceJob(webhooks.SubjectEvents, webhookDeliveryHandler(webhookWorker))), []nats.SubOpt{nats.MaxDeliver(webhooks.MaxAttempts)}},
 	}
 	var subs []*nats.Subscription
 	for _, s := range subjects {
-		sub, err := js.Subscribe(s.subject, s.handler,
+		opts := []nats.SubOpt{
 			nats.Durable(s.durable),
 			nats.AckWait(ackWait),
 			nats.DeliverAll(),
 			nats.ManualAck(),
-		)
+		}
+		opts = append(opts, s.extraOpts...)
+		sub, err := js.Subscribe(s.subject, s.handler, opts...)
 		if err != nil {
 			unsubscribeAll(subs)
 			return nil, fmt.Errorf("subscribe %s: %w", s.subject, err)
