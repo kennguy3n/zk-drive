@@ -1,6 +1,9 @@
 package metrics
 
-import "github.com/prometheus/client_golang/prometheus"
+import (
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promauto"
+)
 
 // RecordEmailSent emits the per-send observability counter used by
 // internal/email.Service. template is the bounded set of template
@@ -22,12 +25,15 @@ func (m *Metrics) RecordEmailSent(template string, outcome string) {
 }
 
 // registerEmailMetrics is called from metrics.New() to mount the
-// email counter on the registry. Kept in this file so the
-// email-specific surface is colocated.
-func (m *Metrics) registerEmailMetrics(auto prometheus.Registerer) {
-	m.emailSentTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+// email counter on the registry. Uses the same promauto.With(reg)
+// pattern as every other metric family in New() so the
+// construct-and-register step stays atomic and a future
+// contributor can copy this shape verbatim without accidentally
+// double-registering on the wrong registry.
+func (m *Metrics) registerEmailMetrics(reg prometheus.Registerer) {
+	auto := promauto.With(reg)
+	m.emailSentTotal = auto.NewCounterVec(prometheus.CounterOpts{
 		Name: "zkdrive_email_sent_total",
 		Help: "Total transactional emails the server attempted to send, partitioned by template and outcome ('ok' = relay accepted DATA; 'smtp_error' = transient transport failure; 'template_error' = render failure; 'address_invalid' = recipient parse failure; 'disabled' = no SMTP relay configured).",
 	}, []string{"template", "outcome"})
-	auto.MustRegister(m.emailSentTotal)
 }

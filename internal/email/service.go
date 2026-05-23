@@ -247,9 +247,6 @@ func maskEmail(addr string) string {
 	if at <= 0 {
 		return "***"
 	}
-	if at == 1 {
-		return string(addr[0]) + "***" + addr[at:]
-	}
 	return string(addr[0]) + "***" + addr[at:]
 }
 

@@ -217,39 +217,69 @@ func (h *Handler) CreateGuestInvite(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, inv)
 }
 
+// guestInviteEmailDispatchTimeout caps how long the goroutine
+// spawned by dispatchGuestInviteEmail will wait for the SMTP
+// send (incl. connect + EHLO + STARTTLS + AUTH + DATA). The
+// SMTPClient already enforces its own per-send timeout (default
+// 30s) via the dial-context, but this outer cap guarantees the
+// goroutine cannot leak even if the relay accepts the connection
+// and then hangs indefinitely on a write.
+const guestInviteEmailDispatchTimeout = 60 * time.Second
+
 // dispatchGuestInviteEmail composes and sends the guest-invite
-// email, resolving the inviter / workspace / folder display data
-// from the existing services. Errors are logged and never returned
+// email on a detached goroutine so a slow SMTP relay cannot
+// extend the HTTP response time of CreateGuestInvite (which would
+// otherwise inherit the SMTP timeout budget, ~30s, on top of the
+// in-app notification path). Errors are logged and never returned
 // to the caller — the invite row already exists, so a failed email
 // should not change the HTTP response.
+//
+// The detached context is built with context.WithoutCancel so
+// middleware-attached values (logger slot, workspace_id,
+// user_id, trace_id) survive the response write, then wrapped
+// with a hard timeout cap. The request clone (r.Clone) is the
+// idiomatic way to safely use r in a goroutine after the handler
+// returns: it deep-copies headers the audit service reads (User-
+// Agent, RemoteAddr) and rebinds the context.
 func (h *Handler) dispatchGuestInviteEmail(r *http.Request, inv *sharing.GuestInvite, inviterID uuid.UUID) {
 	if h.email == nil {
 		return
 	}
-	ctx := r.Context()
-	log := logging.FromContext(ctx)
+	detached := context.WithoutCancel(r.Context())
+	sendCtx, cancel := context.WithTimeout(detached, guestInviteEmailDispatchTimeout)
+	detachedR := r.Clone(sendCtx)
+	go func() {
+		defer cancel()
+		log := logging.FromContext(sendCtx).With("invite_id", inv.ID)
 
-	inviterName := h.resolveInviterDisplayName(ctx, inv.WorkspaceID, inviterID)
-	workspaceName := h.resolveWorkspaceName(ctx, inv.WorkspaceID)
-	folderName := h.resolveFolderName(ctx, inv.WorkspaceID, inv.FolderID)
+		inviterName := h.resolveInviterDisplayName(sendCtx, inv.WorkspaceID, inviterID)
+		workspaceName := h.sharing.ResolveWorkspaceName(sendCtx, inv.WorkspaceID)
+		folderName := h.sharing.ResolveFolderName(sendCtx, inv.WorkspaceID, inv.FolderID)
 
-	outcome, err := h.email.SendGuestInvite(ctx, email.SendGuestInviteInput{
-		Email:         inv.Email,
-		InviterName:   inviterName,
-		WorkspaceName: workspaceName,
-		FolderName:    folderName,
-		Role:          inv.Role,
-		InviteID:      inv.ID.String(),
-		ExpiresAt:     inv.ExpiresAt,
-	})
-	if err != nil {
-		log.Warn("guest invite email failed", "invite_id", inv.ID, "outcome", string(outcome), "err", err)
-	}
-	h.logAudit(ctx, r, audit.ActionGuestInviteEmailed, "guest_invite", &inv.ID, map[string]any{
-		"outcome": string(outcome),
-	})
+		outcome, err := h.email.SendGuestInvite(sendCtx, email.SendGuestInviteInput{
+			Email:         inv.Email,
+			InviterName:   inviterName,
+			WorkspaceName: workspaceName,
+			FolderName:    folderName,
+			Role:          inv.Role,
+			InviteID:      inv.ID.String(),
+			ExpiresAt:     inv.ExpiresAt,
+		})
+		if err != nil {
+			log.Warn("guest invite email failed", "outcome", string(outcome), "err", err)
+		}
+		h.logAudit(sendCtx, detachedR, audit.ActionGuestInviteEmailed, "guest_invite", &inv.ID, map[string]any{
+			"outcome": string(outcome),
+		})
+	}()
 }
 
+// resolveInviterDisplayName looks up the inviter's display name
+// for use in email templates. Kept handler-side (not on sharing.
+// Service) because users / authentication concerns are not the
+// sharing service's domain — sharing only owns workspace + folder
+// resolvers. The fallback string mirrors what we use for unknown
+// inviters in the audit-log surface.
 func (h *Handler) resolveInviterDisplayName(ctx context.Context, workspaceID, userID uuid.UUID) string {
 	if h.users == nil || userID == uuid.Nil {
 		return "A workspace member"
@@ -262,28 +292,6 @@ func (h *Handler) resolveInviterDisplayName(ctx context.Context, workspaceID, us
 		return u.Name
 	}
 	return u.Email
-}
-
-func (h *Handler) resolveWorkspaceName(ctx context.Context, workspaceID uuid.UUID) string {
-	if h.workspaces == nil {
-		return "your workspace"
-	}
-	ws, err := h.workspaces.GetByID(ctx, workspaceID)
-	if err != nil || ws == nil {
-		return "your workspace"
-	}
-	return ws.Name
-}
-
-func (h *Handler) resolveFolderName(ctx context.Context, workspaceID, folderID uuid.UUID) string {
-	if h.folders == nil {
-		return "a shared folder"
-	}
-	f, err := h.folders.GetByID(ctx, workspaceID, folderID)
-	if err != nil || f == nil {
-		return "a shared folder"
-	}
-	return f.Name
 }
 
 // PreviewGuestInvite returns display-safe metadata for a guest

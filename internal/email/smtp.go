@@ -153,10 +153,10 @@ func (c *SMTPClient) Send(ctx context.Context, msg Message) error {
 		return ErrNotConfigured
 	}
 	if strings.TrimSpace(msg.To) == "" {
-		return errors.New("email: Message.To is required")
+		return fmt.Errorf("%w: Message.To is required", ErrInvalidAddress)
 	}
 	if _, err := mail.ParseAddress(msg.To); err != nil {
-		return fmt.Errorf("email: invalid To address: %w", err)
+		return fmt.Errorf("%w: %v", ErrInvalidAddress, err)
 	}
 
 	addr := net.JoinHostPort(c.cfg.Host, fmt.Sprintf("%d", c.cfg.Port))

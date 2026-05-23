@@ -3,6 +3,7 @@ package email
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"sync"
 	"testing"
@@ -151,6 +152,35 @@ func TestSendGuestInvite_SMTPErrorIsClassifiedAndReturned(t *testing.T) {
 	}
 	if len(m.emits) != 1 || m.emits[0].outcome != "smtp_error" {
 		t.Errorf("metric outcome = %+v, want smtp_error", m.emits)
+	}
+}
+
+// TestSendGuestInvite_AddressInvalidIsClassified asserts the
+// end-to-end classification path: a sender that returns an
+// ErrInvalidAddress-wrapped error must produce
+// OutcomeAddressInvalid (and the corresponding metric label),
+// not OutcomeSMTPError. The real SMTPClient.Send wraps
+// mail.ParseAddress failures with ErrInvalidAddress, so this
+// test pins the contract that the classifier observes.
+func TestSendGuestInvite_AddressInvalidIsClassified(t *testing.T) {
+	sender := &recordingSender{configured: true, sendErr: fmt.Errorf("%w: %v", ErrInvalidAddress, errors.New("mail: missing '@'"))}
+	svc, m := mustService(t, sender)
+	outcome, err := svc.SendGuestInvite(context.Background(), SendGuestInviteInput{
+		Email:         "bob@example.com",
+		InviterName:   "Alice",
+		WorkspaceName: "Acme Co",
+		FolderName:    "Q4 Roadmap",
+		Role:          "editor",
+		InviteID:      "INVITEID",
+	})
+	if err == nil {
+		t.Fatalf("expected error for invalid address")
+	}
+	if outcome != OutcomeAddressInvalid {
+		t.Fatalf("outcome = %s, want address_invalid", outcome)
+	}
+	if len(m.emits) != 1 || m.emits[0].outcome != "address_invalid" {
+		t.Errorf("metric outcome = %+v, want address_invalid", m.emits)
 	}
 }
 

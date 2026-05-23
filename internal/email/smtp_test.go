@@ -228,8 +228,8 @@ func TestSMTPClient_RejectsInvalidToAddress(t *testing.T) {
 	if err == nil {
 		t.Fatalf("expected error for invalid To address")
 	}
-	if !strings.Contains(err.Error(), "invalid To") {
-		t.Errorf("error did not mention invalid To: %v", err)
+	if !errors.Is(err, ErrInvalidAddress) {
+		t.Errorf("error did not wrap ErrInvalidAddress: %v", err)
 	}
 }
 
