@@ -83,7 +83,7 @@ func (h *Handler) WithPostSignupHook(hook PostSignupHook) *Handler {
 // WithSessionRevoker wires the session store so Logout actually
 // invalidates tokens. When nil (the test harness path, single-process
 // dev mode), Logout is a no-op beyond the audit log entry — matching
-// the pre-WS-1 stateless-JWT behaviour. Production wiring in
+// stateless-JWT behaviour. Production wiring in
 // cmd/server installs the Redis-backed store unconditionally when
 // REDIS_URL is configured.
 func (h *Handler) WithSessionRevoker(s SessionRevoker) *Handler {
@@ -95,7 +95,7 @@ func (h *Handler) WithSessionRevoker(s SessionRevoker) *Handler {
 // challenge path when the user has 2FA enrolled, and so the
 // /auth/totp/* endpoints can drive enrollment / verify / disable.
 // Optional: when nil the auth handler behaves exactly as it did
-// pre-WS-19 (password-only logins).
+// before the TOTP service was introduced (password-only logins).
 func (h *Handler) WithTOTP(svc *totp.Service) *Handler {
 	h.totp = svc
 	return h
@@ -418,7 +418,7 @@ func (h *Handler) maybeIssueMFAChallenge(ctx context.Context, u *user.User, r *h
 // 204 even when the session store is unwired or fails, so clients
 // can treat logout uniformly: the worst case (store unreachable) is
 // that the JWT remains valid until its natural TTL elapses, which
-// is the pre-WS-1 stateless behaviour.
+// is the stateless-JWT fallback.
 //
 // We pass middleware.TokenTTL as the cutoff key's TTL so the
 // underlying redis entry self-cleans after no token it could revoke

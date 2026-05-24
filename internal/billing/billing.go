@@ -85,7 +85,7 @@ type Limits struct {
 }
 
 // TierDefaults maps a tier name to its baseline limits. Values come
-// from PROPOSAL.md §2.3:
+// from docs/PRODUCT.md "Tiers and limits":
 //   - Free: 5 GB total, 5 users, 10 GB/month bandwidth.
 //   - Starter: 10 GB / user pooled, 25 users, 100 GB/month bandwidth.
 //   - Business: 50 GB / user pooled, 250 users, 1 TB/month bandwidth.

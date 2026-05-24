@@ -1,4 +1,4 @@
--- Per-folder encryption mode (Phase 4, task 4).
+-- Per-folder encryption mode.
 --
 -- Folders default to 'managed_encrypted' so existing rows behave
 -- exactly as before this migration. 'strict_zk' folders disable

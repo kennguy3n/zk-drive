@@ -1,4 +1,4 @@
--- Customer-managed key (CMK) URI per workspace (Phase 4, task 6).
+-- Customer-managed key (CMK) URI per workspace.
 --
 -- A non-empty cmk_uri instructs zk-object-fabric to use a customer-
 -- managed key for the workspace's tenant rather than the gateway's

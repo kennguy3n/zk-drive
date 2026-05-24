@@ -40,8 +40,7 @@ type ArchiveRunRecord struct {
 	// Prometheus metric zkdrive_audit_archive_bytes_total carries the
 	// same semantic. Operators sizing S3 cost should multiply by the
 	// empirically-observed gzip ratio for their audit traffic (≈10x
-	// compression in practice). See WS-23 PR #68 Devin Review
-	// finding ANALYSIS_pr-review-job-ad89da4c3a1449c5b914d6045dc4ffb8_0003.
+	// compression in practice).
 	BytesUploaded int64
 	StartedAt     time.Time
 	CompletedAt   time.Time

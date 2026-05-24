@@ -405,7 +405,8 @@ func AccessLog(next http.Handler) http.Handler {
 
 		// Echo the resolved request_id back to the client via the
 		// X-Request-Id response header. This is the same contract
-		// chimw.RequestID provided before WS-9 — clients that record
+		// chimw.RequestID provided before this middleware took it
+		// over — clients that record
 		// the server-assigned id from their HTTP response can use it
 		// to correlate a client-side error report to the server-side
 		// log line in tools like Datadog / Honeycomb. Without this

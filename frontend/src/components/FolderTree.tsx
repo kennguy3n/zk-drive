@@ -3,9 +3,9 @@ import { Link } from "react-router-dom";
 import { listFolders, type Folder } from "../api/client";
 import EncryptionBadge from "./EncryptionBadge";
 
-// FolderTree is a one-level tree for Phase 1: it shows the workspace root
-// plus direct children of the current folder. Full recursive tree is a
-// Phase 2 feature once sharing UI lands.
+// FolderTree is a one-level tree: it shows the workspace root plus
+// direct children of the current folder. A full recursive tree is a
+// follow-up enhancement.
 export default function FolderTree({ currentFolderID }: { currentFolderID: string | null }) {
   const [rootFolders, setRootFolders] = useState<Folder[]>([]);
   const [error, setError] = useState<string | null>(null);

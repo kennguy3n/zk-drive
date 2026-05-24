@@ -3,8 +3,8 @@ import EncryptionBadge from "../components/EncryptionBadge";
 
 // PrivacyPage is the customer-facing explainer for ZK Drive's two
 // per-folder privacy modes. It is deliberately written to avoid the
-// "zero-knowledge by default" framing that the PROPOSAL.md §3.3
-// threat model calls out as misleading:
+// "zero-knowledge by default" framing that docs/PRODUCT.md
+// calls out as misleading:
 //
 //   > Business Secure (managed) is **not** strict zero-knowledge. The
 //   > zk-object-fabric gateway can read plaintext in memory during

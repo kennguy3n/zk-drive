@@ -272,7 +272,7 @@ func (h *hijackerRecorder) Hijack() (net.Conn, *bufio.ReadWriter, error) {
 }
 
 // TestAccessLogPreservesHijackerForWebSocketUpgrades reproduces
-// the regression Devin Review flagged: a naive status-capturing
+// the regression where a naive status-capturing
 // response writer that only embeds http.ResponseWriter silently
 // strips optional interfaces like http.Hijacker, breaking
 // WebSocket upgrades because gorilla/websocket type-asserts the
@@ -321,7 +321,7 @@ func TestAccessLogPreservesHijackerForWebSocketUpgrades(t *testing.T) {
 }
 
 // TestAccessLogAttachesRequestIDForCorrelation pins the
-// correlation contract Devin Review flagged: the access log
+// correlation contract: the access log
 // record AND the handler-emitted log records must share the
 // SAME request_id so operators can pivot between them in their
 // log aggregator. Pre-fix, AccessLog wrapped the mux OUTSIDE
@@ -412,7 +412,7 @@ func TestAccessLogGeneratesRequestIDWhenHeaderMissing(t *testing.T) {
 }
 
 // TestEnrichFromInnerMiddlewareReachesAccessLog pins the
-// architectural fix Devin Review flagged: attributes added by
+// architectural fix: attributes added by
 // middleware INSIDE chi (auth layering workspace_id / user_id /
 // role) must reach the access log record that AccessLog emits
 // OUTSIDE chi. Pre-fix, the auth middleware called
@@ -506,7 +506,7 @@ func TestEnrichOutsideRequestSlotFallsBackToImmutableContext(t *testing.T) {
 }
 
 // TestInitBridgePreservesComponentAttribute pins the fix for
-// Devin Review's bridge-handler finding: the legacy log.Printf
+// the bridge-handler fix: the legacy log.Printf
 // bridge must use logger.Handler() not the raw handler so
 // bridged records carry the "component" attribute every native
 // slog call emits. Without this, third-party `log.Printf`
@@ -673,7 +673,7 @@ func TestSanitizeRequestIDRejectsHostileInputs(t *testing.T) {
 // generated server-side) MUST appear in the X-Request-Id
 // response header so clients can record it for later correlation
 // when they file a bug report. This matches the contract
-// chimw.RequestID provided before WS-9 removed it.
+// chimw.RequestID used to provide before this middleware took it over.
 func TestAccessLogEchoesRequestIDHeader(t *testing.T) {
 	wrapped := AccessLog(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)

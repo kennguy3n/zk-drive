@@ -72,7 +72,7 @@ func (f *fakeRepo) LinkAuthProvider(context.Context, uuid.UUID, string, string) 
 
 func TestMaybeRehashPasswordUpgradesLowerCostHash(t *testing.T) {
 	password := "correct horse battery staple"
-	// Legacy hash at cost 10 (the old DefaultCost before the WS-5 bump).
+	// Legacy hash at cost 10 (the bcrypt default before we bumped to 12).
 	legacyHash, err := bcrypt.GenerateFromPassword([]byte(password), 10)
 	if err != nil {
 		t.Fatalf("setup: hash with cost 10: %v", err)

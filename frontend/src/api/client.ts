@@ -47,9 +47,9 @@ export interface AuthResponse {
 }
 
 // EncryptionMode is the canonical wire-level union for a folder's
-// privacy mode. The server emits one of these two values; pre-Phase 4
-// rows may omit the field entirely. PROPOSAL §3.3 freezes these two
-// strings as the canonical names — widening this with `| string` would
+// privacy mode. The server emits one of these two values; older
+// folder rows may omit the field entirely. The two strings are part
+// of the public API surface — widening this with `| string` would
 // silently break TS narrowing in every consumer, so we keep it strict
 // here and let runtime guards (e.g. EncryptionBadge's `=== "strict_zk"`
 // check) handle hypothetical future modes that ship before the
@@ -64,8 +64,8 @@ export interface Folder {
   path: string;
   created_at: string;
   updated_at: string;
-  // Encryption mode is optional in the response for pre-Phase 4
-  // clients; current folders default to "managed_encrypted".
+  // Encryption mode is optional in the response for legacy folder
+  // rows; current folders default to "managed_encrypted".
   encryption_mode?: EncryptionMode;
 }
 
@@ -302,9 +302,9 @@ export async function deleteFolder(id: string): Promise<void> {
 
 // listFiles returns the files inside a folder. The backend exposes file
 // listings via `GET /api/folders/{id}` (which returns both subfolders and
-// files), so for nested folders we reuse getFolder. The root has no such
-// endpoint in Phase 1; the UI simply shows no files there and nudges the
-// user to open / create a subfolder.
+// files), so for nested folders we reuse getFolder. The workspace root
+// has no such endpoint; the UI simply shows no files there and nudges
+// the user to open / create a subfolder.
 export async function listFiles(folderID: string | null): Promise<FileItem[]> {
   if (!folderID) return [];
   const { files } = await getFolderContents(folderID);
@@ -526,7 +526,7 @@ export async function searchFiles(query: string, opts: {
 //   2. PUT the file bytes directly to upload_url.
 //   3. POST /files/confirm-upload with { file_id, object_key, size_bytes }
 //      to pin the new version as current.
-// A null folderID is rejected because the Phase 1 backend requires every
+// A null folderID is rejected because the backend requires every
 // file to live under a concrete folder.
 export async function uploadFile(
   file: File,
@@ -727,7 +727,7 @@ export async function deleteRetentionPolicy(id: string): Promise<void> {
   await client.delete(`/admin/retention-policies/${id}`);
 }
 
-// --- Placement (Phase 4) -----------------------------------------------
+// --- Placement -----------------------------------------------------
 
 // PlacementPolicy mirrors internal/fabric.Policy. Only the subset the
 // admin UI actually edits is modelled; other fields (tenant, cache
@@ -760,7 +760,7 @@ export async function updatePlacement(policy: PlacementPolicy): Promise<void> {
   await client.put("/admin/placement", policy);
 }
 
-// --- CMK (Phase 4) ------------------------------------------------------
+// --- Customer-managed keys -----------------------------------------
 
 export async function fetchCMK(): Promise<{ cmk_uri: string }> {
   const { data } = await client.get<{ cmk_uri: string }>("/admin/cmk");
@@ -771,7 +771,7 @@ export async function updateCMK(cmk_uri: string): Promise<void> {
   await client.put("/admin/cmk", { cmk_uri });
 }
 
-// --- KChat rooms (Phase 4) ---------------------------------------------
+// --- KChat rooms ---------------------------------------------------
 
 export interface KChatRoom {
   id: string;
@@ -812,7 +812,7 @@ export async function syncKChatMembers(
   return data;
 }
 
-// --- Client-room templates (Phase 4) -----------------------------------
+// --- Client-room templates -----------------------------------------
 
 export interface ClientRoomTemplate {
   name: string;

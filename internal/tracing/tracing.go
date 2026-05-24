@@ -4,8 +4,8 @@
 // # Why OpenTelemetry (and not a vendor SDK)
 //
 // We already use two of the three observability pillars: structured
-// JSON logs (slog + chi correlation, WS-9) and Prometheus metrics
-// (WS-17). Distributed traces are the missing third pillar: they
+// JSON logs (slog + chi correlation) and Prometheus metrics.
+// Distributed traces are the missing third pillar: they
 // answer "which dependency added latency to THIS request" in a way
 // that metrics can't (cardinality limits) and logs can't (no causal
 // linkage). OpenTelemetry has been the CNCF-graduated standard since
@@ -23,8 +23,8 @@
 // at every call site), but no spans are exported. The startup log
 // announces this state at INFO level so an operator knows tracing is
 // inert without checking dashboards. This mirrors the SMTP graceful
-// degrade pattern from WS-21: missing config is logged once at boot,
-// not surfaced as silent dropped data later.
+// degrade pattern: missing config is logged once at boot, not
+// surfaced as silent dropped data later.
 //
 // # Sampling
 //

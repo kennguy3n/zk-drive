@@ -14,30 +14,30 @@ COPY . .
 ARG APP_VERSION=dev
 RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w -X github.com/kennguy3n/zk-drive/internal/version.Version=${APP_VERSION}" -o /out/server ./cmd/server
 RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w -X github.com/kennguy3n/zk-drive/internal/version.Version=${APP_VERSION}" -o /out/worker ./cmd/worker
-# Standalone migrate binary (WS-11), shipped in the same image so deploys
+# Standalone migrate binary, shipped in the same image so deploys
 # can run a K8s Job (or Compose service) that does `entrypoint:
 # ["/app/migrate"]` before the server / worker pods come up. Keeping
 # every entrypoint in one image avoids a separate image tag / build
 # pipeline.
 RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w -X github.com/kennguy3n/zk-drive/internal/version.Version=${APP_VERSION}" -o /out/migrate ./cmd/migrate
-# Standalone reconciler binary (WS-14), shipped in the same image so
+# Standalone reconciler binary, shipped in the same image so
 # deploys can run a K8s CronJob (or Compose service) that does
 # `entrypoint: ["/app/reconciler"]` to refresh the denormalized
 # storage_used_bytes counter on the workspaces table. Same
 # one-image-many-entrypoints pattern as the migrate binary above.
 RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w -X github.com/kennguy3n/zk-drive/internal/version.Version=${APP_VERSION}" -o /out/reconciler ./cmd/reconciler
-# Standalone orphan-object GC binary (WS-18), same pattern as the
+# Standalone orphan-object GC binary, same pattern as the
 # reconciler. Deploys that prefer a dedicated K8s CronJob (over the
 # in-process loop the worker runs by default) schedule
 # `entrypoint: ["/app/orphan-gc"]` and set GC_INTERVAL_MINUTES=0 on
 # the worker to avoid duplicate runs.
 RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w -X github.com/kennguy3n/zk-drive/internal/version.Version=${APP_VERSION}" -o /out/orphan-gc ./cmd/orphan-gc
-# Audit-log archiver binary (WS-23). Same one-image-many-entrypoints
+# Audit-log archiver binary. Same one-image-many-entrypoints
 # pattern as the other CronJob binaries. Deployed as a nightly K8s
 # CronJob that exports audit_log rows older than retention to S3
 # cold archive and then deletes them from the hot table.
 RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w -X github.com/kennguy3n/zk-drive/internal/version.Version=${APP_VERSION}" -o /out/audit-archiver ./cmd/audit-archiver
-# Audit-log restore CLI (WS-23). Read-only counterpart that reads
+# Audit-log restore CLI. Read-only counterpart that reads
 # archived rows back from S3 for incident investigation /
 # compliance "produce all admin actions in workspace X between
 # two dates" requests. Operators run it ad-hoc, not on a schedule.

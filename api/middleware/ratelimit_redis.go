@@ -28,8 +28,7 @@ const redisRateLimitWindow = time.Second
 //     budget, return immediately — the workspace counter is *not*
 //     touched. This prevents a single misbehaving client from
 //     inflating the workspace counter with denied requests and
-//     starving every other user in the workspace (Devin Review
-//     #3150549270).
+//     starving every other user in the workspace.
 //  2. INCR workspace counter and EXPIRE it. If it exceeds the
 //     workspace budget, DECR the user counter (refund) and signal
 //     a workspace denial.

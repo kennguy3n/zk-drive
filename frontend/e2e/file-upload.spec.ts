@@ -33,7 +33,7 @@ test("uploaded file appears in the folder list", async ({ page }) => {
   await expect(page).toHaveURL(/\/drive$/);
 
   // 2. Create a folder via the modal so we have somewhere to upload to.
-  //    Phase 1 doesn't allow uploads at the workspace root.
+  //    Uploads at the workspace root are not allowed.
   const folderName = `Upload Target ${Date.now()}`;
   await page.getByRole("button", { name: /^new folder$/i }).click();
   await page.getByLabel(/name/i).fill(folderName);

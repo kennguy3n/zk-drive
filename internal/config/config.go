@@ -218,7 +218,7 @@ type Config struct {
 	// initialised but no traces exported).
 	OTELSamplerRatio float64
 
-	// Audit-log cold archival (WS-23). When AuditArchiveEnabled
+	// Audit-log cold archival. When AuditArchiveEnabled
 	// is false (the default), the audit-archiver binary refuses
 	// to run — operators must explicitly opt in so a fresh
 	// install can't accidentally start deleting audit history
@@ -238,9 +238,7 @@ type Config struct {
 	// the effective setting. AUDIT_LOG_ARCHIVE_ENABLED=false
 	// is the supported way to disable archival; setting
 	// AUDIT_LOG_RETENTION_DAYS=0 does NOT disable archival —
-	// it just runs at the 90-day default. See WS-23 PR #68
-	// Devin Review finding
-	// BUG_pr-review-job-00ec8888db2a410b892f764609056529_0001.
+	// it just runs at the 90-day default.
 	AuditLogRetentionDays int
 	// AuditArchivePrefix is the S3 key prefix every archive
 	// object is written under. Defaults to "audit-archive/".
@@ -387,8 +385,6 @@ func buildConfigFromEnv() *Config {
 // JWT_SECRET (per the README workaround `JWT_SECRET=unused-but-required`)
 // is friction during incident response: an on-call engineer may have
 // S3 credentials in hand but not the running Postgres password.
-// See WS-23 PR #68 Devin Review finding
-// ANALYSIS_pr-review-job-ad89da4c3a1449c5b914d6045dc4ffb8_0001.
 //
 // Any new binary that wants this slim variant should call
 // LoadStorageOnly explicitly; the default Load remains strict so
@@ -559,9 +555,7 @@ const defaultAuditArchiveMaxRowsPerBatch = 50000
 //     so a malformed env var can't OOM-kill the archiver pod.
 //
 // The caller surfaces the clamped value at startup via the boot
-// logs so an operator can confirm the effective setting. See WS-23
-// PR #68 Devin Review finding
-// ANALYSIS_pr-review-job-667bb339b9654552bfaa74d3720a8d0b_0005.
+// logs so an operator can confirm the effective setting.
 func clampAuditMaxRowsPerBatch(n int) int {
 	if n <= 0 {
 		return defaultAuditArchiveMaxRowsPerBatch

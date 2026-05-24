@@ -8,7 +8,8 @@ import (
 	"github.com/google/uuid"
 )
 
-// TestConfirmUploadRejectsTraversalKeys is the end-to-end half of WS-3:
+// TestConfirmUploadRejectsTraversalKeys is the end-to-end half of the
+// canonical-form object-key validator:
 // the storage.ValidateObjectKey unit tests (internal/storage) cover
 // every input class, this test verifies the HTTP handler actually
 // routes a tampered object_key through that validator and returns 403

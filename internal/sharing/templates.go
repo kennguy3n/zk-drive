@@ -18,7 +18,7 @@ import (
 //
 // Templates intentionally cover only the folder structure: roles,
 // share-link policy, retention, and tagging are out of scope (and
-// belong to follow-on Phase 4 work). That keeps the surface area
+// belong to follow-on work). That keeps the surface area
 // stable while we observe how customers actually use the verticals.
 type Template struct {
 	Name       string

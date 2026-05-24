@@ -3,9 +3,9 @@ import { expect, test } from "@playwright/test";
 // Workspace owners are admin-by-default (see api/auth/handler.go), so a
 // freshly-signed-up user can reach both /admin and /billing. These tests
 // only assert that each page's structural surface renders — they don't
-// touch backend data because the Phase 1 admin/billing endpoints might
-// 401 / 403 / 5xx on a brand-new tenant, and we want the navigation gate
-// to stand on its own.
+// touch backend data because the admin/billing endpoints may
+// 401 / 403 / 5xx on a brand-new tenant, and we want the navigation
+// surface to stand on its own.
 
 function uniqueIdentity(prefix: string) {
   const stamp = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;

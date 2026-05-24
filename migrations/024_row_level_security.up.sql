@@ -1,5 +1,4 @@
--- Phase 5 (WS-13): row-level security for defence-in-depth tenant
--- isolation.
+-- Row-level security for defence-in-depth tenant isolation.
 --
 -- Every existing query already filters on `workspace_id = $1`, so
 -- enabling RLS does not change application behaviour for the happy

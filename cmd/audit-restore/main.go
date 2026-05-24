@@ -1,4 +1,4 @@
-// zk-drive audit-log restore CLI — Phase 5 / WS-23.
+// zk-drive audit-log restore CLI.
 //
 // Reads archived audit_log rows from the S3 cold tier for a single
 // workspace and emits them as newline-delimited JSON to stdout (or
@@ -109,8 +109,6 @@ func run() error {
 	// compliance request shouldn't need Postgres credentials just
 	// to stream archived JSONL out. The S3 group is still validated
 	// (S3_ENDPOINT requires bucket + access key + secret key).
-	// See WS-23 PR #68 Devin Review finding
-	// ANALYSIS_pr-review-job-ad89da4c3a1449c5b914d6045dc4ffb8_0001.
 	cfg, err := config.LoadStorageOnly()
 	if err != nil {
 		return fmt.Errorf("load config: %w", err)

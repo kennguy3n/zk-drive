@@ -4,7 +4,7 @@
 // event to one or more users based on the notification type.
 //
 // Retention: notifications are kept indefinitely today and pruned
-// manually via admin tooling. Phase 3 will add a retention policy.
+// manually via admin tooling. A configurable retention policy is a follow-up.
 package notification
 
 import (

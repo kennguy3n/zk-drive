@@ -79,8 +79,7 @@ func TestRequireMinMigrationVersionAcceptsMigratedDatabase(t *testing.T) {
 	// audit-archiver has its own precondition constant pointing at
 	// migration 027. Pin that on a fully-migrated database too so
 	// future migration renumbering doesn't silently leave the
-	// archiver gated on a stale version. WS-23 PR #68 Devin Review
-	// finding ANALYSIS_pr-review-job-ad89da4c3a1449c5b914d6045dc4ffb8_0002.
+	// archiver gated on a stale version.
 	if err := database.RequireMinMigrationVersionFor(
 		ctx, pool, database.MinRequiredMigrationVersionAuditArchiver,
 	); err != nil {
@@ -93,8 +92,7 @@ func TestRequireMinMigrationVersionAcceptsMigratedDatabase(t *testing.T) {
 // NOT exist in schema_migrations, even on a fully-migrated database.
 // Pins the contract that any new binary adding a higher-watermark
 // constant will fail-fast against an older schema rather than
-// silently passing on the server/worker baseline. WS-23 PR #68
-// Devin Review finding ANALYSIS_pr-review-job-ad89da4c3a1449c5b914d6045dc4ffb8_0002.
+// silently passing on the server/worker baseline.
 func TestRequireMinMigrationVersionForCustomVersion(t *testing.T) {
 	if os.Getenv("TEST_DATABASE_URL") == "" {
 		t.Skip("TEST_DATABASE_URL not set; skipping integration test")

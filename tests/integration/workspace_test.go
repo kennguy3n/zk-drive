@@ -90,7 +90,7 @@ func TestWorkspaceTenantIsolation(t *testing.T) {
 	}
 }
 
-// TestCreateWorkspaceForbiddenForMemberRole pins the WS-4 invariant
+// TestCreateWorkspaceForbiddenForMemberRole pins the admin-only invariant
 // that members cannot self-promote by spinning up a fresh workspace
 // (which would make them admin of the new workspace). Only admins
 // of an existing workspace may create new ones.

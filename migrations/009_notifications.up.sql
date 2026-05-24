@@ -1,4 +1,4 @@
--- Phase 2: in-app notifications.
+-- in-app notifications.
 --
 -- Notifications are workspace- and user-scoped events surfaced to the
 -- recipient's notification center. Types in use today:

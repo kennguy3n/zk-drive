@@ -1,4 +1,4 @@
-// zk-drive audit-log archiver binary — Phase 5 / WS-23.
+// zk-drive audit-log archiver binary.
 //
 // Standalone entrypoint that archives audit_log rows older than the
 // configured retention window to S3 as compressed JSONL (one object
@@ -138,8 +138,7 @@ func run() error {
 	// has a precondition distinct from server/worker (which
 	// don't touch audit_log_archive_runs), so we check
 	// MinRequiredMigrationVersionAuditArchiver explicitly rather
-	// than bumping the shared baseline. See WS-23 PR #68 Devin
-	// Review finding ANALYSIS_pr-review-job-ad89da4c3a1449c5b914d6045dc4ffb8_0002.
+	// than bumping the shared baseline.
 	if err := database.RequireMinMigrationVersionFor(
 		ctx, pool, database.MinRequiredMigrationVersionAuditArchiver,
 	); err != nil {

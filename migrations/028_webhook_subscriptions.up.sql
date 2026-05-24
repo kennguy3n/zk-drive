@@ -1,4 +1,4 @@
--- WS-24: outbound webhook subscriptions for workspace events.
+-- Outbound webhook subscriptions for workspace events.
 --
 -- Workspace admins create subscriptions that POST a signed JSON
 -- payload to their own HTTPS endpoint whenever an event of interest

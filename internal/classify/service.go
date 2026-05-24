@@ -1,7 +1,7 @@
 // Package classify assigns a coarse "what kind of thing is this"
-// label to a file row. Phase 4 keeps the taxonomy rule-based so the
+// label to a file row. The current taxonomy is rule-based so the
 // workflow (migration + worker job + persisted column) is wired end
-// to end without a model dependency; a later phase can swap in a
+// to end without a model dependency; a follow-up can swap in a
 // real classifier behind the same Service.Classify contract.
 package classify
 

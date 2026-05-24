@@ -1,4 +1,4 @@
--- Phase 4 sprint 5 — content search index.
+-- Content search index.
 --
 -- The search worker (cmd/worker, drive.search.index subject) extracts
 -- text from supported file types (plain text, PDF) and persists it

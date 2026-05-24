@@ -1,5 +1,5 @@
 // Package webhooks implements outbound webhook subscriptions for
-// workspace events (WS-24).
+// workspace events.
 //
 // # The product gap this closes
 //
@@ -49,7 +49,7 @@
 // Three layers stack on top of each other:
 //
 //  1. Admin auth: only workspace admins can create/list/delete
-//     subscriptions (WS-4 enforcement at the route).
+//     subscriptions (admin-role enforcement at the route).
 //  2. URL validation: SSRF defense rejects RFC1918, link-local,
 //     loopback, multicast, and cloud-metadata IPs at create time AND
 //     re-validates at every delivery (DNS rebinding defense).

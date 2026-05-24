@@ -148,8 +148,9 @@ type RoomService struct {
 // caller is expected to wire the full set; a partial wiring
 // (e.g. files + keyFactory but no keyValidator) would let the
 // attachment confirm path fall back to a weaker check on a
-// client-supplied object_key, and that's exactly the footgun WS-3
-// closes. Production wiring (cmd/server/main.go) and the
+// client-supplied object_key, and that's exactly the footgun the
+// canonical-form object-key validator exists to close.
+// Production wiring (cmd/server/main.go) and the
 // integration test harness both install all four.
 func NewRoomService(repo Repository, folders FolderCreator, permissions PermissionGranter, files FileCreator, presign PresignResolver, keyFactory ObjectKeyFactory, keyValidator ObjectKeyValidator) *RoomService {
 	return &RoomService{

@@ -9,7 +9,7 @@ import (
 	"github.com/pquerna/otp/totp"
 )
 
-// TestTOTPLifecycle exercises the WS-19 second-factor end-to-end:
+// TestTOTPLifecycle exercises the second-factor end-to-end:
 // signup -> enroll/begin -> enroll/finalize -> login (returns
 // challenge token) -> verify -> session-token granted. Then disables
 // 2FA and re-logs in without a second factor.

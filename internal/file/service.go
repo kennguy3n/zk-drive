@@ -130,7 +130,7 @@ func (s *Service) DeletePendingOrphan(ctx context.Context, workspaceID, fileID u
 
 // CreateVersion inserts a file version row and updates the file's current
 // version pointer atomically. Intended for use by the upload-confirmation
-// endpoint once the S3 integration lands in Phase 1b.
+// endpoint after the storage backend accepts the uploaded bytes.
 func (s *Service) CreateVersion(ctx context.Context, workspaceID uuid.UUID, v *FileVersion) error {
 	return s.repo.CreateVersionAndSetCurrent(ctx, workspaceID, v)
 }

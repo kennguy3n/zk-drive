@@ -215,8 +215,7 @@ func TestAdminWebhooks_CreateRejectsBadInput(t *testing.T) {
 //
 // Note: the admin middleware stack rejects member-role JWTs at
 // /api/admin/* with 403, AND the handler's requireAdmin check runs
-// as belt-and-suspenders defence (see Devin Review finding on
-// handler.go:210 — confirmed intentional). This test pins the outer
+// as belt-and-suspenders defence (intentional duplication). This test pins the outer
 // admin middleware layer; the inner requireAdmin guard is covered
 // by handler_test.go's TestHandler_Create_RequiresAdmin.
 func TestAdminWebhooks_NonAdminForbidden(t *testing.T) {

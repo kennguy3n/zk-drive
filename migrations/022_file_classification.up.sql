@@ -1,4 +1,4 @@
--- Phase 4: per-file classification column.
+-- Per-file classification column.
 --
 -- Populated by the drive.classify.file worker job (see internal/classify).
 -- NULL means the file has not been classified yet (or was skipped because

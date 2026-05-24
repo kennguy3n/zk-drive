@@ -74,8 +74,7 @@ func TestBulkDeleteSoftDeletes(t *testing.T) {
 	// /api/files/{id} endpoint or the batch /api/bulk/delete
 	// endpoint. Without this assertion the gap is silent — the bulk
 	// path soft-deletes the rows but webhook subscribers never see
-	// the events, which is exactly the consistency bug reviewed in
-	// PR #69 (Devin Review finding bulk.go:138).
+	// the events, which is the consistency contract this test pins.
 	deletedEvents := env.webhooks.fileEventsByType(webhooks.EventFileDeleted)
 	if len(deletedEvents) != 2 {
 		t.Fatalf("expected 2 file.deleted webhook events for bulk delete, got %d", len(deletedEvents))

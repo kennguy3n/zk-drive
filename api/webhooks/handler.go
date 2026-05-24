@@ -1,5 +1,5 @@
 // Package webhooks serves the workspace-admin REST surface for
-// outbound webhook subscriptions (WS-24). Routes are mounted under
+// outbound webhook subscriptions. Routes are mounted under
 // /api/admin/webhooks in cmd/server/main.go inside the admin-guarded
 // router; the workspace is resolved from the JWT context, not from
 // a URL parameter, so paths are NOT parameterised by workspace ID:

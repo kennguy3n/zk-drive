@@ -135,8 +135,7 @@ const MinRequiredMigrationVersion = "026_user_totp"
 // against a stale schema fails fast (clear error) rather than
 // burning a full run's worth of S3 PutObject + audit fetch only
 // to fail on the first RecordRun INSERT with "relation
-// audit_log_archive_runs does not exist". See WS-23 PR #68 Devin
-// Review finding ANALYSIS_pr-review-job-ad89da4c3a1449c5b914d6045dc4ffb8_0002.
+// audit_log_archive_runs does not exist".
 const MinRequiredMigrationVersionAuditArchiver = "027_audit_log_archive_runs"
 
 // ErrMigrationsOutOfDate is returned by RequireMinMigrationVersion when
@@ -157,8 +156,8 @@ var ErrMigrationsOutOfDate = errors.New("database migrations are out of date: ru
 // schema_migrations. The trade-off is intentional: a gap-scan would
 // cost an extra round-trip per startup for a check that catches a
 // failure mode (manual row deletion) we don't actually defend
-// against at any other layer. WS-18 (down-migration CI) is the
-// right place to add gap detection if we ever want it.
+// against at any other layer. Down-migration CI is the right place
+// to add gap detection if we ever want it.
 //
 // This is the entrypoint check both cmd/server and cmd/worker run at
 // startup, replacing the old behaviour of calling Migrate() inline.

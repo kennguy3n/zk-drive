@@ -1,8 +1,8 @@
 # docker-compose for local zk-drive development.
 #
-# Brings up Postgres (required) plus an optional NATS JetStream service
-# for Phase 2 worker development. Uncomment the nats service block when
-# you start wiring preview / scan / index workers.
+# Brings up Postgres (required), NATS JetStream (for the async worker
+# pipeline), and ClamAV (for virus scanning). The server connects to
+# each opportunistically; the worker binary requires all three.
 #
 # Usage:
 #   docker compose up -d postgres
@@ -27,9 +27,9 @@ services:
       timeout: 5s
       retries: 10
 
-  # Phase 2 async worker pipeline (preview / scan / index / retention).
-  # The server connects opportunistically (NATS_URL env var); the
-  # worker binary requires this to be running.
+  # NATS JetStream backs the async worker pipeline (preview / scan /
+  # index / retention). The server connects opportunistically via
+  # NATS_URL; the worker binary requires this to be running.
   nats:
     image: nats:2.10-alpine
     command: ["-js", "-m", "8222"]

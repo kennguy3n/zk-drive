@@ -1,9 +1,10 @@
 // Package search implements workspace-scoped full-text search across
-// files and folders. Phase 2 uses Postgres' built-in `to_tsvector` /
-// `plainto_tsquery` operators with the `simple` dictionary so search
-// works in every language without requiring a language-specific stemmer
-// configuration. Phase 3+ can migrate to pg_trgm or an external engine
-// without changing this package's public surface.
+// files and folders. The implementation uses Postgres' built-in
+// `to_tsvector` / `plainto_tsquery` operators with the `simple`
+// dictionary so search works in every language without requiring a
+// language-specific stemmer configuration. Migrating to pg_trgm or an
+// external engine is a follow-up that won't change this package's
+// public surface.
 package search
 
 import (

@@ -17,10 +17,10 @@ import (
 	"github.com/kennguy3n/zk-drive/internal/notification"
 )
 
-// TestPhase5Gate exercises every Phase 5 deliverable end-to-end so the
-// closing decision gate ("a paying customer can sign up via Stripe
-// Checkout, install the PWA on mobile, receive real-time WebSocket
-// notifications, and see PDF previews") is pinned in CI.
+// TestFullStackScenario exercises the headline end-to-end story
+// ("a paying customer can sign up via Stripe Checkout, install the
+// PWA on mobile, receive real-time WebSocket notifications, and see
+// PDF previews") so the full integration is pinned in CI.
 //
 // The subtests are intentionally light on assertions about external
 // systems — Stripe API calls, an LLM provider, and a real Redis
@@ -28,9 +28,9 @@ import (
 // that the *wiring* is in place: the routes exist, return non-404
 // status codes, and the fall-back paths (no-secret, no-Redis) behave
 // the way the production server expects.
-func TestPhase5Gate(t *testing.T) {
+func TestFullStackScenario(t *testing.T) {
 	env := setupEnv(t)
-	admin := env.signupAndLogin("Acme Phase 5", "admin@phase5.test", "Alice", "pw")
+	admin := env.signupAndLogin("Acme Full Stack", "admin@fullstack.test", "Alice", "pw")
 
 	t.Run("StripeWebhookEndpointExists", func(t *testing.T) {
 		// The harness wires StripeService with an empty webhook
@@ -38,7 +38,7 @@ func TestPhase5Gate(t *testing.T) {
 		// verification. The point of this subtest is that the
 		// route is mounted at all — i.e. *not* 404.
 		status, body := env.httpRequest(http.MethodPost, "/api/webhooks/stripe", "", map[string]any{
-			"id":   "evt_test_phase5",
+			"id":   "evt_test_fullstack",
 			"type": "checkout.session.completed",
 		})
 		if status == http.StatusNotFound {
@@ -164,7 +164,7 @@ func TestPhase5Gate(t *testing.T) {
 		// summarise. The summary endpoint returns the LLM output
 		// when LLM_API_KEY is set, and the rule-based scaffold
 		// otherwise — both shapes are non-empty strings.
-		const roomID = "kchat-room-phase5-summary"
+		const roomID = "kchat-room-fullstack-summary"
 		status, body := env.httpRequest(http.MethodPost, "/api/kchat/rooms", admin.Token, map[string]string{
 			"kchat_room_id": roomID,
 		})
@@ -174,7 +174,7 @@ func TestPhase5Gate(t *testing.T) {
 		var room kchatRoomCreated
 		env.decodeJSON(body, &room)
 
-		createFile(t, env, admin.Token, room.FolderID.String(), "phase5-notes.txt", "text/plain")
+		createFile(t, env, admin.Token, room.FolderID.String(), "fullstack-notes.txt", "text/plain")
 
 		status, body = env.httpRequest(http.MethodPost, "/api/kchat/rooms/"+room.ID.String()+"/summary", admin.Token, nil)
 		if status != http.StatusOK {
@@ -205,7 +205,7 @@ func TestPhase5Gate(t *testing.T) {
 		// supported mime type so the preview worker would pick it
 		// up.
 		fold := createFolder(t, env, admin.Token, nil, "Phase5 PDFs")
-		f := createFile(t, env, admin.Token, fold.ID.String(), "phase5.pdf", "application/pdf")
+		f := createFile(t, env, admin.Token, fold.ID.String(), "fullstack.pdf", "application/pdf")
 		status, body := env.httpRequest(http.MethodGet, "/api/files/"+f.ID.String(), admin.Token, nil)
 		if status != http.StatusOK {
 			t.Fatalf("get pdf metadata: status=%d body=%s", status, string(body))
@@ -213,7 +213,7 @@ func TestPhase5Gate(t *testing.T) {
 	})
 
 	t.Run("PreviousPhaseGatesStillPass", func(t *testing.T) {
-		// Billing usage summary (Phase 3 quota infrastructure).
+		// Billing usage summary (quota infrastructure).
 		status, body := env.httpRequest(http.MethodGet, "/api/admin/billing/usage", admin.Token, nil)
 		if status != http.StatusOK {
 			t.Fatalf("billing usage: status=%d body=%s", status, string(body))
@@ -224,7 +224,7 @@ func TestPhase5Gate(t *testing.T) {
 			t.Errorf("billing usage returned empty tier: %+v", usage)
 		}
 
-		// Notifications listing (Phase 3 fan-out).
+		// Notifications listing (fan-out).
 		status, body = env.httpRequest(http.MethodGet, "/api/notifications", admin.Token, nil)
 		if status != http.StatusOK {
 			t.Fatalf("notifications: status=%d body=%s", status, string(body))
@@ -234,8 +234,8 @@ func TestPhase5Gate(t *testing.T) {
 		}
 		env.decodeJSON(body, &notifResp)
 
-		// Search endpoint (Phase 4 strict-ZK / FTS).
-		status, body = env.httpRequest(http.MethodGet, "/api/search?q=phase5", admin.Token, nil)
+		// Search endpoint (strict-ZK / FTS).
+		status, body = env.httpRequest(http.MethodGet, "/api/search?q=fullstack", admin.Token, nil)
 		if status != http.StatusOK {
 			t.Fatalf("search: status=%d body=%s", status, string(body))
 		}

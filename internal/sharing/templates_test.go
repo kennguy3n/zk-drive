@@ -64,7 +64,7 @@ func TestListTemplatesReturnsDeepCopy(t *testing.T) {
 }
 
 // TestGetTemplateKnown spot-checks the canonical "agency" template
-// (which has been part of the API contract since Phase 3 launched)
+// (which is part of the documented API contract)
 // to catch accidental edits to SubFolders ordering — the UI surfaces
 // folders in this exact order.
 func TestGetTemplateKnown(t *testing.T) {

@@ -1,4 +1,4 @@
--- Phase 5 (WS-23): audit-log cold archival.
+-- Audit-log cold archival.
 --
 -- The audit_log table records every security-relevant event (login,
 -- permission grant/revoke, admin user management, retention-policy
@@ -84,9 +84,7 @@ CREATE TABLE audit_log_archive_runs (
     -- "uncompressed JSONL bytes" semantic; the two must agree.
     -- Operators who want S3 storage cost should multiply by the
     -- empirically-observed gzip ratio for their workload (≈10x
-    -- compression on real audit traffic). See WS-23 PR #68
-    -- Devin Review finding
-    -- ANALYSIS_pr-review-job-ad89da4c3a1449c5b914d6045dc4ffb8_0003.
+    -- compression on real audit traffic).
     bytes_uploaded      BIGINT      NOT NULL,
     started_at          TIMESTAMPTZ NOT NULL,
     completed_at        TIMESTAMPTZ NOT NULL,

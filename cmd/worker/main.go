@@ -1,4 +1,4 @@
-// zk-drive worker binary — Phase 2.
+// zk-drive worker binary.
 //
 // The worker hosts JetStream consumers for the drive.* subjects the
 // API server publishes to after a successful upload:
@@ -209,7 +209,7 @@ func run() error {
 
 	// Guest expiry sweep runs on a timer inside the worker binary so
 	// the server process doesn't take on extra cron-like
-	// responsibilities. A 5-minute cadence is fine for Phase 3 —
+	// responsibilities. A 5-minute cadence is fine here:
 	// share-link TTLs are generally hours / days.
 	sharingSvc := sharing.NewService(sharing.NewPostgresRepository(pool), wiring.NewPermissionGranter(permission.NewService(permission.NewPostgresRepository(pool))))
 	bgGoroutines.Add(1)
@@ -218,7 +218,7 @@ func run() error {
 		runGuestExpirySweep(ctx, sharingSvc, 5*time.Minute)
 	}()
 
-	// Storage-counter reconciliation (WS-14). Runs inside the worker
+	// Storage-counter reconciliation. Runs inside the worker
 	// process on a configurable cadence so the denormalized
 	// workspaces.storage_used_bytes column converges back to the
 	// canonical SUM(files.size_bytes) over time, even if a future
@@ -246,7 +246,7 @@ func run() error {
 		}()
 	}
 
-	// Orphan-object GC (WS-18). Reclaims S3 objects whose presigned
+	// Orphan-object GC. Reclaims S3 objects whose presigned
 	// PUT completed but whose ConfirmUpload never landed. Uses the
 	// same per-workspace storage resolution as the API server so
 	// per-tenant zk-object-fabric buckets are correctly targeted
@@ -457,7 +457,7 @@ func ensureStream(js nats.JetStreamContext) error {
 // (subject, result) labels land on zkdrive_worker_jobs_total and
 // the duration histogram captures wall time per subject.
 func subscribeAll(ctx context.Context, js nats.JetStreamContext, pool *pgxpool.Pool, m *metrics.Metrics, previewSvc *preview.Service, scanSvc *scan.Service, archiveSvc *retention.ArchiveService, indexSvc *index.Service, classifySvc *classify.Service) ([]*nats.Subscription, error) {
-	// Webhook delivery worker (WS-24). Constructed once and shared
+	// Webhook delivery worker. Constructed once and shared
 	// across all webhook.events deliveries; the DeliveryClient
 	// holds an http.Client + URLValidator that are both safe for
 	// concurrent use. The repository is the pgx-backed
@@ -831,7 +831,7 @@ func reconcileInterval() time.Duration {
 // per-interval. Acceptable here because reconciliation is
 // idempotent (FOR UPDATE row lock + no-op UPDATE on no drift) and
 // the loop body is synchronous so there's never more than one
-// concurrent run. WS-17's reconciler_runtime_seconds metric is the
+// concurrent run. The reconciler_runtime_seconds metric is the
 // signal for "reconcile is now slower than the configured cadence,
 // time to shard or relax the interval".
 func runStorageReconciler(ctx context.Context, rc *reconciler.Reconciler, m *metrics.Metrics, interval time.Duration) {

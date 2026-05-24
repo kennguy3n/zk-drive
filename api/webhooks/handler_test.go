@@ -319,7 +319,7 @@ func TestHandler_Create_CapReached(t *testing.T) {
 // auto-paused rows (active=false, populated by the worker's
 // consecutive-failure threshold) do NOT count. Regression for the
 // SQL CTE in PostgresRepository.Create which previously counted all
-// rows (Devin Review pr-review-job-2ce203d4_0001).
+// rows.
 func TestHandler_Create_AutoPausedDoesNotCountTowardsCap(t *testing.T) {
 	t.Parallel()
 	repo := &fakeRepo{}
@@ -474,9 +474,9 @@ func TestHandler_Test_RequiresDispatcher(t *testing.T) {
 	}
 }
 
-// TestHandler_Test_DispatchesToTargetSubscriptionOnly is the
-// regression test for Devin Review pr-review-job-c492c9c4_0002 —
-// the prior implementation published a synthetic event onto
+// TestHandler_Test_DispatchesToTargetSubscriptionOnly pins the
+// per-subscription dispatch semantic. Earlier behaviour published
+// a synthetic event onto
 // JetStream, which fanned out to every active subscription matching
 // (workspace_id, event_type) instead of only the targeted
 // subscription. The new TestDispatcher path delivers synchronously

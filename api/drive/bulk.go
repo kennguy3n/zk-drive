@@ -315,8 +315,8 @@ func (h *Handler) BulkCopy(w http.ResponseWriter, r *http.Request) {
 
 // BulkDownload streams a zip archive of the requested files. This is
 // one of the few endpoints where the API server proxies object bytes
-// — the tradeoff is documented in docs/PROGRESS.md. Larger downloads
-// should move to an async "build zip in object storage" worker later.
+// — accepted today for small archives. Larger downloads should move
+// to an async "build zip in object storage" worker later.
 func (h *Handler) BulkDownload(w http.ResponseWriter, r *http.Request) {
 	workspaceID, _ := middleware.WorkspaceIDFromContext(r.Context())
 	store := h.resolveStorage(r.Context(), workspaceID)

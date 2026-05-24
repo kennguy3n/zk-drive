@@ -1,4 +1,4 @@
--- Phase 2: virus scan status on file versions.
+-- virus scan status on file versions.
 --
 -- scan_status tracks the async ClamAV scan lifecycle for each uploaded
 -- version:

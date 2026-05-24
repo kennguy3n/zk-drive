@@ -325,8 +325,8 @@ func TestNewSMTPClient_UnconfiguredHostBootsCleanly(t *testing.T) {
 // after dial, so subsequent reads/writes against the socket
 // time out at the same wall-clock instant as the outer context.
 //
-// Regression test for ANALYSIS_0001 from the third Devin Review
-// pass on PR #66 — the comment on guestInviteEmailDispatchTimeout
+// Regression test pinning the dispatch-timeout contract — the
+// comment on guestInviteEmailDispatchTimeout
 // previously claimed "the goroutine cannot leak even if the
 // relay accepts the connection and then hangs indefinitely on a
 // write," which was false until SetDeadline was wired through.
@@ -407,8 +407,7 @@ func TestSMTPClient_HangingRelayDoesNotLeakGoroutine(t *testing.T) {
 // values" matches the pattern Go's net/http uses to reject
 // malformed inputs at the boundary.
 //
-// Regression test for ANALYSIS_0005 from the fourth Devin Review
-// pass on PR #66.
+// Regression test pinning CRLF-injection rejection in custom headers.
 func TestWriteRFC5322_RejectsCRLFInjectionInCustomHeaders(t *testing.T) {
 	cases := []struct {
 		name   string

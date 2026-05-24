@@ -1,4 +1,4 @@
-// Audit-log cold archival (WS-23).
+// Audit-log cold archival.
 //
 // # Why this exists
 //
@@ -38,9 +38,7 @@
 //     pages — if those pages all shared runID in the key, page 2
 //     would silently overwrite page 1 in S3 while page 1's rows had
 //     already been deleted from the hot tier (permanent audit
-//     data loss). See WS-23 PR #68 Devin Review finding
-//     BUG_pr-review-job-92fe43f0a26c44ea817db9bacbc6c88d_0001 for
-//     the original walkthrough.
+//     data loss).
 //
 // The (workspace, month) shard size is the load-bearing trade-off:
 // large enough that the cold tier doesn't degrade into millions of
@@ -336,8 +334,7 @@ func (a *ArchiveService) Run(ctx context.Context) (*RunResult, error) {
 	// here). Without this attribution, an operator monitoring the OK +
 	// Failed counters would see them sum to less than Total whenever a
 	// run was cancelled mid-iteration — a confusing gap that this
-	// branch closes. See WS-23 PR #68 Devin Review finding
-	// ANALYSIS_pr-review-job-667bb339b9654552bfaa74d3720a8d0b_0001.
+	// branch closes.
 	processedGroups := 0
 	for _, g := range groups {
 		if err := ctx.Err(); err != nil {
@@ -511,9 +508,7 @@ func (a *ArchiveService) archiveBucket(ctx context.Context, runID uuid.UUID, cut
 			// the object never appeared). If the failure-row
 			// INSERT itself fails we log + carry on — the primary
 			// error is what the caller cares about and operators
-			// still see the structured-log entry. See WS-23 PR #68
-			// Devin Review finding
-			// ANALYSIS_pr-review-job-d2a9e87dcd554aae916858730442da4c_0001.
+			// still see the structured-log entry.
 			a.recordPreUploadFailure(ctx, runID, m.WorkspaceID, cutoff, m.YearMonth, objectKey, startedAt, err)
 			span.RecordError(err)
 			span.SetStatus(codes.Error, "s3 upload failed")
@@ -558,8 +553,7 @@ func (a *ArchiveService) archiveBucket(ctx context.Context, runID uuid.UUID, cut
 			// itself errors (e.g. admin manually purged the row
 			// mid-flight), we still return the primary DeleteBatch
 			// error — operators have structured logs covering both
-			// paths. See WS-23 PR #68 Devin Review finding
-			// ANALYSIS_pr-review-job-d2a9e87dcd554aae916858730442da4c_0001.
+			// paths.
 			a.markRunDeleteFailure(ctx, record.ID, err)
 			span.RecordError(err)
 			span.SetStatus(codes.Error, "delete batch failed")

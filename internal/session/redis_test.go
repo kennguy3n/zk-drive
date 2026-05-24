@@ -86,8 +86,8 @@ func TestRevokeAllForUser(t *testing.T) {
 	}
 }
 
-// TestUserSessionsIndexTTLNeverShrinks regression-tests the bug
-// flagged in Devin Review #3150549347: a short-lived session must
+// TestUserSessionsIndexTTLNeverShrinks pins the contract that a
+// short-lived session must
 // not shrink the user_sessions SET TTL, otherwise the index can
 // expire before older long-lived sessions and RevokeAllForUser will
 // silently miss them.
@@ -124,7 +124,7 @@ func TestUserSessionsIndexTTLNeverShrinks(t *testing.T) {
 }
 
 // TestRevokeUserAndIsRevoked exercises the per-user cutoff path that
-// powers WS-1's JWT revocation. The IsRevoked decision boundary is
+// powers per-user JWT revocation. The IsRevoked decision boundary is
 // inclusive ("iat <= cutoff") so a token issued in the same second
 // as the revocation is treated as revoked — the conservative choice
 // for the race between login completion and logout call.
@@ -293,7 +293,7 @@ func TestIsRevokedRejectsMalformedCutoff(t *testing.T) {
 }
 
 // TestRevokeUserAtomicMaxUpdate is the regression test for the
-// last-writer-wins race flagged in Devin Review on PR #48: two
+// last-writer-wins race in atomic revocation updates: two
 // concurrent revocations could (in principle) land out of order
 // such that an older timestamp overwrites a newer one, moving the
 // cutoff backwards and re-validating tokens an earlier revocation

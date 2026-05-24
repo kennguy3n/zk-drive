@@ -1,8 +1,8 @@
 // Package permission implements per-resource access grants within a
-// workspace. Phase 1 enforces workspace-level role gating (admin vs member)
-// at the handler layer; the service here lets callers grant, revoke, list,
-// and check individual viewer/editor/admin grants on a single folder or
-// file. Folder-level inheritance is deferred to Phase 2.
+// workspace. The handler layer enforces workspace-level role gating
+// (admin vs member); the service here lets callers grant, revoke,
+// list, and check individual viewer/editor/admin grants on a single
+// folder or file. Folder-level inheritance is a follow-up.
 package permission
 
 import (

@@ -1,4 +1,4 @@
-// zk-drive reconciler binary — Phase 5 / WS-14.
+// zk-drive reconciler binary.
 //
 // Standalone entrypoint that recomputes denormalized counters on
 // the workspaces table (currently storage_used_bytes) so they
@@ -23,7 +23,7 @@
 //   - Per-workspace failures do NOT flip the exit code: a single
 //     bad row doesn't trip K8s CronJob alerting for the whole
 //     run; they are surfaced via log output for ad-hoc triage.
-//     The metrics-based alerting path (WS-17) flows through the
+//     The metrics-based alerting path flows through the
 //     long-running worker's in-process reconciler invocation —
 //     see internal/metrics.RecordReconcilerRun and the worker's
 //     /metrics endpoint. cmd/reconciler intentionally does NOT

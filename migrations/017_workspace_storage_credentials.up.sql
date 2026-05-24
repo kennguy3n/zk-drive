@@ -1,4 +1,4 @@
--- Per-workspace zk-object-fabric tenant credentials (Phase 4, task 2).
+-- Per-workspace zk-object-fabric tenant credentials.
 --
 -- Each workspace maps 1:1 to a zk-object-fabric tenant. On workspace
 -- creation, the signup handler best-effort calls the fabric console
