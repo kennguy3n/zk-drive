@@ -65,12 +65,25 @@ export interface EncryptionBadgeProps {
   //   2. The badge is rendered ON the privacy page itself, where the
   //      same-page link would do nothing useful.
   linkToHelp?: boolean;
+  // tabbable controls whether the badge participates in the keyboard
+  // tab order. Default true so a solo badge (e.g. breadcrumb header,
+  // dialog comparison) is reachable by Tab like any other link. Pass
+  // tabbable={false} when the badge is rendered in a repeated list
+  // (sidebar tree, subfolder card grid) so the user does not have to
+  // tab through N identical-destination links — the dedicated
+  // "Privacy" link in the app header is the primary keyboard
+  // discovery affordance in that case. Screen-reader users still
+  // reach skip-tabbed badges via arrow-key / virtual-cursor
+  // navigation and hear the link role + accessible name. Ignored
+  // when linkToHelp={false} (a `<span>` has no tab order anyway).
+  tabbable?: boolean;
 }
 
 export default function EncryptionBadge({
   mode,
   size = "row",
   linkToHelp = true,
+  tabbable = true,
 }: EncryptionBadgeProps) {
   const isStrict = mode === "strict_zk";
   const label = isStrict ? "zero-knowledge" : "confidential";
@@ -113,12 +126,14 @@ export default function EncryptionBadge({
         title={title}
         data-testid="encryption-badge"
         data-mode={dataMode}
-        // The badge link must not steal focus when keyboard users tab
-        // through file rows — the parent row navigation should still be
-        // the primary affordance. We keep it focusable (default) so
-        // screen reader users can reach it, but the visual outline is
-        // suppressed in favour of the existing pill background; assistive
-        // tech still announces the link role + accessible name.
+        // tabIndex={-1} removes the badge from the keyboard tab order
+        // without removing the link role from assistive tech (screen
+        // reader users still reach it via arrow keys / virtual cursor
+        // and hear the link + accessible name). Used in list contexts
+        // where the parent row navigation is the primary affordance
+        // and tabbing through N identical-destination badges would be
+        // noise. See the `tabbable` prop comment above.
+        tabIndex={tabbable ? undefined : -1}
         aria-label={`${label} — learn about privacy modes`}
         style={style}
       >

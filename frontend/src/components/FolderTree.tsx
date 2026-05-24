@@ -104,7 +104,7 @@ export default function FolderTree({ currentFolderID }: { currentFolderID: strin
               for folders missing the field (pre-Phase-4 rows), so the
               tree still renders cleanly.
             */}
-            <EncryptionBadge mode={f.encryption_mode} />
+            <EncryptionBadge mode={f.encryption_mode} tabbable={false} />
           </li>
         ))}
       </ul>

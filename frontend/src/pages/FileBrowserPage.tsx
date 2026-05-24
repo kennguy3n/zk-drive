@@ -220,7 +220,7 @@ export default function FileBrowserPage() {
                     >
                       {f.name}
                     </Link>
-                    <EncryptionBadge mode={f.encryption_mode} />
+                    <EncryptionBadge mode={f.encryption_mode} tabbable={false} />
                   </span>
                   <div style={{ display: "flex", gap: 6 }}>
                     <button
