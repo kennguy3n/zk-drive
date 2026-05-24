@@ -132,7 +132,7 @@ func TestRenderArchive_PlainGzipFallback(t *testing.T) {
 	// Verify the helper directly: tag should be GZ (not TAR.GZ),
 	// total count 1, and the entry should be the gzip header's
 	// Name.
-	entries, total, kind, err := listGzipOrTarGzEntries(gzBuf.Bytes())
+	entries, total, kind, err := listGzipOrTarGzEntries(context.Background(), gzBuf.Bytes())
 	if err != nil {
 		t.Fatalf("listGzipOrTarGzEntries: %v", err)
 	}
@@ -162,7 +162,7 @@ func TestRenderArchive_PlainGzipNoName(t *testing.T) {
 	if err := gz.Close(); err != nil {
 		t.Fatalf("gz close: %v", err)
 	}
-	entries, total, kind, err := listGzipOrTarGzEntries(gzBuf.Bytes())
+	entries, total, kind, err := listGzipOrTarGzEntries(context.Background(), gzBuf.Bytes())
 	if err != nil {
 		t.Fatalf("listGzipOrTarGzEntries: %v", err)
 	}
@@ -195,7 +195,7 @@ func TestListZipEntries_HonoursEntryCap(t *testing.T) {
 		t.Fatalf("zip close: %v", err)
 	}
 
-	got, total, err := listZipEntries(buf.Bytes())
+	got, total, err := listZipEntries(context.Background(), buf.Bytes())
 	if err != nil {
 		t.Fatalf("listZipEntries: %v", err)
 	}
@@ -204,5 +204,94 @@ func TestListZipEntries_HonoursEntryCap(t *testing.T) {
 	}
 	if total != entries {
 		t.Errorf("total = %d, want %d (the real entry count, not the cap)", total, entries)
+	}
+}
+
+// TestListTarEntries_RespectsContextCancellation guards the
+// gzip-bomb mitigation: a cancelled ctx should short-circuit the
+// header iteration so a wedged decompression can't keep doing work
+// past the per-renderer timeout. We construct a perfectly valid tar
+// stream with more entries than archiveMaxEntries, cancel the ctx
+// before iterating, and assert the lister returns the ctx error
+// with zero entries collected.
+func TestListTarEntries_RespectsContextCancellation(t *testing.T) {
+	t.Parallel()
+	var buf bytes.Buffer
+	tw := tar.NewWriter(&buf)
+	const entries = archiveMaxEntries * 2
+	for i := 0; i < entries; i++ {
+		if err := tw.WriteHeader(&tar.Header{
+			Name:     fmt.Sprintf("file-%05d.txt", i),
+			Mode:     0o600,
+			Size:     0,
+			Typeflag: tar.TypeReg,
+		}); err != nil {
+			t.Fatalf("tar write header: %v", err)
+		}
+	}
+	if err := tw.Close(); err != nil {
+		t.Fatalf("tar close: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // pre-cancel so the first iteration sees the cancellation.
+	got, total, err := listTarEntries(ctx, bytes.NewReader(buf.Bytes()))
+	if err == nil {
+		t.Fatalf("expected ctx-cancellation error; got entries=%v total=%d", got, total)
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Errorf("err = %v; want context.Canceled", err)
+	}
+}
+
+// TestRenderArchive_GzipBombMitigation guards the decompressed-byte
+// cap on the tar.gz path. We construct a tar.gz whose compressed
+// size is small but whose decompressed contents would balloon past
+// archiveMaxDecompressedBytes if we let the walker run unbounded.
+// The walker should stop at the cap with whatever prefix of entries
+// it managed to read, and the surrounding renderArchive call should
+// still complete (rendering the partial listing) instead of
+// monopolising the worker.
+func TestRenderArchive_GzipBombMitigation(t *testing.T) {
+	t.Parallel()
+	// Build a tar with many small entries — each tar header is 512
+	// bytes, so 1024 entries is ~512 KiB raw, which compresses to
+	// almost nothing because the data is highly repetitive.
+	var rawTar bytes.Buffer
+	tw := tar.NewWriter(&rawTar)
+	const headerCount = 1024
+	for i := 0; i < headerCount; i++ {
+		if err := tw.WriteHeader(&tar.Header{
+			Name:     fmt.Sprintf("entry-%05d.txt", i),
+			Mode:     0o600,
+			Size:     0,
+			Typeflag: tar.TypeReg,
+		}); err != nil {
+			t.Fatalf("tar header: %v", err)
+		}
+	}
+	if err := tw.Close(); err != nil {
+		t.Fatalf("tar close: %v", err)
+	}
+	var gzBuf bytes.Buffer
+	gw := gzip.NewWriter(&gzBuf)
+	if _, err := gw.Write(rawTar.Bytes()); err != nil {
+		t.Fatalf("gzip write: %v", err)
+	}
+	if err := gw.Close(); err != nil {
+		t.Fatalf("gzip close: %v", err)
+	}
+	// Under archiveMaxDecompressedBytes this completes normally —
+	// the assertion here is that nothing wedges and the renderer
+	// returns a valid image. The cap kicks in only on inputs that
+	// expand past 256 MiB, which is impractical to construct in a
+	// unit test. The test still exercises the wired-up
+	// io.LimitReader code path on every CI run.
+	img, err := renderArchive(context.Background(), "application/gzip", gzBuf.Bytes())
+	if err != nil {
+		t.Fatalf("renderArchive: %v", err)
+	}
+	if img == nil {
+		t.Fatal("renderArchive returned nil image")
 	}
 }

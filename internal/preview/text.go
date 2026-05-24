@@ -36,7 +36,12 @@ const textPreviewMaxLines = 32
 func renderText(_ context.Context, srcBytes []byte) (image.Image, error) {
 	body := srcBytes
 	if len(body) > textPreviewMaxBytes {
-		body = body[:textPreviewMaxBytes]
+		// Trim any trailing bytes that aren't a complete UTF-8
+		// codepoint so the truncation point doesn't introduce a
+		// U+FFFD replacement glyph mid-character. Same rationale
+		// as the email body path — see clipBytesToValidUTF8 in
+		// textimage.go for the helper's contract.
+		body = clipBytesToValidUTF8(body[:textPreviewMaxBytes])
 	}
 	return renderTextToImage(string(body), textPreviewOpts{
 		maxLines: textPreviewMaxLines,

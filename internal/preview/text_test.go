@@ -1,9 +1,11 @@
 package preview
 
 import (
+	"bytes"
 	"context"
 	"strings"
 	"testing"
+	"unicode/utf8"
 )
 
 func TestRenderText_ProducesNonEmptyImage(t *testing.T) {
@@ -25,6 +27,45 @@ func TestRenderText_TruncatesLongSource(t *testing.T) {
 	// so we exercise the truncation slice path. Any failure here is
 	// likely a regression in the cap constant or the slice math.
 	src := []byte(strings.Repeat("x", textPreviewMaxBytes*4))
+	img, err := renderText(context.Background(), src)
+	if err != nil {
+		t.Fatalf("renderText: %v", err)
+	}
+	if img == nil {
+		t.Fatal("renderText returned nil image")
+	}
+}
+
+// TestRenderText_UTF8BoundaryAtTruncationPoint guards the
+// clipBytesToValidUTF8 wiring on the text renderer. We construct a
+// source where a CJK codepoint lands exactly across the
+// textPreviewMaxBytes cap, then assert that the rendered byte
+// stream after truncation is still valid UTF-8 (no U+FFFD glyphs
+// produced by byte-level slicing). The byte-pad before the
+// codepoint is sized so the multi-byte rune straddles the cap.
+func TestRenderText_UTF8BoundaryAtTruncationPoint(t *testing.T) {
+	t.Parallel()
+	// Use a CJK rune (3 bytes in UTF-8) and pad so the rune starts
+	// at offset textPreviewMaxBytes-1. After byte-truncation the
+	// last 1 byte would be the first byte of the rune; the helper
+	// must trim it.
+	pad := bytes.Repeat([]byte("a"), textPreviewMaxBytes-1)
+	src := append(append([]byte{}, pad...), []byte("漢")...)
+	src = append(src, []byte("bbb")...) // tail past the cap
+	// Re-exercise the truncation path: source size is > cap.
+	if len(src) <= textPreviewMaxBytes {
+		t.Fatalf("test source too short to exercise truncation: len=%d cap=%d", len(src), textPreviewMaxBytes)
+	}
+	// What the renderer will keep, byte-for-byte, after the helper.
+	want := clipBytesToValidUTF8(src[:textPreviewMaxBytes])
+	if !utf8.Valid(want) {
+		t.Fatalf("want bytes are not valid UTF-8: %q", want)
+	}
+	if len(want) >= textPreviewMaxBytes {
+		t.Errorf("expected helper to trim at least 1 byte at the cap; got len=%d cap=%d", len(want), textPreviewMaxBytes)
+	}
+	// Smoke test the renderer path on this input — it should not
+	// crash, and the truncation should be silent (no error path).
 	img, err := renderText(context.Background(), src)
 	if err != nil {
 		t.Fatalf("renderText: %v", err)

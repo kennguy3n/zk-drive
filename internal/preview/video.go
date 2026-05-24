@@ -90,9 +90,21 @@ func renderVideoFrame(ctx context.Context, srcBytes []byte) (image.Image, error)
 	)
 	cmd.Dir = dir
 	cmd.Stderr = &primaryStderr
-	var primaryRunErr error
+	var (
+		primaryRunErr    error
+		primaryDecodeErr error
+	)
 	if primaryRunErr = cmd.Run(); primaryRunErr == nil {
-		if img, decErr := readImageFile(outPath); decErr == nil {
+		// ffmpeg exited 0 but the PNG it wrote may still be
+		// undecodable (rare, but happens with some codecs that
+		// produce a 0-byte or truncated output despite a clean
+		// exit code). Capture the decode error so it appears in
+		// the final diagnostic when the fallback also fails —
+		// otherwise operators would see "primary err=<nil>" with
+		// no hint that decode was actually the failure mode.
+		var img image.Image
+		img, primaryDecodeErr = readImageFile(outPath)
+		if primaryDecodeErr == nil {
 			return img, nil
 		}
 	}
@@ -127,20 +139,20 @@ func renderVideoFrame(ctx context.Context, srcBytes []byte) (image.Image, error)
 		// successful primary run.
 		if errors.Is(fallbackCtx.Err(), context.DeadlineExceeded) {
 			return nil, fmt.Errorf(
-				"ffmpeg video frame timed out after %s on fallback (primary err=%v, primary stderr=%q): %s",
-				videoRenderTimeout, primaryRunErr, primaryStderr.String(), fallbackStderr.String(),
+				"ffmpeg video frame timed out after %s on fallback (primary err=%v, primary decode err=%v, primary stderr=%q): %s",
+				videoRenderTimeout, primaryRunErr, primaryDecodeErr, primaryStderr.String(), fallbackStderr.String(),
 			)
 		}
 		return nil, fmt.Errorf(
-			"ffmpeg video frame: %w (primary err=%v, primary stderr=%q, fallback stderr=%q)",
-			err, primaryRunErr, primaryStderr.String(), fallbackStderr.String(),
+			"ffmpeg video frame: %w (primary err=%v, primary decode err=%v, primary stderr=%q, fallback stderr=%q)",
+			err, primaryRunErr, primaryDecodeErr, primaryStderr.String(), fallbackStderr.String(),
 		)
 	}
 	img, err := readImageFile(outPath)
 	if err != nil {
 		return nil, fmt.Errorf(
-			"decode video frame: %w (primary err=%v, primary stderr=%q, fallback stderr=%q)",
-			err, primaryRunErr, primaryStderr.String(), fallbackStderr.String(),
+			"decode video frame: %w (primary err=%v, primary decode err=%v, primary stderr=%q, fallback stderr=%q)",
+			err, primaryRunErr, primaryDecodeErr, primaryStderr.String(), fallbackStderr.String(),
 		)
 	}
 	return img, nil

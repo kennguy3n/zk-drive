@@ -11,6 +11,7 @@ import (
 	"io"
 	"sort"
 	"strings"
+	"time"
 )
 
 // archiveMaxEntries caps the number of entries we'll enumerate from
@@ -18,6 +19,33 @@ import (
 // every entry of a 50k-file tarball would be a waste of CPU and
 // memory.
 const archiveMaxEntries = 64
+
+// archiveRenderTimeout caps the wall time spent on a single archive
+// listing. Subprocess renderers (design / video / svg / office) all
+// carry per-invocation deadlines so one pathological input can't
+// monopolise a worker goroutine; the in-process archive renderer was
+// the outlier that relied solely on the worker's 2-minute job timeout.
+// 30s matches design.go and is generous enough for legitimate tar.gz
+// listings (the listers only read entry headers, never bodies) while
+// being tight enough to keep the preview queue moving when a crafted
+// payload makes the gzip + tar walk slow.
+const archiveRenderTimeout = 30 * time.Second
+
+// archiveMaxDecompressedBytes caps how many decompressed bytes the
+// gzip→tar walker can consume from a single .tar.gz / .tgz input.
+// gzip is pathologically asymmetric — a few MiB of source can
+// decompress to many GiB — so even with the 100 MiB MaxSourceBytes
+// cap on the *compressed* input, an attacker can still demand large
+// amounts of CPU and tar.Next iterations from the worker.
+//
+// 256 MiB is comfortably larger than the largest legitimate tar.gz
+// archive we'd want to preview (thousands of entry headers, each
+// 512 bytes, plus padding) and small enough that the worst-case
+// scan completes well inside archiveRenderTimeout. When we hit this
+// cap, tar.Next surfaces an unexpected-EOF error that listTarEntries
+// already handles non-fatally: any entries collected before the cap
+// are returned as a best-effort listing.
+const archiveMaxDecompressedBytes = 256 * 1024 * 1024
 
 // renderArchive lists the file paths inside a ZIP / TAR / TAR.GZ
 // archive and renders them as a text image. We do NOT extract — the
@@ -28,7 +56,11 @@ const archiveMaxEntries = 64
 // MIME dispatch decides which decoder to use. The handler accepts
 // both "application/zip" and "application/x-zip-compressed" because
 // browsers and OS sniffers disagree on the canonical type.
-func renderArchive(_ context.Context, mime string, src []byte) (image.Image, error) {
+func renderArchive(ctx context.Context, mime string, src []byte) (image.Image, error) {
+	// Per-invocation timeout layered under the caller's ctx. Effective
+	// deadline = min(caller deadline, archiveRenderTimeout).
+	renderCtx, cancel := context.WithTimeout(ctx, archiveRenderTimeout)
+	defer cancel()
 	var (
 		entries    []string
 		totalCount int
@@ -37,10 +69,10 @@ func renderArchive(_ context.Context, mime string, src []byte) (image.Image, err
 	)
 	switch normalizeMime(mime) {
 	case "application/zip", "application/x-zip-compressed":
-		entries, totalCount, err = listZipEntries(src)
+		entries, totalCount, err = listZipEntries(renderCtx, src)
 		kind = "ZIP"
 	case "application/x-tar":
-		entries, totalCount, err = listTarEntries(bytes.NewReader(src))
+		entries, totalCount, err = listTarEntries(renderCtx, bytes.NewReader(src))
 		kind = "TAR"
 	case "application/gzip", "application/x-gzip", "application/x-tar-gz", "application/x-tgz":
 		// .tar.gz / .tgz. Try the tar path first; if the
@@ -53,7 +85,7 @@ func renderArchive(_ context.Context, mime string, src []byte) (image.Image, err
 		// tar-parse error that did NOT wrap ErrUnsupportedMime, so
 		// the worker's Nak loop retried the job until the JetStream
 		// delivery cap kicked in.
-		entries, totalCount, kind, err = listGzipOrTarGzEntries(src)
+		entries, totalCount, kind, err = listGzipOrTarGzEntries(renderCtx, src)
 	default:
 		return nil, fmt.Errorf("%w: archive type %q", ErrUnsupportedMime, mime)
 	}
@@ -106,7 +138,7 @@ func renderArchive(_ context.Context, mime string, src []byte) (image.Image, err
 // Returns an error only when the input isn't a valid gzip stream at
 // all (e.g. truncated upload, wrong MIME). That error path is rare
 // enough that we let it propagate as a hard failure.
-func listGzipOrTarGzEntries(src []byte) ([]string, int, string, error) {
+func listGzipOrTarGzEntries(ctx context.Context, src []byte) ([]string, int, string, error) {
 	// Two readers because tar walks consume the stream. We probe
 	// the tar shape on a fresh reader, then either keep going with
 	// the tar listing or rewind to grab the gzip header name for
@@ -116,7 +148,13 @@ func listGzipOrTarGzEntries(src []byte) ([]string, int, string, error) {
 		return nil, 0, "", fmt.Errorf("gzip: %w", gzErr)
 	}
 	defer func() { _ = gz.Close() }()
-	entries, total, tarErr := listTarEntries(gz)
+	// Cap decompressed bytes so a gzip bomb can't make the tar
+	// walker do unbounded work — see archiveMaxDecompressedBytes.
+	// listTarEntries handles the resulting unexpected-EOF
+	// non-fatally and returns whatever prefix of entries it
+	// successfully read.
+	limited := io.LimitReader(gz, archiveMaxDecompressedBytes)
+	entries, total, tarErr := listTarEntries(ctx, limited)
 	if tarErr == nil && total > 0 {
 		return entries, total, "TAR.GZ", nil
 	}
@@ -147,7 +185,7 @@ func listGzipOrTarGzEntries(src []byte) ([]string, int, string, error) {
 // hammer the worker with O(n log n) sorting before any output was
 // produced. Capping early means the work per preview is bounded by
 // archiveMaxEntries regardless of how pathological the input is.
-func listZipEntries(src []byte) ([]string, int, error) {
+func listZipEntries(ctx context.Context, src []byte) ([]string, int, error) {
 	r, err := zip.NewReader(bytes.NewReader(src), int64(len(src)))
 	if err != nil {
 		return nil, 0, err
@@ -158,6 +196,9 @@ func listZipEntries(src []byte) ([]string, int, error) {
 	}
 	out := make([]string, 0, preallocCount)
 	for _, f := range r.File {
+		if err := ctx.Err(); err != nil {
+			return out, len(r.File), err
+		}
 		if len(out) >= archiveMaxEntries {
 			break
 		}
@@ -172,11 +213,22 @@ func listZipEntries(src []byte) ([]string, int, error) {
 // a tar stream for its length up front) so we keep iterating past
 // the cap to drain the headers — but we DON'T append past the cap,
 // so the per-preview memory is still bounded by archiveMaxEntries.
-func listTarEntries(r io.Reader) ([]string, int, error) {
+func listTarEntries(ctx context.Context, r io.Reader) ([]string, int, error) {
 	tr := tar.NewReader(r)
 	out := []string{}
 	total := 0
 	for {
+		// Cooperative cancellation: the per-renderer timeout and the
+		// caller's deadline both flow through ctx. Without this
+		// check, a tar header parse loop could keep iterating past
+		// the deadline if the underlying io.LimitReader still has
+		// bytes to feed.
+		if err := ctx.Err(); err != nil {
+			if total == 0 {
+				return nil, 0, err
+			}
+			return out, total, nil
+		}
 		h, err := tr.Next()
 		if err == io.EOF {
 			break
@@ -185,7 +237,10 @@ func listTarEntries(r io.Reader) ([]string, int, error) {
 			// Non-fatal: many .tar.gz with corrupt trailing bytes
 			// still have a valid prefix of entries. Return what we
 			// have so the preview still renders, but wrap the error
-			// in case callers care.
+			// in case callers care. Also covers the gzip-bomb cap
+			// hit: io.LimitReader returns io.EOF mid-stream which
+			// tar.Next reports as io.ErrUnexpectedEOF, which lands
+			// here and surfaces the partial listing.
 			if total == 0 {
 				return nil, 0, err
 			}
