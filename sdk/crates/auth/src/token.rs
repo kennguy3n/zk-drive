@@ -128,10 +128,27 @@ impl Refresher for HttpRefresher {
             .json()
             .await
             .map_err(|e| AuthError::Decode(format!("{e}")))?;
+        // A hostile / misconfigured server can return an
+        // astronomically large `expires_in`. chrono's `Add` panics on
+        // overflow, so guard the computation with `try_seconds` +
+        // `checked_add_signed` and surface the bad response as a
+        // typed error instead of crashing the refresher task.
+        let lifetime = Duration::try_seconds(r.expires_in).ok_or_else(|| {
+            AuthError::OAuth(format!(
+                "refresh response carries non-representable expires_in: {}",
+                r.expires_in
+            ))
+        })?;
+        let expires_at = Utc::now().checked_add_signed(lifetime).ok_or_else(|| {
+            AuthError::OAuth(format!(
+                "refresh response would overflow expires_at: expires_in={}",
+                r.expires_in
+            ))
+        })?;
         Ok(TokenSet {
             access_token: r.access_token,
             refresh_token: r.refresh_token.unwrap_or_else(|| refresh_token.to_string()),
-            expires_at: Utc::now() + Duration::seconds(r.expires_in),
+            expires_at,
             scope: r.scope.unwrap_or_default(),
         })
     }

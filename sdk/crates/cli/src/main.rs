@@ -19,7 +19,7 @@ use tracing::info;
 use uuid::Uuid;
 
 use zk_sync_api::{Bearer, Client};
-use zk_sync_engine::{Catalogue, Engine, EngineConfig, RemotePoller, Watcher};
+use zk_sync_engine::{placeholder_dir, Catalogue, Engine, EngineConfig, RemotePoller, Watcher};
 
 #[derive(Parser)]
 #[command(name = "zk-sync", version, about = "ZK Drive desktop sync daemon")]
@@ -61,13 +61,48 @@ enum Cmd {
     },
 }
 
+/// Expand a leading `~/` into the user's home directory.
+///
+/// The default catalogue path is `~/.zk-sync/catalogue.db`. On
+/// Unix `$HOME` is the canonical home; on Windows we fall back to
+/// `%USERPROFILE%` and finally to `%HOMEDRIVE%%HOMEPATH%` so the
+/// CLI keeps producing a sane catalogue location once the Tauri
+/// shell ships on Windows. If none of the variables are set we
+/// pass through the raw input so the user gets a clear error
+/// rather than a literal `~` directory in the working directory.
 fn expand_tilde(path: &str) -> PathBuf {
-    if let Some(stripped) = path.strip_prefix("~/") {
-        if let Some(home) = std::env::var_os("HOME") {
-            return PathBuf::from(home).join(stripped);
+    let stripped = match path.strip_prefix("~/") {
+        Some(s) => s,
+        None => {
+            // Also handle the Windows-style `~\` separator for
+            // consistency with PowerShell users.
+            match path.strip_prefix("~\\") {
+                Some(s) => s,
+                None => return PathBuf::from(path),
+            }
         }
+    };
+    if let Some(home) = home_dir() {
+        return home.join(stripped);
     }
     PathBuf::from(path)
+}
+
+fn home_dir() -> Option<PathBuf> {
+    if let Some(h) = std::env::var_os("HOME") {
+        return Some(PathBuf::from(h));
+    }
+    if let Some(h) = std::env::var_os("USERPROFILE") {
+        return Some(PathBuf::from(h));
+    }
+    match (std::env::var_os("HOMEDRIVE"), std::env::var_os("HOMEPATH")) {
+        (Some(drive), Some(path)) => {
+            let mut p = PathBuf::from(drive);
+            p.push(path);
+            Some(p)
+        }
+        _ => None,
+    }
 }
 
 #[tokio::main]
@@ -106,9 +141,18 @@ async fn main() -> anyhow::Result<()> {
             page_size,
         } => {
             std::fs::create_dir_all(&root)?;
+            // Pre-create the placeholder directory so the watcher can
+            // resolve it absolutely on platforms where notify only
+            // emits canonical paths.
+            std::fs::create_dir_all(placeholder_dir(&root))?;
             let (local_tx, local_rx) = mpsc::channel(1024);
             let (remote_tx, remote_rx) = mpsc::channel(1024);
-            let _watcher = Watcher::start(&root, std::time::Duration::from_millis(250), local_tx)?;
+            let _watcher = Watcher::start_with_ignore(
+                &root,
+                std::time::Duration::from_millis(250),
+                vec![placeholder_dir(&root)],
+                local_tx,
+            )?;
 
             let poller = RemotePoller {
                 workspace_id: workspace,

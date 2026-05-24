@@ -64,6 +64,15 @@ impl RemotePoller {
         let mut catch_up_backoff = INITIAL_BACKOFF;
         let mut live_backoff = INITIAL_BACKOFF;
         loop {
+            // Bail out before any network work if the consumer has gone
+            // away. Without this check a catch-up that returns an empty
+            // page never calls `tx.send` and so can't detect the closed
+            // receiver -- the loop would otherwise reconnect the
+            // WebSocket forever inside a long-lived runtime (e.g. the
+            // Tauri shell where the tokio runtime outlives the engine).
+            if tx.is_closed() {
+                return Ok(());
+            }
             if let Err(e) = self.catch_up(&tx).await {
                 warn!("changefeed catch-up failed: {e:?}");
                 tokio::time::sleep(catch_up_backoff).await;
@@ -72,16 +81,27 @@ impl RemotePoller {
             }
             catch_up_backoff = INITIAL_BACKOFF;
 
+            if tx.is_closed() {
+                return Ok(());
+            }
+
             let started = Instant::now();
             let live_result = self.live(&tx).await;
             let ran_for = started.elapsed();
+            // Consumer dropping the receiver while we were in `live`
+            // shows up as either `Ok(())` (the inner loop noticed
+            // `tx.send().is_err()`) or a graceful WebSocket close.
+            // Either way, exit instead of retrying.
+            if tx.is_closed() {
+                return Ok(());
+            }
             match live_result {
                 Ok(_) if ran_for >= LIVE_SUCCESS_THRESHOLD => {
                     live_backoff = INITIAL_BACKOFF;
                 }
                 Ok(_) => {
                     // Disconnect happened too quickly to count as a
-                    // healthy session — grow live backoff anyway.
+                    // healthy session -- grow live backoff anyway.
                     warn!(
                         "changefeed live subscription closed after {:?}; growing backoff",
                         ran_for
@@ -99,6 +119,9 @@ impl RemotePoller {
     }
 
     async fn catch_up(&self, tx: &mpsc::Sender<RemoteEvent>) -> Result<()> {
+        if tx.is_closed() {
+            return Ok(());
+        }
         loop {
             let since = self.catalogue.lock().await.get_cursor(self.workspace_id)?;
             let page = ChangefeedClient::new(&self.client)
@@ -128,6 +151,9 @@ impl RemotePoller {
     }
 
     async fn live(&self, tx: &mpsc::Sender<RemoteEvent>) -> Result<()> {
+        if tx.is_closed() {
+            return Ok(());
+        }
         let mut stream = ChangefeedClient::new(&self.client)
             .stream_changes(self.workspace_id)
             .await?;

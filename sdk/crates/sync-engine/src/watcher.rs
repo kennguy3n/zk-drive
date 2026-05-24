@@ -61,9 +61,28 @@ impl Watcher {
     /// `tx`. Channel capacity should be sized for the worst-case
     /// burst (a `cp -r` of a few thousand files); 1024 is typically
     /// enough.
+    ///
+    /// Equivalent to [`Watcher::start_with_ignore`] with an empty
+    /// ignore set. Most callers want the ignore-aware constructor
+    /// because the engine materialises catalogue stubs under
+    /// `<root>/.zk-pending/` and those writes must not bounce back
+    /// into the watcher as spurious local events.
     pub fn start(
         root: impl AsRef<Path>,
         coalesce: Duration,
+        tx: mpsc::Sender<LocalEvent>,
+    ) -> Result<Self> {
+        Self::start_with_ignore(root, coalesce, Vec::<PathBuf>::new(), tx)
+    }
+
+    /// Same as [`Watcher::start`] but drops any event whose first
+    /// path component lies under one of `ignore_prefixes`. Used by
+    /// the CLI / Tauri shell to suppress writes the engine itself
+    /// performs into the placeholder directory ([`crate::placeholder_dir`]).
+    pub fn start_with_ignore<P: Into<PathBuf>>(
+        root: impl AsRef<Path>,
+        coalesce: Duration,
+        ignore_prefixes: impl IntoIterator<Item = P>,
         tx: mpsc::Sender<LocalEvent>,
     ) -> Result<Self> {
         let (raw_tx, raw_rx) = std_mpsc::channel::<notify::Result<Event>>();
@@ -72,6 +91,7 @@ impl Watcher {
         })?;
         nw.watch(root.as_ref(), RecursiveMode::Recursive)?;
 
+        let ignore_prefixes: Vec<PathBuf> = ignore_prefixes.into_iter().map(Into::into).collect();
         let shutdown = Arc::new(AtomicBool::new(false));
         let shutdown_thread = shutdown.clone();
         let join = std::thread::Builder::new()
@@ -95,14 +115,14 @@ impl Watcher {
                         }
                     };
                     if let Ok(ev) = next {
-                        push(&mut pending, ev);
+                        push(&mut pending, ev, &ignore_prefixes);
                     }
                     let deadline = Instant::now() + coalesce;
                     while let Ok(ev) =
                         raw_rx.recv_timeout(deadline.saturating_duration_since(Instant::now()))
                     {
                         if let Ok(ev) = ev {
-                            push(&mut pending, ev);
+                            push(&mut pending, ev, &ignore_prefixes);
                         }
                     }
                     flush(&mut pending, &tx);
@@ -118,6 +138,13 @@ impl Watcher {
     }
 }
 
+/// Returns true if `path` lies inside any of the configured ignore
+/// prefixes. Comparison is done on the canonical components so a
+/// stray trailing separator doesn't change the answer.
+fn is_ignored(path: &Path, prefixes: &[PathBuf]) -> bool {
+    prefixes.iter().any(|p| path.starts_with(p))
+}
+
 /// Returns true if `kind` is a state-change we care about. Read-only
 /// `Access` events are dropped — without this filter a save burst
 /// would coalesce to the trailing `Access(Close(Write))` and produce
@@ -129,12 +156,15 @@ fn is_actionable(kind: &EventKind) -> bool {
     )
 }
 
-fn push(pending: &mut Vec<(PathBuf, Instant, EventKind)>, ev: Event) {
+fn push(pending: &mut Vec<(PathBuf, Instant, EventKind)>, ev: Event, ignore_prefixes: &[PathBuf]) {
     if !is_actionable(&ev.kind) {
         return;
     }
     for path in ev.paths {
-        // Keep only the most recent (path, kind) within the window —
+        if is_ignored(&path, ignore_prefixes) {
+            continue;
+        }
+        // Keep only the most recent (path, kind) within the window --
         // earlier entries on the same path are superseded.
         pending.retain(|(p, _, _)| p != &path);
         pending.push((path, Instant::now(), ev.kind));
@@ -214,5 +244,53 @@ mod tests {
             }
         }
         assert!(saw_upsert, "watcher did not surface the create");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn ignore_prefix_suppresses_events_under_placeholder_dir() {
+        // Regression: a future PR that materialises stub files under
+        // `<root>/.zk-pending/<uuid>` must not bounce those writes
+        // back into the engine as `LocalEvent::Upsert`.
+        let dir = tempfile::tempdir().unwrap();
+        let placeholder = dir.path().join(".zk-pending");
+        std::fs::create_dir_all(&placeholder).unwrap();
+
+        let (tx, mut rx) = mpsc::channel::<LocalEvent>(32);
+        let _w = Watcher::start_with_ignore(
+            dir.path(),
+            Duration::from_millis(100),
+            vec![placeholder.clone()],
+            tx,
+        )
+        .unwrap();
+        tokio::time::sleep(Duration::from_millis(150)).await;
+
+        let stub = placeholder.join("00000000-0000-0000-0000-000000000001");
+        let real = dir.path().join("real.txt");
+        {
+            let mut f = std::fs::File::create(&stub).unwrap();
+            f.write_all(b"stub").unwrap();
+        }
+        {
+            let mut f = std::fs::File::create(&real).unwrap();
+            f.write_all(b"real").unwrap();
+        }
+
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+        let mut saw_real = false;
+        let mut saw_stub = false;
+        while tokio::time::Instant::now() < deadline {
+            tokio::select! {
+                Some(ev) = rx.recv() => {
+                    if let LocalEvent::Upsert { path, .. } = ev {
+                        if path == stub { saw_stub = true; }
+                        if path == real { saw_real = true; }
+                    }
+                }
+                _ = tokio::time::sleep(Duration::from_millis(100)) => {}
+            }
+        }
+        assert!(saw_real, "watcher must still surface real files");
+        assert!(!saw_stub, "watcher must drop events under placeholder dir");
     }
 }

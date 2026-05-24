@@ -223,9 +223,22 @@ fn row_to_record(row: &rusqlite::Row<'_>) -> rusqlite::Result<FileRecord> {
     let pinned: i32 = row.get(6)?;
     let updated_s: String = row.get(7)?;
 
+    // The schema guarantees `content_hash` is a BLOB sized exactly
+    // 32 bytes. Any other size means the row was written by a corrupt
+    // or out-of-date SDK; surface that loudly so the operator can
+    // re-sync, but degrade to the all-zero sentinel so the catalogue
+    // remains openable. An all-zero hash is the same value used for
+    // "not yet downloaded" placeholders, so the engine treats this row
+    // as needing a fresh fetch from the server -- a safe fallback.
     let mut hash = [0u8; 32];
     if hash_bytes.len() == 32 {
         hash.copy_from_slice(&hash_bytes);
+    } else {
+        warn!(
+            remote_file_id = %remote_file_id_s,
+            actual_len = hash_bytes.len(),
+            "catalogue content_hash is not 32 bytes; treating row as not-downloaded"
+        );
     }
     let parse_uuid = |s: &str| {
         Uuid::parse_str(s).map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))

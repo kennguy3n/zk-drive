@@ -62,24 +62,39 @@ impl Engine {
     /// Build a placeholder local path for a remote file we've just
     /// learned about via the change feed but haven't downloaded yet.
     ///
-    /// The placeholder lives at `<root>/.zk-pending/<resource_id>` and
-    /// is keyed exclusively on the resource id so two distinct remote
-    /// files can never collide on the catalogue's UNIQUE(local_path)
-    /// index — even when their `name` fields happen to be identical
-    /// (e.g. two `readme.md` files in different remote folders).
+    /// The placeholder lives under [`PLACEHOLDER_DIR_NAME`] and is keyed
+    /// exclusively on the resource id so two distinct remote files
+    /// can never collide on the catalogue's UNIQUE(local_path) index
+    /// -- even when their `name` fields happen to be identical (e.g.
+    /// two `readme.md` files in different remote folders).
     ///
     /// PR5's downloader is responsible for moving the file to its
     /// final location under the resolved folder hierarchy and
     /// rewriting `local_path` on the catalogue row via `upsert` once
     /// it knows where the file actually belongs. Until then this stub
     /// path keeps the catalogue invariant intact.
+    ///
+    /// The [`Watcher`](crate::Watcher) is expected to be configured
+    /// with `placeholder_dir(root)` as an ignored prefix so the act
+    /// of materialising a stub does not bounce back into the engine
+    /// as a spurious local event.
     fn placeholder_path_for(&self, resource_id: Uuid) -> PathBuf {
-        self.config
-            .root
-            .join(".zk-pending")
-            .join(resource_id.to_string())
+        placeholder_dir(&self.config.root).join(resource_id.to_string())
     }
+}
 
+/// Hidden subdirectory inside the workspace root where the engine
+/// materialises catalogue stubs for remote files it has learned
+/// about but hasn't downloaded yet. Watchers MUST be configured to
+/// ignore this prefix; see [`Engine::placeholder_path_for`].
+pub const PLACEHOLDER_DIR_NAME: &str = ".zk-pending";
+
+/// Returns the absolute placeholder directory for a workspace `root`.
+pub fn placeholder_dir(root: &std::path::Path) -> PathBuf {
+    root.join(PLACEHOLDER_DIR_NAME)
+}
+
+impl Engine {
     /// Drive both event channels until either is closed.
     pub async fn run(
         self,
@@ -197,6 +212,7 @@ impl Engine {
             // but don't materialise as on-disk operations in this
             // PR. The desktop shell uses them to refresh tree views.
             RemoteEvent::FolderCreated(_)
+            | RemoteEvent::FolderUpdated(_)
             | RemoteEvent::FolderRenamed(_)
             | RemoteEvent::FolderMoved(_)
             | RemoteEvent::FolderDeleted(_)

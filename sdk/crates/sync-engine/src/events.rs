@@ -36,6 +36,12 @@ pub enum RemoteEvent {
     FileMoved(Mutation),
     FileDeleted(Mutation),
     FolderCreated(Mutation),
+    /// `folder` + `update` -- e.g. a property change that isn't a
+    /// rename / move. The engine currently ignores folder events but
+    /// having the dedicated variant means a future folder-handling
+    /// PR doesn't have to fish folder-updates back out of `Raw` and
+    /// the variant survives the `unknown remote event` warn-log path.
+    FolderUpdated(Mutation),
     FolderRenamed(Mutation),
     FolderMoved(Mutation),
     FolderDeleted(Mutation),
@@ -56,6 +62,7 @@ impl RemoteEvent {
             (kind::FILE, op::MOVE) => RemoteEvent::FileMoved(m),
             (kind::FILE, op::DELETE) => RemoteEvent::FileDeleted(m),
             (kind::FOLDER, op::CREATE) => RemoteEvent::FolderCreated(m),
+            (kind::FOLDER, op::UPDATE) => RemoteEvent::FolderUpdated(m),
             (kind::FOLDER, op::RENAME) => RemoteEvent::FolderRenamed(m),
             (kind::FOLDER, op::MOVE) => RemoteEvent::FolderMoved(m),
             (kind::FOLDER, op::DELETE) => RemoteEvent::FolderDeleted(m),
@@ -72,6 +79,7 @@ impl RemoteEvent {
             | RemoteEvent::FileMoved(m)
             | RemoteEvent::FileDeleted(m)
             | RemoteEvent::FolderCreated(m)
+            | RemoteEvent::FolderUpdated(m)
             | RemoteEvent::FolderRenamed(m)
             | RemoteEvent::FolderMoved(m)
             | RemoteEvent::FolderDeleted(m)
@@ -117,6 +125,17 @@ mod tests {
         assert!(matches!(
             RemoteEvent::from_mutation(mut_for("permission", "create")),
             RemoteEvent::PermissionChanged(_)
+        ));
+    }
+
+    #[test]
+    fn folder_update_lifts_to_folder_updated() {
+        // Regression: previously `(folder, update)` fell through to
+        // `Raw` because `FolderUpdated` didn't exist as a variant.
+        let m = mut_for("folder", "update");
+        assert!(matches!(
+            RemoteEvent::from_mutation(m),
+            RemoteEvent::FolderUpdated(_)
         ));
     }
 
