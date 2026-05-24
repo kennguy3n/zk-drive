@@ -121,19 +121,26 @@ func SupportedMimes() []string {
 	return out
 }
 
-// normalizeMime lowercases the MIME type and strips surrounding
-// whitespace. We deliberately do NOT strip params (e.g.
-// "; charset=utf-8") because:
-//   - text/plain; charset=utf-8 and text/plain are arguably the same
-//     renderer-wise, but the registry key is the exact comparison
-//     unit. If we ever need parameter-tolerant lookup we'll introduce
-//     a second pass; doing it here would silently coalesce types we
-//     might want to distinguish in the future.
+// normalizeMime lowercases the MIME type, strips surrounding
+// whitespace, and drops MIME parameters (anything after a ";"). The
+// underlying file table's mime_type column stores the bare
+// type/subtype today but the gateway is free to start storing a
+// parameterised type ("text/plain; charset=utf-8") at any point;
+// callers like the worker do not want to silently lose preview
+// support when that happens. Stripping params here means a renderer
+// registered for "text/plain" also serves "text/plain;
+// charset=utf-8" without each handler having to opt in.
 //
-// Callers that want to be tolerant of params should pass the raw
-// type/subtype only.
+// We intentionally do NOT use mime.ParseMediaType: it allocates a
+// map for the parameters we'd immediately throw away and rejects
+// some non-conforming-but-real-world inputs. A single Cut at ";" is
+// both faster and more permissive.
 func normalizeMime(m string) string {
-	return strings.ToLower(strings.TrimSpace(m))
+	m = strings.ToLower(strings.TrimSpace(m))
+	if i := strings.IndexByte(m, ';'); i >= 0 {
+		m = strings.TrimSpace(m[:i])
+	}
+	return m
 }
 
 // ErrUnsupportedDependencyMissing is the canonical error returned by

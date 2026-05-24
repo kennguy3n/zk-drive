@@ -56,15 +56,23 @@ func renderVideoFrame(ctx context.Context, srcBytes []byte) (image.Image, error)
 		return nil, fmt.Errorf("write video source: %w", err)
 	}
 
-	runCtx, cancel := context.WithTimeout(ctx, videoRenderTimeout)
-	defer cancel()
+	// Each ffmpeg attempt gets its OWN videoRenderTimeout budget,
+	// not a shared one. A slow-but-not-dead primary attempt (e.g.
+	// fast-seek on a slightly damaged mp4) used to consume the
+	// shared budget and leave the fallback no time to run; giving
+	// each attempt a fresh timeout makes the retry actually
+	// useful. The caller's ctx still bounds the total wall time
+	// via the worker's job-level deadline, so this can't run away.
+	var stderr bytes.Buffer
+	primaryCtx, primaryCancel := context.WithTimeout(ctx, videoRenderTimeout)
+	defer primaryCancel()
 	// -ss before -i is the fast seek path: ffmpeg jumps directly to
 	// the closest keyframe before videoFrameTimeOffset, which is
 	// much faster than decoding from t=0. -frames:v 1 + -an drops
 	// audio entirely so the encoder doesn't waste time on it.
 	// -loglevel error keeps stderr quiet on the happy path; we
 	// surface it on errors.
-	cmd := exec.CommandContext(runCtx, ffmpegBinary,
+	cmd := exec.CommandContext(primaryCtx, ffmpegBinary,
 		"-y",
 		"-ss", videoFrameTimeOffset,
 		"-i", inPath,
@@ -75,7 +83,6 @@ func renderVideoFrame(ctx context.Context, srcBytes []byte) (image.Image, error)
 		outPath,
 	)
 	cmd.Dir = dir
-	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err == nil {
 		if img, decErr := readImageFile(outPath); decErr == nil {
@@ -90,7 +97,9 @@ func renderVideoFrame(ctx context.Context, srcBytes []byte) (image.Image, error)
 	if outErr := os.Remove(outPath); outErr != nil && !errors.Is(outErr, os.ErrNotExist) {
 		return nil, fmt.Errorf("remove stale frame: %w", outErr)
 	}
-	cmd = exec.CommandContext(runCtx, ffmpegBinary,
+	fallbackCtx, fallbackCancel := context.WithTimeout(ctx, videoRenderTimeout)
+	defer fallbackCancel()
+	cmd = exec.CommandContext(fallbackCtx, ffmpegBinary,
 		"-y",
 		"-i", inPath,
 		"-frames:v", "1",
@@ -102,7 +111,7 @@ func renderVideoFrame(ctx context.Context, srcBytes []byte) (image.Image, error)
 	cmd.Dir = dir
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
-		if errors.Is(runCtx.Err(), context.DeadlineExceeded) {
+		if errors.Is(fallbackCtx.Err(), context.DeadlineExceeded) {
 			return nil, fmt.Errorf("ffmpeg video frame timed out after %s: %s", videoRenderTimeout, stderr.String())
 		}
 		return nil, fmt.Errorf("ffmpeg video frame: %w: %s", err, stderr.String())

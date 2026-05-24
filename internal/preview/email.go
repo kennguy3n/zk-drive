@@ -82,12 +82,21 @@ func renderEmail(_ context.Context, src []byte) (image.Image, error) {
 // Content-Type / Content-Transfer-Encoding pseudo-headers that
 // follow them, so a multipart message body doesn't render as a wall
 // of "--====_NextPart_xxx_xxxxxxxx" markers.
+//
+// RFC 2046 §5.1.1 defines a boundary line as "--" followed by the
+// boundary token, which is at least one bcharsnospace character.
+// Real world boundary patterns we have to handle: Outlook
+// "------=_NextPart_000_001D...", Java mail "----=_Part_12345_xxx",
+// "--===============xxx", and the simpler "--boundary-xyz" form. The
+// common shape is "two-or-more dashes, then at least one non-dash
+// character". Plain markdown horizontal rules ("---" with nothing
+// else) are NOT boundaries and should pass through unchanged.
 func stripMimeBoundaries(body string) string {
 	out := make([]string, 0, 64)
 	inHeader := false
 	for _, line := range strings.Split(body, "\n") {
 		trimmed := strings.TrimSpace(line)
-		if strings.HasPrefix(trimmed, "--") && strings.Contains(trimmed, "-") && !strings.HasPrefix(trimmed, "---") {
+		if isMimeBoundaryLine(trimmed) {
 			// boundary line — start swallowing the per-part headers
 			inHeader = true
 			continue
@@ -101,6 +110,30 @@ func stripMimeBoundaries(body string) string {
 		out = append(out, line)
 	}
 	return strings.Join(out, "\n")
+}
+
+// isMimeBoundaryLine reports whether a (trimmed) line looks like a
+// MIME multipart boundary. The check is intentionally heuristic: we
+// only need to be good enough to suppress boundary noise in the
+// preview, not parse the message correctly. The rule is "starts with
+// `--`, has at least one non-dash character after some run of
+// dashes" — that matches every boundary form we have seen in the
+// wild while keeping plain markdown horizontal rules out.
+func isMimeBoundaryLine(trimmed string) bool {
+	if !strings.HasPrefix(trimmed, "--") {
+		return false
+	}
+	// Strip all leading dashes; if anything is left, we've got a
+	// boundary token. If the line was nothing but dashes (e.g.
+	// markdown "---", "----"), this returns "" and we skip it.
+	rest := strings.TrimLeft(trimmed, "-")
+	if rest == "" {
+		return false
+	}
+	// Likewise, a closing boundary is "--<boundary>--". Trim trailing
+	// dashes the same way so we accept those.
+	rest = strings.TrimRight(rest, "-")
+	return rest != ""
 }
 
 func init() {

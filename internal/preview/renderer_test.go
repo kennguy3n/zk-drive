@@ -46,6 +46,14 @@ func TestRendererRegistry(t *testing.T) {
 			"X-Test/Case-Norm",
 			"  x-test/case-norm  ",
 			"X-TEST/CASE-NORM",
+			// Parameterised types must resolve to the same
+			// renderer as the bare type/subtype — the database
+			// schema doesn't promise param-free mime_type values,
+			// and we don't want to silently lose preview support
+			// when the gateway starts storing "text/plain;
+			// charset=utf-8".
+			"x-test/case-norm; charset=utf-8",
+			"X-Test/Case-Norm;boundary=----abc",
 		} {
 			if !IsSupportedMime(variant) {
 				t.Errorf("expected variant %q to match registered MIME %q", variant, mime)

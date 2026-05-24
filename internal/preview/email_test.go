@@ -64,3 +64,53 @@ func TestStripMimeBoundaries(t *testing.T) {
 		t.Errorf("expected body content to be preserved, got %q", got)
 	}
 }
+
+func TestStripMimeBoundaries_RealWorldPrefixes(t *testing.T) {
+	t.Parallel()
+	// Real Outlook / Java-mail / Exchange boundaries use 3+ leading
+	// dashes. An earlier heuristic explicitly skipped these via
+	// `!HasPrefix("---")` which is exactly the opposite of what we
+	// want. Anchor that bug with a regression test so it can't
+	// silently come back.
+	cases := []string{
+		"------=_NextPart_000_001D",
+		"----=_Part_12345_678",
+		"--===============0123456789--",
+		"--_000_BOUNDARY_NAME_",
+	}
+	for _, boundary := range cases {
+		body := strings.Join([]string{
+			"preamble",
+			boundary,
+			"Content-Type: text/plain",
+			"",
+			"part body",
+			boundary + "--",
+		}, "\n")
+		got := stripMimeBoundaries(body)
+		if strings.Contains(got, boundary) {
+			t.Errorf("boundary %q should have been stripped from %q", boundary, got)
+		}
+	}
+}
+
+func TestStripMimeBoundaries_PreservesMarkdownRule(t *testing.T) {
+	t.Parallel()
+	// A plain "---" line is a markdown horizontal rule, not a MIME
+	// boundary. The heuristic must NOT swallow it (and the lines
+	// after it).
+	body := strings.Join([]string{
+		"Hi there,",
+		"",
+		"---",
+		"",
+		"Yours truly,",
+	}, "\n")
+	got := stripMimeBoundaries(body)
+	if !strings.Contains(got, "---") {
+		t.Errorf("markdown rule should be preserved, got %q", got)
+	}
+	if !strings.Contains(got, "Yours truly") {
+		t.Errorf("content after markdown rule should be preserved, got %q", got)
+	}
+}

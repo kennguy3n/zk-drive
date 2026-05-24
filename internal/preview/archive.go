@@ -31,16 +31,16 @@ const archiveMaxEntries = 64
 func renderArchive(_ context.Context, mime string, src []byte) (image.Image, error) {
 	var (
 		entries []string
-		header  string
+		kind    string
 		err     error
 	)
 	switch normalizeMime(mime) {
 	case "application/zip", "application/x-zip-compressed":
 		entries, err = listZipEntries(src)
-		header = fmt.Sprintf("ZIP archive — %d entries", len(entries))
+		kind = "ZIP"
 	case "application/x-tar":
 		entries, err = listTarEntries(bytes.NewReader(src))
-		header = fmt.Sprintf("TAR archive — %d entries", len(entries))
+		kind = "TAR"
 	case "application/gzip", "application/x-gzip", "application/x-tar-gz", "application/x-tgz":
 		// .tar.gz / .tgz. Wrap the source in a gzip reader, then
 		// hand off to the tar entry lister. A plain .gz of a
@@ -53,13 +53,16 @@ func renderArchive(_ context.Context, mime string, src []byte) (image.Image, err
 		}
 		defer func() { _ = gz.Close() }()
 		entries, err = listTarEntries(gz)
-		header = fmt.Sprintf("TAR.GZ archive — %d entries", len(entries))
+		kind = "TAR.GZ"
 	default:
 		return nil, fmt.Errorf("%w: archive type %q", ErrUnsupportedMime, mime)
 	}
 	if err != nil {
 		return nil, fmt.Errorf("list archive: %w", err)
 	}
+	// Header is computed AFTER the err check so a failed listing
+	// can't bake a misleading "0 entries" caption into the preview.
+	header := fmt.Sprintf("%s archive — %d entries", kind, len(entries))
 	// Sort directory entries first, then files, both alphabetically.
 	// This matches the listing format most file managers use and
 	// makes the preview deterministic across re-uploads of the same
