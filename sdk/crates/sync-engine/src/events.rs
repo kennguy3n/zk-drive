@@ -16,8 +16,19 @@ pub enum LocalEvent {
     },
     /// A file was removed.
     Delete { path: PathBuf },
-    /// A file was renamed. Watchers report this as two events on
-    /// some platforms; the watcher coalesces into one.
+    /// A file was renamed. NOTE: the bundled
+    /// [`crate::watcher::Watcher`] does not currently emit this
+    /// variant; on every platform we support, `notify` surfaces a
+    /// rename as the source disappearing and the destination being
+    /// created, and the watcher's flush logic drops the source
+    /// (`File::open` fails because the source no longer exists) and
+    /// emits an `Upsert` for the destination. The variant is kept
+    /// because (a) future event sources -- e.g. an explicit "move"
+    /// API exposed by the Tauri shell, or a platform watcher that
+    /// supports notify's `Modify(Name(Both { from, to }))` payload
+    /// -- need to push proper renames into the engine, and (b) the
+    /// engine's catalogue-side handler is exercised by integration
+    /// tests that synthesise the event directly.
     Rename { from: PathBuf, to: PathBuf },
 }
 

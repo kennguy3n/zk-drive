@@ -139,12 +139,34 @@ impl Engine {
                     if existing.content_hash == content_hash {
                         return Ok(());
                     }
-                    cat.set_status(existing.remote_file_id, SyncStatus::LocalDirty)?;
-                    info!(?path, size_bytes, "local file marked dirty");
+                    let next = existing.status.next_on_local_change();
+                    if next != existing.status {
+                        cat.set_status(existing.remote_file_id, next)?;
+                    }
+                    info!(?path, size_bytes, ?next, "local file change recorded");
                 } else {
+                    // First time we've seen this path on disk. Allocate
+                    // a stub remote_file_id (the upload flow in PR5 will
+                    // remap it once the server assigns the real one) so
+                    // the row is visible to status queries immediately.
+                    let local_id = Uuid::new_v4();
+                    let rec = FileRecord {
+                        remote_file_id: local_id,
+                        // Zero version sentinel = "not yet uploaded".
+                        remote_version_id: Uuid::nil(),
+                        local_path: path.clone(),
+                        size_bytes,
+                        content_hash,
+                        status: SyncStatus::LocalDirty,
+                        pinned: false,
+                        updated_at: chrono::Utc::now(),
+                    };
+                    cat.upsert(&rec)?;
                     info!(
                         ?path,
-                        size_bytes, "new local file discovered; awaiting first upload"
+                        size_bytes,
+                        local_id = %local_id,
+                        "new local file registered; awaiting first upload"
                     );
                 }
                 Ok(())
@@ -152,8 +174,11 @@ impl Engine {
             LocalEvent::Delete { path } => {
                 let mut cat = self.catalogue.lock().await;
                 if let Some(existing) = cat.by_local_path(&path)? {
-                    cat.set_status(existing.remote_file_id, SyncStatus::LocalDirty)?;
-                    info!(?path, "local delete marked dirty for remote tombstone");
+                    let next = existing.status.next_on_local_change();
+                    if next != existing.status {
+                        cat.set_status(existing.remote_file_id, next)?;
+                    }
+                    info!(?path, ?next, "local delete recorded");
                 }
                 Ok(())
             }
@@ -177,20 +202,24 @@ impl Engine {
                         let parked = tombstone_dir(&self.config.root)
                             .join(displaced.remote_file_id.to_string());
                         cat.set_local_path(displaced.remote_file_id, &parked)?;
-                        cat.set_status(displaced.remote_file_id, SyncStatus::LocalDirty)?;
+                        let displaced_next = displaced.status.next_on_local_change();
+                        if displaced_next != displaced.status {
+                            cat.set_status(displaced.remote_file_id, displaced_next)?;
+                        }
                         info!(
                             ?to,
                             displaced_file_id = %displaced.remote_file_id,
+                            ?displaced_next,
                             "rename target already tracked; displaced row marked deleted"
                         );
                     }
                 }
                 let mut new_rec = existing.clone();
                 new_rec.local_path = to.clone();
-                new_rec.status = SyncStatus::LocalDirty;
+                new_rec.status = existing.status.next_on_local_change();
                 new_rec.updated_at = chrono::Utc::now();
                 cat.upsert(&new_rec)?;
-                info!(?from, ?to, "local rename recorded");
+                info!(?from, ?to, status = ?new_rec.status, "local rename recorded");
                 Ok(())
             }
         }
@@ -202,8 +231,11 @@ impl Engine {
             RemoteEvent::FileCreated(_) | RemoteEvent::FileUpdated(_) => {
                 let mut cat = self.catalogue.lock().await;
                 match cat.get(m.resource_id)? {
-                    Some(_existing) => {
-                        cat.set_status(m.resource_id, SyncStatus::RemoteDirty)?;
+                    Some(existing) => {
+                        let next = existing.status.next_on_remote_change();
+                        if next != existing.status {
+                            cat.set_status(m.resource_id, next)?;
+                        }
                     }
                     None => {
                         // Brand-new remote file. Materialise a
@@ -237,15 +269,21 @@ impl Engine {
             }
             RemoteEvent::FileDeleted(_) => {
                 let mut cat = self.catalogue.lock().await;
-                if let Some(_existing) = cat.get(m.resource_id)? {
-                    cat.set_status(m.resource_id, SyncStatus::RemoteDirty)?;
+                if let Some(existing) = cat.get(m.resource_id)? {
+                    let next = existing.status.next_on_remote_change();
+                    if next != existing.status {
+                        cat.set_status(m.resource_id, next)?;
+                    }
                 }
                 Ok(())
             }
             RemoteEvent::FileRenamed(_) | RemoteEvent::FileMoved(_) => {
                 let mut cat = self.catalogue.lock().await;
-                if let Some(_existing) = cat.get(m.resource_id)? {
-                    cat.set_status(m.resource_id, SyncStatus::RemoteDirty)?;
+                if let Some(existing) = cat.get(m.resource_id)? {
+                    let next = existing.status.next_on_remote_change();
+                    if next != existing.status {
+                        cat.set_status(m.resource_id, next)?;
+                    }
                 }
                 Ok(())
             }
@@ -454,5 +492,149 @@ mod tests {
         let renamed = cat.get(src_id).unwrap().unwrap();
         assert_eq!(renamed.local_path, to);
         assert_eq!(renamed.status, SyncStatus::LocalDirty);
+    }
+
+    #[tokio::test]
+    async fn remote_change_over_local_dirty_escalates_to_conflict() {
+        // Regression: handle_remote used to overwrite LocalDirty with
+        // RemoteDirty, silently discarding the local change and
+        // making the ConflictPolicy infrastructure dead code. The
+        // state machine in SyncStatus::next_on_remote_change now
+        // escalates to Conflict so a future downloader can route
+        // through the policy instead of clobbering the user's edits.
+        let tempdir = TempDir::new().unwrap();
+        let (engine, catalogue) = engine_for(&tempdir);
+        let file_id = Uuid::new_v4();
+        let workspace_id = engine.config.workspace_id;
+        {
+            let mut cat = catalogue.lock().await;
+            cat.upsert(&FileRecord {
+                remote_file_id: file_id,
+                remote_version_id: Uuid::new_v4(),
+                local_path: tempdir.path().join("doc.md"),
+                size_bytes: 16,
+                content_hash: [9u8; 32],
+                status: SyncStatus::LocalDirty,
+                pinned: false,
+                updated_at: Utc::now(),
+            })
+            .unwrap();
+        }
+        engine
+            .handle_remote(RemoteEvent::FileUpdated(Mutation {
+                sequence: 1,
+                workspace_id,
+                actor_id: None,
+                kind: "file".into(),
+                op: "update".into(),
+                resource_id: file_id,
+                parent_id: None,
+                name: "doc.md".into(),
+                metadata: None,
+                occurred_at: Utc::now(),
+            }))
+            .await
+            .unwrap();
+        let cat = catalogue.lock().await;
+        let rec = cat.get(file_id).unwrap().unwrap();
+        assert_eq!(rec.status, SyncStatus::Conflict);
+    }
+
+    #[tokio::test]
+    async fn local_change_over_remote_dirty_escalates_to_conflict() {
+        // Symmetric counterpart: a local edit on a row whose remote
+        // change is still queued for download must escalate to
+        // Conflict instead of clobbering the remote side's pending
+        // intent.
+        let tempdir = TempDir::new().unwrap();
+        let (engine, catalogue) = engine_for(&tempdir);
+        let file_id = Uuid::new_v4();
+        let path = tempdir.path().join("collab.md");
+        {
+            let mut cat = catalogue.lock().await;
+            cat.upsert(&FileRecord {
+                remote_file_id: file_id,
+                remote_version_id: Uuid::new_v4(),
+                local_path: path.clone(),
+                size_bytes: 16,
+                content_hash: [9u8; 32],
+                status: SyncStatus::RemoteDirty,
+                pinned: false,
+                updated_at: Utc::now(),
+            })
+            .unwrap();
+        }
+        engine
+            .handle_local(LocalEvent::Upsert {
+                path: path.clone(),
+                size_bytes: 32,
+                content_hash: [7u8; 32],
+            })
+            .await
+            .unwrap();
+        let cat = catalogue.lock().await;
+        let rec = cat.get(file_id).unwrap().unwrap();
+        assert_eq!(rec.status, SyncStatus::Conflict);
+    }
+
+    #[tokio::test]
+    async fn new_local_file_registers_catalogue_row() {
+        // Regression: handle_local used to only log "new local file
+        // discovered" for unknown paths, leaving them invisible to
+        // the engine's state machine. The engine now allocates a
+        // stub remote_file_id and writes a LocalDirty row so the
+        // upload flow (PR5) can pick it up.
+        let tempdir = TempDir::new().unwrap();
+        let (engine, catalogue) = engine_for(&tempdir);
+        let path = tempdir.path().join("draft.md");
+        engine
+            .handle_local(LocalEvent::Upsert {
+                path: path.clone(),
+                size_bytes: 42,
+                content_hash: [3u8; 32],
+            })
+            .await
+            .unwrap();
+        let cat = catalogue.lock().await;
+        let rec = cat
+            .by_local_path(&path)
+            .unwrap()
+            .expect("new local file must register a catalogue row");
+        assert_eq!(rec.status, SyncStatus::LocalDirty);
+        assert_eq!(rec.size_bytes, 42);
+        assert_eq!(rec.content_hash, [3u8; 32]);
+        // Stub remote ids are random v4s, not nil.
+        assert_ne!(rec.remote_file_id, Uuid::nil());
+        // No remote version yet.
+        assert_eq!(rec.remote_version_id, Uuid::nil());
+    }
+
+    #[test]
+    fn sync_status_transitions_match_truth_table() {
+        // Locks the state machine documented on
+        // SyncStatus::next_on_{local,remote}_change.
+        use SyncStatus::*;
+        let local = [
+            (UpToDate, LocalDirty),
+            (LocalDirty, LocalDirty),
+            (RemoteDirty, Conflict),
+            (Conflict, Conflict),
+            (InFlight, Conflict),
+            (Evicted, LocalDirty),
+        ];
+        for (cur, next) in local {
+            assert_eq!(cur.next_on_local_change(), next, "local from {cur:?}");
+        }
+        let remote = [
+            (UpToDate, RemoteDirty),
+            (RemoteDirty, RemoteDirty),
+            (LocalDirty, Conflict),
+            (Conflict, Conflict),
+            (InFlight, Conflict),
+            (Evicted, RemoteDirty),
+        ];
+        for (cur, next) in remote {
+            assert_eq!(cur.next_on_remote_change(), next, "remote from {cur:?}");
+        }
     }
 }

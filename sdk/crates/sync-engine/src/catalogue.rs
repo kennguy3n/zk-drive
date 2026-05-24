@@ -47,6 +47,56 @@ impl SyncStatus {
         }
     }
 
+    /// Returns the catalogue status that should be persisted when
+    /// the local side of a record changes (file written, deleted, or
+    /// renamed). The transition is conservative: a remote change
+    /// already waiting to be applied (or an in-flight transfer)
+    /// escalates to [`SyncStatus::Conflict`] instead of clobbering
+    /// the prior side's intent.
+    ///
+    /// Truth table (current -> next):
+    ///
+    /// | current      | next                                        |
+    /// |--------------|---------------------------------------------|
+    /// | UpToDate     | LocalDirty                                  |
+    /// | LocalDirty   | LocalDirty                                  |
+    /// | RemoteDirty  | Conflict (remote pending + local change)    |
+    /// | Conflict     | Conflict (already in conflict)              |
+    /// | InFlight     | Conflict (transfer in progress + local change) |
+    /// | Evicted      | LocalDirty (user re-created an evicted file)|
+    pub fn next_on_local_change(self) -> Self {
+        match self {
+            SyncStatus::UpToDate | SyncStatus::Evicted => SyncStatus::LocalDirty,
+            SyncStatus::LocalDirty => SyncStatus::LocalDirty,
+            SyncStatus::RemoteDirty | SyncStatus::Conflict | SyncStatus::InFlight => {
+                SyncStatus::Conflict
+            }
+        }
+    }
+
+    /// Mirror of [`Self::next_on_local_change`] for remote-side changes
+    /// (catch-up page or live WebSocket frame).
+    ///
+    /// Truth table (current -> next):
+    ///
+    /// | current      | next                                         |
+    /// |--------------|----------------------------------------------|
+    /// | UpToDate     | RemoteDirty                                  |
+    /// | RemoteDirty  | RemoteDirty                                  |
+    /// | LocalDirty   | Conflict (local pending + remote change)     |
+    /// | Conflict     | Conflict (already in conflict)               |
+    /// | InFlight     | Conflict (transfer in progress + remote chg) |
+    /// | Evicted      | RemoteDirty                                  |
+    pub fn next_on_remote_change(self) -> Self {
+        match self {
+            SyncStatus::UpToDate | SyncStatus::Evicted => SyncStatus::RemoteDirty,
+            SyncStatus::RemoteDirty => SyncStatus::RemoteDirty,
+            SyncStatus::LocalDirty | SyncStatus::Conflict | SyncStatus::InFlight => {
+                SyncStatus::Conflict
+            }
+        }
+    }
+
     /// Maps a persisted status string back to a [`SyncStatus`].
     ///
     /// Unknown / unrecognised strings degrade to `UpToDate` so the
