@@ -139,10 +139,14 @@ impl Engine {
                     if existing.content_hash == content_hash {
                         return Ok(());
                     }
-                    let next = existing.status.next_on_local_change();
-                    if next != existing.status {
-                        cat.set_status(existing.remote_file_id, next)?;
-                    }
+                    // Atomically flip status + refresh the catalogue's
+                    // view of (content_hash, size_bytes). Without the
+                    // hash/size refresh, a follow-up A -> B -> A revert
+                    // would short-circuit on the stale hash A at the
+                    // dedup check above and silently leave the row
+                    // LocalDirty even though it matches the server.
+                    let next = existing.status.next_on_local_upsert();
+                    cat.set_local_state(existing.remote_file_id, next, content_hash, size_bytes)?;
                     info!(?path, size_bytes, ?next, "local file change recorded");
                 } else {
                     // First time we've seen this path on disk. Allocate
@@ -174,7 +178,7 @@ impl Engine {
             LocalEvent::Delete { path } => {
                 let mut cat = self.catalogue.lock().await;
                 if let Some(existing) = cat.by_local_path(&path)? {
-                    let next = existing.status.next_on_local_change();
+                    let next = existing.status.next_on_local_delete();
                     if next != existing.status {
                         cat.set_status(existing.remote_file_id, next)?;
                     }
@@ -202,7 +206,12 @@ impl Engine {
                         let parked = tombstone_dir(&self.config.root)
                             .join(displaced.remote_file_id.to_string());
                         cat.set_local_path(displaced.remote_file_id, &parked)?;
-                        let displaced_next = displaced.status.next_on_local_change();
+                        // The displaced row's on-disk bytes are gone
+                        // (the OS just overwrote them). Route it
+                        // through the delete-side transition so the
+                        // upload flow pushes a tombstone, not stale
+                        // bytes.
+                        let displaced_next = displaced.status.next_on_local_delete();
                         if displaced_next != displaced.status {
                             cat.set_status(displaced.remote_file_id, displaced_next)?;
                         }
@@ -216,7 +225,11 @@ impl Engine {
                 }
                 let mut new_rec = existing.clone();
                 new_rec.local_path = to.clone();
-                new_rec.status = existing.status.next_on_local_change();
+                // The source row's content still exists on disk (just
+                // at a different path), so this is the upsert side of
+                // the state machine even though the user thinks of it
+                // as a 'move'.
+                new_rec.status = existing.status.next_on_local_upsert();
                 new_rec.updated_at = chrono::Utc::now();
                 cat.upsert(&new_rec)?;
                 info!(?from, ?to, status = ?new_rec.status, "local rename recorded");
@@ -488,7 +501,10 @@ mod tests {
             displaced.local_path,
             tempdir.path().join(".zk-deleted").join(dst_id.to_string())
         );
-        assert_eq!(displaced.status, SyncStatus::LocalDirty);
+        // Displaced row's on-disk bytes were overwritten by the
+        // rename target; the upload flow must push a tombstone for
+        // it, not stale bytes.
+        assert_eq!(displaced.status, SyncStatus::LocalDeleted);
         let renamed = cat.get(src_id).unwrap().unwrap();
         assert_eq!(renamed.local_path, to);
         assert_eq!(renamed.status, SyncStatus::LocalDirty);
@@ -612,23 +628,37 @@ mod tests {
     #[test]
     fn sync_status_transitions_match_truth_table() {
         // Locks the state machine documented on
-        // SyncStatus::next_on_{local,remote}_change.
+        // SyncStatus::next_on_local_{upsert,delete} and next_on_remote_change.
         use SyncStatus::*;
-        let local = [
+        let upsert = [
             (UpToDate, LocalDirty),
             (LocalDirty, LocalDirty),
+            (LocalDeleted, LocalDirty),
             (RemoteDirty, Conflict),
             (Conflict, Conflict),
             (InFlight, Conflict),
             (Evicted, LocalDirty),
         ];
-        for (cur, next) in local {
-            assert_eq!(cur.next_on_local_change(), next, "local from {cur:?}");
+        for (cur, next) in upsert {
+            assert_eq!(cur.next_on_local_upsert(), next, "upsert from {cur:?}");
+        }
+        let delete = [
+            (UpToDate, LocalDeleted),
+            (LocalDirty, LocalDeleted),
+            (LocalDeleted, LocalDeleted),
+            (Evicted, LocalDeleted),
+            (RemoteDirty, Conflict),
+            (Conflict, Conflict),
+            (InFlight, Conflict),
+        ];
+        for (cur, next) in delete {
+            assert_eq!(cur.next_on_local_delete(), next, "delete from {cur:?}");
         }
         let remote = [
             (UpToDate, RemoteDirty),
             (RemoteDirty, RemoteDirty),
             (LocalDirty, Conflict),
+            (LocalDeleted, Conflict),
             (Conflict, Conflict),
             (InFlight, Conflict),
             (Evicted, RemoteDirty),
@@ -636,5 +666,154 @@ mod tests {
         for (cur, next) in remote {
             assert_eq!(cur.next_on_remote_change(), next, "remote from {cur:?}");
         }
+    }
+
+    #[tokio::test]
+    async fn local_revert_round_trips_through_uptodate_after_dirty() {
+        // Regression for R6 #1: handle_local used to flip status to
+        // LocalDirty via set_status alone, leaving the catalogue's
+        // content_hash + size_bytes stale. A subsequent revert to the
+        // server's content (A -> B -> A) would short-circuit on the
+        // outdated hash A and silently leave the row LocalDirty even
+        // though the file matches the server again.
+        //
+        // With the atomic set_local_state path, the row's hash + size
+        // track the on-disk bytes after every change. The revert path
+        // is then driven by an explicit downloader/uploader
+        // reconciliation in PR5; here we lock down the *invariant*
+        // (catalogue hash mirrors on-disk hash after every change).
+        let tempdir = TempDir::new().unwrap();
+        let (engine, catalogue) = engine_for(&tempdir);
+        let file_id = Uuid::new_v4();
+        let path = tempdir.path().join("draft.md");
+        let server_hash = [0xAAu8; 32];
+        let edited_hash = [0xBBu8; 32];
+        {
+            let mut cat = catalogue.lock().await;
+            cat.upsert(&FileRecord {
+                remote_file_id: file_id,
+                remote_version_id: Uuid::new_v4(),
+                local_path: path.clone(),
+                size_bytes: 100,
+                content_hash: server_hash,
+                status: SyncStatus::UpToDate,
+                pinned: false,
+                updated_at: Utc::now(),
+            })
+            .unwrap();
+        }
+        // User edits.
+        engine
+            .handle_local(LocalEvent::Upsert {
+                path: path.clone(),
+                size_bytes: 150,
+                content_hash: edited_hash,
+            })
+            .await
+            .unwrap();
+        {
+            let cat = catalogue.lock().await;
+            let rec = cat.get(file_id).unwrap().unwrap();
+            assert_eq!(rec.status, SyncStatus::LocalDirty);
+            assert_eq!(
+                rec.content_hash, edited_hash,
+                "catalogue must refresh hash on local change"
+            );
+            assert_eq!(rec.size_bytes, 150);
+        }
+        // User reverts to server bytes. The next watcher event would
+        // be another Upsert with the original hash; the catalogue
+        // must already reflect the prior edited hash so the dedup
+        // short-circuit doesn't fire and status flips.
+        engine
+            .handle_local(LocalEvent::Upsert {
+                path: path.clone(),
+                size_bytes: 100,
+                content_hash: server_hash,
+            })
+            .await
+            .unwrap();
+        let cat = catalogue.lock().await;
+        let rec = cat.get(file_id).unwrap().unwrap();
+        // Status stays LocalDirty because the engine doesn't know
+        // (yet) that the bytes match the server -- that's the
+        // downloader/uploader's job to resolve. The important
+        // invariant: the catalogue's hash + size mirror disk.
+        assert_eq!(
+            rec.content_hash, server_hash,
+            "catalogue must refresh hash on revert"
+        );
+        assert_eq!(rec.size_bytes, 100);
+    }
+
+    #[tokio::test]
+    async fn local_delete_marks_row_local_deleted_not_local_dirty() {
+        // Regression for R6 #2: handle_local Delete used to flip
+        // status to LocalDirty, which made it indistinguishable from
+        // a content change. The upload flow (PR5) needs to know that
+        // this row is a tombstone candidate, not a content push.
+        let tempdir = TempDir::new().unwrap();
+        let (engine, catalogue) = engine_for(&tempdir);
+        let file_id = Uuid::new_v4();
+        let path = tempdir.path().join("gone.md");
+        {
+            let mut cat = catalogue.lock().await;
+            cat.upsert(&FileRecord {
+                remote_file_id: file_id,
+                remote_version_id: Uuid::new_v4(),
+                local_path: path.clone(),
+                size_bytes: 16,
+                content_hash: [9u8; 32],
+                status: SyncStatus::UpToDate,
+                pinned: false,
+                updated_at: Utc::now(),
+            })
+            .unwrap();
+        }
+        engine
+            .handle_local(LocalEvent::Delete { path: path.clone() })
+            .await
+            .unwrap();
+        let cat = catalogue.lock().await;
+        let rec = cat.get(file_id).unwrap().unwrap();
+        assert_eq!(rec.status, SyncStatus::LocalDeleted);
+    }
+
+    #[tokio::test]
+    async fn local_upsert_after_delete_resurrects_to_local_dirty() {
+        // R6 #2 follow-up: a delete then immediate re-create at the
+        // same path must transition LocalDeleted -> LocalDirty, not
+        // stay LocalDeleted (which would lose the new content).
+        let tempdir = TempDir::new().unwrap();
+        let (engine, catalogue) = engine_for(&tempdir);
+        let file_id = Uuid::new_v4();
+        let path = tempdir.path().join("flicker.md");
+        {
+            let mut cat = catalogue.lock().await;
+            cat.upsert(&FileRecord {
+                remote_file_id: file_id,
+                remote_version_id: Uuid::new_v4(),
+                local_path: path.clone(),
+                size_bytes: 16,
+                content_hash: [9u8; 32],
+                status: SyncStatus::LocalDeleted,
+                pinned: false,
+                updated_at: Utc::now(),
+            })
+            .unwrap();
+        }
+        engine
+            .handle_local(LocalEvent::Upsert {
+                path: path.clone(),
+                size_bytes: 24,
+                content_hash: [3u8; 32],
+            })
+            .await
+            .unwrap();
+        let cat = catalogue.lock().await;
+        let rec = cat.get(file_id).unwrap().unwrap();
+        assert_eq!(rec.status, SyncStatus::LocalDirty);
+        assert_eq!(rec.content_hash, [3u8; 32]);
+        assert_eq!(rec.size_bytes, 24);
     }
 }

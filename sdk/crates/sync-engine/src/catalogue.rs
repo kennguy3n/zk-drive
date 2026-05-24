@@ -21,8 +21,15 @@ use crate::Result;
 pub enum SyncStatus {
     /// Local copy matches the recorded remote version.
     UpToDate,
-    /// Local change pending upload.
+    /// Local content changed and the file still exists on disk; the
+    /// upload flow should push the new bytes.
     LocalDirty,
+    /// Local file was deleted (or otherwise no longer exists at
+    /// `local_path`); the upload flow should push a tombstone for the
+    /// remote object. Kept distinct from [`SyncStatus::LocalDirty`] so
+    /// the upload flow doesn't have to stat the path again to
+    /// distinguish 'send bytes' from 'send tombstone'.
+    LocalDeleted,
     /// Remote change waiting to be downloaded.
     RemoteDirty,
     /// Both sides changed since last sync; the [`crate::conflict::ConflictPolicy`]
@@ -40,6 +47,7 @@ impl SyncStatus {
         match self {
             SyncStatus::UpToDate => "up_to_date",
             SyncStatus::LocalDirty => "local_dirty",
+            SyncStatus::LocalDeleted => "local_deleted",
             SyncStatus::RemoteDirty => "remote_dirty",
             SyncStatus::Conflict => "conflict",
             SyncStatus::InFlight => "in_flight",
@@ -48,52 +56,88 @@ impl SyncStatus {
     }
 
     /// Returns the catalogue status that should be persisted when
-    /// the local side of a record changes (file written, deleted, or
-    /// renamed). The transition is conservative: a remote change
-    /// already waiting to be applied (or an in-flight transfer)
-    /// escalates to [`SyncStatus::Conflict`] instead of clobbering
-    /// the prior side's intent.
+    /// the local file is written (created or modified). A pending
+    /// remote change (or an in-flight transfer) escalates to
+    /// [`SyncStatus::Conflict`] so we don't clobber the remote side's
+    /// intent. A row that was previously [`SyncStatus::LocalDeleted`]
+    /// is resurrected back to [`SyncStatus::LocalDirty`] because the
+    /// path now has content again.
     ///
     /// Truth table (current -> next):
     ///
-    /// | current      | next                                        |
-    /// |--------------|---------------------------------------------|
-    /// | UpToDate     | LocalDirty                                  |
-    /// | LocalDirty   | LocalDirty                                  |
-    /// | RemoteDirty  | Conflict (remote pending + local change)    |
-    /// | Conflict     | Conflict (already in conflict)              |
-    /// | InFlight     | Conflict (transfer in progress + local change) |
-    /// | Evicted      | LocalDirty (user re-created an evicted file)|
-    pub fn next_on_local_change(self) -> Self {
+    /// | current       | next                                           |
+    /// |---------------|------------------------------------------------|
+    /// | UpToDate      | LocalDirty                                     |
+    /// | LocalDirty    | LocalDirty                                     |
+    /// | LocalDeleted  | LocalDirty (file resurrected at this path)     |
+    /// | RemoteDirty   | Conflict (remote pending + local upsert)       |
+    /// | Conflict      | Conflict                                       |
+    /// | InFlight      | Conflict (transfer in progress + local upsert) |
+    /// | Evicted       | LocalDirty (user re-created an evicted file)   |
+    pub fn next_on_local_upsert(self) -> Self {
         match self {
-            SyncStatus::UpToDate | SyncStatus::Evicted => SyncStatus::LocalDirty,
-            SyncStatus::LocalDirty => SyncStatus::LocalDirty,
+            SyncStatus::UpToDate
+            | SyncStatus::Evicted
+            | SyncStatus::LocalDirty
+            | SyncStatus::LocalDeleted => SyncStatus::LocalDirty,
             SyncStatus::RemoteDirty | SyncStatus::Conflict | SyncStatus::InFlight => {
                 SyncStatus::Conflict
             }
         }
     }
 
-    /// Mirror of [`Self::next_on_local_change`] for remote-side changes
-    /// (catch-up page or live WebSocket frame).
+    /// Returns the catalogue status that should be persisted when
+    /// the local file disappears (removed, or moved away from this
+    /// `local_path`). Distinct from [`Self::next_on_local_upsert`]
+    /// because the upload flow has to push a *tombstone* rather than
+    /// content for these rows. A pending remote change escalates to
+    /// [`SyncStatus::Conflict`].
     ///
     /// Truth table (current -> next):
     ///
-    /// | current      | next                                         |
-    /// |--------------|----------------------------------------------|
-    /// | UpToDate     | RemoteDirty                                  |
-    /// | RemoteDirty  | RemoteDirty                                  |
-    /// | LocalDirty   | Conflict (local pending + remote change)     |
-    /// | Conflict     | Conflict (already in conflict)               |
-    /// | InFlight     | Conflict (transfer in progress + remote chg) |
-    /// | Evicted      | RemoteDirty                                  |
+    /// | current       | next                                           |
+    /// |---------------|------------------------------------------------|
+    /// | UpToDate      | LocalDeleted                                   |
+    /// | LocalDirty    | LocalDeleted (queued upload made obsolete)     |
+    /// | LocalDeleted  | LocalDeleted                                   |
+    /// | Evicted       | LocalDeleted (server still has the row)        |
+    /// | RemoteDirty   | Conflict (remote pending + local delete)       |
+    /// | Conflict      | Conflict                                       |
+    /// | InFlight      | Conflict (transfer in progress + local delete) |
+    pub fn next_on_local_delete(self) -> Self {
+        match self {
+            SyncStatus::UpToDate
+            | SyncStatus::LocalDirty
+            | SyncStatus::LocalDeleted
+            | SyncStatus::Evicted => SyncStatus::LocalDeleted,
+            SyncStatus::RemoteDirty | SyncStatus::Conflict | SyncStatus::InFlight => {
+                SyncStatus::Conflict
+            }
+        }
+    }
+
+    /// Mirror of [`Self::next_on_local_upsert`] / [`Self::next_on_local_delete`]
+    /// for remote-side changes (catch-up page or live WebSocket frame).
+    ///
+    /// Truth table (current -> next):
+    ///
+    /// | current       | next                                           |
+    /// |---------------|------------------------------------------------|
+    /// | UpToDate      | RemoteDirty                                    |
+    /// | RemoteDirty   | RemoteDirty                                    |
+    /// | Evicted       | RemoteDirty                                    |
+    /// | LocalDirty    | Conflict (local pending + remote change)       |
+    /// | LocalDeleted  | Conflict (local tombstone + remote change)     |
+    /// | Conflict      | Conflict                                       |
+    /// | InFlight      | Conflict (transfer in progress + remote chg)   |
     pub fn next_on_remote_change(self) -> Self {
         match self {
             SyncStatus::UpToDate | SyncStatus::Evicted => SyncStatus::RemoteDirty,
             SyncStatus::RemoteDirty => SyncStatus::RemoteDirty,
-            SyncStatus::LocalDirty | SyncStatus::Conflict | SyncStatus::InFlight => {
-                SyncStatus::Conflict
-            }
+            SyncStatus::LocalDirty
+            | SyncStatus::LocalDeleted
+            | SyncStatus::Conflict
+            | SyncStatus::InFlight => SyncStatus::Conflict,
         }
     }
 
@@ -108,6 +152,7 @@ impl SyncStatus {
         match s {
             "up_to_date" => SyncStatus::UpToDate,
             "local_dirty" => SyncStatus::LocalDirty,
+            "local_deleted" => SyncStatus::LocalDeleted,
             "remote_dirty" => SyncStatus::RemoteDirty,
             "conflict" => SyncStatus::Conflict,
             "in_flight" => SyncStatus::InFlight,
@@ -213,6 +258,40 @@ impl Catalogue {
         self.conn.execute(
             "UPDATE files SET status = ?1, updated_at = ?2 WHERE remote_file_id = ?3",
             params![status.as_str(), now, remote_file_id.to_string()],
+        )?;
+        Ok(())
+    }
+
+    /// Update `status`, `content_hash`, and `size_bytes` atomically.
+    /// Used by the engine when a local file change is detected: the
+    /// state machine needs to flip status (e.g. `UpToDate -> LocalDirty`)
+    /// *and* refresh the catalogue's view of the on-disk bytes so the
+    /// dedup-against-stale-hash short-circuit in `handle_local`
+    /// continues to work for follow-up events. Without this, an
+    /// A -> B -> A revert would be silently missed because the
+    /// catalogue would still hold hash A from before the first edit.
+    pub fn set_local_state(
+        &mut self,
+        remote_file_id: Uuid,
+        status: SyncStatus,
+        content_hash: [u8; 32],
+        size_bytes: u64,
+    ) -> Result<()> {
+        let now = chrono::Utc::now().to_rfc3339();
+        self.conn.execute(
+            r#"UPDATE files
+                  SET status = ?1,
+                      content_hash = ?2,
+                      size_bytes = ?3,
+                      updated_at = ?4
+                WHERE remote_file_id = ?5"#,
+            params![
+                status.as_str(),
+                content_hash.as_slice(),
+                size_bytes as i64,
+                now,
+                remote_file_id.to_string()
+            ],
         )?;
         Ok(())
     }
