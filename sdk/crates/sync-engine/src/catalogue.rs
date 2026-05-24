@@ -30,8 +30,21 @@ pub enum SyncStatus {
     /// the upload flow doesn't have to stat the path again to
     /// distinguish 'send bytes' from 'send tombstone'.
     LocalDeleted,
-    /// Remote change waiting to be downloaded.
+    /// Remote change waiting to be downloaded (content update,
+    /// rename, or move). Kept distinct from [`SyncStatus::RemoteDeleted`]
+    /// so the downloader (PR5) does not have to re-fetch the file's
+    /// metadata to discover whether the remote-side change was an
+    /// update or a tombstone -- a critical disambiguation, because
+    /// for a deletion it must unlink the local file rather than
+    /// download new bytes.
     RemoteDirty,
+    /// Remote object was deleted; the downloader should unlink the
+    /// local copy (subject to the conflict policy if local has
+    /// pending changes). Distinct from [`SyncStatus::RemoteDirty`]
+    /// for the same reason [`SyncStatus::LocalDeleted`] is distinct
+    /// from [`SyncStatus::LocalDirty`]: the action diverges from
+    /// 'transfer content' to 'remove the entry'.
+    RemoteDeleted,
     /// Both sides changed since last sync; the [`crate::conflict::ConflictPolicy`]
     /// decides the resolution.
     Conflict,
@@ -49,6 +62,7 @@ impl SyncStatus {
             SyncStatus::LocalDirty => "local_dirty",
             SyncStatus::LocalDeleted => "local_deleted",
             SyncStatus::RemoteDirty => "remote_dirty",
+            SyncStatus::RemoteDeleted => "remote_deleted",
             SyncStatus::Conflict => "conflict",
             SyncStatus::InFlight => "in_flight",
             SyncStatus::Evicted => "evicted",
@@ -80,6 +94,12 @@ impl SyncStatus {
             | SyncStatus::Evicted
             | SyncStatus::LocalDirty
             | SyncStatus::LocalDeleted => SyncStatus::LocalDirty,
+            // Server already executed a tombstone; recreating
+            // locally is a fresh upload, not a revival of the
+            // pre-delete row. Mark LocalDirty so the upload flow
+            // pushes the new bytes (under whatever new resource id
+            // the server allocates).
+            SyncStatus::RemoteDeleted => SyncStatus::LocalDirty,
             SyncStatus::RemoteDirty | SyncStatus::Conflict | SyncStatus::InFlight => {
                 SyncStatus::Conflict
             }
@@ -110,6 +130,12 @@ impl SyncStatus {
             | SyncStatus::LocalDirty
             | SyncStatus::LocalDeleted
             | SyncStatus::Evicted => SyncStatus::LocalDeleted,
+            // Both sides agree on a delete. Pick RemoteDeleted as
+            // the convergence point for parity with
+            // `next_on_remote_delete(LocalDeleted)`; the upload flow
+            // skips pushing a tombstone that the server has already
+            // executed.
+            SyncStatus::RemoteDeleted => SyncStatus::RemoteDeleted,
             SyncStatus::RemoteDirty | SyncStatus::Conflict | SyncStatus::InFlight => {
                 SyncStatus::Conflict
             }
@@ -117,7 +143,9 @@ impl SyncStatus {
     }
 
     /// Mirror of [`Self::next_on_local_upsert`] / [`Self::next_on_local_delete`]
-    /// for remote-side changes (catch-up page or live WebSocket frame).
+    /// for remote-side *content* changes (catch-up page or live
+    /// WebSocket frame announcing a create, update, rename, or
+    /// move). Use [`Self::next_on_remote_delete`] for tombstones.
     ///
     /// Truth table (current -> next):
     ///
@@ -125,6 +153,7 @@ impl SyncStatus {
     /// |---------------|------------------------------------------------|
     /// | UpToDate      | RemoteDirty                                    |
     /// | RemoteDirty   | RemoteDirty                                    |
+    /// | RemoteDeleted | RemoteDirty (remote resurrected what it killed)|
     /// | Evicted       | RemoteDirty                                    |
     /// | LocalDirty    | Conflict (local pending + remote change)       |
     /// | LocalDeleted  | Conflict (local tombstone + remote change)     |
@@ -134,10 +163,57 @@ impl SyncStatus {
         match self {
             SyncStatus::UpToDate | SyncStatus::Evicted => SyncStatus::RemoteDirty,
             SyncStatus::RemoteDirty => SyncStatus::RemoteDirty,
+            // A remote create after a remote delete (e.g. user
+            // restored the file on another device) needs to escape
+            // the RemoteDeleted state -- otherwise the downloader
+            // would still treat the row as a tombstone and unlink
+            // the local copy when it finally syncs.
+            SyncStatus::RemoteDeleted => SyncStatus::RemoteDirty,
             SyncStatus::LocalDirty
             | SyncStatus::LocalDeleted
             | SyncStatus::Conflict
             | SyncStatus::InFlight => SyncStatus::Conflict,
+        }
+    }
+
+    /// Catalogue status to persist when the change feed announces a
+    /// remote *tombstone* (file/folder deleted on the server). The
+    /// downloader (PR5) must consume this distinctly from
+    /// [`SyncStatus::RemoteDirty`] because the action is to unlink
+    /// the local file, not to fetch new content -- without this
+    /// split, [`RemoteEvent::FileDeleted`] and [`RemoteEvent::FileUpdated`]
+    /// would land on indistinguishable catalogue rows and the
+    /// downloader would have to re-stat the server to recover the
+    /// op, defeating the point of the change feed.
+    ///
+    /// Truth table (current -> next):
+    ///
+    /// | current       | next                                           |
+    /// |---------------|------------------------------------------------|
+    /// | UpToDate      | RemoteDeleted                                  |
+    /// | RemoteDirty   | RemoteDeleted (remote deletion supersedes update) |
+    /// | RemoteDeleted | RemoteDeleted                                  |
+    /// | Evicted       | RemoteDeleted                                  |
+    /// | LocalDirty    | Conflict (local pending + remote delete)       |
+    /// | LocalDeleted  | RemoteDeleted (both sides agree; tombstone wins) |
+    /// | Conflict      | Conflict                                       |
+    /// | InFlight      | Conflict (transfer in progress + remote delete) |
+    pub fn next_on_remote_delete(self) -> Self {
+        match self {
+            SyncStatus::UpToDate
+            | SyncStatus::RemoteDirty
+            | SyncStatus::RemoteDeleted
+            | SyncStatus::Evicted => SyncStatus::RemoteDeleted,
+            // Both sides converged on a delete -- no conflict, the
+            // row is just a tombstone now. Picking RemoteDeleted
+            // (rather than LocalDeleted) means the downloader owns
+            // the cleanup, which is the right side because the
+            // server has already executed its delete; the upload
+            // flow would only push a redundant tombstone.
+            SyncStatus::LocalDeleted => SyncStatus::RemoteDeleted,
+            SyncStatus::LocalDirty | SyncStatus::Conflict | SyncStatus::InFlight => {
+                SyncStatus::Conflict
+            }
         }
     }
 
@@ -154,6 +230,7 @@ impl SyncStatus {
             "local_dirty" => SyncStatus::LocalDirty,
             "local_deleted" => SyncStatus::LocalDeleted,
             "remote_dirty" => SyncStatus::RemoteDirty,
+            "remote_deleted" => SyncStatus::RemoteDeleted,
             "conflict" => SyncStatus::Conflict,
             "in_flight" => SyncStatus::InFlight,
             "evicted" => SyncStatus::Evicted,

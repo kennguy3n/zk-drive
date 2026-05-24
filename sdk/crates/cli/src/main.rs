@@ -36,9 +36,24 @@ struct Cli {
         default_value = "~/.zk-sync/catalogue.db"
     )]
     catalogue: String,
-    /// Bearer token for the API client.
-    #[arg(long, env = "ZK_DRIVE_BEARER")]
-    bearer: String,
+    /// File containing the bearer token for the API client (one
+    /// line, optional trailing newline). Preferred over passing the
+    /// token via the [`ZK_DRIVE_BEARER`] environment variable in
+    /// shared environments — the file's permissions can be locked
+    /// to mode 0600 whereas environment variables can leak into
+    /// child processes via `/proc/<pid>/environ`. Mutually exclusive
+    /// with `ZK_DRIVE_BEARER`; if both are set the file wins so a
+    /// stale env var in the shell can't override a freshly-rotated
+    /// token on disk.
+    ///
+    /// We deliberately do NOT accept the raw token as a CLI value
+    /// (e.g. `--bearer <TOKEN>`). On Linux the kernel exposes every
+    /// process's argv via `/proc/<pid>/cmdline` to every user on the
+    /// host, so a flag-passed secret is visible to `ps`, `htop`,
+    /// monitoring agents, and shell history. File / env-var paths
+    /// avoid that exposure surface.
+    #[arg(long, env = "ZK_DRIVE_BEARER_FILE")]
+    bearer_file: Option<PathBuf>,
 
     #[command(subcommand)]
     cmd: Cmd,
@@ -94,6 +109,46 @@ fn expand_tilde(path: &str) -> PathBuf {
     PathBuf::from(path)
 }
 
+/// Resolve the bearer token from (in order of precedence):
+///
+/// 1. A `--bearer-file` argument (or the `ZK_DRIVE_BEARER_FILE`
+///    environment variable that clap exposes via the same arg).
+///    The file is read in full, trimmed of trailing whitespace,
+///    and the bytes are interpreted as UTF-8. Permission bits are
+///    NOT validated by this binary — operators are expected to
+///    `chmod 600` the file themselves; the keychain-backed `login`
+///    subcommand is the path for hands-off provisioning.
+/// 2. The `ZK_DRIVE_BEARER` environment variable, kept for CI /
+///    automation workflows that already inject secrets into the
+///    process environment via the orchestrator (GitHub Actions,
+///    `kubectl exec -e`, systemd `EnvironmentFile=`, etc.). Those
+///    secrets are NOT exposed to other users on the host because
+///    `/proc/<pid>/environ` is mode-0400.
+///
+/// Returns an error if neither source supplies a non-empty value.
+/// We never accept the token as a positional or flag argument —
+/// see the doc-comment on [`Cli::bearer_file`] for the rationale.
+fn load_bearer(bearer_file: Option<&std::path::Path>) -> anyhow::Result<String> {
+    if let Some(p) = bearer_file {
+        let raw = std::fs::read_to_string(p)
+            .map_err(|e| anyhow::anyhow!("failed to read bearer file {}: {e}", p.display()))?;
+        let trimmed = raw.trim().to_string();
+        if trimmed.is_empty() {
+            return Err(anyhow::anyhow!(
+                "bearer file {} is empty after trimming whitespace",
+                p.display()
+            ));
+        }
+        return Ok(trimmed);
+    }
+    match std::env::var("ZK_DRIVE_BEARER") {
+        Ok(v) if !v.trim().is_empty() => Ok(v.trim().to_string()),
+        _ => Err(anyhow::anyhow!(
+            "no bearer token supplied; pass --bearer-file <PATH> or set ZK_DRIVE_BEARER"
+        )),
+    }
+}
+
 fn home_dir() -> Option<PathBuf> {
     if let Some(h) = std::env::var_os("HOME") {
         return Some(PathBuf::from(h));
@@ -138,9 +193,10 @@ async fn main() -> anyhow::Result<()> {
     let cat = Catalogue::open(&catalogue_path, workspace_id)?;
     let catalogue = Arc::new(Mutex::new(cat));
 
+    let bearer = load_bearer(args.bearer_file.as_deref())?;
     let client = Arc::new(
         Client::builder(&args.base_url)
-            .bearer(Bearer(args.bearer.clone()))
+            .bearer(Bearer(bearer))
             .build()?,
     );
 

@@ -136,7 +136,36 @@ impl Engine {
             } => {
                 let mut cat = self.catalogue.lock().await;
                 if let Some(existing) = cat.by_local_path(&path)? {
-                    if existing.content_hash == content_hash {
+                    // Dedup short-circuit: a re-fire of the watcher
+                    // on the same content is a no-op iff the row is
+                    // already in a "content matches what's known"
+                    // status. The `LocalDeleted` / `Evicted` cases
+                    // are deliberately excluded:
+                    //
+                    //   * `LocalDeleted` means the previous event
+                    //     was a delete; the upload flow would push a
+                    //     *tombstone* for this row. Re-creating the
+                    //     file with identical content (e.g. `git
+                    //     checkout`, undo, restore-from-backup) MUST
+                    //     resurrect the row to `LocalDirty` so the
+                    //     server-side copy stays alive. Skipping
+                    //     here would silently delete the file on the
+                    //     server on the next reconciliation.
+                    //
+                    //   * `Evicted` means the LRU offline cache (PR5)
+                    //     dropped the local bytes; the row's
+                    //     content_hash still records the *last known*
+                    //     server hash, so a recreate at the same path
+                    //     with that hash must transition back to
+                    //     `UpToDate` via the normal upsert path, not
+                    //     stay `Evicted` and confuse the cache
+                    //     prefetcher.
+                    if existing.content_hash == content_hash
+                        && !matches!(
+                            existing.status,
+                            SyncStatus::LocalDeleted | SyncStatus::Evicted
+                        )
+                    {
                         return Ok(());
                     }
                     // Atomically flip status + refresh the catalogue's
@@ -145,7 +174,25 @@ impl Engine {
                     // would short-circuit on the stale hash A at the
                     // dedup check above and silently leave the row
                     // LocalDirty even though it matches the server.
-                    let next = existing.status.next_on_local_upsert();
+                    //
+                    // Two distinct paths converge here:
+                    //   1. content_hash CHANGED -- treat as normal
+                    //      LocalDirty transition; the upload flow will
+                    //      push the new bytes.
+                    //   2. content_hash UNCHANGED but status was
+                    //      LocalDeleted or Evicted (the dedup
+                    //      short-circuit above lets these through).
+                    //      In this case the row's recorded hash
+                    //      already equals the server's known version,
+                    //      so there is nothing to upload -- jump
+                    //      straight back to UpToDate instead of
+                    //      churning the row through a redundant
+                    //      LocalDirty -> upload -> UpToDate cycle.
+                    let next = if existing.content_hash == content_hash {
+                        SyncStatus::UpToDate
+                    } else {
+                        existing.status.next_on_local_upsert()
+                    };
                     cat.set_local_state(existing.remote_file_id, next, content_hash, size_bytes)?;
                     info!(?path, size_bytes, ?next, "local file change recorded");
                 } else {
@@ -299,9 +346,18 @@ impl Engine {
                 Ok(())
             }
             RemoteEvent::FileDeleted(_) => {
+                // Use the dedicated `next_on_remote_delete` transition
+                // (NOT `next_on_remote_change`) so the catalogue row
+                // lands on `RemoteDeleted` instead of `RemoteDirty`.
+                // The downloader (PR5) pivots on this status to
+                // decide between 'fetch new content' and 'unlink the
+                // local copy'; collapsing both into RemoteDirty would
+                // force it to re-stat the server for every dirty row
+                // just to disambiguate, defeating the whole point of
+                // the change feed.
                 let mut cat = self.catalogue.lock().await;
                 if let Some(existing) = cat.get(m.resource_id)? {
-                    let next = existing.status.next_on_remote_change();
+                    let next = existing.status.next_on_remote_delete();
                     if next != existing.status {
                         cat.set_status(m.resource_id, next)?;
                     }
@@ -647,13 +703,18 @@ mod tests {
     #[test]
     fn sync_status_transitions_match_truth_table() {
         // Locks the state machine documented on
-        // SyncStatus::next_on_local_{upsert,delete} and next_on_remote_change.
+        // SyncStatus::next_on_local_{upsert,delete} and
+        // SyncStatus::next_on_remote_{change,delete}. Every starting
+        // status must appear in every table so a future variant
+        // (e.g. PR5's PinPending) is impossible to add silently
+        // without revisiting the truth tables.
         use SyncStatus::*;
         let upsert = [
             (UpToDate, LocalDirty),
             (LocalDirty, LocalDirty),
             (LocalDeleted, LocalDirty),
             (RemoteDirty, Conflict),
+            (RemoteDeleted, LocalDirty),
             (Conflict, Conflict),
             (InFlight, Conflict),
             (Evicted, LocalDirty),
@@ -667,6 +728,7 @@ mod tests {
             (LocalDeleted, LocalDeleted),
             (Evicted, LocalDeleted),
             (RemoteDirty, Conflict),
+            (RemoteDeleted, RemoteDeleted),
             (Conflict, Conflict),
             (InFlight, Conflict),
         ];
@@ -676,6 +738,7 @@ mod tests {
         let remote = [
             (UpToDate, RemoteDirty),
             (RemoteDirty, RemoteDirty),
+            (RemoteDeleted, RemoteDirty),
             (LocalDirty, Conflict),
             (LocalDeleted, Conflict),
             (Conflict, Conflict),
@@ -684,6 +747,23 @@ mod tests {
         ];
         for (cur, next) in remote {
             assert_eq!(cur.next_on_remote_change(), next, "remote from {cur:?}");
+        }
+        let remote_delete = [
+            (UpToDate, RemoteDeleted),
+            (RemoteDirty, RemoteDeleted),
+            (RemoteDeleted, RemoteDeleted),
+            (Evicted, RemoteDeleted),
+            (LocalDirty, Conflict),
+            (LocalDeleted, RemoteDeleted),
+            (Conflict, Conflict),
+            (InFlight, Conflict),
+        ];
+        for (cur, next) in remote_delete {
+            assert_eq!(
+                cur.next_on_remote_delete(),
+                next,
+                "remote delete from {cur:?}"
+            );
         }
     }
 
@@ -834,5 +914,199 @@ mod tests {
         assert_eq!(rec.status, SyncStatus::LocalDirty);
         assert_eq!(rec.content_hash, [3u8; 32]);
         assert_eq!(rec.size_bytes, 24);
+    }
+
+    #[tokio::test]
+    async fn local_upsert_after_delete_with_same_content_returns_to_up_to_date() {
+        // R10 #2: prior to the status-aware dedup short-circuit, an
+        // identical-content recreation of a deleted file fell into
+        // the early-out at `existing.content_hash == content_hash`,
+        // which left the row at LocalDeleted. The upload flow would
+        // then push a tombstone for a file that has reappeared with
+        // exactly the bytes the server already holds -- a silent
+        // data-loss event.
+        //
+        // After the fix, the dedup branch only fires when the row is
+        // already in a "content matches what's known" status; the
+        // LocalDeleted (and Evicted) cases fall through. When the
+        // hash also matches the catalogue's last-known server hash,
+        // the row snaps straight to UpToDate (the server already has
+        // these bytes; no upload required).
+        let tempdir = TempDir::new().unwrap();
+        let (engine, catalogue) = engine_for(&tempdir);
+        let file_id = Uuid::new_v4();
+        let path = tempdir.path().join("undeleted.md");
+        let server_hash = [0xCDu8; 32];
+        {
+            let mut cat = catalogue.lock().await;
+            cat.upsert(&FileRecord {
+                remote_file_id: file_id,
+                remote_version_id: Uuid::new_v4(),
+                local_path: path.clone(),
+                size_bytes: 42,
+                content_hash: server_hash,
+                status: SyncStatus::LocalDeleted,
+                pinned: false,
+                updated_at: Utc::now(),
+            })
+            .unwrap();
+        }
+        engine
+            .handle_local(LocalEvent::Upsert {
+                path: path.clone(),
+                size_bytes: 42,
+                content_hash: server_hash,
+            })
+            .await
+            .unwrap();
+        let cat = catalogue.lock().await;
+        let rec = cat.get(file_id).unwrap().unwrap();
+        assert_eq!(
+            rec.status,
+            SyncStatus::UpToDate,
+            "identical-content recreate of LocalDeleted must skip the upload \
+             flow and snap straight back to UpToDate"
+        );
+        assert_eq!(rec.content_hash, server_hash);
+        assert_eq!(rec.size_bytes, 42);
+    }
+
+    #[tokio::test]
+    async fn local_upsert_after_evict_with_same_content_returns_to_up_to_date() {
+        // Mirror of `local_upsert_after_delete_with_same_content_*`
+        // for the Evicted variant: PR5's LRU cache may unlink the
+        // local copy while keeping the catalogue row pointing at the
+        // server's last-known hash. When the user (or the pin
+        // prefetcher) recreates the file with that exact hash, the
+        // row must snap to UpToDate -- not stay Evicted (which would
+        // confuse the cache prefetcher into thinking the bytes are
+        // still missing).
+        let tempdir = TempDir::new().unwrap();
+        let (engine, catalogue) = engine_for(&tempdir);
+        let file_id = Uuid::new_v4();
+        let path = tempdir.path().join("rehydrated.md");
+        let server_hash = [0xEFu8; 32];
+        {
+            let mut cat = catalogue.lock().await;
+            cat.upsert(&FileRecord {
+                remote_file_id: file_id,
+                remote_version_id: Uuid::new_v4(),
+                local_path: path.clone(),
+                size_bytes: 7,
+                content_hash: server_hash,
+                status: SyncStatus::Evicted,
+                pinned: false,
+                updated_at: Utc::now(),
+            })
+            .unwrap();
+        }
+        engine
+            .handle_local(LocalEvent::Upsert {
+                path: path.clone(),
+                size_bytes: 7,
+                content_hash: server_hash,
+            })
+            .await
+            .unwrap();
+        let cat = catalogue.lock().await;
+        let rec = cat.get(file_id).unwrap().unwrap();
+        assert_eq!(rec.status, SyncStatus::UpToDate);
+    }
+
+    #[tokio::test]
+    async fn remote_file_deleted_marks_row_remote_deleted_not_remote_dirty() {
+        // R10 #4: FileDeleted used to route through
+        // `next_on_remote_change`, landing the row on RemoteDirty.
+        // That made it indistinguishable from a remote *update*, so
+        // the PR5 downloader could not pivot 'fetch new bytes' vs
+        // 'unlink the local copy' without an extra HEAD/metadata
+        // round trip to the server -- defeating the whole point of
+        // the change feed.
+        //
+        // After the fix, FileDeleted is wired through the dedicated
+        // `next_on_remote_delete` transition and lands on the new
+        // RemoteDeleted status.
+        let tempdir = TempDir::new().unwrap();
+        let (engine, catalogue) = engine_for(&tempdir);
+        let workspace_id = engine.config.workspace_id;
+        let file_id = Uuid::new_v4();
+        {
+            let mut cat = catalogue.lock().await;
+            cat.upsert(&FileRecord {
+                remote_file_id: file_id,
+                remote_version_id: Uuid::new_v4(),
+                local_path: tempdir.path().join("doomed.txt"),
+                size_bytes: 16,
+                content_hash: [0xA5u8; 32],
+                status: SyncStatus::UpToDate,
+                pinned: false,
+                updated_at: Utc::now(),
+            })
+            .unwrap();
+        }
+        engine
+            .handle_remote(RemoteEvent::FileDeleted(Mutation {
+                sequence: 7,
+                workspace_id,
+                actor_id: None,
+                kind: "file".into(),
+                op: "delete".into(),
+                resource_id: file_id,
+                parent_id: None,
+                name: "doomed.txt".into(),
+                metadata: None,
+                occurred_at: Utc::now(),
+            }))
+            .await
+            .unwrap();
+        let cat = catalogue.lock().await;
+        let rec = cat.get(file_id).unwrap().unwrap();
+        assert_eq!(rec.status, SyncStatus::RemoteDeleted);
+    }
+
+    #[tokio::test]
+    async fn remote_file_deleted_over_local_dirty_escalates_to_conflict() {
+        // Local edits pending + remote tombstone is a real conflict:
+        // resolving without policy input would either lose the local
+        // edits (downloader unlinks) or resurrect a file the server
+        // intentionally killed (uploader pushes). Lock that this
+        // routes through Conflict, leaving the resolution to
+        // ConflictPolicy in PR5.
+        let tempdir = TempDir::new().unwrap();
+        let (engine, catalogue) = engine_for(&tempdir);
+        let workspace_id = engine.config.workspace_id;
+        let file_id = Uuid::new_v4();
+        {
+            let mut cat = catalogue.lock().await;
+            cat.upsert(&FileRecord {
+                remote_file_id: file_id,
+                remote_version_id: Uuid::new_v4(),
+                local_path: tempdir.path().join("contested.txt"),
+                size_bytes: 16,
+                content_hash: [0xBCu8; 32],
+                status: SyncStatus::LocalDirty,
+                pinned: false,
+                updated_at: Utc::now(),
+            })
+            .unwrap();
+        }
+        engine
+            .handle_remote(RemoteEvent::FileDeleted(Mutation {
+                sequence: 8,
+                workspace_id,
+                actor_id: None,
+                kind: "file".into(),
+                op: "delete".into(),
+                resource_id: file_id,
+                parent_id: None,
+                name: "contested.txt".into(),
+                metadata: None,
+                occurred_at: Utc::now(),
+            }))
+            .await
+            .unwrap();
+        let cat = catalogue.lock().await;
+        let rec = cat.get(file_id).unwrap().unwrap();
+        assert_eq!(rec.status, SyncStatus::Conflict);
     }
 }
