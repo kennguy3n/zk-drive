@@ -117,7 +117,7 @@ jobs:
       # introduce lint changes that break CI overnight. Bumping
       # this version is an explicit commit.
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@1.85.0
+        uses: dtolnay/rust-toolchain@1.86.0
         with:
           components: rustfmt, clippy
 

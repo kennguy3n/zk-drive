@@ -26,8 +26,17 @@ pub struct TokenSet {
 impl TokenSet {
     pub fn is_expired(&self, now: DateTime<Utc>) -> bool {
         // 60-second skew so we proactively refresh before the
-        // access token is rejected by an upstream replica.
-        now + Duration::seconds(60) >= self.expires_at
+        // access token is rejected by an upstream replica. Use
+        // `checked_add_signed` to mirror `HttpRefresher::refresh`
+        // and stay panic-free if `now` is somehow close to
+        // `DateTime::MAX` (e.g. an OS clock that wandered into the
+        // far future). Falling back to "expired" is the safe
+        // choice: the caller will issue a refresh, which is the
+        // worst case here, not a panic.
+        match now.checked_add_signed(Duration::seconds(60)) {
+            Some(t) => t >= self.expires_at,
+            None => true,
+        }
     }
 }
 

@@ -179,6 +179,26 @@ fn flush(pending: &mut Vec<(PathBuf, Instant, EventKind)>, tx: &mpsc::Sender<Loc
             // the destination only, so without a "From" path we
             // surface as Upsert. A true rename is handled by the
             // catalogue when it sees the missing original.
+            //
+            // Failure to open the file or to hash its contents
+            // drops the event on the floor on purpose. The dropped
+            // cases are:
+            //
+            //   * `File::open` fails because the file was deleted
+            //     between `notify` firing and the coalesce window
+            //     expiring (a rapid create-then-delete burst from
+            //     an editor's temp-file write or `rm`).
+            //   * `content_hash` fails because the file was
+            //     truncated / replaced mid-read.
+            //
+            // These would race the engine's catalogue regardless of
+            // whether we surface them, so silent drop is the safe
+            // option: the next reconciliation cycle (next save, or
+            // a future `Engine::rescan`) catches up the catalogue
+            // state. We do not propagate IO errors to the engine
+            // because the watcher thread has no recovery path -- the
+            // channel would just receive a noisy `Delete` it can't
+            // tell apart from a real deletion.
             EventKind::Modify(_) | EventKind::Create(_) | EventKind::Other => {
                 match std::fs::File::open(&path) {
                     Ok(f) => {

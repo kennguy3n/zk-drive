@@ -94,6 +94,23 @@ pub fn placeholder_dir(root: &std::path::Path) -> PathBuf {
     root.join(PLACEHOLDER_DIR_NAME)
 }
 
+/// Hidden subdirectory inside the workspace root where the engine
+/// parks `local_path` entries for catalogue rows whose on-disk
+/// bytes have been overwritten -- e.g. a rename that landed on a
+/// path that was already tracked by a different file. The row is
+/// kept (so the next outbound sync can push a tombstone) but its
+/// `local_path` is moved here to satisfy UNIQUE(local_path).
+///
+/// Watchers MUST also ignore this prefix; the row's on-disk
+/// counterpart is gone, but a sloppy future caller could still
+/// touch the parked path.
+pub const TOMBSTONE_DIR_NAME: &str = ".zk-deleted";
+
+/// Returns the absolute tombstone directory for a workspace `root`.
+pub fn tombstone_dir(root: &std::path::Path) -> PathBuf {
+    root.join(TOMBSTONE_DIR_NAME)
+}
+
 impl Engine {
     /// Drive both event channels until either is closed.
     pub async fn run(
@@ -142,14 +159,38 @@ impl Engine {
             }
             LocalEvent::Rename { from, to } => {
                 let mut cat = self.catalogue.lock().await;
-                if let Some(existing) = cat.by_local_path(&from)? {
-                    let mut new_rec = existing.clone();
-                    new_rec.local_path = to.clone();
-                    new_rec.status = SyncStatus::LocalDirty;
-                    new_rec.updated_at = chrono::Utc::now();
-                    cat.upsert(&new_rec)?;
-                    info!(?from, ?to, "local rename recorded");
+                let Some(existing) = cat.by_local_path(&from)? else {
+                    return Ok(());
+                };
+                // Defensive: a rename into a path the catalogue is
+                // already tracking would violate UNIQUE(local_path)
+                // when we re-upsert `existing` with its new path.
+                // Treat the displaced row as locally deleted (the
+                // operating system overwrote its on-disk bytes) so
+                // the next sync pushes a tombstone for it, then
+                // proceed with the rename. Order matters: we must
+                // free the target path inside the same catalogue
+                // transaction we own the lock for, otherwise a
+                // concurrent task could race in between.
+                if let Some(displaced) = cat.by_local_path(&to)? {
+                    if displaced.remote_file_id != existing.remote_file_id {
+                        let parked = tombstone_dir(&self.config.root)
+                            .join(displaced.remote_file_id.to_string());
+                        cat.set_local_path(displaced.remote_file_id, &parked)?;
+                        cat.set_status(displaced.remote_file_id, SyncStatus::LocalDirty)?;
+                        info!(
+                            ?to,
+                            displaced_file_id = %displaced.remote_file_id,
+                            "rename target already tracked; displaced row marked deleted"
+                        );
+                    }
                 }
+                let mut new_rec = existing.clone();
+                new_rec.local_path = to.clone();
+                new_rec.status = SyncStatus::LocalDirty;
+                new_rec.updated_at = chrono::Utc::now();
+                cat.upsert(&new_rec)?;
+                info!(?from, ?to, "local rename recorded");
                 Ok(())
             }
         }
@@ -356,5 +397,62 @@ mod tests {
         assert_eq!(rec.remote_version_id, version_id);
         assert_eq!(rec.content_hash, [0xAB; 32]);
         assert_eq!(rec.size_bytes, 1024);
+    }
+
+    #[tokio::test]
+    async fn rename_over_tracked_path_parks_displaced_row() {
+        // Regression: a rename whose `to` collides with an existing
+        // catalogue row would previously violate UNIQUE(local_path)
+        // on the second upsert. The engine now reroutes the
+        // displaced row into the tombstone dir, marks it
+        // LocalDirty, and only then upserts the renamed source.
+        let tempdir = TempDir::new().unwrap();
+        let (engine, catalogue) = engine_for(&tempdir);
+        let src_id = Uuid::new_v4();
+        let dst_id = Uuid::new_v4();
+        let from = tempdir.path().join("a.txt");
+        let to = tempdir.path().join("b.txt");
+        {
+            let mut cat = catalogue.lock().await;
+            cat.upsert(&FileRecord {
+                remote_file_id: src_id,
+                remote_version_id: Uuid::new_v4(),
+                local_path: from.clone(),
+                size_bytes: 1,
+                content_hash: [1u8; 32],
+                status: SyncStatus::UpToDate,
+                pinned: false,
+                updated_at: Utc::now(),
+            })
+            .unwrap();
+            cat.upsert(&FileRecord {
+                remote_file_id: dst_id,
+                remote_version_id: Uuid::new_v4(),
+                local_path: to.clone(),
+                size_bytes: 1,
+                content_hash: [2u8; 32],
+                status: SyncStatus::UpToDate,
+                pinned: false,
+                updated_at: Utc::now(),
+            })
+            .unwrap();
+        }
+        engine
+            .handle_local(LocalEvent::Rename {
+                from: from.clone(),
+                to: to.clone(),
+            })
+            .await
+            .expect("rename must not violate UNIQUE(local_path)");
+        let cat = catalogue.lock().await;
+        let displaced = cat.get(dst_id).unwrap().unwrap();
+        assert_eq!(
+            displaced.local_path,
+            tempdir.path().join(".zk-deleted").join(dst_id.to_string())
+        );
+        assert_eq!(displaced.status, SyncStatus::LocalDirty);
+        let renamed = cat.get(src_id).unwrap().unwrap();
+        assert_eq!(renamed.local_path, to);
+        assert_eq!(renamed.status, SyncStatus::LocalDirty);
     }
 }

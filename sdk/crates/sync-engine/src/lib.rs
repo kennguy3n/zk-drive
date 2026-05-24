@@ -27,7 +27,9 @@ mod watcher;
 
 pub use catalogue::{Catalogue, FileRecord, SyncStatus};
 pub use conflict::ConflictPolicy;
-pub use engine::{placeholder_dir, Engine, EngineConfig, PLACEHOLDER_DIR_NAME};
+pub use engine::{
+    placeholder_dir, tombstone_dir, Engine, EngineConfig, PLACEHOLDER_DIR_NAME, TOMBSTONE_DIR_NAME,
+};
 pub use events::{LocalEvent, RemoteEvent};
 pub use hash::content_hash;
 pub use poller::RemotePoller;

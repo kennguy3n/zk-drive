@@ -19,7 +19,9 @@ use tracing::info;
 use uuid::Uuid;
 
 use zk_sync_api::{Bearer, Client};
-use zk_sync_engine::{placeholder_dir, Catalogue, Engine, EngineConfig, RemotePoller, Watcher};
+use zk_sync_engine::{
+    placeholder_dir, tombstone_dir, Catalogue, Engine, EngineConfig, RemotePoller, Watcher,
+};
 
 #[derive(Parser)]
 #[command(name = "zk-sync", version, about = "ZK Drive desktop sync daemon")]
@@ -71,16 +73,20 @@ enum Cmd {
 /// pass through the raw input so the user gets a clear error
 /// rather than a literal `~` directory in the working directory.
 fn expand_tilde(path: &str) -> PathBuf {
+    // Handle the three meaningful inputs: a bare `~`, `~/...`, and
+    // `~\...` (PowerShell). Anything else passes through untouched
+    // -- e.g. `~user/...` is reserved for future per-user expansion
+    // and right now should surface as a clear "file not found"
+    // instead of being silently mangled.
+    if path == "~" {
+        return home_dir().unwrap_or_else(|| PathBuf::from(path));
+    }
     let stripped = match path.strip_prefix("~/") {
         Some(s) => s,
-        None => {
-            // Also handle the Windows-style `~\` separator for
-            // consistency with PowerShell users.
-            match path.strip_prefix("~\\") {
-                Some(s) => s,
-                None => return PathBuf::from(path),
-            }
-        }
+        None => match path.strip_prefix("~\\") {
+            Some(s) => s,
+            None => return PathBuf::from(path),
+        },
     };
     if let Some(home) = home_dir() {
         return home.join(stripped);
@@ -141,16 +147,17 @@ async fn main() -> anyhow::Result<()> {
             page_size,
         } => {
             std::fs::create_dir_all(&root)?;
-            // Pre-create the placeholder directory so the watcher can
-            // resolve it absolutely on platforms where notify only
-            // emits canonical paths.
+            // Pre-create the hidden engine-owned directories so the
+            // watcher resolves them canonically on platforms where
+            // notify emits canonical paths only.
             std::fs::create_dir_all(placeholder_dir(&root))?;
+            std::fs::create_dir_all(tombstone_dir(&root))?;
             let (local_tx, local_rx) = mpsc::channel(1024);
             let (remote_tx, remote_rx) = mpsc::channel(1024);
             let _watcher = Watcher::start_with_ignore(
                 &root,
                 std::time::Duration::from_millis(250),
-                vec![placeholder_dir(&root)],
+                vec![placeholder_dir(&root), tombstone_dir(&root)],
                 local_tx,
             )?;
 

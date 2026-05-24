@@ -147,6 +147,24 @@ impl RemotePoller {
             if !page.has_more {
                 return Ok(());
             }
+            // Defensive: a misbehaving server could return
+            // `has_more=true` with an unchanged cursor (and either
+            // empty or replayed mutations), which would spin this
+            // loop hot against the API. Bail out and let the outer
+            // run-loop's exponential backoff handle the retry --
+            // that grows the request interval instead of pegging a
+            // CPU.
+            if page.cursor <= since {
+                warn!(
+                    workspace_id = %self.workspace_id,
+                    since,
+                    cursor = page.cursor,
+                    "changefeed reports has_more=true but cursor did not advance; aborting catch-up"
+                );
+                return Err(crate::SyncError::Other(
+                    "changefeed cursor did not advance".into(),
+                ));
+            }
         }
     }
 

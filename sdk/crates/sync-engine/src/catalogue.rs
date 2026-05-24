@@ -138,6 +138,24 @@ impl Catalogue {
         Ok(())
     }
 
+    /// Repoint a record's `local_path`. Used by the engine to move a
+    /// row out of the way when a rename arrives at a path that is
+    /// already tracked by a different file -- without this the
+    /// downstream upsert would violate the schema's UNIQUE(local_path)
+    /// constraint.
+    pub fn set_local_path(&mut self, remote_file_id: Uuid, new_path: &Path) -> Result<()> {
+        let now = chrono::Utc::now().to_rfc3339();
+        self.conn.execute(
+            "UPDATE files SET local_path = ?1, updated_at = ?2 WHERE remote_file_id = ?3",
+            params![
+                new_path.to_string_lossy().to_string(),
+                now,
+                remote_file_id.to_string()
+            ],
+        )?;
+        Ok(())
+    }
+
     /// Mark a record's [`SyncStatus`]. Cheap path used by the engine
     /// loop when transitioning a file in-flight / back to up_to_date.
     pub fn set_status(&mut self, remote_file_id: Uuid, status: SyncStatus) -> Result<()> {

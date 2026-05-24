@@ -27,7 +27,7 @@ members = [
 
 [workspace.package]
 edition = "2021"
-rust-version = "1.79"
+rust-version = "1.86"
 license = "Apache-2.0"
 repository = "https://github.com/kennguy3n/zk-drive"
 authors = ["ZK Drive Engineering <eng@uney.com>"]
