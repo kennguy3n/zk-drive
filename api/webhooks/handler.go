@@ -432,15 +432,42 @@ func (h *Handler) Test(w http.ResponseWriter, r *http.Request) {
 		writeServerError(r.Context(), w, "dispatch test event", dispatchErr)
 		return
 	}
+	// Dispatch can return (row != nil, dispatchErr != nil) for two
+	// shapes: (1) the synthetic event was rejected pre-send (bad URL
+	// parse / bad signer) and recordBlocked persisted an
+	// OutcomeBlocked row; (2) the HTTP call ran to completion but the
+	// follow-up InsertDelivery failed. Shape (1) is still useful to
+	// the admin — the row's ErrorMessage carries the reason and they
+	// see it inline. Shape (2) is the observability gap: the admin
+	// sees the live result but a follow-up GET on /deliveries will
+	// NOT show the row, which would be confusing without a log trail.
+	// Log both shapes here so operators can correlate the missing
+	// row against the request_id in the access log, then continue to
+	// render the row to the admin so the synchronous test-result UX
+	// is preserved. The dispatchErr wraps the row's ErrorMessage with
+	// extra context (e.g. "persist delivery: ..."), which is exactly
+	// what the operator needs to triage the failure.
+	if dispatchErr != nil {
+		logging.FromContext(r.Context()).Warn("webhook test dispatch returned row with non-fatal error",
+			"err", dispatchErr,
+			"subscription_id", sub.ID,
+			"outcome", string(row.Outcome),
+			"status_code", row.StatusCode,
+		)
+	}
 	// Audit the test so the access log shows who triggered it.
 	if h.audit != nil {
 		actorID, _ := middleware.UserIDFromContext(r.Context())
 		subID := sub.ID
-		h.audit.LogAction(r.Context(), workspaceID, &actorID, audit.ActionWebhookSubscriptionTest, "webhook_subscription", &subID, r, map[string]any{
+		auditMeta := map[string]any{
 			"event_type":  string(sub.EventType),
 			"outcome":     string(row.Outcome),
 			"status_code": row.StatusCode,
-		})
+		}
+		if dispatchErr != nil {
+			auditMeta["dispatch_error"] = dispatchErr.Error()
+		}
+		h.audit.LogAction(r.Context(), workspaceID, &actorID, audit.ActionWebhookSubscriptionTest, "webhook_subscription", &subID, r, auditMeta)
 	}
 	status := http.StatusOK
 	if row.Outcome != webhooks.OutcomeSuccess {

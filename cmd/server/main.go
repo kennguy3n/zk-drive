@@ -522,13 +522,28 @@ func run() error {
 	// not JetStream — tests dispatch synchronously to the single
 	// targeted subscription, see internal/webhooks/test_dispatch.go).
 	webhookRepo := webhooks.NewPostgresRepository(pool)
-	webhookTester, err := webhooks.NewTestDispatcher(webhookRepo, webhooks.NewDeliveryClient(webhooks.NewURLValidator(), webhooks.DefaultDeliveryTimeout))
+	// A single URLValidator is shared between (a) the admin
+	// handler's create-time SSRF check and (b) the TestDispatcher's
+	// per-delivery DNS-rebinding re-check. Both run inside the same
+	// API process and the validator is stateless (no caches, no
+	// connection pools), so a single instance is functionally
+	// identical to two independent instances. The previous
+	// arrangement created one via NewHandler's default constructor
+	// and a second inline at NewDeliveryClient(NewURLValidator(),
+	// ...); a future change to validator defaults (e.g. adding an
+	// allow-list flag) would have had to land in both places to
+	// avoid drift. Sharing here eliminates that coupling risk. The
+	// worker (cmd/worker/main.go) still constructs its own validator
+	// because it runs in a separate process.
+	webhookValidator := webhooks.NewURLValidator()
+	webhookTester, err := webhooks.NewTestDispatcher(webhookRepo, webhooks.NewDeliveryClient(webhookValidator, webhooks.DefaultDeliveryTimeout))
 	if err != nil {
 		return fmt.Errorf("webhooks/test-dispatcher: %w", err)
 	}
 	webhookHandler := apiwebhooks.NewHandler(webhookRepo).
 		WithPublisher(webhookPublisher).
 		WithTestDispatcher(webhookTester).
+		WithValidator(webhookValidator).
 		WithAudit(auditSvc)
 
 	kchatSvc := kchat.NewRoomService(
