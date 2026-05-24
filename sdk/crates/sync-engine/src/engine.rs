@@ -327,7 +327,8 @@ mod tests {
     use zk_sync_api::Mutation;
 
     fn engine_for(tempdir: &TempDir) -> (Engine, Arc<Mutex<Catalogue>>) {
-        let cat = Catalogue::open(tempdir.path().join("cat.db")).unwrap();
+        let workspace_id = Uuid::new_v4();
+        let cat = Catalogue::open(tempdir.path().join("cat.db"), workspace_id).unwrap();
         let catalogue = Arc::new(Mutex::new(cat));
         let client = Arc::new(
             zk_sync_api::Client::builder("https://example.com")
@@ -336,7 +337,7 @@ mod tests {
         );
         let engine = Engine::new(
             EngineConfig {
-                workspace_id: Uuid::new_v4(),
+                workspace_id,
                 root: tempdir.path().to_path_buf(),
                 chunk_size: None,
             },

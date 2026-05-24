@@ -185,21 +185,66 @@ pub struct FileRecord {
 }
 
 /// SQLite-backed catalogue.
+///
+/// A catalogue is *bound* to exactly one `workspace_id` at
+/// [`Catalogue::open`] time. Re-opening the same path for a different
+/// workspace is rejected with [`crate::SyncError::Other`] so a stray
+/// CLI invocation can't accidentally mix rows from two workspaces
+/// (the `files` table is keyed by `remote_file_id`/`local_path` only;
+/// mixing workspaces would produce hash / state-machine corruption
+/// on the next reconciliation). The CLI's status handler can
+/// therefore call [`Catalogue::list_all`] knowing the count is
+/// already correctly workspace-scoped.
 pub struct Catalogue {
     conn: rusqlite::Connection,
+    workspace_id: Uuid,
 }
 
 impl Catalogue {
-    /// Open or create a catalogue at `path`. The schema is applied
-    /// idempotently on every open so upgrades that only ever add
-    /// tables / columns are safe.
-    pub fn open(path: impl AsRef<Path>) -> Result<Self> {
+    /// Open or create a catalogue at `path`, bound to `workspace_id`.
+    /// The schema is applied idempotently on every open so upgrades
+    /// that only ever add tables / columns are safe. If the on-disk
+    /// catalogue was previously bound to a *different* workspace,
+    /// this returns [`crate::SyncError::Other`] -- the caller is
+    /// expected to either pick a different catalogue path or migrate
+    /// the existing data out-of-band; we never silently overwrite the
+    /// stored binding.
+    pub fn open(path: impl AsRef<Path>, workspace_id: Uuid) -> Result<Self> {
         let conn = rusqlite::Connection::open(path)?;
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.pragma_update(None, "synchronous", "NORMAL")?;
         conn.pragma_update(None, "foreign_keys", "ON")?;
         conn.execute_batch(SCHEMA)?;
-        Ok(Self { conn })
+        let want = workspace_id.to_string();
+        let stored: Option<String> = conn
+            .query_row(
+                "SELECT value FROM catalogue_meta WHERE key = 'workspace_id'",
+                [],
+                |r| r.get(0),
+            )
+            .optional()?;
+        match stored {
+            Some(existing) if existing == want => {}
+            Some(existing) => {
+                return Err(crate::SyncError::Other(format!(
+                    "catalogue is bound to workspace {existing}; refusing to open for workspace {want}"
+                )));
+            }
+            None => {
+                conn.execute(
+                    "INSERT INTO catalogue_meta (key, value) VALUES ('workspace_id', ?1)",
+                    [&want],
+                )?;
+            }
+        }
+        Ok(Self { conn, workspace_id })
+    }
+
+    /// Workspace this catalogue is bound to. Surfaced so the engine
+    /// (and the CLI status handler) can assert configuration matches
+    /// what the catalogue claims to know about.
+    pub fn workspace_id(&self) -> Uuid {
+        self.workspace_id
     }
 
     /// Insert or replace one record. Used for both "first time we
@@ -425,6 +470,16 @@ CREATE TABLE IF NOT EXISTS workspace_cursors (
     workspace_id TEXT PRIMARY KEY,
     cursor       INTEGER NOT NULL
 );
+
+-- Stores the workspace this catalogue is exclusively bound to. The
+-- catalogue rejects opens for any other workspace_id; this is the
+-- enforcement point for the "one catalogue file per workspace"
+-- invariant relied on by every files-table query (which is keyed by
+-- remote_file_id / local_path, NOT by workspace).
+CREATE TABLE IF NOT EXISTS catalogue_meta (
+    key   TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
 "#;
 
 #[cfg(test)]
@@ -448,14 +503,35 @@ mod tests {
     fn open_creates_schema_idempotently() {
         let tmp = tempfile::tempdir().unwrap();
         let p = tmp.path().join("catalogue.db");
-        let _ = Catalogue::open(&p).unwrap();
-        let _ = Catalogue::open(&p).unwrap(); // Re-open must succeed.
+        let ws = Uuid::new_v4();
+        let _ = Catalogue::open(&p, ws).unwrap();
+        let _ = Catalogue::open(&p, ws).unwrap(); // Re-open same workspace must succeed.
+    }
+
+    #[test]
+    fn open_rejects_mismatched_workspace_binding() {
+        let tmp = tempfile::tempdir().unwrap();
+        let p = tmp.path().join("catalogue.db");
+        let ws_a = Uuid::new_v4();
+        let ws_b = Uuid::new_v4();
+        let _ = Catalogue::open(&p, ws_a).unwrap();
+        // Use a hand-rolled match so we don't have to require `Debug`
+        // on the catalogue handle just to satisfy `expect_err`.
+        let err = match Catalogue::open(&p, ws_b) {
+            Err(e) => e,
+            Ok(_) => panic!("opening the same catalogue path for a different workspace must fail"),
+        };
+        let msg = format!("{err}");
+        assert!(
+            msg.contains(&ws_a.to_string()) && msg.contains(&ws_b.to_string()),
+            "error message must surface both workspace ids: {msg}"
+        );
     }
 
     #[test]
     fn upsert_and_get_round_trip() {
         let tmp = tempfile::tempdir().unwrap();
-        let mut cat = Catalogue::open(tmp.path().join("c.db")).unwrap();
+        let mut cat = Catalogue::open(tmp.path().join("c.db"), Uuid::new_v4()).unwrap();
         let mut r = rec("a.txt");
         cat.upsert(&r).unwrap();
         let got = cat.get(r.remote_file_id).unwrap().unwrap();
@@ -473,7 +549,7 @@ mod tests {
     #[test]
     fn by_local_path_matches_upsert() {
         let tmp = tempfile::tempdir().unwrap();
-        let mut cat = Catalogue::open(tmp.path().join("c.db")).unwrap();
+        let mut cat = Catalogue::open(tmp.path().join("c.db"), Uuid::new_v4()).unwrap();
         let r = rec("b.bin");
         cat.upsert(&r).unwrap();
         let got = cat.by_local_path(&r.local_path).unwrap().unwrap();
@@ -483,8 +559,8 @@ mod tests {
     #[test]
     fn cursor_round_trip() {
         let tmp = tempfile::tempdir().unwrap();
-        let mut cat = Catalogue::open(tmp.path().join("c.db")).unwrap();
         let ws = Uuid::new_v4();
+        let mut cat = Catalogue::open(tmp.path().join("c.db"), ws).unwrap();
         assert_eq!(cat.get_cursor(ws).unwrap(), 0);
         cat.set_cursor(ws, 42).unwrap();
         assert_eq!(cat.get_cursor(ws).unwrap(), 42);
@@ -495,7 +571,7 @@ mod tests {
     #[test]
     fn list_all_orders_by_updated_at() {
         let tmp = tempfile::tempdir().unwrap();
-        let mut cat = Catalogue::open(tmp.path().join("c.db")).unwrap();
+        let mut cat = Catalogue::open(tmp.path().join("c.db"), Uuid::new_v4()).unwrap();
         let mut r1 = rec("a");
         r1.updated_at = chrono::Utc::now() - chrono::Duration::seconds(10);
         let r2 = rec("b");

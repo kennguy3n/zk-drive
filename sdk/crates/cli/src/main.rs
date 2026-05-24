@@ -125,7 +125,17 @@ async fn main() -> anyhow::Result<()> {
     if let Some(parent) = catalogue_path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let cat = Catalogue::open(&catalogue_path)?;
+    // The catalogue is bound to one workspace for its lifetime so the
+    // `files` table (keyed by remote_file_id / local_path only) can
+    // never accidentally co-mingle rows from a second workspace if
+    // the user reuses `--catalogue` across `--workspace` flags. Pull
+    // the workspace out of the subcommand here and surface it to the
+    // catalogue opener.
+    let workspace_id = match &args.cmd {
+        Cmd::Status { workspace } => *workspace,
+        Cmd::Run { workspace, .. } => *workspace,
+    };
+    let cat = Catalogue::open(&catalogue_path, workspace_id)?;
     let catalogue = Arc::new(Mutex::new(cat));
 
     let client = Arc::new(
@@ -138,6 +148,9 @@ async fn main() -> anyhow::Result<()> {
         Cmd::Status { workspace } => {
             let c = catalogue.lock().await;
             let cursor = c.get_cursor(workspace)?;
+            // `list_all` is safe to report as a per-workspace count
+            // because the catalogue itself is workspace-scoped (see
+            // Catalogue::open).
             let n = c.list_all()?.len();
             println!("workspace={workspace} cursor={cursor} tracked_files={n}");
         }

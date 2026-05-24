@@ -61,7 +61,7 @@ mod tests {
         eintr_pending: bool,
     }
 
-    impl<'a> Read for EintrOnceThenRead<'a> {
+    impl Read for EintrOnceThenRead<'_> {
         fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
             if self.eintr_pending {
                 self.eintr_pending = false;
