@@ -22,9 +22,19 @@ import (
 // lock release.
 var binaryVarsMu sync.Mutex
 
-// withBinarySwap takes the package-level lock, calls swap to mutate
-// one of the binary vars, registers a t.Cleanup that restores the
-// original value, and releases the lock when the test finishes.
+// withBinarySwap takes the package-level lock, runs swap to capture
+// + mutate one of the binary vars, and releases the lock when the
+// test finishes. The swap closure runs WHILE the lock is held so
+// both the read-of-previous-value AND the write-of-new-value happen
+// inside the critical section — a previous version of this helper
+// let callers read the old value before calling withBinarySwap,
+// which would race a concurrent test if anyone ever added
+// t.Parallel(). The closure is responsible for capturing the
+// previous value (e.g. via a local var) and registering a
+// t.Cleanup that restores it; that cleanup must also run inside
+// the locked region, which the LIFO ordering of t.Cleanup
+// guarantees because we register the Unlock cleanup FIRST here.
+//
 // Tests should funnel ALL binary-var mutations through this helper
 // rather than touching the vars directly.
 func withBinarySwap(t *testing.T, swap func()) {
@@ -40,11 +50,11 @@ func withBinarySwap(t *testing.T, swap func()) {
 // refactor adds t.Parallel() to one of them.
 
 func TestRenderOfficeDocument_MissingBinaryIsUnsupported(t *testing.T) {
-	prev := sofficeBinary
 	withBinarySwap(t, func() {
+		prev := sofficeBinary
+		t.Cleanup(func() { sofficeBinary = prev })
 		sofficeBinary = "/nonexistent/zkdrive-soffice-stub"
 	})
-	t.Cleanup(func() { sofficeBinary = prev })
 
 	_, err := renderOfficeDocument(context.Background(),
 		"application/vnd.openxmlformats-officedocument.wordprocessingml.document",
@@ -75,11 +85,11 @@ func TestRenderOfficeDocument_NoExtensionMappingIsUnsupported(t *testing.T) {
 }
 
 func TestRenderVideoFrame_MissingBinaryIsUnsupported(t *testing.T) {
-	prev := ffmpegBinary
 	withBinarySwap(t, func() {
+		prev := ffmpegBinary
+		t.Cleanup(func() { ffmpegBinary = prev })
 		ffmpegBinary = "/nonexistent/zkdrive-ffmpeg-stub"
 	})
-	t.Cleanup(func() { ffmpegBinary = prev })
 
 	_, err := renderVideoFrame(context.Background(), []byte("\x00\x00\x00stub"))
 	if !errors.Is(err, ErrUnsupportedMime) {
@@ -88,15 +98,15 @@ func TestRenderVideoFrame_MissingBinaryIsUnsupported(t *testing.T) {
 }
 
 func TestRenderAudioWaveform_NoToolsIsUnsupported(t *testing.T) {
-	prevBBC := audioWaveformBinary
-	prevFF := ffmpegBinary
 	withBinarySwap(t, func() {
+		prevBBC := audioWaveformBinary
+		prevFF := ffmpegBinary
+		t.Cleanup(func() {
+			audioWaveformBinary = prevBBC
+			ffmpegBinary = prevFF
+		})
 		audioWaveformBinary = "/nonexistent/zkdrive-audiowaveform-stub"
 		ffmpegBinary = "/nonexistent/zkdrive-ffmpeg-stub"
-	})
-	t.Cleanup(func() {
-		audioWaveformBinary = prevBBC
-		ffmpegBinary = prevFF
 	})
 
 	_, err := renderAudioWaveform(context.Background(), []byte("\x00stub"))
@@ -106,11 +116,11 @@ func TestRenderAudioWaveform_NoToolsIsUnsupported(t *testing.T) {
 }
 
 func TestRenderSVG_MissingBinaryIsUnsupported(t *testing.T) {
-	prev := rsvgBinary
 	withBinarySwap(t, func() {
+		prev := rsvgBinary
+		t.Cleanup(func() { rsvgBinary = prev })
 		rsvgBinary = "/nonexistent/zkdrive-rsvg-stub"
 	})
-	t.Cleanup(func() { rsvgBinary = prev })
 
 	_, err := renderSVG(context.Background(), []byte(`<svg xmlns="http://www.w3.org/2000/svg"/>`))
 	if !errors.Is(err, ErrUnsupportedMime) {
@@ -119,11 +129,11 @@ func TestRenderSVG_MissingBinaryIsUnsupported(t *testing.T) {
 }
 
 func TestRenderDesign_MissingBinaryIsUnsupported(t *testing.T) {
-	prev := imagemagickBinary
 	withBinarySwap(t, func() {
+		prev := imagemagickBinary
+		t.Cleanup(func() { imagemagickBinary = prev })
 		imagemagickBinary = "/nonexistent/zkdrive-convert-stub"
 	})
-	t.Cleanup(func() { imagemagickBinary = prev })
 
 	_, err := renderDesign(context.Background(), []byte("not a psd"))
 	if !errors.Is(err, ErrUnsupportedMime) {

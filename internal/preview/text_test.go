@@ -62,3 +62,96 @@ func TestRenderText_IsRegistered(t *testing.T) {
 		}
 	}
 }
+
+// TestTruncateRunes guards the rune-aware truncation helper because
+// regressing it would silently produce U+FFFD glyphs in every
+// preview that handles non-ASCII content (CJK / Arabic / emoji
+// subjects, multi-byte source files, etc.). The byte-len-based
+// path that we replaced would have failed every multi-byte case
+// below.
+func TestTruncateRunes(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name   string
+		input  string
+		max    int
+		suffix string
+		want   string
+	}{
+		{
+			name: "ASCII within cap is unchanged",
+			input: "hello", max: 10, suffix: "…",
+			want: "hello",
+		},
+		{
+			name: "ASCII over cap gets ellipsis",
+			input: "abcdefghij", max: 5, suffix: "…",
+			want: "abcd…",
+		},
+		{
+			name: "CJK over cap slices on rune boundary",
+			input: "日本語テストです", max: 4, suffix: "…",
+			want: "日本語…",
+		},
+		{
+			name: "emoji over cap slices on rune boundary",
+			input: "🎨🎬🎵🎮🎲🃏", max: 3, suffix: "…",
+			want: "🎨🎬…",
+		},
+		{
+			name: "empty suffix returns hard cut",
+			input: "日本語テストです", max: 3, suffix: "",
+			want: "日本語",
+		},
+		{
+			name: "max < 1 yields suffix only",
+			input: "anything", max: 0, suffix: "…",
+			want: "…",
+		},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := truncateRunes(tc.input, tc.max, tc.suffix)
+			if got != tc.want {
+				t.Errorf("truncateRunes(%q, %d, %q) = %q; want %q",
+					tc.input, tc.max, tc.suffix, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestWrapLines_MultiByteRuneBoundary guards the rune-aware wrap
+// path. The byte-len-based wrap would split each 3-byte CJK rune
+// into a leading 1-byte fragment and a trailing 2-byte fragment,
+// neither of which is valid UTF-8 in isolation. We assert that
+// every wrapped chunk is independently valid UTF-8.
+func TestWrapLines_MultiByteRuneBoundary(t *testing.T) {
+	t.Parallel()
+	// 10 CJK runes; wrap at 4 should give chunks of 4 / 4 / 2 runes.
+	body := "日本語テストデータ用"
+	lines := wrapLines(body, 4)
+	if len(lines) != 3 {
+		t.Fatalf("wrapLines len = %d, want 3 (got: %v)", len(lines), lines)
+	}
+	wantRunes := []int{4, 4, 2}
+	for i, ln := range lines {
+		got := len([]rune(ln))
+		if got != wantRunes[i] {
+			t.Errorf("lines[%d] rune count = %d, want %d (line=%q)", i, got, wantRunes[i], ln)
+		}
+		if !isValidUTF8(ln) {
+			t.Errorf("lines[%d] is not valid UTF-8: %q", i, ln)
+		}
+	}
+}
+
+func isValidUTF8(s string) bool {
+	for _, r := range s {
+		if r == '\uFFFD' {
+			return false
+		}
+	}
+	return true
+}

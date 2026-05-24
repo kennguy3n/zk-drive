@@ -43,10 +43,12 @@ func renderEmail(_ context.Context, src []byte) (image.Image, error) {
 	}
 	// Trim very long subjects so the header doesn't bleed off the
 	// canvas. 64 chars matches our textimage column budget for the
-	// 600 px canvas at the inconsolata 8 px advance.
-	if len(header) > 64 {
-		header = header[:63] + "…"
-	}
+	// 600 px canvas at the inconsolata 8 px advance. We slice by
+	// rune count rather than byte length because email subjects are
+	// frequently non-ASCII (CJK, Arabic, emoji) and byte-slicing in
+	// the middle of a multi-byte UTF-8 sequence would render as
+	// U+FFFD replacement glyphs in the preview.
+	header = truncateRunes(header, 64, "…")
 
 	var b strings.Builder
 	if from != "" {

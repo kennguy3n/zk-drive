@@ -30,16 +30,17 @@ const archiveMaxEntries = 64
 // browsers and OS sniffers disagree on the canonical type.
 func renderArchive(_ context.Context, mime string, src []byte) (image.Image, error) {
 	var (
-		entries []string
-		kind    string
-		err     error
+		entries    []string
+		totalCount int
+		kind       string
+		err        error
 	)
 	switch normalizeMime(mime) {
 	case "application/zip", "application/x-zip-compressed":
-		entries, err = listZipEntries(src)
+		entries, totalCount, err = listZipEntries(src)
 		kind = "ZIP"
 	case "application/x-tar":
-		entries, err = listTarEntries(bytes.NewReader(src))
+		entries, totalCount, err = listTarEntries(bytes.NewReader(src))
 		kind = "TAR"
 	case "application/gzip", "application/x-gzip", "application/x-tar-gz", "application/x-tgz":
 		// .tar.gz / .tgz. Wrap the source in a gzip reader, then
@@ -52,7 +53,7 @@ func renderArchive(_ context.Context, mime string, src []byte) (image.Image, err
 			return nil, fmt.Errorf("gzip: %w", gzErr)
 		}
 		defer func() { _ = gz.Close() }()
-		entries, err = listTarEntries(gz)
+		entries, totalCount, err = listTarEntries(gz)
 		kind = "TAR.GZ"
 	default:
 		return nil, fmt.Errorf("%w: archive type %q", ErrUnsupportedMime, mime)
@@ -62,11 +63,21 @@ func renderArchive(_ context.Context, mime string, src []byte) (image.Image, err
 	}
 	// Header is computed AFTER the err check so a failed listing
 	// can't bake a misleading "0 entries" caption into the preview.
-	header := fmt.Sprintf("%s archive — %d entries", kind, len(entries))
+	// totalCount reflects the real number of entries the listers
+	// observed, even when archiveMaxEntries truncated the returned
+	// slice. Surface that fact in the caption so a 50k-file tarball
+	// doesn't render as "TAR archive — 64 entries".
+	header := fmt.Sprintf("%s archive — %d entries", kind, totalCount)
+	if totalCount > len(entries) {
+		header = fmt.Sprintf("%s archive — %d entries (showing first %d)", kind, totalCount, len(entries))
+	}
 	// Sort directory entries first, then files, both alphabetically.
 	// This matches the listing format most file managers use and
 	// makes the preview deterministic across re-uploads of the same
-	// archive (zip readers do not guarantee insertion order).
+	// archive (zip readers do not guarantee insertion order). The
+	// listers already cap entries at archiveMaxEntries so we sort a
+	// bounded slice rather than a potentially-millions-of-entries
+	// one — see the doc comment on listZipEntries.
 	sort.SliceStable(entries, func(i, j int) bool {
 		a, b := entries[i], entries[j]
 		ad, bd := strings.HasSuffix(a, "/"), strings.HasSuffix(b, "/")
@@ -75,9 +86,6 @@ func renderArchive(_ context.Context, mime string, src []byte) (image.Image, err
 		}
 		return a < b
 	})
-	if len(entries) > archiveMaxEntries {
-		entries = entries[:archiveMaxEntries]
-	}
 	body := strings.Join(entries, "\n")
 	return renderTextToImage(body, textPreviewOpts{
 		header: header,
@@ -87,21 +95,45 @@ func renderArchive(_ context.Context, mime string, src []byte) (image.Image, err
 	}), nil
 }
 
-func listZipEntries(src []byte) ([]string, error) {
+// listZipEntries reads the ZIP central directory and returns the
+// first archiveMaxEntries entry names plus the TOTAL count of entries
+// the archive contained. The cap is enforced during the iteration,
+// not afterwards: a crafted ZIP can declare hundreds of thousands of
+// tiny entries within our 100 MiB MaxSourceBytes budget, and the
+// previous "collect everything, sort it, then slice" implementation
+// would let one such job allocate megabytes of string headers and
+// hammer the worker with O(n log n) sorting before any output was
+// produced. Capping early means the work per preview is bounded by
+// archiveMaxEntries regardless of how pathological the input is.
+func listZipEntries(src []byte) ([]string, int, error) {
 	r, err := zip.NewReader(bytes.NewReader(src), int64(len(src)))
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
-	out := make([]string, 0, len(r.File))
+	preallocCount := len(r.File)
+	if preallocCount > archiveMaxEntries {
+		preallocCount = archiveMaxEntries
+	}
+	out := make([]string, 0, preallocCount)
 	for _, f := range r.File {
+		if len(out) >= archiveMaxEntries {
+			break
+		}
 		out = append(out, f.Name)
 	}
-	return out, nil
+	return out, len(r.File), nil
 }
 
-func listTarEntries(r io.Reader) ([]string, error) {
+// listTarEntries walks the tar stream and returns the first
+// archiveMaxEntries entry names plus the TOTAL number of entries the
+// stream contained. The total is counted incrementally (we can't ask
+// a tar stream for its length up front) so we keep iterating past
+// the cap to drain the headers — but we DON'T append past the cap,
+// so the per-preview memory is still bounded by archiveMaxEntries.
+func listTarEntries(r io.Reader) ([]string, int, error) {
 	tr := tar.NewReader(r)
 	out := []string{}
+	total := 0
 	for {
 		h, err := tr.Next()
 		if err == io.EOF {
@@ -112,17 +144,17 @@ func listTarEntries(r io.Reader) ([]string, error) {
 			// still have a valid prefix of entries. Return what we
 			// have so the preview still renders, but wrap the error
 			// in case callers care.
-			if len(out) == 0 {
-				return nil, err
+			if total == 0 {
+				return nil, 0, err
 			}
-			return out, nil
+			return out, total, nil
 		}
-		out = append(out, h.Name)
-		if len(out) >= archiveMaxEntries {
-			break
+		total++
+		if len(out) < archiveMaxEntries {
+			out = append(out, h.Name)
 		}
 	}
-	return out, nil
+	return out, total, nil
 }
 
 func init() {

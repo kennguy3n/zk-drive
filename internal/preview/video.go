@@ -63,7 +63,13 @@ func renderVideoFrame(ctx context.Context, srcBytes []byte) (image.Image, error)
 	// each attempt a fresh timeout makes the retry actually
 	// useful. The caller's ctx still bounds the total wall time
 	// via the worker's job-level deadline, so this can't run away.
-	var stderr bytes.Buffer
+	//
+	// Each attempt gets its own stderr buffer because we want to
+	// preserve the primary attempt's diagnostics when the fallback
+	// also fails — discarding the primary stderr made debugging
+	// fast-seek-only failures (the most common ffmpeg edge case)
+	// effectively impossible.
+	var primaryStderr, fallbackStderr bytes.Buffer
 	primaryCtx, primaryCancel := context.WithTimeout(ctx, videoRenderTimeout)
 	defer primaryCancel()
 	// -ss before -i is the fast seek path: ffmpeg jumps directly to
@@ -83,8 +89,9 @@ func renderVideoFrame(ctx context.Context, srcBytes []byte) (image.Image, error)
 		outPath,
 	)
 	cmd.Dir = dir
-	cmd.Stderr = &stderr
-	if err := cmd.Run(); err == nil {
+	cmd.Stderr = &primaryStderr
+	var primaryRunErr error
+	if primaryRunErr = cmd.Run(); primaryRunErr == nil {
 		if img, decErr := readImageFile(outPath); decErr == nil {
 			return img, nil
 		}
@@ -93,7 +100,6 @@ func renderVideoFrame(ctx context.Context, srcBytes []byte) (image.Image, error)
 	// because the whole file is <1s, ffmpeg's fast-seek skipped past
 	// the only available keyframe, etc. Retry without -ss so ffmpeg
 	// picks the very first frame regardless of timestamp.
-	stderr.Reset()
 	if outErr := os.Remove(outPath); outErr != nil && !errors.Is(outErr, os.ErrNotExist) {
 		return nil, fmt.Errorf("remove stale frame: %w", outErr)
 	}
@@ -109,16 +115,33 @@ func renderVideoFrame(ctx context.Context, srcBytes []byte) (image.Image, error)
 		outPath,
 	)
 	cmd.Dir = dir
-	cmd.Stderr = &stderr
+	cmd.Stderr = &fallbackStderr
 	if err := cmd.Run(); err != nil {
+		// Surface BOTH attempts' diagnostics when we fail. The
+		// primary attempt is the most common ffmpeg-bug culprit
+		// (fast-seek on damaged containers, codec quirks), so
+		// hiding its stderr made historical incident reports
+		// useless. The primaryRunErr (if any) is also included
+		// so operators can see whether the fallback was triggered
+		// by a real error or by a decode-failure after a
+		// successful primary run.
 		if errors.Is(fallbackCtx.Err(), context.DeadlineExceeded) {
-			return nil, fmt.Errorf("ffmpeg video frame timed out after %s: %s", videoRenderTimeout, stderr.String())
+			return nil, fmt.Errorf(
+				"ffmpeg video frame timed out after %s on fallback (primary err=%v, primary stderr=%q): %s",
+				videoRenderTimeout, primaryRunErr, primaryStderr.String(), fallbackStderr.String(),
+			)
 		}
-		return nil, fmt.Errorf("ffmpeg video frame: %w: %s", err, stderr.String())
+		return nil, fmt.Errorf(
+			"ffmpeg video frame: %w (primary err=%v, primary stderr=%q, fallback stderr=%q)",
+			err, primaryRunErr, primaryStderr.String(), fallbackStderr.String(),
+		)
 	}
 	img, err := readImageFile(outPath)
 	if err != nil {
-		return nil, fmt.Errorf("decode video frame: %w (stderr=%q)", err, stderr.String())
+		return nil, fmt.Errorf(
+			"decode video frame: %w (primary err=%v, primary stderr=%q, fallback stderr=%q)",
+			err, primaryRunErr, primaryStderr.String(), fallbackStderr.String(),
+		)
 	}
 	return img, nil
 }

@@ -119,10 +119,11 @@ func renderTextToImage(body string, opts textPreviewOpts) image.Image {
 	for i, ln := range lines {
 		if truncated && i == lastIdx {
 			// trim the last line so the ellipsis fits within
-			// the column budget.
+			// the column budget. Slice by rune count, not byte
+			// count — see truncateRunes for the rationale.
 			trimTo := colsPerLine - 1
-			if trimTo > 0 && len(ln) > trimTo {
-				ln = ln[:trimTo]
+			if trimTo > 0 {
+				ln = truncateRunes(ln, trimTo, "")
 			}
 			ln += "…"
 		}
@@ -137,6 +138,14 @@ func renderTextToImage(body string, opts textPreviewOpts) image.Image {
 // at width. Tabs are expanded to two spaces (a thumbnail-friendly
 // width — keeping the source's 4 / 8 spaces would chew up the
 // available columns very quickly).
+//
+// Width is interpreted as a count of RUNES (not bytes), because the
+// monospace font we render with advances one cell per rune and the
+// caller computes width from "how many cells fit in this canvas". A
+// byte-based hard cut would split a multi-byte UTF-8 sequence in the
+// middle and produce U+FFFD glyphs at wrap boundaries for any line
+// with non-ASCII content. The rune-aware path costs one allocation
+// per wrapped chunk in exchange for correct output on every script.
 func wrapLines(body string, width int) []string {
 	if width < 1 {
 		width = 1
@@ -157,13 +166,40 @@ func wrapLines(body string, width int) []string {
 			out = append(out, "")
 			continue
 		}
-		for len(line) > width {
-			out = append(out, line[:width])
-			line = line[width:]
+		runes := []rune(line)
+		for len(runes) > width {
+			out = append(out, string(runes[:width]))
+			runes = runes[width:]
 		}
-		out = append(out, line)
+		out = append(out, string(runes))
 	}
 	return out
+}
+
+// truncateRunes returns s shortened to at most maxRunes runes,
+// appending the suffix when truncation actually occurs. Returns s
+// unchanged when its rune count is already <= maxRunes. This is the
+// rune-aware analogue of `if len(s) > n { s = s[:n-1] + "…" }` and
+// exists so callers don't have to remember to convert to []rune
+// every time they slice a possibly-non-ASCII string. The suffix
+// counts toward the visible width budget if the caller wants a
+// strict cap; pass "" to skip suffixing.
+func truncateRunes(s string, maxRunes int, suffix string) string {
+	if maxRunes < 1 {
+		return suffix
+	}
+	runes := []rune(s)
+	if len(runes) <= maxRunes {
+		return s
+	}
+	cut := maxRunes
+	if suffix != "" {
+		cut = maxRunes - len([]rune(suffix))
+		if cut < 0 {
+			cut = 0
+		}
+	}
+	return string(runes[:cut]) + suffix
 }
 
 func fillSolid(dst *image.RGBA, c color.Color) {

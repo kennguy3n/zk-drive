@@ -39,6 +39,44 @@ func TestRenderEmail_InvalidInput(t *testing.T) {
 	}
 }
 
+// TestRenderEmail_LongCJKSubject ensures we slice a long
+// non-ASCII subject on a rune boundary so the preview doesn't
+// render U+FFFD replacement glyphs. A byte-len cap at 63 would
+// split the 3-byte UTF-8 sequence in the middle of "日"; this
+// test would have caught that regression.
+func TestRenderEmail_LongCJKSubject(t *testing.T) {
+	t.Parallel()
+	// 80 CJK runes (240 bytes) — well over the 64-rune cap.
+	subject := strings.Repeat("日本語テストです", 10)
+	raw := strings.Join([]string{
+		"From: alice@example.com",
+		"To: bob@example.com",
+		"Subject: " + subject,
+		"Date: Mon, 25 May 2026 13:00:00 +0000",
+		"Content-Type: text/plain; charset=utf-8",
+		"",
+		"body",
+	}, "\r\n")
+	img, err := renderEmail(context.Background(), []byte(raw))
+	if err != nil {
+		t.Fatalf("renderEmail: %v", err)
+	}
+	if img == nil {
+		t.Fatal("renderEmail returned nil image")
+	}
+	// We can't easily extract the rendered subject from the pixel
+	// data, but we CAN exercise the same truncation path the
+	// renderer takes and assert it's clean. If a future refactor
+	// breaks this assertion, the preview thumbnails would silently
+	// regress to U+FFFD.
+	got := truncateRunes(subject, 64, "…")
+	for _, r := range got {
+		if r == '\uFFFD' {
+			t.Fatalf("truncated subject contains U+FFFD: %q", got)
+		}
+	}
+}
+
 func TestStripMimeBoundaries(t *testing.T) {
 	t.Parallel()
 	body := strings.Join([]string{

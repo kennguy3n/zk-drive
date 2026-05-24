@@ -7,6 +7,7 @@ import (
 	"compress/gzip"
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 )
 
@@ -96,5 +97,38 @@ func TestRenderArchive_UnknownMime(t *testing.T) {
 	_, err := renderArchive(context.Background(), "application/x-not-an-archive", []byte("..."))
 	if !errors.Is(err, ErrUnsupportedMime) {
 		t.Fatalf("expected ErrUnsupportedMime for unknown archive mime, got %v", err)
+	}
+}
+
+// TestListZipEntries_HonoursEntryCap exercises the listZipEntries
+// cap so a crafted archive with hundreds of thousands of entries
+// can't blow up the worker's memory + sort budget. The entry count
+// just over the cap is enough to verify the early break path
+// without baking a slow test.
+func TestListZipEntries_HonoursEntryCap(t *testing.T) {
+	t.Parallel()
+	var buf bytes.Buffer
+	zw := zip.NewWriter(&buf)
+	const entries = archiveMaxEntries * 4
+	for i := 0; i < entries; i++ {
+		f, err := zw.Create(fmt.Sprintf("entry-%05d.txt", i))
+		if err != nil {
+			t.Fatalf("zip create: %v", err)
+		}
+		_, _ = f.Write([]byte("x"))
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatalf("zip close: %v", err)
+	}
+
+	got, total, err := listZipEntries(buf.Bytes())
+	if err != nil {
+		t.Fatalf("listZipEntries: %v", err)
+	}
+	if len(got) != archiveMaxEntries {
+		t.Errorf("len(got) = %d, want exactly the cap %d", len(got), archiveMaxEntries)
+	}
+	if total != entries {
+		t.Errorf("total = %d, want %d (the real entry count, not the cap)", total, entries)
 	}
 }
