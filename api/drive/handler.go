@@ -251,23 +251,40 @@ func (h *Handler) notify(ctx context.Context, fn func(*notification.Service) err
 // logActivity is a nil-safe wrapper so callers don't need to null-check
 // every call-site. metadata may be nil.
 //
-// When a changefeed service is wired, the activity entry is also
-// mirrored to change_log for actions that represent state
-// mutations (file/folder create/rename/move/delete, file upload,
-// tag add/remove, permission grant/revoke). Pure-read actions
+// The activity log and the change feed are independently optional:
+// each is gated on its own service being wired, so a deployment can
+// enable one without the other. When the change feed is wired the
+// activity entry is mirrored to change_log for state-mutation
+// actions (file/folder create/rename/move/delete, file upload, tag
+// add/remove, permission grant/revoke). Pure-read actions
 // (file.download, file.bulk.download) are skipped — they do not
 // affect any client's reconciled state. The mirror is synchronous
 // so the durable cursor advances before the HTTP response, but a
 // failure is logged and swallowed (the activity entry is still
-// enqueued).
+// enqueued, the parent HTTP request still succeeds).
 func (h *Handler) logActivity(ctx context.Context, action, resourceType string, resourceID uuid.UUID, metadata map[string]any) {
+	workspaceID, _ := middleware.WorkspaceIDFromContext(ctx)
+	userID, _ := middleware.UserIDFromContext(ctx)
+	if h.activity != nil {
+		h.activity.LogAction(ctx, workspaceID, userID, action, resourceType, resourceID, metadata)
+	}
+	h.recordChange(ctx, workspaceID, userID, action, resourceType, resourceID, metadata)
+}
+
+// logActivityOnly mirrors logActivity but skips the change-feed leg.
+// Bulk handlers (api/drive/bulk.go) use this in their per-item loop
+// and call h.batchRecordChanges once at the end with the collected
+// inputs, so a 100-item bulk operation produces a single multi-row
+// change_log INSERT instead of 100 sequential ones. The activity
+// log is unaffected — it is already async (LogAction enqueues onto
+// a buffered channel) so per-item dispatch is cheap.
+func (h *Handler) logActivityOnly(ctx context.Context, action, resourceType string, resourceID uuid.UUID, metadata map[string]any) {
 	if h.activity == nil {
 		return
 	}
 	workspaceID, _ := middleware.WorkspaceIDFromContext(ctx)
 	userID, _ := middleware.UserIDFromContext(ctx)
 	h.activity.LogAction(ctx, workspaceID, userID, action, resourceType, resourceID, metadata)
-	h.recordChange(ctx, workspaceID, userID, action, resourceType, resourceID, metadata)
 }
 
 // recordChange translates an activity action into a changefeed
@@ -294,40 +311,7 @@ func (h *Handler) recordChange(
 	if !ok {
 		return
 	}
-	in := changefeed.RecordInput{
-		WorkspaceID: workspaceID,
-		Kind:        kind,
-		Op:          op,
-		ResourceID:  resourceID,
-		Metadata:    metadata,
-	}
-	if userID != uuid.Nil {
-		actor := userID
-		in.ActorID = &actor
-	}
-	// Pull parent_id / name out of metadata when present so sync
-	// clients receive structured fields rather than having to dig
-	// through the free-form blob. Both are optional; the activity
-	// call sites set them inconsistently and the change feed
-	// schema's columns are nullable.
-	if parentRaw, present := metadata["folder_id"]; present {
-		if pid, ok := uuidFromAny(parentRaw); ok {
-			in.ParentID = &pid
-		}
-	} else if parentRaw, present := metadata["parent_folder_id"]; present {
-		if pid, ok := uuidFromAny(parentRaw); ok {
-			in.ParentID = &pid
-		}
-	} else if parentRaw, present := metadata["new_parent_folder_id"]; present {
-		if pid, ok := uuidFromAny(parentRaw); ok {
-			in.ParentID = &pid
-		}
-	}
-	if nameRaw, present := metadata["name"]; present {
-		if n, ok := nameRaw.(string); ok {
-			in.Name = n
-		}
-	}
+	in := buildChangefeedInput(workspaceID, userID, kind, op, resourceID, metadata)
 	if _, err := h.changefeed.Record(ctx, in); err != nil {
 		logging.FromContext(ctx).Error("changefeed record failed; activity still enqueued",
 			"action", action,
@@ -336,6 +320,120 @@ func (h *Handler) recordChange(
 			"err", err,
 		)
 	}
+}
+
+// changeInput is the per-item payload a bulk handler accumulates
+// inside its loop. The handler hands a slice of these to
+// batchRecordChanges after the loop completes, and the changefeed
+// service flushes them in a single multi-row INSERT.
+type changeInput struct {
+	Action       string
+	ResourceType string
+	ResourceID   uuid.UUID
+	Metadata     map[string]any
+}
+
+// batchRecordChanges flushes a slice of per-item change inputs to
+// the change feed in a single batch. Used by bulk handlers (move,
+// copy, delete, download enumeration that mutates) to amortise the
+// Postgres round-trip cost across an N-item operation. Read-only
+// actions and actions that don't map to a change-feed kind/op are
+// silently skipped here just like the per-item recordChange path.
+func (h *Handler) batchRecordChanges(ctx context.Context, items []changeInput) {
+	if h.changefeed == nil || len(items) == 0 {
+		return
+	}
+	workspaceID, _ := middleware.WorkspaceIDFromContext(ctx)
+	userID, _ := middleware.UserIDFromContext(ctx)
+	if workspaceID == uuid.Nil {
+		return
+	}
+	inputs := make([]changefeed.RecordInput, 0, len(items))
+	for _, it := range items {
+		if it.ResourceID == uuid.Nil {
+			continue
+		}
+		kind, op, ok := changefeedKindOpFor(it.Action, it.ResourceType)
+		if !ok {
+			continue
+		}
+		inputs = append(inputs, buildChangefeedInput(workspaceID, userID, kind, op, it.ResourceID, it.Metadata))
+	}
+	if len(inputs) == 0 {
+		return
+	}
+	if _, err := h.changefeed.BatchRecord(ctx, inputs); err != nil {
+		logging.FromContext(ctx).Error("changefeed batch record failed",
+			"count", len(inputs),
+			"err", err,
+		)
+	}
+}
+
+// buildChangefeedInput is the shared builder used by both the
+// per-item recordChange path and the bulk batchRecordChanges path.
+// It lifts parent_id / name out of the activity metadata into
+// dedicated columns and strips those keys from the metadata blob so
+// the lifted value is not stored twice per row. Sync clients get
+// the structured field; the original free-form metadata still
+// flows through but minus the duplicated keys.
+func buildChangefeedInput(
+	workspaceID, userID uuid.UUID,
+	kind, op string,
+	resourceID uuid.UUID,
+	metadata map[string]any,
+) changefeed.RecordInput {
+	in := changefeed.RecordInput{
+		WorkspaceID: workspaceID,
+		Kind:        kind,
+		Op:          op,
+		ResourceID:  resourceID,
+	}
+	if userID != uuid.Nil {
+		actor := userID
+		in.ActorID = &actor
+	}
+	parentKeys := [...]string{"folder_id", "parent_folder_id", "new_parent_folder_id"}
+	var parentFound bool
+	for _, k := range parentKeys {
+		if raw, present := metadata[k]; present {
+			if pid, ok := uuidFromAny(raw); ok && !parentFound {
+				in.ParentID = &pid
+				parentFound = true
+			}
+		}
+	}
+	var nameFound bool
+	if raw, present := metadata["name"]; present {
+		if n, ok := raw.(string); ok {
+			in.Name = n
+			nameFound = true
+		}
+	}
+	// Strip the lifted keys from the metadata blob so the value is
+	// not stored redundantly in change_log.metadata alongside the
+	// dedicated columns. We shallow-copy the caller's map so the
+	// activity log entry (which receives the original) is untouched.
+	if len(metadata) > 0 && (parentFound || nameFound) {
+		trimmed := make(map[string]any, len(metadata))
+		for k, v := range metadata {
+			trimmed[k] = v
+		}
+		if parentFound {
+			for _, k := range parentKeys {
+				delete(trimmed, k)
+			}
+		}
+		if nameFound {
+			delete(trimmed, "name")
+		}
+		if len(trimmed) > 0 {
+			in.Metadata = trimmed
+		}
+	} else if len(metadata) > 0 {
+		in.Metadata = metadata
+	}
+	return in
 }
 
 // uuidFromAny extracts a uuid.UUID from common dynamic-typed values

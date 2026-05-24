@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"sort"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -33,6 +34,18 @@ func (r *fakeChangefeedRepo) Record(_ context.Context, m *changefeed.Mutation) e
 	m.Sequence = r.next
 	m.OccurredAt = time.Now().UTC()
 	r.rows = append(r.rows, *m)
+	return nil
+}
+
+func (r *fakeChangefeedRepo) BatchRecord(_ context.Context, muts []changefeed.Mutation) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for i := range muts {
+		r.next++
+		muts[i].Sequence = r.next
+		muts[i].OccurredAt = time.Now().UTC()
+		r.rows = append(r.rows, muts[i])
+	}
 	return nil
 }
 
@@ -384,6 +397,111 @@ func TestRecordChange_NoChangefeedServiceIsNoop(t *testing.T) {
 	// Must not panic.
 	h.recordChange(context.Background(), uuid.New(), uuid.New(),
 		activity.ActionFileCreate, "file", uuid.New(), nil)
+}
+
+// TestLogActivity_RecordsChangeEvenWhenActivityNil pins the F1 fix:
+// the change-feed leg must remain wired even if no activity service
+// is configured. Before the decoupling, logActivity returned early
+// on activity == nil and silently disabled the change feed.
+func TestLogActivity_RecordsChangeEvenWhenActivityNil(t *testing.T) {
+	t.Parallel()
+	repo := &fakeChangefeedRepo{}
+	svc := changefeed.NewService(repo)
+	h := (&Handler{}).WithChangefeed(svc) // activity intentionally nil
+
+	wsID := uuid.New()
+	userID := uuid.New()
+	resID := uuid.New()
+	ctx := middleware.WithWorkspaceID(context.Background(), wsID)
+	ctx = middleware.WithUserID(ctx, userID)
+
+	h.logActivity(ctx, activity.ActionFileCreate, "file", resID, nil)
+	if len(repo.rows) != 1 {
+		t.Fatalf("expected 1 change row recorded when activity is nil, got %d", len(repo.rows))
+	}
+}
+
+// TestBuildChangefeedInput_StripsLiftedKeysFromMetadata pins the F3
+// fix: parent_id / name extracted into structured columns must NOT
+// also appear in change_log.metadata, which would double the row
+// size for the most common mutation actions.
+func TestBuildChangefeedInput_StripsLiftedKeysFromMetadata(t *testing.T) {
+	t.Parallel()
+	repo := &fakeChangefeedRepo{}
+	svc := changefeed.NewService(repo)
+	h := (&Handler{}).WithChangefeed(svc)
+
+	wsID := uuid.New()
+	userID := uuid.New()
+	resID := uuid.New()
+	parentID := uuid.New()
+	h.recordChange(context.Background(), wsID, userID,
+		activity.ActionFileCreate, "file", resID, map[string]any{
+			"folder_id":            parentID.String(),
+			"parent_folder_id":     parentID.String(),
+			"new_parent_folder_id": parentID.String(),
+			"name":                 "report.pdf",
+			"size_bytes":           int64(2048), // unrelated metadata stays
+		})
+	if len(repo.rows) != 1 {
+		t.Fatalf("expected 1 mutation recorded, got %d", len(repo.rows))
+	}
+	m := repo.rows[0]
+	if m.ParentID == nil || *m.ParentID != parentID {
+		t.Fatalf("parent_id not lifted: %+v", m.ParentID)
+	}
+	if m.Name != "report.pdf" {
+		t.Fatalf("name not lifted: %q", m.Name)
+	}
+	// The metadata JSON should retain size_bytes but not the
+	// lifted keys.
+	body := string(m.Metadata)
+	for _, k := range []string{"folder_id", "parent_folder_id", "new_parent_folder_id", "\"name\""} {
+		if strings.Contains(body, k) {
+			t.Fatalf("metadata still contains lifted key %q: %s", k, body)
+		}
+	}
+	if !strings.Contains(body, "size_bytes") {
+		t.Fatalf("metadata missing unrelated key size_bytes: %s", body)
+	}
+}
+
+// TestBuildChangefeedInput_NoMetadataLeftEmpty drops the metadata
+// JSON entirely when stripping leaves an empty object — a 2-byte
+// "{}" payload per row would inflate the table for no reason.
+func TestBuildChangefeedInput_NoMetadataLeftEmpty(t *testing.T) {
+	t.Parallel()
+	repo := &fakeChangefeedRepo{}
+	svc := changefeed.NewService(repo)
+	h := (&Handler{}).WithChangefeed(svc)
+
+	parentID := uuid.New()
+	h.recordChange(context.Background(), uuid.New(), uuid.New(),
+		activity.ActionFileCreate, "file", uuid.New(), map[string]any{
+			"folder_id": parentID.String(),
+			"name":      "x.txt",
+		})
+	if len(repo.rows) != 1 {
+		t.Fatalf("expected 1 mutation, got %d", len(repo.rows))
+	}
+	if len(repo.rows[0].Metadata) != 0 {
+		t.Fatalf("metadata should be empty after stripping all lifted keys, got %q", repo.rows[0].Metadata)
+	}
+}
+
+// TestParseIntQuery_NegativeClipsToDefault pins the F5 symmetry fix:
+// a negative `limit` should be treated identically to an unset
+// `limit`, matching parseInt64Query's negative-clipping behavior.
+func TestParseIntQuery_NegativeClipsToDefault(t *testing.T) {
+	t.Parallel()
+	req := httptest.NewRequest(http.MethodGet, "/api/changes?limit=-5", nil)
+	v, err := parseIntQuery(req, "limit", 100)
+	if err != nil {
+		t.Fatalf("parseIntQuery returned error: %v", err)
+	}
+	if v != 100 {
+		t.Fatalf("negative limit should clip to default 100, got %d", v)
+	}
 }
 
 // itoa avoids importing strconv just for one int formatting call.

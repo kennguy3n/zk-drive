@@ -136,6 +136,12 @@ func parseInt64Query(r *http.Request, name string, def int64) (int64, error) {
 // parseIntQuery is the int equivalent of parseInt64Query. The narrower
 // type matches the changefeed.Since limit parameter which is
 // constrained to MaxLimit = 500.
+//
+// Negative values are clipped to `def` for symmetry with
+// parseInt64Query (cursor=-1 -> 0, limit=-1 -> default). The service
+// also defends with limit <= 0 -> DefaultLimit, but clipping at the
+// edge means a negative limit and an unset limit produce the same
+// observable response, which is the principle of least surprise.
 func parseIntQuery(r *http.Request, name string, def int) (int, error) {
 	raw := r.URL.Query().Get(name)
 	if raw == "" {
@@ -144,6 +150,9 @@ func parseIntQuery(r *http.Request, name string, def int) (int, error) {
 	v, err := strconv.Atoi(raw)
 	if err != nil {
 		return 0, err
+	}
+	if v < 0 {
+		return def, nil
 	}
 	return v, nil
 }

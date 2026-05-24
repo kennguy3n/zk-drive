@@ -144,6 +144,71 @@ func (s *Service) Record(ctx context.Context, in RecordInput) (Mutation, error) 
 	return m, nil
 }
 
+// BatchRecord persists a slice of RecordInputs in a single multi-row
+// INSERT and broadcasts each resulting Mutation. Bulk handlers
+// (move/copy/delete of N items) use this to amortise the per-row
+// round-trip cost across the entire bulk operation while preserving
+// the durability guarantee that the catch-up cursor advances before
+// the HTTP response returns.
+//
+// Validation, metadata marshalling, and broadcasting mirror the
+// single-item Record path so callers see identical semantics. An
+// empty slice is a no-op (returns nil, nil). Inputs that fail
+// validation cause the entire batch to fail before any DB write:
+// partial-success would leak gaps into the cursor stream which is
+// worse than an outright error for clients.
+//
+// Each event is published independently because the WS payload is
+// one mutation per envelope — the existing client protocol does
+// not understand a "batched" payload and changing it would force a
+// SDK upgrade. The publishes happen sequentially in sequence order
+// so clients observing the live stream see the same order as
+// clients catching up via Since.
+func (s *Service) BatchRecord(ctx context.Context, inputs []RecordInput) ([]Mutation, error) {
+	if len(inputs) == 0 {
+		return nil, nil
+	}
+	muts := make([]Mutation, len(inputs))
+	for i := range inputs {
+		if err := inputs[i].validate(); err != nil {
+			return nil, fmt.Errorf("batch[%d]: %w", i, err)
+		}
+		var metadata json.RawMessage
+		if len(inputs[i].Metadata) > 0 {
+			raw, err := json.Marshal(inputs[i].Metadata)
+			if err != nil {
+				return nil, fmt.Errorf("batch[%d]: marshal metadata: %w", i, err)
+			}
+			metadata = raw
+		}
+		muts[i] = Mutation{
+			WorkspaceID: inputs[i].WorkspaceID,
+			ActorID:     inputs[i].ActorID,
+			Kind:        inputs[i].Kind,
+			Op:          inputs[i].Op,
+			ResourceID:  inputs[i].ResourceID,
+			ParentID:    inputs[i].ParentID,
+			Name:        inputs[i].Name,
+			Metadata:    metadata,
+		}
+	}
+	if err := s.repo.BatchRecord(ctx, muts); err != nil {
+		return nil, err
+	}
+	if s.pub != nil {
+		for _, m := range muts {
+			if err := s.pub.Publish(ctx, m.WorkspaceID, Event{Type: "change", Payload: m}); err != nil {
+				logging.FromContext(ctx).Warn("changefeed batch publish failed; row persisted",
+					"workspace_id", m.WorkspaceID,
+					"sequence", m.Sequence,
+					"err", err,
+				)
+			}
+		}
+	}
+	return muts, nil
+}
+
 // Since returns the next page of mutations for `workspaceID` strictly
 // after `cursor`. The returned Page contains an advanced cursor that
 // callers should pass on the next call. Limit is clamped to (0,

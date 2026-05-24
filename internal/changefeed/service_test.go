@@ -52,6 +52,29 @@ func (r *fakeRepo) Record(_ context.Context, m *changefeed.Mutation) error {
 	return nil
 }
 
+func (r *fakeRepo) BatchRecord(_ context.Context, muts []changefeed.Mutation) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	now := time.Now().UTC()
+	for i := range muts {
+		r.next++
+		muts[i].Sequence = r.next
+		muts[i].OccurredAt = now
+		clone := muts[i]
+		if len(muts[i].Metadata) > 0 {
+			clone.Metadata = append(json.RawMessage(nil), muts[i].Metadata...)
+		}
+		r.rows = append(r.rows, clone)
+		if r.recordOK != nil {
+			select {
+			case r.recordOK <- struct{}{}:
+			default:
+			}
+		}
+	}
+	return nil
+}
+
 func (r *fakeRepo) Since(_ context.Context, workspaceID uuid.UUID, cursor int64, limit int) ([]changefeed.Mutation, bool, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -90,7 +113,8 @@ func (r *fakeRepo) Latest(_ context.Context, workspaceID uuid.UUID) (int64, erro
 // alongside the happy-path tests.
 type errRepo struct{ err error }
 
-func (e errRepo) Record(_ context.Context, _ *changefeed.Mutation) error { return e.err }
+func (e errRepo) Record(_ context.Context, _ *changefeed.Mutation) error       { return e.err }
+func (e errRepo) BatchRecord(_ context.Context, _ []changefeed.Mutation) error { return e.err }
 func (e errRepo) Since(_ context.Context, _ uuid.UUID, _ int64, _ int) ([]changefeed.Mutation, bool, error) {
 	return nil, false, e.err
 }
@@ -411,6 +435,111 @@ func TestServiceLatest_NilWorkspace(t *testing.T) {
 	svc := changefeed.NewService(newFakeRepo())
 	if _, err := svc.Latest(context.Background(), uuid.Nil); err == nil {
 		t.Fatalf("expected error for nil workspace id")
+	}
+}
+
+func TestServiceBatchRecord_PersistsAllAndBroadcastsEach(t *testing.T) {
+	t.Parallel()
+
+	repo := newFakeRepo()
+	pub := &recordingPublisher{}
+	svc := changefeed.NewService(repo).WithPublisher(pub)
+
+	workspaceID := uuid.New()
+	inputs := []changefeed.RecordInput{
+		{WorkspaceID: workspaceID, Kind: changefeed.KindFile, Op: changefeed.OpDelete, ResourceID: uuid.New()},
+		{WorkspaceID: workspaceID, Kind: changefeed.KindFile, Op: changefeed.OpDelete, ResourceID: uuid.New()},
+		{WorkspaceID: workspaceID, Kind: changefeed.KindFile, Op: changefeed.OpDelete, ResourceID: uuid.New()},
+	}
+	muts, err := svc.BatchRecord(context.Background(), inputs)
+	if err != nil {
+		t.Fatalf("batch record: %v", err)
+	}
+	if len(muts) != len(inputs) {
+		t.Fatalf("expected %d returned mutations, got %d", len(inputs), len(muts))
+	}
+	for i, m := range muts {
+		if m.Sequence == 0 {
+			t.Fatalf("batch[%d] sequence not populated", i)
+		}
+		if i > 0 && muts[i-1].Sequence >= m.Sequence {
+			t.Fatalf("batch sequence not monotonic: %d >= %d", muts[i-1].Sequence, m.Sequence)
+		}
+	}
+	if len(repo.rows) != len(inputs) {
+		t.Fatalf("expected %d rows persisted, got %d", len(inputs), len(repo.rows))
+	}
+	events, _ := pub.snapshot()
+	if len(events) != len(inputs) {
+		t.Fatalf("expected %d Publish calls, got %d", len(inputs), len(events))
+	}
+}
+
+func TestServiceBatchRecord_EmptyIsNoop(t *testing.T) {
+	t.Parallel()
+	repo := newFakeRepo()
+	svc := changefeed.NewService(repo)
+	muts, err := svc.BatchRecord(context.Background(), nil)
+	if err != nil {
+		t.Fatalf("empty batch should not error: %v", err)
+	}
+	if len(muts) != 0 {
+		t.Fatalf("expected 0 mutations, got %d", len(muts))
+	}
+	if len(repo.rows) != 0 {
+		t.Fatalf("expected 0 rows persisted, got %d", len(repo.rows))
+	}
+}
+
+func TestServiceBatchRecord_ValidationErrorAbortsBatch(t *testing.T) {
+	t.Parallel()
+	repo := newFakeRepo()
+	svc := changefeed.NewService(repo)
+
+	inputs := []changefeed.RecordInput{
+		{WorkspaceID: uuid.New(), Kind: changefeed.KindFile, Op: changefeed.OpCreate, ResourceID: uuid.New()},
+		// Second input is invalid (bad kind) so the entire batch
+		// must fail before any DB write happens — partial success
+		// would leak gaps into the cursor stream.
+		{WorkspaceID: uuid.New(), Kind: "wat", Op: changefeed.OpCreate, ResourceID: uuid.New()},
+	}
+	if _, err := svc.BatchRecord(context.Background(), inputs); err == nil {
+		t.Fatalf("expected validation error")
+	}
+	if len(repo.rows) != 0 {
+		t.Fatalf("expected 0 rows persisted on validation failure, got %d", len(repo.rows))
+	}
+}
+
+func TestServiceBatchRecord_PublishErrorDoesNotFail(t *testing.T) {
+	t.Parallel()
+	repo := newFakeRepo()
+	pub := &recordingPublisher{err: errors.New("redis down")}
+	svc := changefeed.NewService(repo).WithPublisher(pub)
+	inputs := []changefeed.RecordInput{
+		{WorkspaceID: uuid.New(), Kind: changefeed.KindFile, Op: changefeed.OpCreate, ResourceID: uuid.New()},
+		{WorkspaceID: uuid.New(), Kind: changefeed.KindFile, Op: changefeed.OpCreate, ResourceID: uuid.New()},
+	}
+	muts, err := svc.BatchRecord(context.Background(), inputs)
+	if err != nil {
+		t.Fatalf("publisher error must not fail BatchRecord: %v", err)
+	}
+	if len(muts) != len(inputs) {
+		t.Fatalf("expected %d mutations, got %d", len(inputs), len(muts))
+	}
+	if len(repo.rows) != len(inputs) {
+		t.Fatalf("rows not persisted despite publisher error")
+	}
+}
+
+func TestServiceBatchRecord_RepoErrorPropagates(t *testing.T) {
+	t.Parallel()
+	svc := changefeed.NewService(errRepo{err: errors.New("db down")})
+	inputs := []changefeed.RecordInput{
+		{WorkspaceID: uuid.New(), Kind: changefeed.KindFile, Op: changefeed.OpCreate, ResourceID: uuid.New()},
+	}
+	if _, err := svc.BatchRecord(context.Background(), inputs); err == nil {
+		t.Fatalf("expected DB error to propagate")
 	}
 }
 

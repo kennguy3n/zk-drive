@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -19,6 +20,14 @@ type Repository interface {
 	// OccurredAt are returned from the database (BIGSERIAL +
 	// DEFAULT now()).
 	Record(ctx context.Context, m *Mutation) error
+	// BatchRecord writes len(muts) rows in a single multi-row INSERT
+	// and populates Sequence + OccurredAt on each. Used by bulk
+	// handlers (move/copy/delete of N items) to amortise the
+	// per-row round-trip cost across an entire bulk operation while
+	// preserving the durability guarantee that the catch-up cursor
+	// advances before the HTTP response returns. Order is preserved:
+	// muts[i].Sequence < muts[j].Sequence for i < j.
+	BatchRecord(ctx context.Context, muts []Mutation) error
 	// Since returns up to `limit` rows for the given workspace where
 	// sequence > cursor, ordered by sequence ascending. Returns the
 	// rows plus a boolean indicating whether more rows may exist
@@ -62,6 +71,73 @@ RETURNING sequence, occurred_at`
 		m.WorkspaceID, m.ActorID, m.Kind, m.Op, m.ResourceID, m.ParentID, m.Name, metadata,
 	).Scan(&m.Sequence, &m.OccurredAt); err != nil {
 		return fmt.Errorf("insert change_log: %w", err)
+	}
+	return nil
+}
+
+// BatchRecord persists len(muts) rows in a single multi-row INSERT.
+// All rows land on adjacent sequence values because Postgres emits
+// them in order from the BIGSERIAL sequence object during a single
+// statement; that ordering is what lets sync clients page through
+// the batch without missing a row.
+//
+// We deliberately do NOT wrap in a transaction: change_log INSERTs
+// only INSERT (no follow-up writes), and the multi-row statement is
+// already atomic from the perspective of any other reader. Adding
+// BEGIN/COMMIT would just buy an extra round-trip.
+func (r *PostgresRepository) BatchRecord(ctx context.Context, muts []Mutation) error {
+	if len(muts) == 0 {
+		return nil
+	}
+	// pgx's $N placeholders are positional, so build the VALUES
+	// clause dynamically: ($1,$2,…,$8), ($9,…,$16), … for 8 cols.
+	const cols = 8
+	args := make([]any, 0, len(muts)*cols)
+	var sb strings.Builder
+	sb.Grow(64 + len(muts)*40)
+	sb.WriteString("INSERT INTO change_log (workspace_id, actor_id, kind, op, resource_id, parent_id, name, metadata) VALUES ")
+	for i, m := range muts {
+		if i > 0 {
+			sb.WriteByte(',')
+		}
+		sb.WriteByte('(')
+		for j := 0; j < cols; j++ {
+			if j > 0 {
+				sb.WriteByte(',')
+			}
+			fmt.Fprintf(&sb, "$%d", i*cols+j+1)
+		}
+		sb.WriteByte(')')
+		var metadata any
+		if len(m.Metadata) > 0 {
+			metadata = []byte(m.Metadata)
+		}
+		args = append(args,
+			m.WorkspaceID, m.ActorID, m.Kind, m.Op,
+			m.ResourceID, m.ParentID, m.Name, metadata,
+		)
+	}
+	sb.WriteString(" RETURNING sequence, occurred_at")
+	rows, err := r.pool.Query(ctx, sb.String(), args...)
+	if err != nil {
+		return fmt.Errorf("batch insert change_log: %w", err)
+	}
+	defer rows.Close()
+	i := 0
+	for rows.Next() {
+		if i >= len(muts) {
+			return errors.New("changefeed: batch insert returned more rows than inputs")
+		}
+		if err := rows.Scan(&muts[i].Sequence, &muts[i].OccurredAt); err != nil {
+			return fmt.Errorf("scan batch change_log row: %w", err)
+		}
+		i++
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("iterate batch change_log rows: %w", err)
+	}
+	if i != len(muts) {
+		return fmt.Errorf("changefeed: batch insert returned %d rows, expected %d", i, len(muts))
 	}
 	return nil
 }
