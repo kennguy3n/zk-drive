@@ -39,6 +39,65 @@ func TestRenderEmail_InvalidInput(t *testing.T) {
 	}
 }
 
+// TestRenderEmail_MboxFirstMessage ensures we extract the first
+// RFC 5322 message out of an mbox archive and render it cleanly.
+// Without the mbox-aware path, mail.ReadMessage would fail on the
+// `From ` envelope line (which is not a valid RFC 5322 header).
+func TestRenderEmail_MboxFirstMessage(t *testing.T) {
+	t.Parallel()
+	mbox := strings.Join([]string{
+		"From alice@example.com Mon Jan  2 15:04:05 2006",
+		"From: alice@example.com",
+		"To: bob@example.com",
+		"Subject: First message in mbox",
+		"Date: Mon, 25 May 2026 13:00:00 +0000",
+		"",
+		"This is the body of the FIRST message.",
+		"",
+		"From bob@example.com Mon Jan  2 15:05:05 2006",
+		"From: bob@example.com",
+		"To: alice@example.com",
+		"Subject: Second message in mbox (should NOT appear)",
+		"Date: Mon, 25 May 2026 13:01:00 +0000",
+		"",
+		"This is the body of the SECOND message.",
+	}, "\r\n")
+	img, err := renderEmail(context.Background(), []byte(mbox))
+	if err != nil {
+		t.Fatalf("renderEmail on mbox: %v", err)
+	}
+	if img == nil {
+		t.Fatal("renderEmail returned nil image on mbox input")
+	}
+	// And verify the extractor returns only the first message — the
+	// second envelope must be excluded so the preview header stays
+	// "First message in mbox", not garbled.
+	got := extractFirstMboxMessage([]byte(mbox))
+	if got == nil {
+		t.Fatal("extractFirstMboxMessage returned nil for valid mbox input")
+	}
+	if strings.Contains(string(got), "Second message in mbox") {
+		t.Fatalf("extractFirstMboxMessage should stop at the second envelope, got:\n%s", got)
+	}
+	if !strings.Contains(string(got), "First message in mbox") {
+		t.Fatalf("extractFirstMboxMessage should preserve the first message, got:\n%s", got)
+	}
+}
+
+// TestExtractFirstMboxMessage_NoFalsePositiveOnEML guards against the
+// extractor mistaking a plain .eml file for mbox just because the
+// first body line happens to start with "From " — RFC 5322 headers
+// have the shape `Header: value` so anything starting with `From `
+// without a colon is the mbox envelope, but a header line `From:`
+// (with the colon) must NOT trigger the mbox path.
+func TestExtractFirstMboxMessage_NoFalsePositiveOnEML(t *testing.T) {
+	t.Parallel()
+	eml := "From: alice@example.com\r\nSubject: hi\r\n\r\nbody\r\n"
+	if got := extractFirstMboxMessage([]byte(eml)); got != nil {
+		t.Fatalf("EML with `From:` header should NOT match mbox, got: %s", got)
+	}
+}
+
 // TestRenderEmail_LongCJKSubject ensures we slice a long
 // non-ASCII subject on a rune boundary so the preview doesn't
 // render U+FFFD replacement glyphs. A byte-len cap at 63 would

@@ -135,7 +135,7 @@ func TestRenderDesign_MissingBinaryIsUnsupported(t *testing.T) {
 		imagemagickBinary = "/nonexistent/zkdrive-convert-stub"
 	})
 
-	_, err := renderDesign(context.Background(), []byte("not a psd"))
+	_, err := renderDesign(context.Background(), "image/vnd.adobe.photoshop", []byte("not a psd"))
 	if !errors.Is(err, ErrUnsupportedMime) {
 		t.Fatalf("expected ErrUnsupportedMime when ImageMagick missing, got %v", err)
 	}

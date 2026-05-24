@@ -40,17 +40,44 @@ var (
 // video pipeline) while still letting production prefer
 // audiowaveform when the worker image carries it.
 func renderAudioWaveform(ctx context.Context, srcBytes []byte) (image.Image, error) {
+	var bbcErr error
 	if _, err := exec.LookPath(audioWaveformBinary); err == nil {
-		img, err := renderAudioWaveformWithBBC(ctx, srcBytes)
-		if err == nil {
+		img, runErr := renderAudioWaveformWithBBC(ctx, srcBytes)
+		if runErr == nil {
 			return img, nil
 		}
-		// BBC tool failed (not "missing", actually failed). Fall
-		// through to ffmpeg — corrupt input is one thing, but a
-		// BBC-specific codec gap shouldn't lose the preview.
+		bbcErr = runErr
+		// Don't fall through if the caller's context is already
+		// done — ffmpeg would just fail immediately for the same
+		// reason and the resulting error message would point at
+		// ffmpeg, hiding that the cancellation actually killed
+		// the BBC attempt. Returning the BBC error here preserves
+		// the real cause and matches what callers expect from a
+		// context-cancelled run.
+		if ctx.Err() != nil {
+			return nil, fmt.Errorf("audiowaveform: %w", bbcErr)
+		}
+		// BBC tool failed (not "missing", actually failed) and
+		// the caller still has time on the clock. Fall through to
+		// ffmpeg — corrupt input is one thing, but a BBC-specific
+		// codec gap shouldn't lose the preview.
 	}
 	if _, err := exec.LookPath(ffmpegBinary); err == nil {
-		return renderAudioWaveformWithFFmpeg(ctx, srcBytes)
+		img, ffErr := renderAudioWaveformWithFFmpeg(ctx, srcBytes)
+		if ffErr != nil && bbcErr != nil {
+			// Surface BOTH failures so operators investigating an
+			// audio preview outage can tell whether the BBC tool
+			// or ffmpeg is the actual culprit.
+			return nil, fmt.Errorf("audio waveform: ffmpeg failed: %w (audiowaveform also failed: %v)", ffErr, bbcErr)
+		}
+		return img, ffErr
+	}
+	if bbcErr != nil {
+		// We attempted the BBC tool, it failed, and ffmpeg isn't
+		// installed. Surface the BBC error rather than the
+		// generic "neither installed" message; the caller's diagnostic
+		// is "what actually went wrong on the one available tool".
+		return nil, fmt.Errorf("audiowaveform: %w", bbcErr)
 	}
 	return nil, missingBinaryErr("audiowaveform or ffmpeg")
 }

@@ -23,11 +23,26 @@ const emailBodyPreviewBytes = 6 * 1024
 // rabbit hole; the goal here is "what was this email roughly about",
 // not "perfectly faithful client view".
 //
+// mbox files (a concatenation of RFC 5322 messages separated by
+// `From ` envelope lines) are also handled: we extract the first
+// message and render it. We do NOT render all messages — the preview
+// is a single 256 px thumbnail and showing more than one message
+// makes the output unreadable.
+//
 // Outlook .msg files (TNEF / CFB containers) need a separate parser;
-// for now we register only RFC 822 / EML and let .msg fall through
-// to the unsupported path. A future iteration can add a libemldb /
-// libmsg dependency if there's demand.
+// for now we register only RFC 822 / EML / mbox and let .msg fall
+// through to the unsupported path. A future iteration can add a
+// libemldb / libmsg dependency if there's demand.
 func renderEmail(_ context.Context, src []byte) (image.Image, error) {
+	// If the input looks like an mbox file (starts with `From `,
+	// with no colon — RFC 5322 headers all have `Header: value`
+	// shape), strip the envelope lines and pass only the first
+	// message to mail.ReadMessage. mail.ReadMessage would otherwise
+	// fail on the leading `From ` line because it's not a valid
+	// header (the space-delimited form has no colon).
+	if msgBytes := extractFirstMboxMessage(src); msgBytes != nil {
+		src = msgBytes
+	}
 	msg, err := mail.ReadMessage(bytes.NewReader(src))
 	if err != nil {
 		return nil, fmt.Errorf("parse email: %w", err)
@@ -136,6 +151,48 @@ func isMimeBoundaryLine(trimmed string) bool {
 	// dashes the same way so we accept those.
 	rest = strings.TrimRight(rest, "-")
 	return rest != ""
+}
+
+// extractFirstMboxMessage returns the bytes of the first RFC 5322
+// message inside an mbox file, or nil if the input doesn't look like
+// mbox. mbox format: each message starts with a line like
+// `From sender@example.com Mon Jan  2 15:04:05 2006`. Subsequent
+// messages start with another such line; we cut at the second one
+// (or EOF) and strip the leading envelope line so net/mail can parse
+// what's left.
+//
+// We return nil (and the caller proceeds with the original bytes) on
+// anything that doesn't look like mbox, so this is a no-op on plain
+// .eml files. The detection rule is strict — only the `From ` prefix
+// with no colon (the actual mbox envelope shape) qualifies — to
+// avoid false positives on RFC 5322 messages whose first body line
+// happens to start with "From " (which is rare but legal).
+func extractFirstMboxMessage(src []byte) []byte {
+	// The defining test is `From ` (space) vs `From:` (colon):
+	// the mbox envelope starts with the former, an RFC 5322 header
+	// with the latter. The prefix check below covers both
+	// false-positive cases — a header line `From: foo@example.com`
+	// won't match because it has a colon at position 4 not a space,
+	// and a body line `From whoever` is rare enough that we accept
+	// the false positive (the preview still renders, just from one
+	// line later).
+	if !bytes.HasPrefix(src, []byte("From ")) {
+		return nil
+	}
+	nl := bytes.IndexByte(src, '\n')
+	if nl < 0 {
+		return nil
+	}
+	// Skip the envelope line + its newline.
+	body := src[nl+1:]
+	// Find the next `\nFrom ` envelope (start of message 2) and
+	// truncate before it. mbox conventionally requires a blank
+	// line before the next envelope, but real-world files sometimes
+	// omit it; the safer test is just "newline followed by `From `".
+	if idx := bytes.Index(body, []byte("\nFrom ")); idx >= 0 {
+		body = body[:idx+1] // keep trailing newline of msg 1
+	}
+	return body
 }
 
 func init() {
