@@ -93,11 +93,19 @@ impl TokenStore for KeychainStore {
 
     async fn clear(&self) -> Result<()> {
         let entry = self.entry()?;
-        tokio::task::spawn_blocking(move || entry.delete_credential())
+        let result = tokio::task::spawn_blocking(move || entry.delete_credential())
             .await
-            .map_err(|e| crate::AuthError::OAuth(format!("join: {e}")))?
-            .map_err(crate::AuthError::Keyring)?;
-        Ok(())
+            .map_err(|e| crate::AuthError::OAuth(format!("join: {e}")))?;
+        // Treat "credential is already gone" as success so logout
+        // remains idempotent. This mirrors how `load` maps NoEntry to
+        // Ok(None) -- a logout call that races a manual keychain
+        // deletion (or that runs without an earlier successful save)
+        // should not surface as an error to the caller.
+        match result {
+            Ok(()) => Ok(()),
+            Err(keyring::Error::NoEntry) => Ok(()),
+            Err(e) => Err(crate::AuthError::Keyring(e)),
+        }
     }
 }
 

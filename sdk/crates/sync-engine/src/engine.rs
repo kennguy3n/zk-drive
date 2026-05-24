@@ -59,16 +59,25 @@ impl Engine {
         self
     }
 
-    /// Build a tentative local path for a remote file we've just
-    /// learned about over the change feed but haven't downloaded
-    /// yet. The folder hierarchy is resolved on first download
-    /// (PR5); for now the placeholder lives at `<root>/<name>` so
-    /// the catalogue row has a non-empty path. Falls back to the
-    /// resource id if the mutation arrived without a name (e.g.
-    /// truncated by a future server-side change).
-    fn local_path_for(&self, name: &str) -> PathBuf {
-        let safe = if name.is_empty() { "_" } else { name };
-        self.config.root.join(safe)
+    /// Build a placeholder local path for a remote file we've just
+    /// learned about via the change feed but haven't downloaded yet.
+    ///
+    /// The placeholder lives at `<root>/.zk-pending/<resource_id>` and
+    /// is keyed exclusively on the resource id so two distinct remote
+    /// files can never collide on the catalogue's UNIQUE(local_path)
+    /// index — even when their `name` fields happen to be identical
+    /// (e.g. two `readme.md` files in different remote folders).
+    ///
+    /// PR5's downloader is responsible for moving the file to its
+    /// final location under the resolved folder hierarchy and
+    /// rewriting `local_path` on the catalogue row via `upsert` once
+    /// it knows where the file actually belongs. Until then this stub
+    /// path keeps the catalogue invariant intact.
+    fn placeholder_path_for(&self, resource_id: Uuid) -> PathBuf {
+        self.config
+            .root
+            .join(".zk-pending")
+            .join(resource_id.to_string())
     }
 
     /// Drive both event channels until either is closed.
@@ -146,7 +155,7 @@ impl Engine {
                         // (wired in PR5) can pick it up. Dropping the
                         // event on the floor here would mean a new
                         // remote file never becomes visible locally.
-                        let local_path = self.local_path_for(&m.name);
+                        let local_path = self.placeholder_path_for(m.resource_id);
                         let rec = FileRecord {
                             remote_file_id: m.resource_id,
                             // Version id arrives on the subsequent
@@ -252,7 +261,42 @@ mod tests {
         let rec = cat.get(file_id).unwrap().expect("stub row must exist");
         assert_eq!(rec.status, SyncStatus::RemoteDirty);
         assert_eq!(rec.remote_version_id, Uuid::nil());
-        assert_eq!(rec.local_path, tempdir.path().join("report.docx"));
+        assert_eq!(
+            rec.local_path,
+            tempdir.path().join(".zk-pending").join(file_id.to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn two_unknown_remote_files_with_same_name_do_not_collide() {
+        // Regression: an earlier draft used `<root>/<name>` as the
+        // placeholder path, which would crash the engine on the
+        // second upsert via UNIQUE(local_path). The current
+        // resource-id-based placeholder must keep them distinct.
+        let tempdir = TempDir::new().unwrap();
+        let (engine, catalogue) = engine_for(&tempdir);
+        let workspace_id = engine.config.workspace_id;
+        let a = Uuid::new_v4();
+        let b = Uuid::new_v4();
+        for id in [a, b] {
+            let ev = RemoteEvent::FileCreated(Mutation {
+                sequence: 1,
+                workspace_id,
+                actor_id: None,
+                kind: "file".into(),
+                op: "create".into(),
+                resource_id: id,
+                parent_id: None,
+                name: "readme.md".into(),
+                metadata: None,
+                occurred_at: Utc::now(),
+            });
+            engine.handle_remote(ev).await.expect("upsert must succeed");
+        }
+        let cat = catalogue.lock().await;
+        let ra = cat.get(a).unwrap().unwrap();
+        let rb = cat.get(b).unwrap().unwrap();
+        assert_ne!(ra.local_path, rb.local_path);
     }
 
     #[tokio::test]
@@ -292,7 +336,7 @@ mod tests {
         let cat = catalogue.lock().await;
         let rec = cat.get(file_id).unwrap().unwrap();
         assert_eq!(rec.status, SyncStatus::RemoteDirty);
-        // Existing version + hash preserved \u2014 set_status only flips status/updated_at.
+        // Existing version + hash preserved -- set_status only flips status/updated_at.
         assert_eq!(rec.remote_version_id, version_id);
         assert_eq!(rec.content_hash, [0xAB; 32]);
         assert_eq!(rec.size_bytes, 1024);

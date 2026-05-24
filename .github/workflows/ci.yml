@@ -112,11 +112,12 @@ jobs:
       - uses: actions/checkout@v4
 
       # `dtolnay/rust-toolchain` is the maintained successor to
-      # `actions-rs/toolchain` (which is unmaintained). Pin to a
-      # stable release rather than `stable` so a toolchain bump
-      # can't silently break CI overnight.
+      # `actions-rs/toolchain` (which is unmaintained). Pin to an
+      # explicit Rust release so a new compiler can't silently
+      # introduce lint changes that break CI overnight. Bumping
+      # this version is an explicit commit.
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@1.82.0
         with:
           components: rustfmt, clippy
 
