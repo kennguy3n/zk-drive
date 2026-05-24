@@ -13,11 +13,11 @@ import (
 )
 
 // sofficeBinary is the LibreOffice / OpenOffice headless command
-// used to convert Office documents to PDF. Kept as a package-level
-// var so tests can swap it out (mainly to exercise the "binary
-// missing" graceful-skip path on CI hosts that don't ship
-// LibreOffice).
-var sofficeBinary = "soffice"
+// used to convert Office documents to PDF. Wrapped in binaryVar so
+// Set + concurrent renderer reads are race-free — see binaryvar.go.
+// Tests swap this out (mainly to exercise the "binary missing"
+// graceful-skip path on CI hosts that don't ship LibreOffice).
+var sofficeBinary = newBinaryVar("soffice")
 
 // officeRenderTimeout is the per-document hard cap for the
 // LibreOffice subprocess. LibreOffice is by far the heaviest
@@ -43,10 +43,11 @@ const officeRenderTimeout = 30 * time.Second
 // Returns ErrUnsupportedMime when EITHER LibreOffice or pdftoppm is
 // missing — both are required for the full pipeline.
 func renderOfficeDocument(ctx context.Context, mime string, srcBytes []byte) (image.Image, error) {
-	if _, err := exec.LookPath(sofficeBinary); err != nil {
+	soffice := sofficeBinary.Get()
+	if _, err := exec.LookPath(soffice); err != nil {
 		return nil, missingBinaryErr("soffice")
 	}
-	if _, err := exec.LookPath(pdftoppmBinary); err != nil {
+	if _, err := exec.LookPath(pdftoppmBinary.Get()); err != nil {
 		return nil, missingBinaryErr("pdftoppm")
 	}
 
@@ -68,7 +69,7 @@ func renderOfficeDocument(ctx context.Context, mime string, srcBytes []byte) (im
 
 	convCtx, cancel := context.WithTimeout(ctx, officeRenderTimeout)
 	defer cancel()
-	cmd := exec.CommandContext(convCtx, sofficeBinary,
+	cmd := exec.CommandContext(convCtx, soffice,
 		"--headless",
 		"--norestore",
 		"--nologo",

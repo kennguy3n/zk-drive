@@ -11,9 +11,9 @@ import (
 )
 
 // pdftoppmBinary is the external binary used to rasterise a PDF page.
-// Kept as a package-level var so tests can swap it (e.g. point at a
-// non-existent path to exercise the "not installed" branch).
-var pdftoppmBinary = "pdftoppm"
+// Wrapped in binaryVar so Set + concurrent renderer reads are
+// race-free — see binaryvar.go.
+var pdftoppmBinary = newBinaryVar("pdftoppm")
 
 // renderPDFFirstPage rasterises page 1 of a PDF blob to an image by
 // shelling out to pdftoppm (poppler-utils, GPL — used as a subprocess,
@@ -27,7 +27,8 @@ var pdftoppmBinary = "pdftoppm"
 // returned so the worker treats the job as a graceful skip rather
 // than a hard failure.
 func renderPDFFirstPage(ctx context.Context, pdfBytes []byte) (image.Image, error) {
-	if _, err := exec.LookPath(pdftoppmBinary); err != nil {
+	pdftoppm := pdftoppmBinary.Get()
+	if _, err := exec.LookPath(pdftoppm); err != nil {
 		return nil, missingBinaryErr("pdftoppm")
 	}
 
@@ -43,7 +44,7 @@ func renderPDFFirstPage(ctx context.Context, pdfBytes []byte) (image.Image, erro
 	}
 
 	outPrefix := filepath.Join(dir, "out")
-	cmd := exec.CommandContext(ctx, pdftoppmBinary,
+	cmd := exec.CommandContext(ctx, pdftoppm,
 		"-png",
 		"-f", "1",
 		"-l", "1",

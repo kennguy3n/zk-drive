@@ -23,9 +23,13 @@ const audioRenderTimeout = 20 * time.Second
 // fall back to ffmpeg's `showwavespic` filter, which produces an
 // acceptable waveform without an extra runtime dependency.
 //
-// Both are package-level vars so tests can swap them out.
+// audioWaveformBinary is wrapped in binaryVar so Set + concurrent
+// renderer reads are race-free — see binaryvar.go. The width/height
+// strings stay as plain strings because they are init-only configuration
+// (no exposed setter, no runtime swap path).
+var audioWaveformBinary = newBinaryVar("audiowaveform")
+
 var (
-	audioWaveformBinary = "audiowaveform"
 	audioWaveformWidth  = "800"
 	audioWaveformHeight = "200"
 )
@@ -41,7 +45,7 @@ var (
 // audiowaveform when the worker image carries it.
 func renderAudioWaveform(ctx context.Context, srcBytes []byte) (image.Image, error) {
 	var bbcErr error
-	if _, err := exec.LookPath(audioWaveformBinary); err == nil {
+	if _, err := exec.LookPath(audioWaveformBinary.Get()); err == nil {
 		img, runErr := renderAudioWaveformWithBBC(ctx, srcBytes)
 		if runErr == nil {
 			return img, nil
@@ -62,7 +66,7 @@ func renderAudioWaveform(ctx context.Context, srcBytes []byte) (image.Image, err
 		// ffmpeg — corrupt input is one thing, but a BBC-specific
 		// codec gap shouldn't lose the preview.
 	}
-	if _, err := exec.LookPath(ffmpegBinary); err == nil {
+	if _, err := exec.LookPath(ffmpegBinary.Get()); err == nil {
 		img, ffErr := renderAudioWaveformWithFFmpeg(ctx, srcBytes)
 		if ffErr != nil && bbcErr != nil {
 			// Surface BOTH failures so operators investigating an
@@ -97,7 +101,7 @@ func renderAudioWaveformWithBBC(ctx context.Context, srcBytes []byte) (image.Ima
 
 	runCtx, cancel := context.WithTimeout(ctx, audioRenderTimeout)
 	defer cancel()
-	cmd := exec.CommandContext(runCtx, audioWaveformBinary,
+	cmd := exec.CommandContext(runCtx, audioWaveformBinary.Get(),
 		"-i", inPath,
 		"-o", outPath,
 		"--pixels-per-second", "100",
@@ -140,7 +144,7 @@ func renderAudioWaveformWithFFmpeg(ctx context.Context, srcBytes []byte) (image.
 	// colour at most; the canvas defaults to transparent, which we
 	// flatten over an off-white background via overlay so PNGs
 	// look uniform between the two backends.
-	cmd := exec.CommandContext(runCtx, ffmpegBinary,
+	cmd := exec.CommandContext(runCtx, ffmpegBinary.Get(),
 		"-y",
 		"-i", inPath,
 		"-filter_complex", "color=c=0xF8F8F8:s="+audioWaveformWidth+"x"+audioWaveformHeight+"[bg];[0:a]showwavespic=s="+audioWaveformWidth+"x"+audioWaveformHeight+":colors=0x1F2933[fg];[bg][fg]overlay=format=auto",

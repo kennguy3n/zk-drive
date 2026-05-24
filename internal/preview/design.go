@@ -19,20 +19,22 @@ import (
 const designRenderTimeout = 30 * time.Second
 
 // imagemagickBinary is the ImageMagick `convert` command used to
-// rasterise design / CAD-adjacent formats. Kept as a package-level
-// var so tests can swap it. ImageMagick 7 ships `magick`; older
-// versions ship `convert`. We default to `convert` for maximum
-// compatibility with Debian / Alpine packages and let operators
-// override it via SetImageMagickBinary at boot if their image only
-// has the newer name.
-var imagemagickBinary = "convert"
+// rasterise design / CAD-adjacent formats. ImageMagick 7 ships
+// `magick`; older versions ship `convert`. We default to `convert`
+// for maximum compatibility with Debian / Alpine packages and let
+// operators override it via SetImageMagickBinary at boot if their
+// image only has the newer name.
+//
+// Wrapped in binaryVar (atomic.Value) so Set + concurrent renderer
+// goroutine reads are race-free. See binaryvar.go for the rationale.
+var imagemagickBinary = newBinaryVar("convert")
 
 // SetImageMagickBinary lets ops or tests override the ImageMagick
 // binary lookup. Exposed (vs. just being a package var) so deploys
 // that bake ImageMagick 7 only — which ships `magick` and not
 // `convert` — can flip it from a single configuration point at
-// worker startup.
-func SetImageMagickBinary(name string) { imagemagickBinary = name }
+// worker startup. Safe to call concurrently with renderer reads.
+func SetImageMagickBinary(name string) { imagemagickBinary.Set(name) }
 
 // designInputFilenameForMime maps each registered design MIME to the
 // filename we hand ImageMagick on disk. The extension matters: even
@@ -110,7 +112,7 @@ func renderDesign(ctx context.Context, mime string, src []byte) (image.Image, er
 	// decode failure paths.
 	renderCtx, cancel := context.WithTimeout(ctx, designRenderTimeout)
 	defer cancel()
-	return renderViaSubprocess(renderCtx, imagemagickBinary, inName, "out.png",
+	return renderViaSubprocess(renderCtx, imagemagickBinary.Get(), inName, "out.png",
 		[]string{"-density", "150", "{{in}}[0]", "-flatten", "-strip", "-resize", "600x600", "{{out}}"},
 		src,
 	)

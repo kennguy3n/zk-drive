@@ -13,13 +13,14 @@ import (
 
 // binaryVarsMu serialises tests that mutate the package-level binary
 // path vars (sofficeBinary, ffmpegBinary, audioWaveformBinary,
-// rsvgBinary, imagemagickBinary). Without this lock, anyone who
-// later adds t.Parallel() to one of these tests — or to an unrelated
-// test in this file that ends up touching the same vars — would
-// silently race the assignments and produce intermittent flakes.
-// Each test that swaps a binary path takes the lock for its full
-// duration via withBinarySwap so the cleanup is paired with the
-// lock release.
+// rsvgBinary, imagemagickBinary). The vars themselves are
+// atomic.Value-backed binaryVars (see binaryvar.go) so concurrent
+// renderer reads + this lock's writes don't race — BUT the lock is
+// still required to make the read-prev / write-stub / cleanup-restore
+// sequence atomic across tests. Without it, two parallel tests
+// swapping the same var could capture each other's stubs as their
+// "previous" value and the cleanup chain would never restore the
+// real binary name.
 var binaryVarsMu sync.Mutex
 
 // withBinarySwap takes the package-level lock, runs swap to capture
@@ -51,9 +52,9 @@ func withBinarySwap(t *testing.T, swap func()) {
 
 func TestRenderOfficeDocument_MissingBinaryIsUnsupported(t *testing.T) {
 	withBinarySwap(t, func() {
-		prev := sofficeBinary
-		t.Cleanup(func() { sofficeBinary = prev })
-		sofficeBinary = "/nonexistent/zkdrive-soffice-stub"
+		prev := sofficeBinary.Get()
+		t.Cleanup(func() { sofficeBinary.Set(prev) })
+		sofficeBinary.Set("/nonexistent/zkdrive-soffice-stub")
 	})
 
 	_, err := renderOfficeDocument(context.Background(),
@@ -72,10 +73,10 @@ func TestRenderOfficeDocument_NoExtensionMappingIsUnsupported(t *testing.T) {
 	// check passes and we exercise the extension-mapping branch.
 	// We only run this when soffice and pdftoppm are present;
 	// otherwise the binary-missing path short-circuits first.
-	if _, err := exec.LookPath(sofficeBinary); err != nil {
+	if _, err := exec.LookPath(sofficeBinary.Get()); err != nil {
 		t.Skip("soffice not installed; covered by other tests")
 	}
-	if _, err := exec.LookPath(pdftoppmBinary); err != nil {
+	if _, err := exec.LookPath(pdftoppmBinary.Get()); err != nil {
 		t.Skip("pdftoppm not installed; covered by other tests")
 	}
 	_, err := renderOfficeDocument(context.Background(), "application/x-totally-unknown-office", []byte("..."))
@@ -86,9 +87,9 @@ func TestRenderOfficeDocument_NoExtensionMappingIsUnsupported(t *testing.T) {
 
 func TestRenderVideoFrame_MissingBinaryIsUnsupported(t *testing.T) {
 	withBinarySwap(t, func() {
-		prev := ffmpegBinary
-		t.Cleanup(func() { ffmpegBinary = prev })
-		ffmpegBinary = "/nonexistent/zkdrive-ffmpeg-stub"
+		prev := ffmpegBinary.Get()
+		t.Cleanup(func() { ffmpegBinary.Set(prev) })
+		ffmpegBinary.Set("/nonexistent/zkdrive-ffmpeg-stub")
 	})
 
 	_, err := renderVideoFrame(context.Background(), []byte("\x00\x00\x00stub"))
@@ -99,14 +100,14 @@ func TestRenderVideoFrame_MissingBinaryIsUnsupported(t *testing.T) {
 
 func TestRenderAudioWaveform_NoToolsIsUnsupported(t *testing.T) {
 	withBinarySwap(t, func() {
-		prevBBC := audioWaveformBinary
-		prevFF := ffmpegBinary
+		prevBBC := audioWaveformBinary.Get()
+		prevFF := ffmpegBinary.Get()
 		t.Cleanup(func() {
-			audioWaveformBinary = prevBBC
-			ffmpegBinary = prevFF
+			audioWaveformBinary.Set(prevBBC)
+			ffmpegBinary.Set(prevFF)
 		})
-		audioWaveformBinary = "/nonexistent/zkdrive-audiowaveform-stub"
-		ffmpegBinary = "/nonexistent/zkdrive-ffmpeg-stub"
+		audioWaveformBinary.Set("/nonexistent/zkdrive-audiowaveform-stub")
+		ffmpegBinary.Set("/nonexistent/zkdrive-ffmpeg-stub")
 	})
 
 	_, err := renderAudioWaveform(context.Background(), []byte("\x00stub"))
@@ -117,9 +118,9 @@ func TestRenderAudioWaveform_NoToolsIsUnsupported(t *testing.T) {
 
 func TestRenderSVG_MissingBinaryIsUnsupported(t *testing.T) {
 	withBinarySwap(t, func() {
-		prev := rsvgBinary
-		t.Cleanup(func() { rsvgBinary = prev })
-		rsvgBinary = "/nonexistent/zkdrive-rsvg-stub"
+		prev := rsvgBinary.Get()
+		t.Cleanup(func() { rsvgBinary.Set(prev) })
+		rsvgBinary.Set("/nonexistent/zkdrive-rsvg-stub")
 	})
 
 	_, err := renderSVG(context.Background(), []byte(`<svg xmlns="http://www.w3.org/2000/svg"/>`))
@@ -130,9 +131,9 @@ func TestRenderSVG_MissingBinaryIsUnsupported(t *testing.T) {
 
 func TestRenderDesign_MissingBinaryIsUnsupported(t *testing.T) {
 	withBinarySwap(t, func() {
-		prev := imagemagickBinary
-		t.Cleanup(func() { imagemagickBinary = prev })
-		imagemagickBinary = "/nonexistent/zkdrive-convert-stub"
+		prev := imagemagickBinary.Get()
+		t.Cleanup(func() { imagemagickBinary.Set(prev) })
+		imagemagickBinary.Set("/nonexistent/zkdrive-convert-stub")
 	})
 
 	_, err := renderDesign(context.Background(), "image/vnd.adobe.photoshop", []byte("not a psd"))

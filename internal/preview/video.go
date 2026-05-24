@@ -13,8 +13,9 @@ import (
 )
 
 // ffmpegBinary is the FFmpeg command used to extract a video frame.
-// Kept as a package-level var so tests can swap it out.
-var ffmpegBinary = "ffmpeg"
+// Wrapped in binaryVar so Set + concurrent renderer reads are
+// race-free — see binaryvar.go.
+var ffmpegBinary = newBinaryVar("ffmpeg")
 
 // videoFrameTimeOffset is the timestamp at which we grab a single
 // frame from the video. t=1s is conventional in video-thumbnail
@@ -40,7 +41,8 @@ const videoRenderTimeout = 15 * time.Second
 // If ffmpeg is not installed on the host, ErrUnsupportedMime is
 // returned so the worker treats the job as a graceful skip.
 func renderVideoFrame(ctx context.Context, srcBytes []byte) (image.Image, error) {
-	if _, err := exec.LookPath(ffmpegBinary); err != nil {
+	ffmpeg := ffmpegBinary.Get()
+	if _, err := exec.LookPath(ffmpeg); err != nil {
 		return nil, missingBinaryErr("ffmpeg")
 	}
 
@@ -78,7 +80,7 @@ func renderVideoFrame(ctx context.Context, srcBytes []byte) (image.Image, error)
 	// audio entirely so the encoder doesn't waste time on it.
 	// -loglevel error keeps stderr quiet on the happy path; we
 	// surface it on errors.
-	cmd := exec.CommandContext(primaryCtx, ffmpegBinary,
+	cmd := exec.CommandContext(primaryCtx, ffmpeg,
 		"-y",
 		"-ss", videoFrameTimeOffset,
 		"-i", inPath,
@@ -117,7 +119,7 @@ func renderVideoFrame(ctx context.Context, srcBytes []byte) (image.Image, error)
 	}
 	fallbackCtx, fallbackCancel := context.WithTimeout(ctx, videoRenderTimeout)
 	defer fallbackCancel()
-	cmd = exec.CommandContext(fallbackCtx, ffmpegBinary,
+	cmd = exec.CommandContext(fallbackCtx, ffmpeg,
 		"-y",
 		"-i", inPath,
 		"-frames:v", "1",

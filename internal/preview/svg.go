@@ -7,8 +7,9 @@ import (
 )
 
 // rsvgBinary is the librsvg `rsvg-convert` command used to rasterise
-// SVG documents. Kept as a package-level var so tests can swap it.
-var rsvgBinary = "rsvg-convert"
+// SVG documents. Wrapped in binaryVar so Set + concurrent renderer
+// reads are race-free — see binaryvar.go.
+var rsvgBinary = newBinaryVar("rsvg-convert")
 
 // svgRenderTimeout caps a single rsvg-convert invocation. SVG
 // rasterisation is normally fast (single-digit ms) but a pathological
@@ -37,7 +38,7 @@ func renderSVG(ctx context.Context, src []byte) (image.Image, error) {
 	// failure paths.
 	renderCtx, cancel := context.WithTimeout(ctx, svgRenderTimeout)
 	defer cancel()
-	return renderViaSubprocess(renderCtx, rsvgBinary, "in.svg", "out.png",
+	return renderViaSubprocess(renderCtx, rsvgBinary.Get(), "in.svg", "out.png",
 		[]string{"-w", "600", "-f", "png", "-o", "{{out}}", "{{in}}"},
 		src,
 	)

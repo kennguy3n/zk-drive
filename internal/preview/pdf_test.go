@@ -33,7 +33,7 @@ func TestPDFPreviewGeneration(t *testing.T) {
 	// Not parallel: TestPDFPreviewGenerationMissingBinary mutates the
 	// package-level pdftoppmBinary var, so we run sequentially to
 	// avoid races on it.
-	if _, err := exec.LookPath(pdftoppmBinary); err != nil {
+	if _, err := exec.LookPath(pdftoppmBinary.Get()); err != nil {
 		// pdftoppm not installed — assert the documented graceful
 		// skip: renderPDFFirstPage should return ErrUnsupportedMime
 		// so the worker treats the job as a no-op.
@@ -66,10 +66,15 @@ func TestPDFPreviewGeneration(t *testing.T) {
 }
 
 func TestPDFPreviewGenerationMissingBinary(t *testing.T) {
-	// Not parallel: mutates package-level state.
-	prev := pdftoppmBinary
-	t.Cleanup(func() { pdftoppmBinary = prev })
-	pdftoppmBinary = "/nonexistent/zkdrive-pdftoppm-stub"
+	// Not parallel: mutates package-level state via binaryVar.Set.
+	// We share the same package mutex other binary-swap tests use
+	// (binaryVarsMu) for cleanup-ordering atomicity — see the
+	// comment on withBinarySwap.
+	withBinarySwap(t, func() {
+		prev := pdftoppmBinary.Get()
+		t.Cleanup(func() { pdftoppmBinary.Set(prev) })
+		pdftoppmBinary.Set("/nonexistent/zkdrive-pdftoppm-stub")
+	})
 
 	_, err := renderPDFFirstPage(context.Background(), minimalPDF)
 	if !errors.Is(err, ErrUnsupportedMime) {
@@ -79,7 +84,7 @@ func TestPDFPreviewGenerationMissingBinary(t *testing.T) {
 
 func TestPDFPreviewGenerationInvalidPDF(t *testing.T) {
 	// Not parallel: shares package-level pdftoppmBinary state.
-	if _, err := exec.LookPath(pdftoppmBinary); err != nil {
+	if _, err := exec.LookPath(pdftoppmBinary.Get()); err != nil {
 		t.Skip("pdftoppm not available")
 	}
 	_, err := renderPDFFirstPage(context.Background(), []byte("not a pdf"))
