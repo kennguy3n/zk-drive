@@ -24,6 +24,8 @@ import (
 	"github.com/kennguy3n/zk-drive/internal/activity"
 	"github.com/kennguy3n/zk-drive/internal/audit"
 	"github.com/kennguy3n/zk-drive/internal/billing"
+	"github.com/kennguy3n/zk-drive/internal/changefeed"
+	"github.com/kennguy3n/zk-drive/internal/email"
 	"github.com/kennguy3n/zk-drive/internal/file"
 	"github.com/kennguy3n/zk-drive/internal/folder"
 	"github.com/kennguy3n/zk-drive/internal/jobs"
@@ -32,7 +34,6 @@ import (
 	"github.com/kennguy3n/zk-drive/internal/preview"
 	"github.com/kennguy3n/zk-drive/internal/search"
 	"github.com/kennguy3n/zk-drive/internal/sharing"
-	"github.com/kennguy3n/zk-drive/internal/email"
 	"github.com/kennguy3n/zk-drive/internal/storage"
 	"github.com/kennguy3n/zk-drive/internal/user"
 	"github.com/kennguy3n/zk-drive/internal/webhooks"
@@ -55,6 +56,7 @@ type Handler struct {
 	storageFactory *storage.ClientFactory
 	permissions    *permission.Service
 	activity       *activity.Service
+	changefeed     *changefeed.Service
 	sharing        *sharing.Service
 	search         *search.Service
 	clientRooms    *sharing.ClientRoomService
@@ -198,6 +200,16 @@ func (h *Handler) WithPreviews(r preview.Repository) *Handler {
 	return h
 }
 
+// WithChangefeed wires the change-feed service. When non-nil every
+// state-mutating logActivity call also records a durable Mutation
+// and broadcasts it workspace-wide for the desktop sync SDK. A nil
+// service silently disables the mirror so tests that don't care
+// about sync keep working unchanged.
+func (h *Handler) WithChangefeed(s *changefeed.Service) *Handler {
+	h.changefeed = s
+	return h
+}
+
 // WithStorageFactory wires a per-workspace storage client factory.
 // When set, presigned-URL handlers prefer the factory's per-workspace
 // client (resolved from workspace_storage_credentials) and fall back
@@ -238,6 +250,16 @@ func (h *Handler) notify(ctx context.Context, fn func(*notification.Service) err
 
 // logActivity is a nil-safe wrapper so callers don't need to null-check
 // every call-site. metadata may be nil.
+//
+// When a changefeed service is wired, the activity entry is also
+// mirrored to change_log for actions that represent state
+// mutations (file/folder create/rename/move/delete, file upload,
+// tag add/remove, permission grant/revoke). Pure-read actions
+// (file.download, file.bulk.download) are skipped — they do not
+// affect any client's reconciled state. The mirror is synchronous
+// so the durable cursor advances before the HTTP response, but a
+// failure is logged and swallowed (the activity entry is still
+// enqueued).
 func (h *Handler) logActivity(ctx context.Context, action, resourceType string, resourceID uuid.UUID, metadata map[string]any) {
 	if h.activity == nil {
 		return
@@ -245,6 +267,145 @@ func (h *Handler) logActivity(ctx context.Context, action, resourceType string, 
 	workspaceID, _ := middleware.WorkspaceIDFromContext(ctx)
 	userID, _ := middleware.UserIDFromContext(ctx)
 	h.activity.LogAction(ctx, workspaceID, userID, action, resourceType, resourceID, metadata)
+	h.recordChange(ctx, workspaceID, userID, action, resourceType, resourceID, metadata)
+}
+
+// recordChange translates an activity action into a changefeed
+// Mutation when the action is a state mutation. Skips read-only
+// actions and short-circuits when the changefeed service is not
+// wired. Errors are logged and swallowed — the change feed mirror
+// is a best-effort overlay on top of the durable activity log, and
+// a transient Postgres write failure here must not bubble up and
+// fail the parent HTTP request.
+func (h *Handler) recordChange(
+	ctx context.Context,
+	workspaceID, userID uuid.UUID,
+	action, resourceType string,
+	resourceID uuid.UUID,
+	metadata map[string]any,
+) {
+	if h.changefeed == nil {
+		return
+	}
+	if workspaceID == uuid.Nil || resourceID == uuid.Nil {
+		return
+	}
+	kind, op, ok := changefeedKindOpFor(action, resourceType)
+	if !ok {
+		return
+	}
+	in := changefeed.RecordInput{
+		WorkspaceID: workspaceID,
+		Kind:        kind,
+		Op:          op,
+		ResourceID:  resourceID,
+		Metadata:    metadata,
+	}
+	if userID != uuid.Nil {
+		actor := userID
+		in.ActorID = &actor
+	}
+	// Pull parent_id / name out of metadata when present so sync
+	// clients receive structured fields rather than having to dig
+	// through the free-form blob. Both are optional; the activity
+	// call sites set them inconsistently and the change feed
+	// schema's columns are nullable.
+	if parentRaw, present := metadata["folder_id"]; present {
+		if pid, ok := uuidFromAny(parentRaw); ok {
+			in.ParentID = &pid
+		}
+	} else if parentRaw, present := metadata["parent_folder_id"]; present {
+		if pid, ok := uuidFromAny(parentRaw); ok {
+			in.ParentID = &pid
+		}
+	} else if parentRaw, present := metadata["new_parent_folder_id"]; present {
+		if pid, ok := uuidFromAny(parentRaw); ok {
+			in.ParentID = &pid
+		}
+	}
+	if nameRaw, present := metadata["name"]; present {
+		if n, ok := nameRaw.(string); ok {
+			in.Name = n
+		}
+	}
+	if _, err := h.changefeed.Record(ctx, in); err != nil {
+		logging.FromContext(ctx).Error("changefeed record failed; activity still enqueued",
+			"action", action,
+			"resource_type", resourceType,
+			"resource_id", resourceID,
+			"err", err,
+		)
+	}
+}
+
+// uuidFromAny extracts a uuid.UUID from common dynamic-typed values
+// found in the activity metadata map: a uuid.UUID itself, its
+// string form, or a json.Number when the map came back through a
+// JSON unmarshal somewhere upstream. Returns (uuid.Nil, false) for
+// anything else so callers know to skip the field.
+func uuidFromAny(v any) (uuid.UUID, bool) {
+	switch x := v.(type) {
+	case uuid.UUID:
+		return x, true
+	case *uuid.UUID:
+		if x == nil {
+			return uuid.Nil, false
+		}
+		return *x, true
+	case string:
+		id, err := uuid.Parse(x)
+		if err != nil {
+			return uuid.Nil, false
+		}
+		return id, true
+	}
+	return uuid.Nil, false
+}
+
+// changefeedKindOpFor maps an activity action string to a
+// (kind, op) pair appropriate for the change feed, or ("", "", false)
+// when the action should not appear in the feed (read-only events,
+// bulk-download enumerations, etc).
+//
+// The mapping is deliberately exhaustive and explicit — a future
+// activity action that isn't covered here will be silently absent
+// from the change feed, which is the safer default than guessing.
+func changefeedKindOpFor(action, resourceType string) (string, string, bool) {
+	switch action {
+	case activity.ActionFileCreate:
+		return changefeed.KindFile, changefeed.OpCreate, true
+	case activity.ActionFileUpload:
+		// A successful upload is a content change on an existing
+		// file row (the row was created by file.create earlier).
+		return changefeed.KindFile, changefeed.OpUpdate, true
+	case activity.ActionFileRename:
+		return changefeed.KindFile, changefeed.OpRename, true
+	case activity.ActionFileMove, activity.ActionFileBulkMove:
+		return changefeed.KindFile, changefeed.OpMove, true
+	case activity.ActionFileDelete, activity.ActionFileBulkDelete:
+		return changefeed.KindFile, changefeed.OpDelete, true
+	case activity.ActionFileTagAdd, activity.ActionFileTagRemove:
+		return changefeed.KindFile, changefeed.OpUpdate, true
+	case activity.ActionFileBulkCopy:
+		// Copy creates a new file row, mirroring file.create.
+		return changefeed.KindFile, changefeed.OpCreate, true
+	case activity.ActionFolderCreate:
+		return changefeed.KindFolder, changefeed.OpCreate, true
+	case activity.ActionFolderRename:
+		return changefeed.KindFolder, changefeed.OpRename, true
+	case activity.ActionFolderMove:
+		return changefeed.KindFolder, changefeed.OpMove, true
+	case activity.ActionFolderDelete:
+		return changefeed.KindFolder, changefeed.OpDelete, true
+	case activity.ActionPermGrant:
+		return changefeed.KindPermission, changefeed.OpCreate, true
+	case activity.ActionPermRevoke:
+		return changefeed.KindPermission, changefeed.OpDelete, true
+	}
+	// Read events (download, bulk download) and any future action
+	// not listed above are explicitly absent from the feed.
+	_ = resourceType
+	return "", "", false
 }
 
 // logAudit is a nil-safe wrapper mirroring logActivity.

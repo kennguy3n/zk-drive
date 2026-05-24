@@ -23,9 +23,9 @@ import (
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 
 	"github.com/kennguy3n/zk-drive/api/admin"
-	apikchat "github.com/kennguy3n/zk-drive/api/kchat"
 	"github.com/kennguy3n/zk-drive/api/auth"
 	"github.com/kennguy3n/zk-drive/api/drive"
+	apikchat "github.com/kennguy3n/zk-drive/api/kchat"
 	"github.com/kennguy3n/zk-drive/api/middleware"
 	apiwebhooks "github.com/kennguy3n/zk-drive/api/webhooks"
 	"github.com/kennguy3n/zk-drive/api/ws"
@@ -33,6 +33,7 @@ import (
 	"github.com/kennguy3n/zk-drive/internal/ai"
 	"github.com/kennguy3n/zk-drive/internal/audit"
 	"github.com/kennguy3n/zk-drive/internal/billing"
+	"github.com/kennguy3n/zk-drive/internal/changefeed"
 	"github.com/kennguy3n/zk-drive/internal/config"
 	cryptopkg "github.com/kennguy3n/zk-drive/internal/crypto"
 	"github.com/kennguy3n/zk-drive/internal/database"
@@ -41,8 +42,8 @@ import (
 	"github.com/kennguy3n/zk-drive/internal/file"
 	"github.com/kennguy3n/zk-drive/internal/folder"
 	"github.com/kennguy3n/zk-drive/internal/health"
-	"github.com/kennguy3n/zk-drive/internal/kchat"
 	"github.com/kennguy3n/zk-drive/internal/jobs"
+	"github.com/kennguy3n/zk-drive/internal/kchat"
 	"github.com/kennguy3n/zk-drive/internal/logging"
 	"github.com/kennguy3n/zk-drive/internal/metrics"
 	"github.com/kennguy3n/zk-drive/internal/notification"
@@ -414,6 +415,27 @@ func run() error {
 	notificationSvc := notification.NewService(notification.NewPostgresRepository(pool)).
 		WithPublisher(notificationPublisher)
 
+	// Change-feed service. Powers the GET /api/changes catch-up
+	// endpoint and the workspace-wide WS push consumed by the
+	// desktop sync SDK. The publisher path mirrors notifications:
+	// fall back to LocalPublisher in single-replica deployments,
+	// upgrade to RedisPublisher when REDIS_URL is configured so
+	// every replica's hub gets every workspace's change events.
+	var changefeedPublisher changefeed.WSPublisher = changefeed.NewLocalPublisher(hub)
+	if redisClient != nil {
+		cfRP := changefeed.NewRedisPublisher(redisClient)
+		changefeedPublisher = cfRP
+		bgGoroutines.Add(1)
+		go func() {
+			defer bgGoroutines.Done()
+			if err := cfRP.Subscribe(ctx, hub); err != nil && err != context.Canceled {
+				slog.Error("redis changefeed subscribe loop exited", "err", err)
+			}
+		}()
+	}
+	changefeedSvc := changefeed.NewService(changefeed.NewPostgresRepository(pool)).
+		WithPublisher(changefeedPublisher)
+
 	// emailSvc owns transactional email delivery (guest-invite
 	// notifications today; future password-reset / MFA notices
 	// follow the same call shape). When SMTP_HOST is unset the
@@ -495,6 +517,7 @@ func run() error {
 		WithClientRooms(clientRoomSvc).
 		WithJobs(jobPublisher).
 		WithNotifications(notificationSvc).
+		WithChangefeed(changefeedSvc).
 		WithEmail(emailSvc).
 		WithPreviews(previewRepo).
 		WithAudit(auditSvc).
@@ -834,6 +857,12 @@ func run() error {
 			r.Post("/notifications/{id}/read", driveHandler.MarkNotificationRead)
 
 			r.Get("/activity", driveHandler.ListActivity)
+
+			// Change feed for desktop sync SDK. Live push rides
+			// on the existing /ws hub (workspace-wide broadcast,
+			// type="change"); these REST routes serve catch-up.
+			r.Get("/changes", driveHandler.ListChanges)
+			r.Get("/changes/latest", driveHandler.LatestChange)
 		})
 
 		r.Route("/admin", func(r chi.Router) {

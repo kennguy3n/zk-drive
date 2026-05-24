@@ -177,6 +177,69 @@ func TestBroadcastRaceWithDisconnect(t *testing.T) {
 	wg.Wait()
 }
 
+// TestBroadcastJSONWorkspace_FansToEveryUserInWorkspace registers
+// two clients in the same workspace under different user IDs and a
+// third client in a different workspace, then asserts the
+// workspace-wide broadcast lands on the first two and not the
+// third. This is the path the change-feed publisher takes: one
+// mutation event must reach every connected user of the workspace
+// irrespective of clientKey.userID.
+func TestBroadcastJSONWorkspace_FansToEveryUserInWorkspace(t *testing.T) {
+	t.Parallel()
+
+	hub := ws.NewHub()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go hub.Run(ctx)
+
+	wsA := uuid.New()
+	wsB := uuid.New()
+	userA1 := uuid.New()
+	userA2 := uuid.New()
+	userB1 := uuid.New()
+
+	// Synthetic clients with nil *websocket.Conn — never Start()ed,
+	// so the read/write pumps don't NPE; we only need the send
+	// channel that NewClient allocates.
+	c1 := ws.NewClient(hub, nil, wsA, userA1)
+	c2 := ws.NewClient(hub, nil, wsA, userA2)
+	c3 := ws.NewClient(hub, nil, wsB, userB1)
+	hub.Register(c1)
+	hub.Register(c2)
+	hub.Register(c3)
+
+	deadline := time.Now().Add(2 * time.Second)
+	for hub.WorkspaceClientCount(wsA) != 2 || hub.WorkspaceClientCount(wsB) != 1 {
+		if time.Now().After(deadline) {
+			t.Fatalf("clients never registered: wsA=%d wsB=%d",
+				hub.WorkspaceClientCount(wsA), hub.WorkspaceClientCount(wsB))
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	payload := []byte(`{"type":"change","payload":{"sequence":42}}`)
+	hub.BroadcastJSONWorkspace(wsA, payload)
+
+	// Each wsA client gets the payload via its send chan; wsB
+	// gets nothing.
+	for label, c := range map[string]*ws.Client{"userA1": c1, "userA2": c2} {
+		select {
+		case got := <-c.Send():
+			if string(got) != string(payload) {
+				t.Fatalf("%s payload = %q, want %q", label, got, payload)
+			}
+		case <-time.After(time.Second):
+			t.Fatalf("%s never received broadcast", label)
+		}
+	}
+	select {
+	case got := <-c3.Send():
+		t.Fatalf("wsB client received unexpected payload: %s", got)
+	case <-time.After(100 * time.Millisecond):
+		// expected: nothing for the other workspace
+	}
+}
+
 // TestServeWSRejectsUnauthenticated asserts that ServeWS returns 401
 // when invoked without a valid bearer token (i.e. the middleware
 // chain never populates the auth context). Belt-and-braces over the

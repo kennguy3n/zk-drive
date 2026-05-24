@@ -234,6 +234,38 @@ func (h *Hub) BroadcastJSON(workspaceID, userID uuid.UUID, payload []byte) {
 		targets = append(targets, c)
 	}
 	h.mu.RUnlock()
+	h.deliver(targets, payload)
+}
+
+// BroadcastJSONWorkspace pushes an already-encoded JSON payload to
+// every client connected for `workspaceID`, irrespective of user. Used
+// by the change feed (workspace-wide), as opposed to notifications
+// (per-user). The iteration shape mirrors BroadcastJSON; the only
+// difference is the lookup spans every clientKey with a matching
+// workspaceID.
+//
+// We snapshot the targets under the read lock and then deliver
+// outside the lock so a slow send / Unregister never blocks the hub.
+func (h *Hub) BroadcastJSONWorkspace(workspaceID uuid.UUID, payload []byte) {
+	h.mu.RLock()
+	var targets []*Client
+	for key, set := range h.clients {
+		if key.workspaceID != workspaceID {
+			continue
+		}
+		for c := range set {
+			targets = append(targets, c)
+		}
+	}
+	h.mu.RUnlock()
+	h.deliver(targets, payload)
+}
+
+// deliver does the bounded send / done / unregister dance for a
+// pre-snapshot list of targets. Extracted out of BroadcastJSON so
+// BroadcastJSONWorkspace can reuse the same slow-consumer policy
+// without duplicating the select.
+func (h *Hub) deliver(targets []*Client, payload []byte) {
 	for _, c := range targets {
 		select {
 		case c.send <- payload:
@@ -248,6 +280,22 @@ func (h *Hub) BroadcastJSON(workspaceID, userID uuid.UUID, payload []byte) {
 			h.Unregister(c)
 		}
 	}
+}
+
+// WorkspaceClientCount returns the number of clients currently
+// connected for `workspaceID` across all users. Primarily useful in
+// tests that need to synchronise on registration before broadcasting
+// over BroadcastJSONWorkspace.
+func (h *Hub) WorkspaceClientCount(workspaceID uuid.UUID) int {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	total := 0
+	for key, set := range h.clients {
+		if key.workspaceID == workspaceID {
+			total += len(set)
+		}
+	}
+	return total
 }
 
 // NewClient constructs a Client around an already-upgraded
@@ -267,6 +315,16 @@ func NewClient(hub *Hub, conn *websocket.Conn, workspaceID, userID uuid.UUID) *C
 		send: make(chan []byte, sendBufferSize),
 		done: make(chan struct{}),
 	}
+}
+
+// Send returns the receive-only end of the client's outbound queue.
+// Exported for tests that register a synthetic Client without a
+// live *websocket.Conn — they need to observe broadcasts via the
+// channel directly because there is no writePump to drain it.
+// Production code should not use this; payloads are pulled by
+// writePump and shipped over the wire.
+func (c *Client) Send() <-chan []byte {
+	return c.send
 }
 
 // Start registers c with the hub and launches the read and write
