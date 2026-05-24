@@ -602,6 +602,34 @@ mapping in `api/drive.changefeedKindOpFor`.
 Read-only actions (`file.download`, `file.bulk.download`) and any
 unmapped future action are explicitly absent from the feed.
 
+### Visibility model — metadata vs content
+
+The change feed is workspace-wide and exposes every mutation to
+every authenticated workspace member, regardless of per-resource
+ACLs. This is intentional and matches the existing semantics of
+`activity_log`: a member who lacks read access to file `foo.docx`
+can still see "Alice moved foo.docx to /Reports/" in the activity
+feed today, and the same goes for the change feed.
+
+This is a **metadata-only** exposure: the feed records names,
+parent IDs, action kinds, and small structured metadata, never
+file bytes. Sync clients apply per-resource access filtering
+locally when deciding whether to fetch content via presigned URLs
+(`api/drive/file.go` permission checks still gate every download).
+For workspaces where file existence itself must be hidden from
+some members, the product answer is a separate workspace, not
+metadata redaction.
+
+**StrictZK folders**: the zero-knowledge guarantee covers file
+*contents* — not folder/file names or structural metadata. The
+change feed records names for StrictZK resources just like
+managed-encrypted resources, because sync clients (and the activity
+log) need them. Customers who require name-level secrecy (e.g.
+filenames are themselves sensitive) should use the workspace-level
+isolation path described above, not a per-folder option.
+
+### Multi-replica fan-out
+
 In multi-replica deployments the change feed uses a separate
 Redis pub/sub channel namespace (`ws-workspace:{workspaceID}`)
 from the per-user notification channels (`ws:{workspaceID}:{userID}`)

@@ -278,6 +278,14 @@ func (h *Handler) logActivity(ctx context.Context, action, resourceType string, 
 // change_log INSERT instead of 100 sequential ones. The activity
 // log is unaffected — it is already async (LogAction enqueues onto
 // a buffered channel) so per-item dispatch is cheap.
+//
+// CONTRACT for new bulk handlers: pair every logActivityOnly call
+// inside the loop with a single batchRecordChanges call after the
+// loop. Forgetting the second half silently drops the bulk
+// operation from the sync feed even though the activity log
+// records it. The opposite shape (one logActivity per item + no
+// batchRecord) also works but throws away the amortisation; only
+// use it for non-bulk paths.
 func (h *Handler) logActivityOnly(ctx context.Context, action, resourceType string, resourceID uuid.UUID, metadata map[string]any) {
 	if h.activity == nil {
 		return
@@ -498,6 +506,11 @@ var changefeedReadOnlyActions = map[string]struct{}{
 // read-only set will be caught by
 // TestChangefeedKindOpFor_ExhaustiveOverAllActions.
 func changefeedKindOpFor(action, resourceType string) (string, string, bool) {
+	// TODO(desktop-sdk): use resourceType to split permission events
+	// into KindFilePermission / KindFolderPermission once sync
+	// clients need to distinguish them. Until then, the kind is
+	// derivable from the action string alone — every action constant
+	// encodes its resource family in the prefix (file.* vs folder.*).
 	_ = resourceType
 	switch action {
 	case activity.ActionFileCreate:

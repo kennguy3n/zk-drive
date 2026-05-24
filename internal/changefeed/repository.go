@@ -85,6 +85,17 @@ RETURNING sequence, occurred_at`
 // only INSERT (no follow-up writes), and the multi-row statement is
 // already atomic from the perspective of any other reader. Adding
 // BEGIN/COMMIT would just buy an extra round-trip.
+//
+// Prepared-statement cache footprint: pgx keys its statement cache
+// on the SQL text, so each distinct batch size produces a separate
+// entry. Bounded by MaxBulkItems (= 100 at the time of writing),
+// which keeps the cache well within pgx's default 512-statement
+// capacity. If MaxBulkItems ever grows past ~1000, revisit: either
+// (a) switch to pgx.CopyFrom + a follow-up currval(...) read to
+// recover the assigned sequence range, or (b) round len(muts) up
+// to a fixed set of power-of-two bucket sizes (padding unused rows
+// with sentinel UUIDs that the receiver filters) so the cache only
+// ever sees log2(MaxBulkItems) distinct query strings.
 func (r *PostgresRepository) BatchRecord(ctx context.Context, muts []Mutation) error {
 	if len(muts) == 0 {
 		return nil
