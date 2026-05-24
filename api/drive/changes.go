@@ -137,11 +137,13 @@ func parseInt64Query(r *http.Request, name string, def int64) (int64, error) {
 // type matches the changefeed.Since limit parameter which is
 // constrained to MaxLimit = 500.
 //
-// Negative values are clipped to `def` for symmetry with
-// parseInt64Query (cursor=-1 -> 0, limit=-1 -> default). The service
-// also defends with limit <= 0 -> DefaultLimit, but clipping at the
-// edge means a negative limit and an unset limit produce the same
-// observable response, which is the principle of least surprise.
+// Both helpers clip negative values to a sensible default for their
+// own semantic — they are NOT numerically symmetric. parseInt64Query
+// clips since=-1 to 0 ("from the beginning"), while parseIntQuery
+// clips limit=-1 to `def` ("use the default page size"). The service
+// layer also defends with `limit <= 0 -> DefaultLimit`, but clipping
+// at the edge means a negative limit and an unset limit produce the
+// same observable response — principle of least surprise.
 func parseIntQuery(r *http.Request, name string, def int) (int, error) {
 	raw := r.URL.Query().Get(name)
 	if raw == "" {

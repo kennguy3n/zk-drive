@@ -393,38 +393,56 @@ func buildChangefeedInput(
 		actor := userID
 		in.ActorID = &actor
 	}
-	parentKeys := [...]string{"folder_id", "parent_folder_id", "new_parent_folder_id"}
-	var parentFound bool
+	// parentKeys is the (canonical) list of metadata keys whose
+	// value is the resource's parent folder. "target" is the legacy
+	// bulk-move convention used by BulkMove; the others come from
+	// the single-file paths (file.go, folder.go). All are stripped
+	// from the metadata blob (whether or not a value was lifted)
+	// so the wire format is consistent across root vs. non-root
+	// creates and single vs. bulk operations.
+	parentKeys := [...]string{"folder_id", "parent_folder_id", "new_parent_folder_id", "target"}
+	var parentKeyPresent bool
 	for _, k := range parentKeys {
-		if raw, present := metadata[k]; present {
-			if pid, ok := uuidFromAny(raw); ok && !parentFound {
-				in.ParentID = &pid
-				parentFound = true
-			}
+		raw, present := metadata[k]
+		if !present {
+			continue
+		}
+		parentKeyPresent = true
+		if in.ParentID != nil {
+			continue
+		}
+		if pid, ok := uuidFromAny(raw); ok {
+			in.ParentID = &pid
 		}
 	}
-	var nameFound bool
+	var nameKeyPresent bool
 	if raw, present := metadata["name"]; present {
+		nameKeyPresent = true
 		if n, ok := raw.(string); ok {
 			in.Name = n
-			nameFound = true
 		}
 	}
 	// Strip the lifted keys from the metadata blob so the value is
 	// not stored redundantly in change_log.metadata alongside the
-	// dedicated columns. We shallow-copy the caller's map so the
-	// activity log entry (which receives the original) is untouched.
-	if len(metadata) > 0 && (parentFound || nameFound) {
+	// dedicated columns. Crucially, we also strip when the key is
+	// present but the value couldn't be lifted (typed-nil pointer,
+	// empty string, etc.) — the structured column will be NULL in
+	// that case and a stray "parent_folder_id": null inside the
+	// JSONB blob would just be a wire-format inconsistency between
+	// root and non-root creates. We shallow-copy the caller's map
+	// so the activity log entry (which receives the original) is
+	// untouched.
+	if len(metadata) > 0 && (parentKeyPresent || nameKeyPresent) {
 		trimmed := make(map[string]any, len(metadata))
 		for k, v := range metadata {
 			trimmed[k] = v
 		}
-		if parentFound {
+		if parentKeyPresent {
 			for _, k := range parentKeys {
 				delete(trimmed, k)
 			}
 		}
-		if nameFound {
+		if nameKeyPresent {
 			delete(trimmed, "name")
 		}
 		if len(trimmed) > 0 {
@@ -460,15 +478,27 @@ func uuidFromAny(v any) (uuid.UUID, bool) {
 	return uuid.Nil, false
 }
 
+// changefeedReadOnlyActions enumerates the activity actions that are
+// explicitly excluded from the change feed because they don't mutate
+// any client-reconciled state (download, bulk-download). Adding a new
+// read-only action here is the explicit signal that "this action was
+// considered for the change feed and deliberately skipped" — separate
+// from an action being absent because someone forgot to map it.
+var changefeedReadOnlyActions = map[string]struct{}{
+	activity.ActionFileDownload:     {},
+	activity.ActionFileBulkDownload: {},
+}
+
 // changefeedKindOpFor maps an activity action string to a
 // (kind, op) pair appropriate for the change feed, or ("", "", false)
-// when the action should not appear in the feed (read-only events,
-// bulk-download enumerations, etc).
+// when the action is in the changefeedReadOnlyActions set.
 //
-// The mapping is deliberately exhaustive and explicit — a future
-// activity action that isn't covered here will be silently absent
-// from the change feed, which is the safer default than guessing.
+// The mapping is deliberately exhaustive over activity.AllActions — a
+// new Action* constant that is neither mapped here nor added to the
+// read-only set will be caught by
+// TestChangefeedKindOpFor_ExhaustiveOverAllActions.
 func changefeedKindOpFor(action, resourceType string) (string, string, bool) {
+	_ = resourceType
 	switch action {
 	case activity.ActionFileCreate:
 		return changefeed.KindFile, changefeed.OpCreate, true
@@ -500,9 +530,6 @@ func changefeedKindOpFor(action, resourceType string) (string, string, bool) {
 	case activity.ActionPermRevoke:
 		return changefeed.KindPermission, changefeed.OpDelete, true
 	}
-	// Read events (download, bulk download) and any future action
-	// not listed above are explicitly absent from the feed.
-	_ = resourceType
 	return "", "", false
 }
 

@@ -114,7 +114,12 @@ func (h *Handler) BulkMove(w http.ResponseWriter, r *http.Request) {
 			resp.Failed = append(resp.Failed, bulkFailure{ID: raw, Error: err.Error()})
 			continue
 		}
-		md := map[string]any{"target": targetID, "new_parent_folder_id": targetID}
+		// "target" is the legacy bulk-move metadata key recognised
+		// by buildChangefeedInput (see parentKeys). The single-file
+		// MoveFile path uses "folder_id" — both lift into the
+		// structured parent_id column and strip from the JSONB
+		// blob, so neither shape ends up duplicating the UUID.
+		md := map[string]any{"target": targetID}
 		h.logActivityOnly(r.Context(), activity.ActionFileBulkMove, permission.ResourceFile, id, md)
 		changes = append(changes, changeInput{
 			Action: activity.ActionFileBulkMove, ResourceType: permission.ResourceFile,
@@ -136,7 +141,7 @@ func (h *Handler) BulkMove(w http.ResponseWriter, r *http.Request) {
 			resp.Failed = append(resp.Failed, bulkFailure{ID: raw, Error: err.Error()})
 			continue
 		}
-		md := map[string]any{"target": targetID, "new_parent_folder_id": targetID}
+		md := map[string]any{"target": targetID}
 		h.logActivityOnly(r.Context(), activity.ActionFolderMove, permission.ResourceFolder, id, md)
 		changes = append(changes, changeInput{
 			Action: activity.ActionFolderMove, ResourceType: permission.ResourceFolder,

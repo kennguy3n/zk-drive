@@ -489,6 +489,96 @@ func TestBuildChangefeedInput_NoMetadataLeftEmpty(t *testing.T) {
 	}
 }
 
+// TestChangefeedKindOpFor_ExhaustiveOverAllActions enforces that
+// every activity.Action* constant is either mapped to a change-feed
+// (kind, op) pair OR explicitly listed in changefeedReadOnlyActions.
+// Adding a new constant without updating one of the two will fail
+// this test instead of silently disappearing from the sync stream.
+func TestChangefeedKindOpFor_ExhaustiveOverAllActions(t *testing.T) {
+	t.Parallel()
+	for _, action := range activity.AllActions {
+		_, _, mapped := changefeedKindOpFor(action, "")
+		_, skipped := changefeedReadOnlyActions[action]
+		if !mapped && !skipped {
+			t.Fatalf("activity action %q is neither mapped in changefeedKindOpFor "+
+				"nor listed in changefeedReadOnlyActions — sync clients will silently "+
+				"miss this mutation. Add to one of the two before merging.", action)
+		}
+		if mapped && skipped {
+			t.Fatalf("activity action %q is BOTH mapped and read-only — pick one.", action)
+		}
+	}
+}
+
+// TestBuildChangefeedInput_LiftsTargetForBulkMove pins the F8 fix:
+// BulkMove's legacy "target" metadata key is recognised as a parent
+// key (lifted into ParentID and stripped from the JSONB blob), so a
+// bulk move no longer carries a duplicate "target": UUID alongside
+// the structured parent_id column.
+func TestBuildChangefeedInput_LiftsTargetForBulkMove(t *testing.T) {
+	t.Parallel()
+	repo := &fakeChangefeedRepo{}
+	svc := changefeed.NewService(repo)
+	h := (&Handler{}).WithChangefeed(svc)
+	targetID := uuid.New()
+	ctx := middleware.WithWorkspaceID(context.Background(), uuid.New())
+	ctx = middleware.WithUserID(ctx, uuid.New())
+	h.batchRecordChanges(ctx, []changeInput{{
+		Action: activity.ActionFileBulkMove, ResourceType: "file",
+		ResourceID: uuid.New(),
+		Metadata:   map[string]any{"target": targetID},
+	}})
+	if len(repo.rows) != 1 {
+		t.Fatalf("expected 1 batch row, got %d", len(repo.rows))
+	}
+	m := repo.rows[0]
+	if m.ParentID == nil || *m.ParentID != targetID {
+		t.Fatalf("target not lifted to ParentID: %+v", m.ParentID)
+	}
+	if strings.Contains(string(m.Metadata), "target") {
+		t.Fatalf("target not stripped from metadata: %s", m.Metadata)
+	}
+}
+
+// TestBuildChangefeedInput_StripsTypedNilParentKey pins the F9 fix:
+// a present-but-unlifted parent key (e.g. root folder create with a
+// typed-nil *uuid.UUID) must still be stripped from the metadata
+// JSONB so the wire format is consistent between root and non-root
+// creates. The structured parent_id column is null in both cases.
+func TestBuildChangefeedInput_StripsTypedNilParentKey(t *testing.T) {
+	t.Parallel()
+	repo := &fakeChangefeedRepo{}
+	svc := changefeed.NewService(repo)
+	h := (&Handler{}).WithChangefeed(svc)
+	var nilParent *uuid.UUID // root folder
+	ctx := middleware.WithWorkspaceID(context.Background(), uuid.New())
+	ctx = middleware.WithUserID(ctx, uuid.New())
+	h.recordChange(ctx, uuid.New(), uuid.New(),
+		activity.ActionFolderCreate, "folder", uuid.New(),
+		map[string]any{
+			"parent_folder_id": nilParent,
+			"name":             "Root",
+			"some_other":       "kept",
+		})
+	if len(repo.rows) != 1 {
+		t.Fatalf("expected 1 row, got %d", len(repo.rows))
+	}
+	m := repo.rows[0]
+	if m.ParentID != nil {
+		t.Fatalf("structured ParentID should be nil for root create, got %v", m.ParentID)
+	}
+	body := string(m.Metadata)
+	if strings.Contains(body, "parent_folder_id") {
+		t.Fatalf("parent_folder_id should be stripped on typed-nil too: %s", body)
+	}
+	if strings.Contains(body, "\"name\"") {
+		t.Fatalf("name should be stripped: %s", body)
+	}
+	if !strings.Contains(body, "some_other") {
+		t.Fatalf("unrelated metadata key dropped: %s", body)
+	}
+}
+
 // TestParseIntQuery_NegativeClipsToDefault pins the F5 symmetry fix:
 // a negative `limit` should be treated identically to an unset
 // `limit`, matching parseInt64Query's negative-clipping behavior.
