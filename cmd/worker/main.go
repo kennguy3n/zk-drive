@@ -55,6 +55,7 @@ import (
 	"github.com/kennguy3n/zk-drive/internal/storage"
 	"github.com/kennguy3n/zk-drive/internal/tracing"
 	"github.com/kennguy3n/zk-drive/internal/version"
+	"github.com/kennguy3n/zk-drive/internal/webhooks"
 	"github.com/kennguy3n/zk-drive/internal/wiring"
 )
 
@@ -433,7 +434,7 @@ func startMetricsServer(_ context.Context, listenAddr string, m *metrics.Metrics
 func ensureStream(js nats.JetStreamContext) error {
 	cfg := &nats.StreamConfig{
 		Name:      streamName,
-		Subjects:  []string{jobs.SubjectPreview, jobs.SubjectScan, jobs.SubjectIndex, jobs.SubjectArchive, jobs.SubjectRetention, jobs.SubjectClassify},
+		Subjects:  []string{jobs.SubjectPreview, jobs.SubjectScan, jobs.SubjectIndex, jobs.SubjectArchive, jobs.SubjectRetention, jobs.SubjectClassify, webhooks.SubjectEvents},
 		Storage:   nats.FileStorage,
 		Retention: nats.WorkQueuePolicy,
 		MaxAge:    7 * 24 * time.Hour,
@@ -456,25 +457,59 @@ func ensureStream(js nats.JetStreamContext) error {
 // (subject, result) labels land on zkdrive_worker_jobs_total and
 // the duration histogram captures wall time per subject.
 func subscribeAll(ctx context.Context, js nats.JetStreamContext, pool *pgxpool.Pool, m *metrics.Metrics, previewSvc *preview.Service, scanSvc *scan.Service, archiveSvc *retention.ArchiveService, indexSvc *index.Service, classifySvc *classify.Service) ([]*nats.Subscription, error) {
+	// Webhook delivery worker (WS-24). Constructed once and shared
+	// across all webhook.events deliveries; the DeliveryClient
+	// holds an http.Client + URLValidator that are both safe for
+	// concurrent use. The repository is the pgx-backed
+	// implementation which the worker runs WITHOUT setting
+	// app.workspace_id so the RLS bypass branch fires (same
+	// pattern as the audit archiver).
+	webhookRepo := webhooks.NewPostgresRepository(pool)
+	webhookDeliveryClient := webhooks.NewDeliveryClient(webhooks.NewURLValidator(), 0)
+	webhookWorker, werr := webhooks.NewDeliveryWorker(webhookRepo, webhookDeliveryClient, m)
+	if werr != nil {
+		return nil, fmt.Errorf("build webhook delivery worker: %w", werr)
+	}
+
 	subjects := []struct {
 		subject string
 		durable string
 		handler nats.MsgHandler
+		// extraOpts is appended to the base subscribe options
+		// for this subject. Used to attach subject-specific
+		// settings (e.g. MaxDeliver for the webhook consumer)
+		// without leaking those settings onto unrelated drive
+		// job consumers that have different retry semantics.
+		extraOpts []nats.SubOpt
 	}{
-		{jobs.SubjectPreview, "drive-preview", m.InstrumentJob(ctx, jobs.SubjectPreview, traceJob(jobs.SubjectPreview, previewHandler(pool, previewSvc)))},
-		{jobs.SubjectScan, "drive-scan", m.InstrumentJob(ctx, jobs.SubjectScan, traceJob(jobs.SubjectScan, scanHandler(pool, scanSvc)))},
-		{jobs.SubjectIndex, "drive-index", m.InstrumentJob(ctx, jobs.SubjectIndex, traceJob(jobs.SubjectIndex, indexHandler(pool, indexSvc)))},
-		{jobs.SubjectArchive, "drive-archive", m.InstrumentJob(ctx, jobs.SubjectArchive, traceJob(jobs.SubjectArchive, archiveHandler(archiveSvc)))},
-		{jobs.SubjectClassify, "drive-classify", m.InstrumentJob(ctx, jobs.SubjectClassify, traceJob(jobs.SubjectClassify, classifyHandler(pool, classifySvc)))},
+		{jobs.SubjectPreview, "drive-preview", m.InstrumentJob(ctx, jobs.SubjectPreview, traceJob(jobs.SubjectPreview, previewHandler(pool, previewSvc))), nil},
+		{jobs.SubjectScan, "drive-scan", m.InstrumentJob(ctx, jobs.SubjectScan, traceJob(jobs.SubjectScan, scanHandler(pool, scanSvc))), nil},
+		{jobs.SubjectIndex, "drive-index", m.InstrumentJob(ctx, jobs.SubjectIndex, traceJob(jobs.SubjectIndex, indexHandler(pool, indexSvc))), nil},
+		{jobs.SubjectArchive, "drive-archive", m.InstrumentJob(ctx, jobs.SubjectArchive, traceJob(jobs.SubjectArchive, archiveHandler(archiveSvc))), nil},
+		{jobs.SubjectClassify, "drive-classify", m.InstrumentJob(ctx, jobs.SubjectClassify, traceJob(jobs.SubjectClassify, classifyHandler(pool, classifySvc))), nil},
+		// MaxDeliver is server-side defense-in-depth for the
+		// webhook consumer. The application-side counter in
+		// internal/webhooks/worker.go also returns "dropped" once
+		// attempt >= MaxAttempts, which the webhookDeliveryHandler
+		// translates to msg.Term(). If that counter is ever bypassed
+		// (programmer error, a deterministic remarshal failure that
+		// historically returned "error" instead of "dropped", etc.),
+		// MaxDeliver=MaxAttempts ensures JetStream itself caps
+		// redeliveries at the same number rather than retrying for
+		// up to MaxAge (7 days). Sized identically to the
+		// application-side cap so the two layers agree.
+		{webhooks.SubjectEvents, "webhook-deliveries", m.InstrumentJob(ctx, webhooks.SubjectEvents, traceJob(webhooks.SubjectEvents, webhookDeliveryHandler(webhookWorker))), []nats.SubOpt{nats.MaxDeliver(webhooks.MaxAttempts)}},
 	}
 	var subs []*nats.Subscription
 	for _, s := range subjects {
-		sub, err := js.Subscribe(s.subject, s.handler,
+		opts := []nats.SubOpt{
 			nats.Durable(s.durable),
 			nats.AckWait(ackWait),
 			nats.DeliverAll(),
 			nats.ManualAck(),
-		)
+		}
+		opts = append(opts, s.extraOpts...)
+		sub, err := js.Subscribe(s.subject, s.handler, opts...)
 		if err != nil {
 			unsubscribeAll(subs)
 			return nil, fmt.Errorf("subscribe %s: %w", s.subject, err)
@@ -938,6 +973,50 @@ func traceJob(subject string, h metrics.JobHandler) metrics.JobHandler {
 	})
 	return func(ctx context.Context, msg *nats.Msg) metrics.JobResult {
 		return metrics.JobResult(wrapped(ctx, msg))
+	}
+}
+
+// webhookDeliveryHandler adapts webhooks.DeliveryWorker.Consume to
+// the JobHandler signature. Per the JobHandler contract in
+// internal/metrics/worker.go, the handler is responsible for calling
+// msg.Ack / Nak / Term itself — we translate Consume's string result:
+//
+//   - "ok" / "skip": Ack — fully fanned out OR no matching
+//     subscribers (skip).
+//   - "error":       NakWithDelay — at least one subscriber failed
+//     and the attempt count hasn't hit MaxAttempts yet. We pass the
+//     same BackoffDelay schedule the worker recorded on the
+//     next_retry_at column so JetStream's redelivery matches what
+//     the admin UI tells the operator (1s, 2s, 4s, 8s between
+//     retries 2 through 5). Without the delay JetStream redelivers
+//     instantly and the documented schedule becomes a lie.
+//   - "dropped":     Term — terminal (poison payload or MaxAttempts
+//     exhausted); stop redelivery so the stream doesn't spin on an
+//     undelivable event. Operators see the final state on the
+//     webhook_deliveries row.
+func webhookDeliveryHandler(w *webhooks.DeliveryWorker) metrics.JobHandler {
+	return func(ctx context.Context, msg *nats.Msg) metrics.JobResult {
+		result := w.Consume(ctx, msg)
+		switch result {
+		case "ok", "skip":
+			_ = msg.Ack()
+		case "dropped":
+			_ = msg.Term()
+		default:
+			// Compute the same backoff the worker recorded on
+			// next_retry_at. NumDelivered is 1-indexed (1 ==
+			// initial attempt) so BackoffDelay(attempt+1)
+			// computes the delay before the NEXT redelivery.
+			attempt := 1
+			if md, mdErr := msg.Metadata(); mdErr == nil && md != nil {
+				attempt = int(md.NumDelivered)
+				if attempt < 1 {
+					attempt = 1
+				}
+			}
+			_ = msg.NakWithDelay(webhooks.BackoffDelay(attempt + 1))
+		}
+		return metrics.JobResult(result)
 	}
 }
 

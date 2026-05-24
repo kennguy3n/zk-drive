@@ -51,6 +51,14 @@ const (
 	// `template_error` / `address_invalid` / `disabled`) so a
 	// failed delivery is still visible without dropping the row.
 	ActionGuestInviteEmailed = "sharing.guest_invite_emailed"
+	// Outbound webhook subscription lifecycle (WS-24). Workspace
+	// admins create / pause / resume / delete subscriptions; each
+	// transition is audited so compliance reviews can attribute
+	// fan-out changes to a specific operator.
+	ActionWebhookSubscriptionCreate = "webhooks.subscription_create"
+	ActionWebhookSubscriptionDelete = "webhooks.subscription_delete"
+	ActionWebhookSubscriptionResume = "webhooks.subscription_resume"
+	ActionWebhookSubscriptionTest   = "webhooks.subscription_test"
 )
 
 // Entry mirrors a single audit_log row. ActorID is nullable because

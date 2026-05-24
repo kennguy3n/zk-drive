@@ -27,6 +27,7 @@ import (
 	"github.com/kennguy3n/zk-drive/api/auth"
 	"github.com/kennguy3n/zk-drive/api/drive"
 	"github.com/kennguy3n/zk-drive/api/middleware"
+	apiwebhooks "github.com/kennguy3n/zk-drive/api/webhooks"
 	"github.com/kennguy3n/zk-drive/api/ws"
 	"github.com/kennguy3n/zk-drive/internal/activity"
 	"github.com/kennguy3n/zk-drive/internal/ai"
@@ -56,6 +57,7 @@ import (
 	"github.com/kennguy3n/zk-drive/internal/tracing"
 	"github.com/kennguy3n/zk-drive/internal/user"
 	"github.com/kennguy3n/zk-drive/internal/version"
+	"github.com/kennguy3n/zk-drive/internal/webhooks"
 	"github.com/kennguy3n/zk-drive/internal/wiring"
 	"github.com/kennguy3n/zk-drive/internal/workspace"
 )
@@ -279,6 +281,7 @@ func run() error {
 	// nc.Status(). A nil natsConn signals "NATS not configured" to
 	// the health checker (which then short-circuits with OK).
 	var jobPublisher *jobs.Publisher
+	var webhookPublisher *webhooks.Publisher
 	var natsConn *nats.Conn
 	if natsURL := os.Getenv("NATS_URL"); natsURL != "" {
 		nc, nerr := nats.Connect(natsURL,
@@ -295,6 +298,7 @@ func run() error {
 				nc.Close()
 			} else {
 				jobPublisher = jobs.NewPublisher(js)
+				webhookPublisher = webhooks.NewPublisher(js)
 				natsConn = nc
 				slog.Info("nats connected, post-upload jobs enabled", "url", natsURL)
 				defer nc.Drain() //nolint:errcheck // best-effort drain
@@ -494,7 +498,8 @@ func run() error {
 		WithEmail(emailSvc).
 		WithPreviews(previewRepo).
 		WithAudit(auditSvc).
-		WithBilling(billingSvc)
+		WithBilling(billingSvc).
+		WithWebhooks(webhookPublisher)
 	var fabricClient admin.FabricClient
 	if cfg.FabricConsoleURL != "" {
 		fabricClient = fabric.NewClient(fabric.ClientConfig{
@@ -506,7 +511,40 @@ func run() error {
 		WithBilling(billingSvc).
 		WithStripe(stripeService).
 		WithFabric(fabricClient, provisioner, storageFactory).
-		WithWorkspaces(wsSvc)
+		WithWorkspaces(wsSvc).
+		WithWebhooks(webhookPublisher)
+
+	// Outbound-webhook subscription admin handler (WS-24). Mounted
+	// under /api/admin/webhooks so it inherits the admin-only +
+	// tenant-guarded middleware stack. CRUD on subscriptions still
+	// works without NATS; POST /test additionally requires a
+	// TestDispatcher (which only needs the repo + a DeliveryClient,
+	// not JetStream — tests dispatch synchronously to the single
+	// targeted subscription, see internal/webhooks/test_dispatch.go).
+	webhookRepo := webhooks.NewPostgresRepository(pool)
+	// A single URLValidator is shared between (a) the admin
+	// handler's create-time SSRF check and (b) the TestDispatcher's
+	// per-delivery DNS-rebinding re-check. Both run inside the same
+	// API process and the validator is stateless (no caches, no
+	// connection pools), so a single instance is functionally
+	// identical to two independent instances. The previous
+	// arrangement created one via NewHandler's default constructor
+	// and a second inline at NewDeliveryClient(NewURLValidator(),
+	// ...); a future change to validator defaults (e.g. adding an
+	// allow-list flag) would have had to land in both places to
+	// avoid drift. Sharing here eliminates that coupling risk. The
+	// worker (cmd/worker/main.go) still constructs its own validator
+	// because it runs in a separate process.
+	webhookValidator := webhooks.NewURLValidator()
+	webhookTester, err := webhooks.NewTestDispatcher(webhookRepo, webhooks.NewDeliveryClient(webhookValidator, webhooks.DefaultDeliveryTimeout))
+	if err != nil {
+		return fmt.Errorf("webhooks/test-dispatcher: %w", err)
+	}
+	webhookHandler := apiwebhooks.NewHandler(webhookRepo).
+		WithPublisher(webhookPublisher).
+		WithTestDispatcher(webhookTester).
+		WithValidator(webhookValidator).
+		WithAudit(auditSvc)
 
 	kchatSvc := kchat.NewRoomService(
 		kchat.NewPostgresRepository(pool),
@@ -804,6 +842,13 @@ func run() error {
 			r.Use(middleware.AdminOnly())
 			r.Use(rateLimiter())
 			adminHandler.RegisterRoutes(r)
+			// Outbound webhook subscription management (WS-24)
+			// rides on the same admin-only middleware stack so
+			// only workspace admins can create / delete /
+			// inspect subscriptions.
+			r.Route("/webhooks", func(r chi.Router) {
+				webhookHandler.RegisterRoutes(r)
+			})
 		})
 
 		r.Route("/kchat", func(r chi.Router) {

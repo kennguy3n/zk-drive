@@ -4,12 +4,14 @@ import (
 	"context"
 	"encoding/json"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -19,6 +21,7 @@ import (
 
 	"github.com/kennguy3n/zk-drive/api/admin"
 	apikchat "github.com/kennguy3n/zk-drive/api/kchat"
+	apiwebhooks "github.com/kennguy3n/zk-drive/api/webhooks"
 	"github.com/kennguy3n/zk-drive/api/auth"
 	"github.com/kennguy3n/zk-drive/api/drive"
 	"github.com/kennguy3n/zk-drive/api/middleware"
@@ -44,6 +47,7 @@ import (
 	"github.com/kennguy3n/zk-drive/internal/storage"
 	"github.com/kennguy3n/zk-drive/internal/totp"
 	"github.com/kennguy3n/zk-drive/internal/user"
+	"github.com/kennguy3n/zk-drive/internal/webhooks"
 	"github.com/kennguy3n/zk-drive/internal/workspace"
 
 	"github.com/alicebob/miniredis/v2"
@@ -67,6 +71,96 @@ type testEnv struct {
 	provisioner  *fabric.Provisioner
 	miniredis    *miniredis.Miniredis
 	sessionStore *session.RedisSessionStore
+	webhooks     *webhookCapture
+}
+
+// webhookCapture is the test-only publisher used by the integration
+// harness to assert outbound-webhook emission without standing up a
+// real NATS/JetStream server. Records every call in order, guarded
+// by a mutex so tests that exercise concurrent handler paths (e.g.
+// bulk operations) can read the slice safely.
+//
+// Implements three narrow interfaces — api/drive.WebhookEventPublisher
+// (file + permission events) and api/admin.MemberEventPublisher
+// (member events) — so a single capturer can be wired into both the
+// drive handler and the admin handler. This mirrors how the
+// concrete *webhooks.Publisher in internal/webhooks satisfies both
+// in production.
+type webhookCapture struct {
+	mu           sync.Mutex
+	FileEvents   []capturedFileEvent
+	PermEvents   []capturedPermEvent
+	MemberEvents []capturedMemberEvent
+}
+
+type capturedFileEvent struct {
+	Type        webhooks.EventType
+	WorkspaceID uuid.UUID
+	ActorID     *uuid.UUID
+	Data        webhooks.FileEventData
+}
+
+type capturedPermEvent struct {
+	Type        webhooks.EventType
+	WorkspaceID uuid.UUID
+	ActorID     *uuid.UUID
+	Data        webhooks.PermissionEventData
+}
+
+type capturedMemberEvent struct {
+	Type        webhooks.EventType
+	WorkspaceID uuid.UUID
+	ActorID     *uuid.UUID
+	Data        webhooks.MemberEventData
+}
+
+func (c *webhookCapture) PublishFileEvent(ctx context.Context, t webhooks.EventType, workspaceID uuid.UUID, actorID *uuid.UUID, data webhooks.FileEventData) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.FileEvents = append(c.FileEvents, capturedFileEvent{Type: t, WorkspaceID: workspaceID, ActorID: actorID, Data: data})
+	return nil
+}
+
+func (c *webhookCapture) PublishPermissionEvent(ctx context.Context, t webhooks.EventType, workspaceID uuid.UUID, actorID *uuid.UUID, data webhooks.PermissionEventData) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.PermEvents = append(c.PermEvents, capturedPermEvent{Type: t, WorkspaceID: workspaceID, ActorID: actorID, Data: data})
+	return nil
+}
+
+func (c *webhookCapture) PublishMemberEvent(ctx context.Context, t webhooks.EventType, workspaceID uuid.UUID, actorID *uuid.UUID, data webhooks.MemberEventData) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.MemberEvents = append(c.MemberEvents, capturedMemberEvent{Type: t, WorkspaceID: workspaceID, ActorID: actorID, Data: data})
+	return nil
+}
+
+// fileEventsByType returns a copy of the captured file events filtered by
+// type. Safe for concurrent test inspection.
+func (c *webhookCapture) fileEventsByType(t webhooks.EventType) []capturedFileEvent {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	var out []capturedFileEvent
+	for _, e := range c.FileEvents {
+		if e.Type == t {
+			out = append(out, e)
+		}
+	}
+	return out
+}
+
+// memberEventsByType returns a copy of the captured member events
+// filtered by type. Safe for concurrent test inspection.
+func (c *webhookCapture) memberEventsByType(t webhooks.EventType) []capturedMemberEvent {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	var out []capturedMemberEvent
+	for _, e := range c.MemberEvents {
+		if e.Type == t {
+			out = append(out, e)
+		}
+	}
+	return out
 }
 
 // setupEnv connects to Postgres, runs migrations, wires the API, and starts
@@ -155,6 +249,7 @@ func setupEnv(t *testing.T) *testEnv {
 		WithAudit(auditSvc).
 		WithTOTP(totpSvc).
 		WithSessionRevoker(sessionStore)
+	webhookCap := &webhookCapture{}
 	driveHandler := drive.NewHandler(pool, wsSvc, folderSvc, fileSvc, userSvc, storageClient, permissionSvc, activitySvc).
 		WithSharing(sharingSvc).
 		WithSearch(searchSvc).
@@ -162,7 +257,8 @@ func setupEnv(t *testing.T) *testEnv {
 		WithNotifications(notificationSvc).
 		WithPreviews(previewRepo).
 		WithAudit(auditSvc).
-		WithBilling(billingSvc)
+		WithBilling(billingSvc).
+		WithWebhooks(webhookCap)
 	// Wire a Postgres-backed fabric provisioner with no console URL
 	// so admin endpoints that only need persistence (CMK) work; the
 	// FabricClient interface is left nil because no test fakes the
@@ -172,7 +268,40 @@ func setupEnv(t *testing.T) *testEnv {
 		WithBilling(billingSvc).
 		WithStripe(stripeService).
 		WithFabric(nil, provisioner, nil).
-		WithWorkspaces(wsSvc)
+		WithWorkspaces(wsSvc).
+		WithWebhooks(webhookCap)
+
+	// Outbound-webhook subscription admin handler (WS-24). Mounted
+	// alongside adminHandler under /admin/webhooks so the
+	// integration harness exercises the same CRUD surface that
+	// cmd/server/main.go does (Create / List / Get / Delete /
+	// ListDeliveries / Resume) against the real Postgres
+	// PostgresRepository — the in-process webhookCap fake covers
+	// emission, this covers the admin CRUD path the bot flagged as
+	// unreachable from the integration harness. POST /test wires
+	// the synchronous TestDispatcher so admin-driven sanity checks
+	// against a single subscription also work end-to-end.
+	webhookRepo := webhooks.NewPostgresRepository(pool)
+	// Relaxed validator for the harness: a fixed resolver returning
+	// a public IP for any hostname (so subscription-create works
+	// without an outbound DNS query), AllowLoopback so the
+	// TestDispatcher can deliver to an httptest.Server bound to
+	// 127.0.0.1:port, and AllowHTTP so we don't need a TLS-
+	// terminating fixture. Mirrors the testValidator helper in
+	// api/webhooks/handler_test.go so the two surfaces have
+	// identical SSRF behaviour in tests.
+	webhookValidator := webhooks.NewURLValidator()
+	webhookValidator.Resolver = staticIPResolver{ip: net.ParseIP("1.1.1.1")}
+	webhookValidator.AllowHTTP = true
+	webhookValidator.AllowLoopback = true
+	webhookTester, err := webhooks.NewTestDispatcher(webhookRepo, webhooks.NewDeliveryClient(webhookValidator, webhooks.DefaultDeliveryTimeout))
+	if err != nil {
+		t.Fatalf("webhooks/test-dispatcher: %v", err)
+	}
+	webhookHandler := apiwebhooks.NewHandler(webhookRepo).
+		WithValidator(webhookValidator).
+		WithTestDispatcher(webhookTester).
+		WithAudit(auditSvc)
 
 	// KChat service: same wiring as cmd/server/main.go, with a fallback
 	// storage factory so AttachmentUploadURL can mint signed URLs in
@@ -358,6 +487,19 @@ func setupEnv(t *testing.T) *testEnv {
 			r.Use(middleware.TenantGuard())
 			r.Use(middleware.AdminOnly())
 			adminHandler.RegisterRoutes(r)
+			// Outbound-webhook subscription admin surface (WS-24).
+			// Mounted here so the integration harness exercises the
+			// real Create / List / Get / Delete / ListDeliveries /
+			// Resume routes against the Postgres repository, not
+			// just the in-process emission fakes. The POST /test
+			// route is wired via WithTestDispatcher below so the
+			// synchronous test-fan-out works end-to-end without
+			// JetStream. The repo lives next to the production
+			// PostgresRepository so the integration tests catch
+			// migration drift the unit tests can't.
+			r.Route("/webhooks", func(r chi.Router) {
+				webhookHandler.RegisterRoutes(r)
+			})
 		})
 
 		r.Route("/kchat", func(r chi.Router) {
@@ -379,6 +521,7 @@ func setupEnv(t *testing.T) *testEnv {
 		provisioner:  provisioner,
 		miniredis:    mr,
 		sessionStore: sessionStore,
+		webhooks:     webhookCap,
 	}
 	t.Cleanup(func() {
 		srv.Close()
@@ -408,7 +551,17 @@ func (e *testEnv) ResetTables() {
 	defer cancel()
 	stmts := []string{
 		`ALTER TABLE workspaces DROP CONSTRAINT IF EXISTS fk_workspaces_owner`,
-		`TRUNCATE kchat_room_folders, workspace_storage_credentials, workspace_plans, usage_events, file_tags, retention_policies, audit_log, notifications, file_previews, client_rooms, guest_invites, share_links, activity_log, permissions, file_versions, files, folders, users, workspaces RESTART IDENTITY CASCADE`,
+		// webhook_deliveries / webhook_subscriptions are listed
+		// explicitly so the dependency is visible at the test
+		// harness layer. They WOULD cascade from workspaces /
+		// users via FK ON DELETE CASCADE, but pinning them here
+		// guards against a future migration that drops or relaxes
+		// the cascade leaving stale rows between tests and
+		// producing flaky "subscription already exists" / counter
+		// drift symptoms that are hard to diagnose. Same defensive
+		// reason kchat_room_folders is listed even though it
+		// cascades from client_rooms.
+		`TRUNCATE webhook_deliveries, webhook_subscriptions, kchat_room_folders, workspace_storage_credentials, workspace_plans, usage_events, file_tags, retention_policies, audit_log, notifications, file_previews, client_rooms, guest_invites, share_links, activity_log, permissions, file_versions, files, folders, users, workspaces RESTART IDENTITY CASCADE`,
 		`ALTER TABLE workspaces ADD CONSTRAINT fk_workspaces_owner FOREIGN KEY (owner_user_id) REFERENCES users(id)`,
 	}
 	for _, s := range stmts {
@@ -535,11 +688,44 @@ func (e *testEnv) signupAndLogin(workspaceName, email, name, password string) to
 	return tok
 }
 
+// login authenticates an existing user (e.g. a member previously
+// invited by an admin) and returns the resulting token payload.
+// Distinct from signupAndLogin so multi-role tests can exercise
+// both the admin role and the member role inside one workspace.
+func (e *testEnv) login(email, password string) tokenPayload {
+	e.t.Helper()
+	status, body := e.httpRequest(http.MethodPost, "/api/auth/login", "", map[string]string{
+		"email":    email,
+		"password": password,
+	})
+	if status != http.StatusOK {
+		e.t.Fatalf("login: status=%d body=%s", status, string(body))
+	}
+	var tok tokenPayload
+	e.decodeJSON(body, &tok)
+	return tok
+}
+
 type tokenPayload struct {
 	Token       string `json:"token"`
 	UserID      string `json:"user_id"`
 	WorkspaceID string `json:"workspace_id"`
 	Role        string `json:"role"`
+}
+
+// staticIPResolver is a webhooks.Resolver implementation that returns
+// a fixed public IP for every host. Used by the webhook admin CRUD
+// integration tests so subscription-create can validate URLs like
+// https://hooks.example.com/x without performing an actual outbound
+// DNS lookup (which would couple test reliability to the host's
+// recursive resolver state). Returns a public IP rather than a
+// private one so the validator's SSRF guard passes.
+type staticIPResolver struct {
+	ip net.IP
+}
+
+func (r staticIPResolver) LookupIPAddr(_ context.Context, _ string) ([]net.IPAddr, error) {
+	return []net.IPAddr{{IP: r.ip}}, nil
 }
 
 // identityCodec is a no-op totp.Encryptor for the integration tests:

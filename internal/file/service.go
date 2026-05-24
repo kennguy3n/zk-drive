@@ -88,6 +88,17 @@ func (s *Service) ListByFolder(ctx context.Context, workspaceID, folderID uuid.U
 	return s.repo.ListFilesByFolder(ctx, workspaceID, folderID)
 }
 
+// ListInFolderSubtree returns every non-deleted file under folderID
+// (including those in nested descendant folders). Callers use this
+// to snapshot per-file metadata BEFORE issuing a recursive folder
+// soft-delete so they can emit a file.deleted webhook per affected
+// file (the folder cascade soft-deletes the files in the same
+// transaction, and after that point the snapshot rows are no longer
+// visible to GetByID's deleted_at IS NULL filter).
+func (s *Service) ListInFolderSubtree(ctx context.Context, workspaceID, folderID uuid.UUID) ([]*File, error) {
+	return s.repo.ListFilesInFolderSubtree(ctx, workspaceID, folderID)
+}
+
 // SetPendingUploadObjectKey records the presigned-PUT object_key on
 // a file row so the orphan-object GC reconciler can reclaim the S3
 // object if ConfirmUpload never completes. Called from the UploadURL

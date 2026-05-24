@@ -35,6 +35,7 @@ import (
 	"github.com/kennguy3n/zk-drive/internal/email"
 	"github.com/kennguy3n/zk-drive/internal/storage"
 	"github.com/kennguy3n/zk-drive/internal/user"
+	"github.com/kennguy3n/zk-drive/internal/webhooks"
 	"github.com/kennguy3n/zk-drive/internal/workspace"
 )
 
@@ -63,6 +64,7 @@ type Handler struct {
 	previews       preview.Repository
 	audit          *audit.Service
 	billing        *billing.Service
+	webhooks       WebhookEventPublisher
 }
 
 // NewHandler constructs a Handler from the underlying services. The pool is
@@ -100,6 +102,32 @@ func NewHandler(
 // metadata-only test wiring that doesn't care about plans.
 func (h *Handler) WithBilling(b *billing.Service) *Handler {
 	h.billing = b
+	return h
+}
+
+// WithWebhooks wires an outbound-webhook publisher. When non-nil the
+// handler emits webhook events (file.upload.confirmed,
+// permission.granted, etc.) onto the JetStream subject so the
+// delivery worker can fan them out to active subscribers. A nil
+// publisher disables event emission (every Publish call becomes a
+// no-op) so the metadata plane keeps working in tests / deployments
+// without NATS configured. Mirrors the WithJobs nil-safe pattern.
+func (h *Handler) WithWebhooks(p WebhookEventPublisher) *Handler {
+	// Guard against passing a typed-nil concrete *webhooks.Publisher,
+	// which would compare != nil under the interface comparison and
+	// then NPE inside the emit helpers. The concrete publisher's
+	// own methods are nil-safe (PublishFileEvent on a nil *Publisher
+	// returns nil) — but going through the interface here keeps the
+	// nil check at the boundary where it's obvious.
+	if p == nil {
+		h.webhooks = nil
+		return h
+	}
+	if pub, ok := p.(*webhooks.Publisher); ok && pub == nil {
+		h.webhooks = nil
+		return h
+	}
+	h.webhooks = p
 	return h
 }
 

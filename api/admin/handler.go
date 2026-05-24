@@ -28,6 +28,7 @@ import (
 	"github.com/kennguy3n/zk-drive/internal/retention"
 	"github.com/kennguy3n/zk-drive/internal/storage"
 	"github.com/kennguy3n/zk-drive/internal/user"
+	"github.com/kennguy3n/zk-drive/internal/webhooks"
 	"github.com/kennguy3n/zk-drive/internal/workspace"
 )
 
@@ -59,6 +60,7 @@ type Handler struct {
 	fabric       FabricClient
 	provisioner  *fabric.Provisioner
 	storeFactory *storage.ClientFactory
+	webhooks     MemberEventPublisher
 }
 
 // NewHandler constructs a Handler. Pass nil for services that are
@@ -81,6 +83,31 @@ func (h *Handler) WithWorkspaces(ws *workspace.Service) *Handler {
 // disabled.
 func (h *Handler) WithBilling(b *billing.Service) *Handler {
 	h.billing = b
+	return h
+}
+
+// WithWebhooks wires an outbound-webhook publisher so InviteUser /
+// DeactivateUser emit member.* events. Nil-safe: when no publisher
+// is configured (NATS unavailable), the helper methods on Handler
+// short-circuit and admin operations behave exactly as before.
+func (h *Handler) WithWebhooks(p MemberEventPublisher) *Handler {
+	// Guard against passing a typed-nil concrete *webhooks.Publisher,
+	// which would compare != nil under the interface comparison and
+	// then NPE inside the emit helper. The concrete publisher's own
+	// PublishMemberEvent method IS nil-safe (returns nil on a nil
+	// receiver), but going through the interface here keeps the
+	// invariant "no publisher configured = no emission" expressed at
+	// the wire-up boundary where it is obvious. Mirrors the equivalent
+	// guard on api/drive.Handler.WithWebhooks.
+	if p == nil {
+		h.webhooks = nil
+		return h
+	}
+	if pub, ok := p.(*webhooks.Publisher); ok && pub == nil {
+		h.webhooks = nil
+		return h
+	}
+	h.webhooks = p
 	return h
 }
 
@@ -495,6 +522,7 @@ func (h *Handler) InviteUser(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 	h.billing.RecordUserAdded(r.Context(), workspaceID)
+	h.publishMemberEvent(r.Context(), webhooks.EventMemberJoined, workspaceID, &actor, u.ID, u.Email, u.Role)
 	writeJSON(w, http.StatusCreated, toUserView(u))
 }
 
@@ -512,6 +540,11 @@ func (h *Handler) DeactivateUser(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid id", http.StatusBadRequest)
 		return
 	}
+	// Snapshot before deactivate so the outbound webhook carries
+	// the target user's email + role. Failure to fetch (e.g. user
+	// already deactivated) falls back to publishing a minimal event
+	// with just the user_id below.
+	snap, _ := h.users.GetByID(r.Context(), workspaceID, id)
 	if err := h.users.Deactivate(r.Context(), workspaceID, id, time.Now().UTC()); err != nil {
 		if errors.Is(err, user.ErrNotFound) {
 			http.Error(w, "user not found or already deactivated", http.StatusNotFound)
@@ -524,7 +557,31 @@ func (h *Handler) DeactivateUser(w http.ResponseWriter, r *http.Request) {
 		target := id
 		h.audit.LogAction(r.Context(), workspaceID, &actor, audit.ActionAdminUserDeactivate, "user", &target, r, nil)
 	}
+	email, role := "", ""
+	if snap != nil {
+		email, role = snap.Email, snap.Role
+	}
+	h.publishMemberEvent(r.Context(), webhooks.EventMemberRemoved, workspaceID, &actor, id, email, role)
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// publishMemberEvent is the admin handler's centralised emit-helper
+// for member.* webhook events. Nil-safe; failures are logged but
+// never propagated to the caller — webhook emission is a side-effect
+// and the underlying admin operation has already committed by the
+// time this helper runs.
+func (h *Handler) publishMemberEvent(ctx context.Context, t webhooks.EventType, workspaceID uuid.UUID, actorID *uuid.UUID, userID uuid.UUID, email, role string) {
+	if h.webhooks == nil {
+		return
+	}
+	if err := h.webhooks.PublishMemberEvent(ctx, t, workspaceID, actorID, webhooks.MemberEventData{
+		UserID: userID,
+		Email:  email,
+		Role:   role,
+	}); err != nil {
+		logging.FromContext(ctx).Error("admin publish webhook member event failed",
+			"event_type", string(t), "user_id", userID, "workspace_id", workspaceID, "err", err)
+	}
 }
 
 // UpdateUserRole promotes or demotes a user.

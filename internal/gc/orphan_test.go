@@ -229,6 +229,9 @@ func (r *fakeFileRepo) MoveFile(context.Context, uuid.UUID, uuid.UUID, uuid.UUID
 func (r *fakeFileRepo) UpdateFileSize(context.Context, uuid.UUID, uuid.UUID, int64) error {
 	panic("unused")
 }
+func (r *fakeFileRepo) ListFilesInFolderSubtree(context.Context, uuid.UUID, uuid.UUID) ([]*file.File, error) {
+	panic("unused")
+}
 func (r *fakeFileRepo) ListFilesByFolder(context.Context, uuid.UUID, uuid.UUID) ([]*file.File, error) {
 	panic("unused")
 }

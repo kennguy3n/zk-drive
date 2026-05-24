@@ -19,6 +19,7 @@ import (
 	"github.com/kennguy3n/zk-drive/internal/permission"
 	"github.com/kennguy3n/zk-drive/internal/scan"
 	"github.com/kennguy3n/zk-drive/internal/storage"
+	"github.com/kennguy3n/zk-drive/internal/webhooks"
 )
 
 // Upload / download DTOs ----------------------------------------------------
@@ -309,6 +310,13 @@ func (h *Handler) ConfirmUpload(w http.ResponseWriter, r *http.Request) {
 		// are logged and ignored so a flaky broker never fails an
 		// otherwise-successful upload — workers can be re-triggered later.
 		h.publishPostUploadJobs(r.Context(), f.ID, v.ID)
+		// Outbound webhook fan-out (WS-24). Same nil-safe pattern as
+		// publishPostUploadJobs: when no webhooks publisher is wired
+		// (NATS not configured), this is a no-op. Publish failures
+		// are logged but do NOT fail the confirm response — the
+		// upload has already committed and webhook delivery is
+		// best-effort.
+		h.publishWebhookFileEvent(r.Context(), webhooks.EventFileUploadConfirmed, workspaceID, f, v.ID, v.SizeBytes)
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"file":    updated,

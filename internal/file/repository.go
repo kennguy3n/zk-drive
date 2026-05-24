@@ -39,6 +39,16 @@ type Repository interface {
 	MoveFile(ctx context.Context, workspaceID, fileID, folderID uuid.UUID) error
 	UpdateFileSize(ctx context.Context, workspaceID, fileID uuid.UUID, sizeBytes int64) error
 	ListFilesByFolder(ctx context.Context, workspaceID, folderID uuid.UUID) ([]*File, error)
+	// ListFilesInFolderSubtree returns every non-deleted file whose
+	// folder_id is folderID OR any descendant of folderID. Used to
+	// snapshot per-file metadata BEFORE a recursive folder soft-delete
+	// so the cascade can emit a file.deleted webhook per affected file
+	// (the corresponding folder.SoftDeleteSubtree cascades the files'
+	// deleted_at column inside one transaction; the webhook cascade
+	// must mirror that without leaving subscribers in the dark). Walks
+	// the same folder-parent hierarchy via a recursive CTE so a deep
+	// nested tree still returns the full set in one round trip.
+	ListFilesInFolderSubtree(ctx context.Context, workspaceID, folderID uuid.UUID) ([]*File, error)
 
 	// SetPendingUploadObjectKey records the presigned-PUT object_key
 	// on the file row so the orphan-object GC reconciler can later
@@ -306,6 +316,40 @@ func (r *PostgresRepository) ListFilesByFolder(ctx context.Context, workspaceID,
 	rows, err := r.pool.Query(ctx, q, workspaceID, folderID)
 	if err != nil {
 		return nil, fmt.Errorf("list files: %w", err)
+	}
+	defer rows.Close()
+	var out []*File
+	for rows.Next() {
+		f := &File{}
+		if err := rows.Scan(&f.ID, &f.WorkspaceID, &f.FolderID, &f.Name, &f.CurrentVersionID, &f.SizeBytes, &f.MimeType, &f.CreatedBy, &f.CreatedAt, &f.UpdatedAt, &f.DeletedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, f)
+	}
+	return out, rows.Err()
+}
+
+// ListFilesInFolderSubtree walks the folder tree rooted at folderID
+// and returns every non-deleted file underneath. Mirrors the
+// recursive CTE shape used by folder.SoftDeleteSubtree so the two
+// stay in lockstep: any file the cascade would soft-delete shows up
+// here, and only those files. Callers should snapshot the slice
+// BEFORE issuing folders.Delete — once the cascade fires the
+// deleted_at IS NULL filter would hide the affected rows.
+func (r *PostgresRepository) ListFilesInFolderSubtree(ctx context.Context, workspaceID, folderID uuid.UUID) ([]*File, error) {
+	const q = `
+WITH RECURSIVE subtree AS (
+    SELECT id FROM folders WHERE workspace_id = $1 AND id = $2 AND deleted_at IS NULL
+    UNION ALL
+    SELECT f.id FROM folders f JOIN subtree s ON f.parent_folder_id = s.id
+        WHERE f.workspace_id = $1 AND f.deleted_at IS NULL
+)
+SELECT ` + fileColumns + ` FROM files
+WHERE workspace_id = $1 AND folder_id IN (SELECT id FROM subtree) AND deleted_at IS NULL
+ORDER BY id ASC`
+	rows, err := r.pool.Query(ctx, q, workspaceID, folderID)
+	if err != nil {
+		return nil, fmt.Errorf("list files in subtree: %w", err)
 	}
 	defer rows.Close()
 	var out []*File

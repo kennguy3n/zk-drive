@@ -15,6 +15,7 @@ import (
 	"github.com/kennguy3n/zk-drive/internal/audit"
 	"github.com/kennguy3n/zk-drive/internal/permission"
 	"github.com/kennguy3n/zk-drive/internal/user"
+	"github.com/kennguy3n/zk-drive/internal/webhooks"
 )
 
 // Permission DTOs ----------------------------------------------------------
@@ -133,6 +134,7 @@ func (h *Handler) GrantPermission(w http.ResponseWriter, r *http.Request) {
 		"grantee_id":   p.GranteeID,
 		"role":         p.Role,
 	})
+	h.publishWebhookPermissionEvent(r.Context(), webhooks.EventPermissionGranted, workspaceID, p.ResourceType, p.ResourceID, p.GranteeID, p.Role)
 	writeJSON(w, http.StatusCreated, p)
 }
 
@@ -176,6 +178,7 @@ func (h *Handler) RevokePermission(w http.ResponseWriter, r *http.Request) {
 		"grantee_id":   p.GranteeID,
 		"role":         p.Role,
 	})
+	h.publishWebhookPermissionEvent(r.Context(), webhooks.EventPermissionRevoked, workspaceID, p.ResourceType, p.ResourceID, p.GranteeID, p.Role)
 	w.WriteHeader(http.StatusNoContent)
 }
 

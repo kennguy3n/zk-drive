@@ -216,6 +216,17 @@ type Metrics struct {
 	// invocation. Useful for validating the archival CronJob
 	// completes within its scheduled cadence.
 	auditArchiveRunDuration prometheus.Histogram
+
+	// webhookDeliveriesTotal counts every outbound webhook
+	// delivery attempt, partitioned by outcome
+	// (success/http_error/net_error/blocked) and a coarse
+	// HTTP status code bucket (2xx/3xx/4xx/5xx/none).
+	webhookDeliveriesTotal *prometheus.CounterVec
+
+	// webhookDeliveryDuration observes wall time per attempt,
+	// labelled by outcome so operators can plot p99 success
+	// latency separately from net_error timeouts.
+	webhookDeliveryDuration *prometheus.HistogramVec
 }
 
 // New constructs a Metrics with a fresh private registry and the
@@ -331,6 +342,7 @@ func New() *Metrics {
 
 	m.registerEmailMetrics(reg)
 	m.registerAuditArchiveMetrics(reg)
+	m.registerWebhookMetrics(reg)
 
 	return m
 }

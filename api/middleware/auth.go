@@ -326,6 +326,22 @@ func RoleFromContext(ctx context.Context) (string, bool) {
 	return v, ok
 }
 
+// WithUserID returns a child context tagged with userID. Mirrors
+// WithWorkspaceID — used by handler test harnesses that need to
+// synthesize an authenticated context without running through
+// AuthMiddleware. Production callers go through the middleware which
+// sets the same key from the verified JWT claims.
+func WithUserID(ctx context.Context, userID uuid.UUID) context.Context {
+	return context.WithValue(ctx, userIDContextKey, userID)
+}
+
+// WithRole returns a child context tagged with role. Mirrors
+// WithUserID; used by handler tests to satisfy AdminOnly guards
+// without going through the full JWT path.
+func WithRole(ctx context.Context, role string) context.Context {
+	return context.WithValue(ctx, roleContextKey, role)
+}
+
 // PurposeMiddleware returns a middleware that accepts ONLY tokens
 // whose Purpose claim matches `want`. Used by the MFA verify and
 // MFA enrollment routes so that an mfa_challenge token cannot be
