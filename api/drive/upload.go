@@ -310,7 +310,7 @@ func (h *Handler) ConfirmUpload(w http.ResponseWriter, r *http.Request) {
 		// are logged and ignored so a flaky broker never fails an
 		// otherwise-successful upload — workers can be re-triggered later.
 		h.publishPostUploadJobs(r.Context(), f.ID, v.ID)
-		// Outbound webhook fan-out (WS-24). Same nil-safe pattern as
+		// Outbound webhook fan-out. Same nil-safe pattern as
 		// publishPostUploadJobs: when no webhooks publisher is wired
 		// (NATS not configured), this is a no-op. Publish failures
 		// are logged but do NOT fail the confirm response — the

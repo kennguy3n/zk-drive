@@ -254,8 +254,7 @@ func less(a, b WorkspaceAuditMonth) bool {
 // which wraps a fakeStorage and rejects the first call positionally.
 // An earlier version of this docstring claimed a "*" wildcard key
 // existed; it never did and the failingFirstPut pattern obsoletes
-// the need. See WS-23 PR #68 Devin Review finding
-// ANALYSIS_pr-review-job-8cfa30b85fb14cd7832897b92f636bf0_0003.
+// the need.
 type fakeStorage struct {
 	mu        sync.Mutex
 	objects   map[string][]byte
@@ -418,9 +417,10 @@ func TestArchiveService_Run_RejectsLowRetention(t *testing.T) {
 }
 
 // TestArchiveService_archiveWorkspace_TimeoutAttributesRemainingMonths
-// is the regression test for the WS-23 PR #68 yellow-flag finding
-// (BUG_pr-review-job-92fe43f0a26c44ea817db9bacbc6c88d_0002): when
-// WorkspaceTimeout fired mid-loop, the previous workspaceMonthsProcessed
+// pins the timeout attribution semantic: when WorkspaceTimeout fires
+// mid-loop, the un-processed buckets must be attributed to
+// WorkspaceMonthsFailed (not silently lost). Earlier behaviour left
+// the previous workspaceMonthsProcessed
 // helper summed the RUN-LEVEL WorkspaceMonthsOK + WorkspaceMonthsFailed
 // counters, which are cumulative across ALL workspaces — so months
 // processed by an earlier workspace inflated the "processed" count for
@@ -548,8 +548,6 @@ func TestArchiveService_Run_S3UploadFailureLeavesHotRows(t *testing.T) {
 	// Failure row IS recorded so the partial-failure dashboard
 	// (idx_audit_log_archive_runs_failures) surfaces the attempt.
 	// rows_archived == 0, bytes_uploaded == 0, error_message != nil.
-	// See WS-23 PR #68 Devin Review finding
-	// ANALYSIS_pr-review-job-d2a9e87dcd554aae916858730442da4c_0001.
 	if len(repo.runs) != 1 {
 		t.Fatalf("runs recorded = %d, want 1 (the pre-upload failure row)", len(repo.runs))
 	}
@@ -620,8 +618,8 @@ func TestArchiveService_Run_DeleteFailureProducesPartialSuccess(t *testing.T) {
 	if result.WorkspaceMonthsFailed != 1 {
 		t.Fatalf("WorkspaceMonthsFailed = %d, want 1", result.WorkspaceMonthsFailed)
 	}
-	// Fix WS-23 PR #68 finding #1: the page DID upload + record;
-	// the rows it represents MUST be counted in the aggregate
+	// The page DID upload + record; the rows it represents MUST be
+	// counted in the aggregate
 	// (otherwise zkdrive_audit_archive_rows_total undercounts
 	// actual cold-tier activity).
 	if result.RowsArchived != 1 {
@@ -640,8 +638,7 @@ func TestArchiveService_Run_DeleteFailureProducesPartialSuccess(t *testing.T) {
 	// And its error_message column was stamped by SetRunError so
 	// the partial-failure dashboard (idx_audit_log_archive_runs_failures)
 	// lights up on this DELETE failure even though the upload +
-	// row insert both succeeded. See WS-23 PR #68 Devin Review
-	// finding ANALYSIS_pr-review-job-d2a9e87dcd554aae916858730442da4c_0001.
+	// row insert both succeeded.
 	if repo.runs[0].ErrorMessage == nil {
 		t.Errorf("run record ErrorMessage = nil after DeleteBatch failure; want non-nil (idx_audit_log_archive_runs_failures relies on this)")
 	} else if !strings.Contains(*repo.runs[0].ErrorMessage, "simulated DB error") {
@@ -666,10 +663,9 @@ func TestArchiveService_Run_DeleteFailureProducesPartialSuccess(t *testing.T) {
 	}
 }
 
-// TestArchiveService_Run_PartialPageSuccessIsAttributed is the
-// regression test for the WS-23 PR #68 finding #1
-// (ANALYSIS_pr-review-job-275fde026190462681d85c491dca8a38_0001):
-// when a (workspace, month) bucket exceeds MaxRowsPerBatch and
+// TestArchiveService_Run_PartialPageSuccessIsAttributed pins the
+// per-page success-attribution invariant: when a (workspace, month)
+// bucket exceeds MaxRowsPerBatch and
 // the bucket fails on page N AFTER pages 1..N-1 have been durably
 // committed, the successfully-committed pages' rows and bytes
 // MUST be counted in RunResult.RowsArchived / BytesUploaded and
@@ -750,8 +746,7 @@ func TestArchiveService_Run_PartialPageSuccessIsAttributed(t *testing.T) {
 	// `WHERE error_message IS NOT NULL` correctly surfaces just
 	// the failed page. Order of repo.runs matches RecordRun call
 	// order (page 1 first, then page 2), pinned by fakeArchiveRepo's
-	// append-on-insert semantics. See WS-23 PR #68 Devin Review
-	// finding ANALYSIS_pr-review-job-d2a9e87dcd554aae916858730442da4c_0001.
+	// append-on-insert semantics.
 	if repo.runs[0].ErrorMessage != nil {
 		t.Errorf("page 1 ErrorMessage = %q, want nil (page 1 committed end-to-end)", *repo.runs[0].ErrorMessage)
 	}
@@ -794,10 +789,9 @@ func TestArchiveService_Run_PartialPageSuccessIsAttributed(t *testing.T) {
 	}
 }
 
-// TestArchiveService_Run_StartedAndCompletedDiffer is the regression
-// test for the WS-23 PR #68 finding #3
-// (ANALYSIS_pr-review-job-275fde026190462681d85c491dca8a38_0003):
-// audit_log_archive_runs.started_at MUST reflect the moment the
+// TestArchiveService_Run_StartedAndCompletedDiffer pins the
+// started_at / completed_at semantics: audit_log_archive_runs.started_at
+// MUST reflect the moment the
 // page's processing began (before FetchBatch), and completed_at
 // MUST reflect the moment after the S3 upload finished. Capturing
 // both at the same instant produced an always-zero-duration column
@@ -937,10 +931,9 @@ func (c *cancellingRepo) ListRuns(ctx context.Context, workspaceID uuid.UUID) ([
 	return c.inner.ListRuns(ctx, workspaceID)
 }
 
-// TestArchiveService_Run_CancellationAttributesRemainingMonths is
-// the regression test for WS-23 PR #68 Devin Review finding
-// ANALYSIS_pr-review-job-667bb339b9654552bfaa74d3720a8d0b_0001: when
-// the parent ctx is cancelled between workspace iterations in
+// TestArchiveService_Run_CancellationAttributesRemainingMonths
+// pins the cancellation attribution semantic: when the parent
+// ctx is cancelled between workspace iterations in
 // Run(), the months belonging to unstarted workspaces MUST be
 // attributed to WorkspaceMonthsFailed so the invariant
 //
@@ -1057,10 +1050,9 @@ func TestArchiveService_buildObjectKey_Format(t *testing.T) {
 	}
 }
 
-// TestArchiveService_Run_MultipleBatchesProduceDistinctKeys is the
-// regression test for the WS-23 PR #68 critical bug
-// (BUG_pr-review-job-92fe43f0a26c44ea817db9bacbc6c88d_0001):
-// when one (workspace, month) bucket exceeded MaxRowsPerBatch, the
+// TestArchiveService_Run_MultipleBatchesProduceDistinctKeys pins
+// the per-batch S3-key uniqueness invariant. Background: when one
+// (workspace, month) bucket exceeds MaxRowsPerBatch, the
 // archiveBucket loop used to call buildObjectKey with the run-level
 // runID for every page, so the second page silently overwrote the
 // first page's S3 object while page 1's rows had already been
@@ -1162,9 +1154,8 @@ func TestArchiveService_Run_MultipleBatchesProduceDistinctKeys(t *testing.T) {
 }
 
 // TestParseYearMonthRange pins the boundary semantics the SQL
-// FetchBatch query depends on after the WS-23 PR #68 finding #2
-// fix (ANALYSIS_pr-review-job-275fde026190462681d85c491dca8a38_0002):
-// the half-open [monthStart, monthEnd) UTC range replacing the
+// FetchBatch query depends on: the half-open [monthStart, monthEnd)
+// UTC range replacing the
 // non-SARGable to_char(date_trunc(...)) predicate must include
 // the first instant of the month and exclude the first instant
 // of the next month \u2014 anything else silently re-classifies rows

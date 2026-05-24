@@ -787,24 +787,43 @@ preview worker.
 
 ## 16. PWA Architecture
 
-The frontend ships as a Progressive Web App so paying SMEs can
-install ZK Drive as a phone home-screen icon without requiring a
-separate React Native build.
+The frontend ships as a Progressive Web App so SMEs can install
+ZK Drive as a phone home-screen icon without requiring a separate
+native mobile build.
 
 - **Build integration**: `vite-plugin-pwa` injects the manifest and
   service worker into the Vite production build.
-- **Manifest**: `manifest.webmanifest` declares name, icons,
-  `display: standalone`, and the theme color.
-- **Service worker**: a Workbox-generated precaching service worker
-  caches the static SPA bundle so cold app launches work offline.
-  API requests stay network-first.
+- **Manifest**: `frontend/public/manifest.webmanifest` declares
+  app name, short name, start URL, `display: standalone`, theme
+  and background colours, and the icon set. The manifest is linked
+  from `index.html` via the `vite-plugin-pwa` integration.
+- **Service worker**: a Workbox-generated precaching service
+  worker caches the static SPA bundle so cold app launches work
+  offline. API requests stay network-first; sensitive endpoints
+  (`/api/files/*/download`, strict-ZK folder listings) are
+  deliberately excluded from caching so decryption material and
+  zero-knowledge content are never persisted locally.
+- **Offline support**: the SPA shell loads offline. Read-only
+  access to the most recently opened folder tree falls back
+  gracefully when the network is unavailable; write operations
+  require connectivity.
 - **Install prompt**: the `InstallPrompt` component listens for
-  `beforeinstallprompt`, surfaces an "Install app" button, and
-  hides itself once the app is installed.
+  `beforeinstallprompt`, surfaces an "Install app" button on the
+  file browser, and hides itself once the app is installed or the
+  user dismisses the prompt.
+- **Icons and splash screens**: Apple touch icons and Android
+  splash screens are served from `frontend/public/icons/`.
+- **Push notifications**: not currently wired. Real-time
+  notifications are delivered over WebSockets while the app is
+  open; Web Push can be layered in later if mobile usage warrants
+  the additional surface.
 
-The PWA-first decision is recorded in
-[MOBILE_EVALUATION.md](MOBILE_EVALUATION.md); a React Native
-investment remains deferred behind PWA install metrics.
+The PWA is the single mobile surface today. A dedicated React
+Native client would add ~8 – 10 engineer-weeks for feature parity
+plus an ongoing app-store compliance overhead, and would need a
+server-side delta-pull endpoint to enable true offline operation
+(none exists today). Until measurable PWA install traction
+justifies that investment, the PWA stays the only mobile path.
 
 ---
 

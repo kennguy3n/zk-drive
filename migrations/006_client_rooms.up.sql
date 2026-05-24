@@ -1,4 +1,4 @@
--- Phase 2: client rooms.
+-- client rooms.
 --
 -- A client room is a "folder + share link" bundle dedicated to an
 -- external client or partner. The folder lives inside the regular

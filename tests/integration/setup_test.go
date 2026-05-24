@@ -236,7 +236,7 @@ func setupEnv(t *testing.T) *testEnv {
 	t.Cleanup(func() { _ = redisClient.Close() })
 	sessionStore := session.NewRedisSessionStore(redisClient)
 
-	// WS-19: a real TOTP service is wired through the integration
+	// A real TOTP service is wired through the integration
 	// harness so the full enroll -> challenge -> verify -> disable
 	// lifecycle exercises the same code path as production. The
 	// codec uses identity (no-op) encryption -- acceptable for
@@ -271,7 +271,7 @@ func setupEnv(t *testing.T) *testEnv {
 		WithWorkspaces(wsSvc).
 		WithWebhooks(webhookCap)
 
-	// Outbound-webhook subscription admin handler (WS-24). Mounted
+	// Outbound-webhook subscription admin handler. Mounted
 	// alongside adminHandler under /admin/webhooks so the
 	// integration harness exercises the same CRUD surface that
 	// cmd/server/main.go does (Create / List / Get / Delete /
@@ -364,14 +364,14 @@ func setupEnv(t *testing.T) *testEnv {
 			// handler can read claims from the bearer token and
 			// record a per-user revocation cutoff. Without the
 			// middleware Logout would 204 without revoking
-			// anything — the bug WS-1 exists to fix.
+			// anything — the bug the Redis revoker layer exists to fix.
 			r.Group(func(r chi.Router) {
 				r.Use(middleware.AuthMiddleware(testJWTSecret, sessionStore))
 				r.Post("/logout", authHandler.Logout)
 				r.Post("/refresh", authHandler.Refresh)
 			})
 
-			// WS-19 TOTP routes mirror cmd/server/main.go wiring so
+			// TOTP routes mirror cmd/server/main.go wiring so
 			// integration tests exercise the same purpose-token
 			// chokepoint that production enforces.
 			totpHandler := auth.NewTOTPHandler(authHandler)
@@ -487,7 +487,7 @@ func setupEnv(t *testing.T) *testEnv {
 			r.Use(middleware.TenantGuard())
 			r.Use(middleware.AdminOnly())
 			adminHandler.RegisterRoutes(r)
-			// Outbound-webhook subscription admin surface (WS-24).
+			// Outbound-webhook subscription admin surface.
 			// Mounted here so the integration harness exercises the
 			// real Create / List / Get / Delete / ListDeliveries /
 			// Resume routes against the Postgres repository, not

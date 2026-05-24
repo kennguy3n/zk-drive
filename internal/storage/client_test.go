@@ -57,7 +57,7 @@ func TestValidateObjectKey(t *testing.T) {
 			name:   "dotdot suffix appended to canonical key rejected",
 			key:    storage.NewObjectKey(workspaceID, fileID, versionID) + "/../../etc/passwd",
 			wantOK: false,
-			why:    "this is the exact attack the WS-3 ticket calls out",
+			why:    "canonical-form object_key blocks path traversal",
 		},
 		{
 			name:   "single dot segment rejected",

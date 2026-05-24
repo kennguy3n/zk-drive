@@ -10,8 +10,8 @@ import (
 	"github.com/kennguy3n/zk-drive/internal/sharing"
 )
 
-// TestPhase3DecisionGate exercises the metadata-plane half of the
-// Phase 3 decision gate scenario:
+// TestSharingAuditRetentionScenario exercises the metadata-plane
+// happy path for the sharing / audit / retention surface:
 //
 //	"a paying SME customer can sign up, create a workspace, upload
 //	files, share with guests, and the admin can view audit logs and
@@ -29,11 +29,11 @@ import (
 //
 // NOTE on the byte path: the full round-trip from presign-PUT through
 // confirm-upload to a downloadable presigned-GET is blocked on the
-// upstream zk-object-fabric query-string SigV4 deferral (Phase 4
-// follow-up). We assert here on the *metadata* writes the gate
-// implies; an integration test that exercises the actual S3 bytes
-// will be wired alongside the upstream presigned-URL fix.
-func TestPhase3DecisionGate(t *testing.T) {
+// upstream zk-object-fabric query-string SigV4 deferral. We assert
+// here on the *metadata* writes the scenario implies; an integration
+// test that exercises the actual S3 bytes will be wired alongside
+// the upstream presigned-URL fix.
+func TestSharingAuditRetentionScenario(t *testing.T) {
 	env := setupEnv(t)
 
 	admin := env.signupAndLogin("Acme SME", "admin@acme.test", "Alice", "pw")

@@ -142,8 +142,7 @@ func TestRenderGuestInvite_ExpiresAtOmitted(t *testing.T) {
 // paired with TestRenderGuestInvite_ConcurrentSafe below to
 // catch the regression a different way.
 //
-// Regression test for the architectural fix to ANALYSIS_0007
-// from the fourth Devin Review pass on PR #66.
+// Regression test pinning the parse-at-init contract.
 func TestTemplatesParsedAtInit(t *testing.T) {
 	if guestInviteTextTmpl == nil {
 		t.Fatal("guestInviteTextTmpl is nil — parse-at-init contract broken")

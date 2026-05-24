@@ -508,7 +508,7 @@ func TestGuestInviteInvalidEmail(t *testing.T) {
 
 // TestSearchFiltersByWorkspace verifies the FTS endpoint filters by
 // workspace and returns folders + files that match the query. It stands
-// in as the integration coverage asked for by the Phase 2 checklist
+// in as the integration coverage for full-text search
 // (alongside the sharing tests).
 func TestSearchFiltersByWorkspace(t *testing.T) {
 	env := setupEnv(t)

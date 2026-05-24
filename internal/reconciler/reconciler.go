@@ -53,7 +53,7 @@ import (
 // Summary is the result of a Reconcile run across all workspaces.
 // Inspected/logged by the caller; fields are public so cmd/reconciler
 // can emit a structured log line and the worker's periodic loop can
-// surface counters into metrics later (WS-17).
+// surface counters into Prometheus metrics later.
 type Summary struct {
 	// Workspaces is the number of workspace rows the reconciler
 	// scanned. A workspace with zero files still counts here — it

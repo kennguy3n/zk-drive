@@ -88,8 +88,7 @@ func TestBuildFromOperatorConfig_SMTPHostMissing(t *testing.T) {
 // email disabled — the server boots cleanly in disabled mode" —
 // without this branch, the contract is violated.
 //
-// Regression test for BUG_0001 from the second Devin Review pass
-// on PR #66.
+// Regression test pinning the SMTPFromAddress-required contract.
 func TestBuildFromOperatorConfig_SMTPFromAddressMissing(t *testing.T) {
 	svc, err := BuildFromOperatorConfig(OperatorConfig{
 		PublicURL:   "https://drive.example.com",

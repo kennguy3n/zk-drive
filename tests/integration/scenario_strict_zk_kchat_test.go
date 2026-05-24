@@ -10,8 +10,8 @@ import (
 	"github.com/kennguy3n/zk-drive/internal/folder"
 )
 
-// TestPhase4DecisionGate pins the Phase 4 decision-gate scenario in
-// a single end-to-end test. The contract this closes out is:
+// TestStrictZKAndKChatScenario pins the strict-ZK / KChat-integration
+// scenario in a single end-to-end test. The contract is:
 //
 //   - A strict-ZK folder can be created, uploaded into (metadata
 //     only), and its file name never surfaces through the FTS search
@@ -23,7 +23,7 @@ import (
 //
 // The test uses only the HTTP harness in setup_test.go so it mirrors
 // what a real client sees on the wire.
-func TestPhase4DecisionGate(t *testing.T) {
+func TestStrictZKAndKChatScenario(t *testing.T) {
 	env := setupEnv(t)
 	admin := env.signupAndLogin("Acme Privacy", "admin@acme.test", "Alice", "pw")
 
@@ -41,7 +41,7 @@ func TestPhase4DecisionGate(t *testing.T) {
 		t.Fatalf("expected strict_zk, got %q", vault.EncryptionMode)
 	}
 
-	const distinctiveName = "phase4gatesecret"
+	const distinctiveName = "strictzksecretmarker"
 	// createFile performs the file-metadata row write the gate cares
 	// about. We don't PUT bytes because the test harness stubs S3 —
 	// the strict-ZK contract is tested at the metadata + search layer.
@@ -60,12 +60,12 @@ func TestPhase4DecisionGate(t *testing.T) {
 	env.decodeJSON(body, &searchResp)
 	for _, h := range searchResp.Hits {
 		if h.ID == zkFile.ID {
-			t.Fatalf("phase4 gate: strict-ZK file leaked into search: %+v", searchResp.Hits)
+			t.Fatalf("strict-ZK file leaked into search: %+v", searchResp.Hits)
 		}
 	}
 
 	// ---------- 2. KChat attachment round-trip ----------
-	const kchatRoomID = "kchat-phase4-gate"
+	const kchatRoomID = "kchat-scenario-room"
 	status, body = env.httpRequest(http.MethodPost, "/api/kchat/rooms", admin.Token, map[string]string{
 		"kchat_room_id": kchatRoomID,
 	})
@@ -103,7 +103,7 @@ func TestPhase4DecisionGate(t *testing.T) {
 		map[string]any{
 			"file_id":    upload.UploadID.String(),
 			"object_key": upload.ObjectKey,
-			"checksum":   "sha256:phase4gate",
+			"checksum":   "sha256:strictzkkchat",
 			"size_bytes": 2048,
 		})
 	if status != http.StatusOK {
@@ -148,7 +148,7 @@ func TestPhase4DecisionGate(t *testing.T) {
 
 	status, body = env.httpRequest(http.MethodPost, "/api/client-rooms/from-template", admin.Token,
 		map[string]any{
-			"name":     "Globex — Phase 4 Review",
+			"name":     "Globex — Engagement Review",
 			"template": "agency",
 		})
 	if status != http.StatusCreated {

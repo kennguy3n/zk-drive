@@ -166,7 +166,7 @@ func (s *Service) RevokeShareLink(ctx context.Context, workspaceID, id uuid.UUID
 // CreateGuestInvite creates a guest invite and the matching permission
 // grant on the folder (grantee_type=guest, expires_at carried through).
 // The invite and the grant share the same expires_at so the retention
-// worker (Phase 2 §7.4) revokes both on the same schedule.
+// worker revokes both on the same schedule.
 //
 // role must be one of "viewer" | "editor" | "admin"; email must be a
 // valid address per net/mail.ParseAddress.
@@ -356,7 +356,7 @@ func (s *Service) computeInviteStatus(inv *GuestInvite) string {
 // when the resolver is unset / fails. Exposed so other call sites
 // (notably api/drive's email-dispatch path) share the same
 // fallback semantics as GetGuestInvitePreview — closes the
-// duplicate-resolver gap the original WS-21 wiring left behind.
+// duplicate-resolver gap the original email wiring left behind.
 func (s *Service) ResolveWorkspaceName(ctx context.Context, workspaceID uuid.UUID) string {
 	if s.workspaceName != nil {
 		if name, err := s.workspaceName(ctx, workspaceID); err == nil && name != "" {

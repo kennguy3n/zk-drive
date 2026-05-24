@@ -62,7 +62,7 @@ func (h *Handler) ListPermissions(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"permissions": list})
 }
 
-// GrantPermission creates a new permission. Admin-only in Phase 1.
+// GrantPermission creates a new permission. Admin-only.
 func (h *Handler) GrantPermission(w http.ResponseWriter, r *http.Request) {
 	if h.permissions == nil {
 		http.Error(w, "permissions not configured", http.StatusNotImplemented)

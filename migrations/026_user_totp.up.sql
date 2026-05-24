@@ -1,9 +1,8 @@
--- Phase 5 (WS-19): TOTP-based two-factor authentication for
--- password and SSO logins.
+-- TOTP-based two-factor authentication for password and SSO logins.
 --
--- Threat model: WS-5 (bcrypt cost 12) and WS-1 (Redis-backed session
--- revocation) closed the password-related auth gaps, but a leaked
--- DB row, a phished password, or password reuse from another breach
+-- Threat model: bcrypt cost 12 + Redis-backed session revocation
+-- already close the password-related auth gaps, but a leaked DB
+-- row, a phished password, or password reuse from another breach
 -- still fully owns the account. Adding a TOTP possession factor
 -- means an attacker holding the password cannot complete login
 -- without also holding the device that owns the shared secret.
@@ -13,8 +12,8 @@
 -- CREDENTIAL_ENCRYPTION_KEY env var) that protects per-tenant
 -- storage credentials — a single key-management story for both
 -- credential families. Operators rotating the encryption key
--- already have the migration runbook from WS-13; TOTP secrets
--- ride the same path.
+-- follow the standard credential-encryption rotation runbook;
+-- TOTP secrets ride the same path.
 --
 -- Recovery codes:
 --   - Generated once at enrollment finalize, returned plaintext
@@ -92,8 +91,8 @@ CREATE INDEX idx_user_totp_recovery_codes_unused
 ALTER TABLE workspaces
     ADD COLUMN mfa_required BOOLEAN NOT NULL DEFAULT FALSE;
 
--- Row-level security: WS-13's policy on user_totp_credentials would
--- be a cross-table join (users -> workspace) that the planner can't
+-- Row-level security: a policy on user_totp_credentials would be a
+-- cross-table join (users -> workspace) that the planner can't
 -- index-only, so we rely on the application layer's tenant guard
 -- for write paths and verify reads via the user_id PK (which is
 -- already workspace-scoped via the users foreign key). The

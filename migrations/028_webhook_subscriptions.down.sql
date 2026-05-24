@@ -1,4 +1,4 @@
--- Reverse WS-24: outbound webhook subscriptions.
+-- Reverse migration: outbound webhook subscriptions.
 --
 -- DROP order: deliveries first (FK -> subscriptions), then subscriptions.
 -- RLS policies, indexes, and the tables themselves all drop in a single

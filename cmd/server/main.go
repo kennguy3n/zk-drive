@@ -514,7 +514,7 @@ func run() error {
 		WithWorkspaces(wsSvc).
 		WithWebhooks(webhookPublisher)
 
-	// Outbound-webhook subscription admin handler (WS-24). Mounted
+	// Outbound-webhook subscription admin handler. Mounted
 	// under /api/admin/webhooks so it inherits the admin-only +
 	// tenant-guarded middleware stack. CRUD on subscriptions still
 	// works without NATS; POST /test additionally requires a
@@ -716,7 +716,7 @@ func run() error {
 				r.Post("/refresh", authHandler.Refresh)
 			})
 
-			// TOTP / 2FA routes (WS-19). The three middleware
+			// TOTP / 2FA routes. The three middleware
 			// groups model the three valid token "purposes":
 			//   - session token: enroll/begin, enroll/finalize
 			//     (re-enrollment from settings), disable, status
@@ -842,7 +842,7 @@ func run() error {
 			r.Use(middleware.AdminOnly())
 			r.Use(rateLimiter())
 			adminHandler.RegisterRoutes(r)
-			// Outbound webhook subscription management (WS-24)
+			// Outbound webhook subscription management
 			// rides on the same admin-only middleware stack so
 			// only workspace admins can create / delete /
 			// inspect subscriptions.

@@ -1,4 +1,4 @@
--- Phase 2: file previews.
+-- file previews.
 --
 -- Each row represents a server-rendered preview (thumbnail) for a
 -- specific file version. The preview bytes live in zk-object-fabric

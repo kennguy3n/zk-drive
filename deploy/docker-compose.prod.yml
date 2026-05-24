@@ -146,7 +146,7 @@ services:
       S3_ENDPOINT: ${S3_ENDPOINT}
       S3_ACCESS_KEY: ${S3_ACCESS_KEY}
       S3_SECRET_KEY: ${S3_SECRET_KEY}
-      # Storage-counter reconciliation cadence (WS-14). Docker
+      # Storage-counter reconciliation cadence. Docker
       # Compose has no native CronJob, so the worker's in-process
       # loop owns reconciliation here. K8s deploys typically set
       # this to 0 on the worker and schedule the dedicated
@@ -154,7 +154,7 @@ services:
       # exclusive only to avoid duplicate row-level locking; both
       # are idempotent and converge on the same value.
       RECONCILE_INTERVAL_MINUTES: ${RECONCILE_INTERVAL_MINUTES:-60}
-      # Orphan-object GC cadence (WS-18). Same operational shape
+      # Orphan-object GC cadence. Same operational shape
       # as RECONCILE_INTERVAL_MINUTES: in-process by default under
       # Compose (no native CronJob); K8s deploys can set this to 0
       # and schedule cmd/orphan-gc externally via CronJob.

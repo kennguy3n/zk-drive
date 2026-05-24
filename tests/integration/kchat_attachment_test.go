@@ -168,7 +168,7 @@ func TestKChatAttachmentUpload(t *testing.T) {
 
 // TestKChatAttachmentConfirmRejectsTraversalKeys exercises the
 // path-traversal defence on the KChat attachment confirm endpoint.
-// Before WS-3 the kchat service used a `strings.HasPrefix` check
+// Before the canonical-form validator the kchat service used a `strings.HasPrefix` check
 // matching the bug in the main drive ConfirmUpload handler: a key
 // like `<workspace>/<file>/../../other-tenant/secret` satisfied the
 // prefix yet still resolved to a foreign S3 object once a presigned

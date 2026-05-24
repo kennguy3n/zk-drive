@@ -12,7 +12,7 @@ import (
 	"github.com/kennguy3n/zk-drive/internal/sharing"
 )
 
-// TestE2ESharingFlow exercises the Phase 2 decision gate scenario end
+// TestE2ESharingFlow exercises the sharing scenario end
 // to end against the metadata plane: an admin creates a folder,
 // invites a guest by email, the guest accepts the invite, uploads a
 // file (presigned PUT skipped because tests don't run a live

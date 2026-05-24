@@ -1,4 +1,4 @@
--- KChat room → ZK Drive folder mapping (Phase 4, task 8).
+-- KChat room → ZK Drive folder mapping.
 --
 -- Each KChat room that needs a backing storage area maps 1:1 to a
 -- ZK Drive folder. The folder lives in the regular folders tree so

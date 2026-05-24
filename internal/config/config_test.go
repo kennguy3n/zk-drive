@@ -33,7 +33,7 @@ func requireEnv(t *testing.T, envs map[string]string) {
 		"SECURITY_HEADERS_DISABLE_HSTS", "SECURITY_HEADERS_CSP_REPORT_ONLY",
 		"SECURITY_HEADERS_CSP_REPORT_URI", "SECURITY_HEADERS_CSP_CONNECT_EXTRA",
 		"SECURITY_HEADERS_CSP_IMG_EXTRA",
-		// OpenTelemetry env vars (WS-22 distributed tracing). Same
+		// OpenTelemetry env vars (distributed tracing). Same
 		// rationale as the audit-archival block below: any env var
 		// read by buildConfigFromEnv must be in this list so a CI
 		// runner with e.g. OTEL_EXPORTER_OTLP_ENDPOINT exported
@@ -41,34 +41,27 @@ func requireEnv(t *testing.T, envs map[string]string) {
 		// default. No test currently asserts on these fields, but
 		// the convention is "every env Load reads goes here" — the
 		// list is the source of truth for what tests are protected
-		// against. See WS-23 PR #68 Devin Review finding
-		// ANALYSIS_pr-review-job-336ff0c949fb48ea98da61b605622dd2_0001.
+		// against.
 		"OTEL_EXPORTER_OTLP_ENDPOINT", "OTEL_EXPORTER_OTLP_HEADERS",
 		"OTEL_EXPORTER_OTLP_INSECURE", "OTEL_EXPORTER_OTLP_COMPRESSION",
 		"OTEL_SERVICE_NAME", "OTEL_DEPLOYMENT_ENVIRONMENT",
 		"OTEL_TRACES_SAMPLER_ARG",
-		// Audit-log cold archival env vars (WS-23). MUST be in this
+		// Audit-log cold archival env vars. MUST be in this
 		// list so tests like TestLoadAuditArchiveDefaults observe the
 		// production "unset" state regardless of what the parent
 		// shell / CI runner has exported. The defaults are validated
 		// inside buildConfigFromEnv (e.g. AUDIT_LOG_RETENTION_DAYS
 		// becomes 90 when unset), so the convention is: any env var
-		// touched by buildConfigFromEnv lives here. See WS-23 PR #68
-		// Devin Review finding
-		// BUG_pr-review-job-00ec8888db2a410b892f764609056529_0002.
+		// touched by buildConfigFromEnv lives here.
 		"AUDIT_LOG_ARCHIVE_ENABLED", "AUDIT_LOG_RETENTION_DAYS",
 		"AUDIT_LOG_ARCHIVE_PREFIX", "AUDIT_LOG_ARCHIVE_BUCKET",
 		"AUDIT_LOG_ARCHIVE_MAX_ROWS_PER_BATCH",
-		// SMTP transactional email + PUBLIC_URL env vars (WS-21).
-		// These were introduced in PR #66 (commit 939fa4d) but the
-		// matching requireEnv update was missed at the time. Adding
-		// them here closes the consistency gap with the same
+		// SMTP transactional email + PUBLIC_URL env vars. Added so
+		// the email-related env state is unset by default, with the same
 		// rationale documented in the OTEL block above: any env var
 		// buildConfigFromEnv reads must live in this list so a CI
 		// runner with e.g. SMTP_HOST exported doesn't bleed into
-		// tests that exercise the "email disabled" default. See
-		// WS-23 PR #68 Devin Review finding
-		// ANALYSIS_pr-review-job-8cfa30b85fb14cd7832897b92f636bf0_0001.
+		// tests that exercise the "email disabled" default.
 		"PUBLIC_URL",
 		"SMTP_HOST", "SMTP_PORT",
 		"SMTP_USERNAME", "SMTP_PASSWORD",
@@ -224,8 +217,7 @@ func TestLoadCompleteS3(t *testing.T) {
 // loader: it returns a populated Config WITHOUT requiring
 // DATABASE_URL or JWT_SECRET. S3_ENDPOINT is required (since the
 // loader is for storage-only binaries); the S3 group remains
-// coherent-validated. Added for WS-23 PR #68 Devin Review finding
-// ANALYSIS_pr-review-job-ad89da4c3a1449c5b914d6045dc4ffb8_0001.
+// coherent-validated.
 func TestLoadStorageOnly(t *testing.T) {
 	requireEnv(t, map[string]string{
 		// Intentionally NO DATABASE_URL / JWT_SECRET.
@@ -531,8 +523,7 @@ func TestAuditRetentionFloorMatchesService(t *testing.T) {
 // 512Mi memory, and the JSONL.gz encoder buffers an entire page in
 // memory before uploading. A malformed env var like
 // AUDIT_LOG_ARCHIVE_MAX_ROWS_PER_BATCH=10000000 (intended 100k) would
-// OOM-kill the pod without this clamp. See WS-23 PR #68 Devin Review
-// finding ANALYSIS_pr-review-job-667bb339b9654552bfaa74d3720a8d0b_0005.
+// OOM-kill the pod without this clamp.
 func TestClampAuditMaxRowsPerBatch(t *testing.T) {
 	cases := []struct {
 		name  string

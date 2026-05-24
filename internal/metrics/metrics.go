@@ -28,8 +28,8 @@
 //     registered routes) for HTTP labels and the constant NATS
 //     subject string for worker labels.
 //
-// WS-17 ships the core surface; subsequent workstreams can add
-// histograms (e.g. preview generation latency by mime type) by
+// This package ships the core surface; additional histograms (e.g.
+// preview generation latency by mime type) can be added by
 // constructing them via promauto.With(m.Registry).
 package metrics
 

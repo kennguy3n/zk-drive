@@ -14,7 +14,7 @@ const PlacementPage = lazy(() => import("./pages/PlacementPage"));
 const EncryptionPage = lazy(() => import("./pages/EncryptionPage"));
 const KChatRoomsPage = lazy(() => import("./pages/KChatRoomsPage"));
 // PrivacyPage is the customer-facing explainer for the two per-folder
-// privacy modes (PROPOSAL.md §3.3). Linked from the FileBrowserPage
+// privacy modes (docs/PRODUCT.md). Linked from the FileBrowserPage
 // header and CreateFolderDialog, so it sits behind RequireAuth like
 // the rest of the /drive surface.
 const PrivacyPage = lazy(() => import("./pages/PrivacyPage"));

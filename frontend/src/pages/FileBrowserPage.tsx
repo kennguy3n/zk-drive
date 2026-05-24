@@ -70,9 +70,9 @@ export default function FileBrowserPage() {
       } else {
         setFolder(null);
         setSubfolders(await listFolders(null));
-        // Root view: backend doesn't expose a file listing for null folder
-        // in Phase 1, so we show an empty table and nudge the user to
-        // open a subfolder.
+        // Root view: backend doesn't expose a file listing for the
+        // null folder, so we show an empty table and nudge the user
+        // to open a subfolder.
         setFiles([]);
       }
     } catch (err) {
@@ -591,8 +591,9 @@ function Breadcrumb({ folder }: { folder: Folder | null }) {
   // EncryptionBadge sits at the end of the breadcrumb so users always
   // know what privacy mode the current folder is in — not just when
   // they scan a parent's subfolder list. This is the same trade-off
-  // matrix as PROPOSAL.md §3.3 (managed = server-readable, strict =
-  // server-blind), surfaced at the point of action.
+  // matrix as docs/PRODUCT.md "Per-folder privacy modes" (managed =
+  // server-readable, strict = server-blind), surfaced at the point
+  // of action.
   const parts = folder?.path?.split("/").filter(Boolean) ?? [];
   return (
     <nav style={{ fontSize: 14, display: "flex", alignItems: "center", gap: 8 }}>

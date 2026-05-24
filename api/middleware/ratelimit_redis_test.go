@@ -131,8 +131,8 @@ func TestRateLimitFailsOpenOnRedisDown(t *testing.T) {
 	}
 }
 
-// TestUserDeniedDoesNotPollutWorkspaceCounter regression-tests the
-// behaviour flagged in Devin Review #3150549270: a user that exceeds
+// TestUserDeniedDoesNotPollutWorkspaceCounter pins the per-user vs.
+// per-workspace counter isolation: a user that exceeds
 // their personal budget and keeps hammering must NOT inflate the
 // workspace counter, otherwise a single misbehaving client can rate
 // limit every other user in the workspace.

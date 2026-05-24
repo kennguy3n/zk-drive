@@ -128,8 +128,8 @@ func TestAdminDeactivateUser(t *testing.T) {
 // contract that POST /api/admin/users emits a member.joined webhook
 // event with the invited user's identifiers + role. The drive
 // handler's webhook emission has had integration coverage since the
-// initial WS-24 PR; this test closes the matching gap for the admin
-// handler that the round-7 review surfaced.
+// initial outbound-webhook landing; this test closes the matching
+// gap for the admin handler.
 func TestAdminInviteUser_EmitsMemberJoinedWebhook(t *testing.T) {
 	env := setupEnv(t)
 	tok := env.signupAndLogin("Acme", "admin@acme.test", "Alice", "pw")

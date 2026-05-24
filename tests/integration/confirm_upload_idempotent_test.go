@@ -13,7 +13,7 @@ import (
 // a property network-flaky clients depend on after a TCP reset
 // between a successful PUT-to-S3 and the confirm hop.
 //
-// Before the WS-3 versionID-pinning change, replays silently created
+// Before the versionID-pinning change, replays silently created
 // a new file_versions row on each retry (each minted a fresh
 // uuid.New()) — N rows pointing at the same S3 object, all but the
 // latest orphaned. Pinning v.ID to the object_key's version segment
@@ -182,7 +182,7 @@ func TestConfirmUploadIdempotentReplay(t *testing.T) {
 // TestConfirmUploadReplayDoesNotRegressVersion is the harder half of
 // the idempotency contract: a retry of V1's confirm MUST NOT silently
 // overwrite a newer V2 that another caller has committed in the
-// interval. Before the WS-3 fix in this PR, ConfirmVersion ran its
+// interval. Before the version-pin fix, ConfirmVersion ran its
 // UPDATE files SET current_version_id = $3 unconditionally on the
 // replay path, so a stale V1 retry would roll back current_version_id
 // to V1 and overwrite size_bytes with V1's size — discarding V2's

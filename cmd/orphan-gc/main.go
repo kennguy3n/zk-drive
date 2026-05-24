@@ -1,4 +1,4 @@
-// zk-drive orphan-object GC binary — Phase 5 / WS-18.
+// zk-drive orphan-object GC binary.
 //
 // Standalone entrypoint that reclaims storage for presigned PUTs
 // that completed but were never confirmed (see internal/gc for the

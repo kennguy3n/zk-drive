@@ -32,7 +32,7 @@ spec:
       # a dedicated port (e.g. so the public ingress can drop it
       # outright), do it via an annotated SecurityHeadersOptions +
       # a second Listener; today the single-port posture mirrors
-      # the WS-9 logging surface.
+      # the structured-logging surface.
       annotations:
         prometheus.io/scrape: "true"
         prometheus.io/port: "8080"

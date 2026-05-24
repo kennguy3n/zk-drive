@@ -40,7 +40,7 @@ func NewArchiveService(pool *pgxpool.Pool, st *storage.Client, httpClient *http.
 // gzips the bytes in memory, uploads to the archive key pattern via
 // presigned PUT, and stamps archived_at on the file_versions row.
 //
-// The in-memory buffer is acceptable for Phase 3 because the typical
+// The in-memory buffer is acceptable today because the typical
 // file size target is <100 MB. Streaming gzip directly between HTTP
 // round-trips is a future optimization if this becomes a bottleneck.
 func (a *ArchiveService) ArchiveVersion(ctx context.Context, versionID uuid.UUID) error {

@@ -1,6 +1,5 @@
--- Phase 5 (WS-18): track presigned-PUT object keys so the orphan
--- garbage collector can reclaim S3 objects that were uploaded but
--- never confirmed.
+-- Track presigned-PUT object keys so the orphan garbage collector
+-- can reclaim S3 objects that were uploaded but never confirmed.
 --
 -- Background: api/drive/upload.go:UploadURL generates a versionID
 -- locally, signs it into the S3 presigned PUT URL, and hands both
@@ -23,9 +22,10 @@
 --
 -- ConfirmUpload clears the column when the version row is inserted,
 -- so confirmed files never carry stale pending keys. The column is
--- nullable because pre-WS-18 file rows have no recorded key and are
--- intentionally invisible to the GC scan (they'd need a separate
--- ListObjects-based cleanup pass, out of scope for this migration).
+-- nullable because legacy file rows from before this migration
+-- have no recorded key and are intentionally invisible to the GC
+-- scan (they would need a separate ListObjects-based cleanup pass,
+-- out of scope for this migration).
 
 ALTER TABLE files ADD COLUMN pending_upload_object_key TEXT;
 

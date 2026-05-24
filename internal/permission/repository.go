@@ -118,8 +118,8 @@ func (r *PostgresRepository) Delete(ctx context.Context, workspaceID, permID uui
 
 // CheckAccess reports whether the grantee has at least minRole on the
 // resource. Role hierarchy: admin > editor > viewer. Expired grants
-// (expires_at <= now()) are ignored. Phase 1 does not inherit from parent
-// folders — that lands in Phase 2.
+// (expires_at <= now()) are ignored. Inheritance from parent folders
+// is a follow-up; today each grant is scoped to a single resource.
 func (r *PostgresRepository) CheckAccess(ctx context.Context, workspaceID uuid.UUID, resourceType string, resourceID uuid.UUID, granteeType string, granteeID uuid.UUID, minRole string) (bool, error) {
 	if !isValidRole(minRole) {
 		return false, fmt.Errorf("invalid min role %q", minRole)

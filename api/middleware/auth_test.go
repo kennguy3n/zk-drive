@@ -248,9 +248,10 @@ func TestAuthMiddleware_CheckerOnlyCalledOnce(t *testing.T) {
 	}
 }
 
-// TestAuthMiddleware_RejectsPurposeToken pins the WS-19 invariant:
-// AuthMiddleware MUST refuse any token whose Purpose claim is set,
-// regardless of its TTL or signing key. This is the single chokepoint
+// TestAuthMiddleware_RejectsPurposeToken pins the TOTP-challenge
+// invariant: AuthMiddleware MUST refuse any token whose Purpose
+// claim is set, regardless of its TTL or signing key. This is the
+// single chokepoint
 // that prevents an attacker who captures an mfa_challenge token from
 // replaying it against a data-plane endpoint.
 func TestAuthMiddleware_RejectsPurposeToken(t *testing.T) {

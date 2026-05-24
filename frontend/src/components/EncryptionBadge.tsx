@@ -1,7 +1,7 @@
 // EncryptionBadge renders the privacy mode of a folder as a small pill
 // next to its name. Mode strings come from the API (`encryption_mode`
-// field on Folder) and map to two product-named modes per PROPOSAL.md
-// §3.3:
+// field on Folder) and map to two product-named modes per
+// docs/PRODUCT.md "Per-folder privacy modes":
 //
 //   - "strict_zk"          -> "strict zero-knowledge"
 //                             (opt-in; server never sees plaintext;
@@ -12,7 +12,7 @@
 //                              request handling, which is what enables
 //                              preview / search / virus scanning)
 //   - anything else / missing -> default to the managed rendering, so
-//                                pre-Phase-4 rows stay clean
+//                                legacy rows without the field stay clean
 //
 // The badge label is deliberately kept to the short canonical mode
 // name ("managed" / "strict zero-knowledge") so it matches the
@@ -22,7 +22,7 @@
 // server-readable trade-off is surfaced through the badge tooltip
 // (below) and the PrivacyPage table, not through the badge text
 // itself, to avoid two different customer-facing labels for the same
-// mode. PROPOSAL.md §3.3 is explicit only about NOT calling the
+// mode. docs/PRODUCT.md is explicit only about NOT calling the
 // managed mode "zero-knowledge" — "managed" satisfies that
 // constraint and matches the brand vocabulary used elsewhere.
 // EncryptionMode is defined in api/client.ts (the wire-level types
@@ -34,11 +34,11 @@ export type { EncryptionMode } from "../api/client";
 
 export interface EncryptionBadgeProps {
   // The badge takes a plain `string | undefined` (not `EncryptionMode`)
-  // at the type level so it can render rows coming off the wire that
-  // pre-date Phase 4 and don't carry the field at all, OR a hypothetical
-  // future mode the server starts emitting before the frontend has been
-  // re-deployed. The runtime branch (`mode === "strict_zk"`) is the
-  // single source of truth — unknown values fall through to the managed
+  // at the type level so it can render legacy folder rows that don't
+  // carry the field at all, OR a hypothetical future mode the server
+  // starts emitting before the frontend has been re-deployed. The
+  // runtime branch (`mode === "strict_zk"`) is the single source of
+  // truth — unknown values fall through to the managed
   // rendering, matching the documented "missing -> managed" contract
   // above. Callers that DO know the mode at compile time should still
   // declare their own state as `EncryptionMode` for autocomplete; the

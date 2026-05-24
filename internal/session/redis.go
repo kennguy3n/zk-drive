@@ -138,8 +138,8 @@ func (s *RedisSessionStore) Set(ctx context.Context, sessionID string, userID, w
 	// The user_sessions SET TTL must never shrink: a short-lived
 	// session followed by a long-lived one would otherwise expire
 	// the index before the long-lived hash, leaving
-	// RevokeAllForUser unable to find it (Devin Review
-	// #3150549347). ExpireNX seeds the TTL on first SAdd when none
+	// RevokeAllForUser unable to find it. ExpireNX seeds the TTL on
+	// first SAdd when none
 	// exists; ExpireGT extends it only when ttl is greater than the
 	// current remaining TTL. Together they implement
 	// max(current, ttl) without a separate PTTL round-trip.

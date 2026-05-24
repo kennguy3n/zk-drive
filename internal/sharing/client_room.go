@@ -123,7 +123,7 @@ func (s *ClientRoomService) Create(ctx context.Context, workspaceID uuid.UUID, c
 		// No compensating folder delete: folder.Service lacks a handle
 		// here without widening the FolderCreator interface, and an
 		// orphaned empty folder is a safer failure than a dangling
-		// share link. The retention worker (Phase 2 §7.4) can sweep.
+		// share link. The retention worker can sweep.
 		return nil, nil, fmt.Errorf("create room share link: %w", err)
 	}
 	room := &ClientRoom{

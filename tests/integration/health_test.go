@@ -32,7 +32,7 @@ func TestReadyzPassesWithLiveDependencies(t *testing.T) {
 	// All four checkers must report ok. The postgres pool is real;
 	// the other three are deliberately wired with nil dependencies
 	// to exercise the nil-safe short-circuit path. Treating that
-	// short-circuit as "ok" rather than "fail" is the WS-10
+	// short-circuit as "ok" rather than "fail" is the readiness
 	// invariant — single-process dev stacks (no Redis / NATS / S3)
 	// must NOT be marked as not-ready.
 	for _, name := range []string{"postgres", "storage", "redis", "nats"} {

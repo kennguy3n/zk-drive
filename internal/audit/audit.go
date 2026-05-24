@@ -22,7 +22,7 @@ const (
 	ActionPasswordChange     = "auth.password_change"
 	ActionSSOLink            = "auth.sso_link"
 	ActionSSOLogin           = "auth.sso_login"
-	// MFA / TOTP lifecycle (WS-19). All five are user-visible in
+	// MFA / TOTP lifecycle. All five are user-visible in
 	// the workspace audit log and surface in operator monitoring
 	// for unusual frequency (e.g. repeated disable/enroll churn,
 	// recovery-code consumption spikes that hint at lost devices).
@@ -43,7 +43,7 @@ const (
 	ActionAdminBillingUpdate    = "admin.billing_update"
 	ActionAdminBillingCheckout  = "admin.billing_checkout_session"
 	ActionAdminBillingPortal    = "admin.billing_portal_session"
-	// Guest-invite delivery (WS-21). Recorded on the same audit_log
+	// Guest-invite delivery. Recorded on the same audit_log
 	// stream as the auth + permission events so operators can join
 	// "invite created → email delivered" on resource_id and surface
 	// undelivered invites in compliance reports. The metadata blob
@@ -51,7 +51,7 @@ const (
 	// `template_error` / `address_invalid` / `disabled`) so a
 	// failed delivery is still visible without dropping the row.
 	ActionGuestInviteEmailed = "sharing.guest_invite_emailed"
-	// Outbound webhook subscription lifecycle (WS-24). Workspace
+	// Outbound webhook subscription lifecycle. Workspace
 	// admins create / pause / resume / delete subscriptions; each
 	// transition is audited so compliance reviews can attribute
 	// fan-out changes to a specific operator.

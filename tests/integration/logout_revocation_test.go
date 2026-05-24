@@ -6,7 +6,7 @@ import (
 	"time"
 )
 
-// TestLogoutRevokesExistingToken pins WS-1's user-visible promise:
+// TestLogoutRevokesExistingToken pins the user-visible promise:
 // once /api/auth/logout returns, the bearer token used to make that
 // call cannot be re-used for any other authenticated endpoint. The
 // guarantee is what makes "Sign out" a real security action rather

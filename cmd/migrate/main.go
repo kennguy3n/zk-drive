@@ -1,4 +1,4 @@
-// zk-drive migrate binary — Phase 5 / WS-11.
+// zk-drive migrate binary.
 //
 // Standalone entrypoint that connects to Postgres and applies every
 // pending migration in MigrationsDir (default ./migrations). Designed

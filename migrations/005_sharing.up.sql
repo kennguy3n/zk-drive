@@ -1,4 +1,4 @@
--- Phase 2: share links and guest invites.
+-- share links and guest invites.
 --
 -- share_links are independent of the user permission model
 -- (ARCHITECTURE.md §7.3): holding the token grants access. A link may

@@ -21,9 +21,9 @@ var ErrInvalidResourceType = errors.New("invalid resource_type")
 // outside the allowed set.
 var ErrInvalidGranteeType = errors.New("invalid grantee_type")
 
-// Service wraps the permission repository with validation. For Phase 1 the
-// service enforces only workspace-level grants on individual folders or
-// files; folder permission inheritance is Phase 2.
+// Service wraps the permission repository with validation. It
+// enforces only workspace-level grants on individual folders or
+// files today; folder permission inheritance is a follow-up.
 type Service struct {
 	repo Repository
 }
