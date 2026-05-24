@@ -4,3 +4,4 @@ frontend/test-results/
 frontend/playwright-report/
 bin/
 *.log
+sdk/target/

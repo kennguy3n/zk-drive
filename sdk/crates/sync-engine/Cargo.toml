@@ -1,0 +1,34 @@
+[package]
+name = "zk-sync-engine"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Bidirectional file-system ↔ ZK Drive sync engine. Local SQLite catalogue + notify watcher + change-feed consumer."
+
+[dependencies]
+zk-sync-crypto = { path = "../crypto" }
+zk-sync-api = { path = "../api-client" }
+zk-sync-auth = { path = "../auth" }
+
+tokio = { workspace = true }
+futures = { workspace = true }
+async-trait = { workspace = true }
+
+notify = { workspace = true }
+rusqlite = { workspace = true }
+blake3 = { workspace = true }
+
+reqwest = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+uuid = { workspace = true }
+chrono = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

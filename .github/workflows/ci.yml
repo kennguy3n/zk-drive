@@ -102,6 +102,41 @@ jobs:
       - name: Build
         run: npm run build
 
+  sdk:
+    name: Rust desktop SDK (fmt, clippy, test)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: sdk
+    steps:
+      - uses: actions/checkout@v4
+
+      # `dtolnay/rust-toolchain` is the maintained successor to
+      # `actions-rs/toolchain` (which is unmaintained). Pin to a
+      # stable release rather than `stable` so a toolchain bump
+      # can't silently break CI overnight.
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      # rusqlite's `bundled` feature compiles SQLite from source; the
+      # rest of the workspace has no C deps. We still install
+      # `libssl-dev` for cargo audit smoke runs in a future PR.
+      - name: Cache cargo registry + target
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: sdk
+
+      - name: cargo fmt --check
+        run: cargo fmt --all -- --check
+
+      - name: cargo clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: cargo test
+        run: cargo test --workspace --no-fail-fast
+
   docker:
     name: Docker image build
     runs-on: ubuntu-latest
