@@ -896,6 +896,45 @@ All endpoints sit under `/api/admin/webhooks` and require the
 | `POST`   | `/api/admin/webhooks/{id}/test`     | Enqueue a synthetic event to verify connectivity end-to-end.    |
 | `POST`   | `/api/admin/webhooks/{id}/resume`   | Re-activate an auto-paused subscription.                        |
 
+#### Operator deployment ordering
+
+The webhook subject (`webhook.events`) is added to the shared
+`DRIVE_JOBS` JetStream stream by the **worker** binary at startup
+(via the same `ensureStream` call that registers every other job
+subject). If you deploy a release that introduces a new subject —
+including the first release of WS-24 itself — to the **server**
+first while the worker is still on the previous version, the
+server will publish events to a subject that is not yet in the
+stream's subject list. NATS rejects those publishes with
+`no responders` and the events are lost (the publisher logs the
+error and returns to the request path; the underlying file /
+permission mutation has already committed).
+
+Two correct deployment shapes:
+
+1. **Worker-first (recommended for rolling deploys).** Roll the
+   worker before the server. The worker updates `DRIVE_JOBS` to
+   include the new subject at startup, and subsequent server
+   publishes are accepted. This is the standard "infrastructure
+   before producer" pattern.
+2. **Single-shot (e.g. CronJob / Helm release that re-runs
+   migrations).** Stop the server, deploy both binaries, start the
+   worker, then the server. Same end state with no in-flight
+   publishes during the window.
+
+The same ordering applies whenever future workstreams add new
+JetStream subjects. If you control deploys via Argo CD / Flux,
+configure sync waves so the worker's `Deployment` sorts ahead of
+the server's. Helm users can use `helm.sh/hook-weight` on the
+worker chart.
+
+After a deploy where the ordering may have been violated, run
+`nats stream info DRIVE_JOBS` against the cluster: the subject
+list should include `webhook.events`. If it doesn't, the worker
+hasn't rolled yet — restart it and the `ensureStream` call adds
+the subject without losing the in-stream messages on existing
+subjects.
+
 ## Running tests
 
 ### Go unit tests
