@@ -155,3 +155,57 @@ func isValidUTF8(s string) bool {
 	}
 	return true
 }
+
+// TestClipBytesToValidUTF8 exercises every interesting class of
+// trailing byte the helper has to handle: pure ASCII (no trim),
+// complete CJK at the boundary (no trim), a CJK chopped at 1/2/3
+// of its 3 bytes (trim 1/2/3), and the 4-byte emoji case (trim up
+// to 3). The helper is used by the email body truncation path to
+// prevent U+FFFD glyphs at the cut point.
+func TestClipBytesToValidUTF8(t *testing.T) {
+	t.Parallel()
+	// "日" is 0xE6 0x97 0xA5 — a 3-byte UTF-8 codepoint.
+	hi := []byte("日")
+	// "😀" is 0xF0 0x9F 0x98 0x80 — a 4-byte UTF-8 codepoint.
+	emoji := []byte("😀")
+	cases := []struct {
+		name string
+		in   []byte
+		want []byte
+	}{
+		{"ascii only", []byte("hello"), []byte("hello")},
+		{"empty", []byte{}, []byte{}},
+		{"complete cjk", append([]byte("ok"), hi...), append([]byte("ok"), hi...)},
+		{"cjk cut at 1 byte", append([]byte("ok"), hi[:1]...), []byte("ok")},
+		{"cjk cut at 2 bytes", append([]byte("ok"), hi[:2]...), []byte("ok")},
+		{"complete emoji", append([]byte("hi"), emoji...), append([]byte("hi"), emoji...)},
+		{"emoji cut at 1 byte", append([]byte("hi"), emoji[:1]...), []byte("hi")},
+		{"emoji cut at 2 bytes", append([]byte("hi"), emoji[:2]...), []byte("hi")},
+		{"emoji cut at 3 bytes", append([]byte("hi"), emoji[:3]...), []byte("hi")},
+	}
+	for _, c := range cases {
+		c := c
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			got := clipBytesToValidUTF8(append([]byte{}, c.in...))
+			if !equalBytes(got, c.want) {
+				t.Errorf("clipBytesToValidUTF8(%q) = %q, want %q", c.in, got, c.want)
+			}
+			if !isValidUTF8(string(got)) {
+				t.Errorf("clipBytesToValidUTF8(%q) result %q has U+FFFD", c.in, got)
+			}
+		})
+	}
+}
+
+func equalBytes(a, b []byte) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}

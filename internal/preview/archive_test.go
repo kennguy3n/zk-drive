@@ -100,6 +100,80 @@ func TestRenderArchive_UnknownMime(t *testing.T) {
 	}
 }
 
+// TestRenderArchive_PlainGzipFallback exercises the plain-.gz path:
+// a gzip blob whose decompressed bytes aren't a tar archive. Before
+// the listGzipOrTarGzEntries fallback, this returned a raw tar-parse
+// error that did NOT wrap ErrUnsupportedMime, so the worker would
+// Nak and redeliver the job until JetStream's MaxAge expired. The
+// fallback now produces a synthetic single-entry listing showing
+// the gzip header's Name field.
+func TestRenderArchive_PlainGzipFallback(t *testing.T) {
+	t.Parallel()
+	// Build a plain gzip of a non-tar payload, with a Name in the
+	// gzip header so we can assert the fallback surfaces it.
+	var gzBuf bytes.Buffer
+	gz := gzip.NewWriter(&gzBuf)
+	gz.Name = "kernel.log"
+	if _, err := gz.Write([]byte("this is a plain log file, not a tar archive\n")); err != nil {
+		t.Fatalf("gz write: %v", err)
+	}
+	if err := gz.Close(); err != nil {
+		t.Fatalf("gz close: %v", err)
+	}
+
+	img, err := renderArchive(context.Background(), "application/gzip", gzBuf.Bytes())
+	if err != nil {
+		t.Fatalf("renderArchive on plain gzip: %v (the worker would Nak forever before the fallback)", err)
+	}
+	if img == nil {
+		t.Fatal("renderArchive returned nil image for plain gzip")
+	}
+
+	// Verify the helper directly: tag should be GZ (not TAR.GZ),
+	// total count 1, and the entry should be the gzip header's
+	// Name.
+	entries, total, kind, err := listGzipOrTarGzEntries(gzBuf.Bytes())
+	if err != nil {
+		t.Fatalf("listGzipOrTarGzEntries: %v", err)
+	}
+	if kind != "GZ" {
+		t.Errorf("kind = %q, want GZ for non-tar gzip", kind)
+	}
+	if total != 1 {
+		t.Errorf("total = %d, want 1", total)
+	}
+	if len(entries) != 1 || entries[0] != "kernel.log" {
+		t.Errorf("entries = %v, want [kernel.log]", entries)
+	}
+}
+
+// TestRenderArchive_PlainGzipNoName covers the gzip-without-Name
+// fallback: a streaming gzip pipeline often omits the original
+// filename. We surface a sentinel rather than an empty listing so
+// the preview still has something to render.
+func TestRenderArchive_PlainGzipNoName(t *testing.T) {
+	t.Parallel()
+	var gzBuf bytes.Buffer
+	gz := gzip.NewWriter(&gzBuf)
+	// Deliberately do NOT set gz.Name.
+	if _, err := gz.Write([]byte("anonymous gzip stream payload")); err != nil {
+		t.Fatalf("gz write: %v", err)
+	}
+	if err := gz.Close(); err != nil {
+		t.Fatalf("gz close: %v", err)
+	}
+	entries, total, kind, err := listGzipOrTarGzEntries(gzBuf.Bytes())
+	if err != nil {
+		t.Fatalf("listGzipOrTarGzEntries: %v", err)
+	}
+	if kind != "GZ" || total != 1 || len(entries) != 1 {
+		t.Fatalf("unexpected (kind=%q total=%d entries=%v)", kind, total, entries)
+	}
+	if entries[0] == "" {
+		t.Error("entry name was empty; expected a non-empty placeholder")
+	}
+}
+
 // TestListZipEntries_HonoursEntryCap exercises the listZipEntries
 // cap so a crafted archive with hundreds of thousands of entries
 // can't blow up the worker's memory + sort budget. The entry count

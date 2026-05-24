@@ -3,7 +3,20 @@ package preview
 import (
 	"context"
 	"image"
+	"time"
 )
+
+// designRenderTimeout caps a single ImageMagick invocation. We rely
+// on this rather than the worker-level 2-minute job timeout because
+// ImageMagick can spend a surprisingly long time on a single complex
+// PSD / AI / HEIC — a multi-hundred-megapixel canvas with a stack
+// of adjustment layers can chew CPU for minutes on its own. Without
+// this cap, one pathological input would tie up a worker goroutine
+// for the full job-timeout window and starve every other preview
+// in the queue. 30s matches the office renderer's budget and is
+// generous enough for legitimate documents while still being
+// tight enough to keep the queue moving.
+const designRenderTimeout = 30 * time.Second
 
 // imagemagickBinary is the ImageMagick `convert` command used to
 // rasterise design / CAD-adjacent formats. Kept as a package-level
@@ -91,7 +104,13 @@ func renderDesign(ctx context.Context, mime string, src []byte) (image.Image, er
 		// — ImageMagick will still try magic sniffing.
 		inName = "in.bin"
 	}
-	return renderViaSubprocess(ctx, imagemagickBinary, inName, "out.png",
+	// Layer our own timeout under the caller's context so we get
+	// the tighter of (caller's deadline, designRenderTimeout).
+	// Cancel on return so the subprocess is killed even on early
+	// decode failure paths.
+	renderCtx, cancel := context.WithTimeout(ctx, designRenderTimeout)
+	defer cancel()
+	return renderViaSubprocess(renderCtx, imagemagickBinary, inName, "out.png",
 		[]string{"-density", "150", "{{in}}[0]", "-flatten", "-strip", "-resize", "600x600", "{{out}}"},
 		src,
 	)

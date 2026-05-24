@@ -66,3 +66,17 @@ const PreviewMimeType = "image/png"
 // multi-gigabyte PNG) from OOM'ing the worker. Matches the defensive
 // cap used by the scan service.
 const MaxSourceBytes = 100 * 1024 * 1024
+
+// MaxDeliver is the upper bound on how many times JetStream will
+// redeliver a preview job that the worker keeps Nak'ing. Without
+// this cap, a deterministic-failure renderer error (e.g. a truly
+// corrupt file that fails to decode on every retry) would loop
+// until JetStream's stream-level MaxAge expired, eating worker
+// goroutine time and producing repeated error logs.
+//
+// Five attempts mirrors webhooks.MaxAttempts and gives transient
+// failures (storage timeout, brief NATS partition) a few cycles to
+// recover before the message is terminated. ErrUnsupportedMime
+// already short-circuits to a graceful Ack at attempt 1, so this
+// cap only affects the "decode error / IO error" path.
+const MaxDeliver = 5

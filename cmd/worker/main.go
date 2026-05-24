@@ -482,7 +482,15 @@ func subscribeAll(ctx context.Context, js nats.JetStreamContext, pool *pgxpool.P
 		// job consumers that have different retry semantics.
 		extraOpts []nats.SubOpt
 	}{
-		{jobs.SubjectPreview, "drive-preview", m.InstrumentJob(ctx, jobs.SubjectPreview, traceJob(jobs.SubjectPreview, previewHandler(pool, previewSvc))), nil},
+		// MaxDeliver=preview.MaxDeliver caps how many times
+		// JetStream redelivers a preview job that the handler keeps
+		// Nak'ing. ErrUnsupportedMime is already Ack'd as a skip
+		// at attempt 1, so this cap only affects the "decode
+		// failed on bytes that will never decode" path — without
+		// it, a deterministic renderer error redelivers until
+		// MaxAge expires (eating worker goroutine time, producing
+		// noisy logs, and starving other preview jobs).
+		{jobs.SubjectPreview, "drive-preview", m.InstrumentJob(ctx, jobs.SubjectPreview, traceJob(jobs.SubjectPreview, previewHandler(pool, previewSvc))), []nats.SubOpt{nats.MaxDeliver(preview.MaxDeliver)}},
 		{jobs.SubjectScan, "drive-scan", m.InstrumentJob(ctx, jobs.SubjectScan, traceJob(jobs.SubjectScan, scanHandler(pool, scanSvc))), nil},
 		{jobs.SubjectIndex, "drive-index", m.InstrumentJob(ctx, jobs.SubjectIndex, traceJob(jobs.SubjectIndex, indexHandler(pool, indexSvc))), nil},
 		{jobs.SubjectArchive, "drive-archive", m.InstrumentJob(ctx, jobs.SubjectArchive, traceJob(jobs.SubjectArchive, archiveHandler(archiveSvc))), nil},

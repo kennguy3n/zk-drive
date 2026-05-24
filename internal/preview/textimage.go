@@ -5,6 +5,7 @@ import (
 	"image/color"
 	"strings"
 	"unicode"
+	"unicode/utf8"
 
 	"golang.org/x/image/font"
 	"golang.org/x/image/font/inconsolata"
@@ -200,6 +201,33 @@ func truncateRunes(s string, maxRunes int, suffix string) string {
 		}
 	}
 	return string(runes[:cut]) + suffix
+}
+
+// clipBytesToValidUTF8 returns b truncated to the longest prefix
+// that ends on a complete UTF-8 codepoint. Used when a byte-level
+// cap (e.g. an email body size budget) has sliced a string in the
+// middle of a multi-byte UTF-8 sequence: the trailing bytes would
+// otherwise render as U+FFFD replacement glyphs.
+//
+// At most 3 trailing bytes can be dropped — UTF-8 codepoints are 1
+// to 4 bytes, so a cut point at most 3 bytes into a 4-byte
+// codepoint is the deepest possible mid-codepoint cut. We bound
+// the loop at 3 iterations so this is O(1) overhead on already-
+// valid inputs (the fast path checks for a complete trailing
+// rune and returns immediately).
+func clipBytesToValidUTF8(b []byte) []byte {
+	for i := 0; i < 3 && len(b) > 0; i++ {
+		r, size := utf8.DecodeLastRune(b)
+		if r != utf8.RuneError || size > 1 {
+			return b
+		}
+		// RuneError with size==1 is the stdlib's signal for an
+		// invalid byte. Drop it and retry; after at most 3
+		// drops we've cleared the longest possible truncated
+		// codepoint.
+		b = b[:len(b)-1]
+	}
+	return b
 }
 
 func fillSolid(dst *image.RGBA, c color.Color) {

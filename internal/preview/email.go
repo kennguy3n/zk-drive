@@ -83,7 +83,15 @@ func renderEmail(_ context.Context, src []byte) (image.Image, error) {
 	bodyBytes, _ := io.ReadAll(io.LimitReader(msg.Body, emailBodyPreviewBytes+1))
 	body := string(bodyBytes)
 	if len(bodyBytes) > emailBodyPreviewBytes {
-		body = string(bodyBytes[:emailBodyPreviewBytes]) + "\n…"
+		// Slice at the byte cap (load-bearing for OOM
+		// protection), then trim any trailing bytes that aren't
+		// a complete UTF-8 codepoint. Without this trim, a cap
+		// landing in the middle of a multi-byte sequence (CJK,
+		// emoji) produces a U+FFFD replacement glyph at the
+		// truncation point — visible if not catastrophic, and
+		// inconsistent with the rune-aware care taken on the
+		// subject line above.
+		body = string(clipBytesToValidUTF8(bodyBytes[:emailBodyPreviewBytes])) + "\n…"
 	}
 	// Strip MIME multipart boundaries / Content-Type headers if this
 	// looks like a multipart body — we don't decode each part, but

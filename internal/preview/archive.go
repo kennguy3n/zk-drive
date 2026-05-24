@@ -43,18 +43,17 @@ func renderArchive(_ context.Context, mime string, src []byte) (image.Image, err
 		entries, totalCount, err = listTarEntries(bytes.NewReader(src))
 		kind = "TAR"
 	case "application/gzip", "application/x-gzip", "application/x-tar-gz", "application/x-tgz":
-		// .tar.gz / .tgz. Wrap the source in a gzip reader, then
-		// hand off to the tar entry lister. A plain .gz of a
-		// non-tar file is rare enough to fold into this same path —
-		// we'll just enumerate one entry ("the underlying
-		// uncompressed stream") and surface it as the listing.
-		gz, gzErr := gzip.NewReader(bytes.NewReader(src))
-		if gzErr != nil {
-			return nil, fmt.Errorf("gzip: %w", gzErr)
-		}
-		defer func() { _ = gz.Close() }()
-		entries, totalCount, err = listTarEntries(gz)
-		kind = "TAR.GZ"
+		// .tar.gz / .tgz. Try the tar path first; if the
+		// decompressed bytes aren't a valid tar archive (i.e. this
+		// is a plain .gz of some other file), fall back to a
+		// synthetic single-entry listing showing the embedded
+		// filename from the gzip header (or a generic placeholder
+		// if it's absent). The fallback is important for worker
+		// stability: without it, a plain .gz upload returned a
+		// tar-parse error that did NOT wrap ErrUnsupportedMime, so
+		// the worker's Nak loop retried the job until the JetStream
+		// delivery cap kicked in.
+		entries, totalCount, kind, err = listGzipOrTarGzEntries(src)
 	default:
 		return nil, fmt.Errorf("%w: archive type %q", ErrUnsupportedMime, mime)
 	}
@@ -93,6 +92,49 @@ func renderArchive(_ context.Context, mime string, src []byte) (image.Image, err
 		// because the source list is already bounded by
 		// archiveMaxEntries.
 	}), nil
+}
+
+// listGzipOrTarGzEntries decompresses a gzip blob and tries to walk
+// it as a tar stream. On success it returns the tar listing tagged
+// as TAR.GZ. On failure — i.e. the gzip is valid but its contents
+// aren't tar — it falls back to a synthetic single-entry listing
+// tagged as GZ that surfaces the original filename from the gzip
+// header (RFC 1952 section 2.3.1.5). The synthetic listing keeps
+// the worker from looping on Nak/redeliver for plain-gzip uploads
+// while still giving the user something useful in the preview.
+//
+// Returns an error only when the input isn't a valid gzip stream at
+// all (e.g. truncated upload, wrong MIME). That error path is rare
+// enough that we let it propagate as a hard failure.
+func listGzipOrTarGzEntries(src []byte) ([]string, int, string, error) {
+	// Two readers because tar walks consume the stream. We probe
+	// the tar shape on a fresh reader, then either keep going with
+	// the tar listing or rewind to grab the gzip header name for
+	// the synthetic listing.
+	gz, gzErr := gzip.NewReader(bytes.NewReader(src))
+	if gzErr != nil {
+		return nil, 0, "", fmt.Errorf("gzip: %w", gzErr)
+	}
+	defer func() { _ = gz.Close() }()
+	entries, total, tarErr := listTarEntries(gz)
+	if tarErr == nil && total > 0 {
+		return entries, total, "TAR.GZ", nil
+	}
+	// Either tar parsing failed or the stream was zero-entry tar
+	// (which is, in practice, never — anything that reads as
+	// "valid tar with 0 entries" is almost always a plain gzip
+	// blob with content that happens to align). Either way, fall
+	// back to the synthetic listing.
+	gz2, gz2Err := gzip.NewReader(bytes.NewReader(src))
+	if gz2Err != nil {
+		return nil, 0, "", fmt.Errorf("gzip: %w", gz2Err)
+	}
+	defer func() { _ = gz2.Close() }()
+	name := gz2.Name
+	if name == "" {
+		name = "(compressed content)"
+	}
+	return []string{name}, 1, "GZ", nil
 }
 
 // listZipEntries reads the ZIP central directory and returns the
