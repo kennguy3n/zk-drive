@@ -193,13 +193,13 @@ async fn main() -> anyhow::Result<()> {
     let cat = Catalogue::open(&catalogue_path, workspace_id)?;
     let catalogue = Arc::new(Mutex::new(cat));
 
-    let bearer = load_bearer(args.bearer_file.as_deref())?;
-    let client = Arc::new(
-        Client::builder(&args.base_url)
-            .bearer(Bearer(bearer))
-            .build()?,
-    );
-
+    // Bearer / HTTP client construction is deferred into the
+    // network-touching arms only. `Status` is a purely local query
+    // (it reads the SQLite catalogue and prints a cursor + row
+    // count) so requiring a token there is a usability foot-gun --
+    // operators want to be able to `zk-sync status` on a box that
+    // has lost network credentials to diagnose what the agent
+    // thought the last-known state was.
     match args.cmd {
         Cmd::Status { workspace } => {
             let c = catalogue.lock().await;
@@ -215,6 +215,12 @@ async fn main() -> anyhow::Result<()> {
             root,
             page_size,
         } => {
+            let bearer = load_bearer(args.bearer_file.as_deref())?;
+            let client = Arc::new(
+                Client::builder(&args.base_url)
+                    .bearer(Bearer(bearer))
+                    .build()?,
+            );
             std::fs::create_dir_all(&root)?;
             // Pre-create the hidden engine-owned directories so the
             // watcher resolves them canonically on platforms where
