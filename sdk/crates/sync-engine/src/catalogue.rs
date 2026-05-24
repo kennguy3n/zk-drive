@@ -266,7 +266,7 @@ CREATE TABLE IF NOT EXISTS files (
     remote_version_id  TEXT NOT NULL,
     local_path         TEXT NOT NULL UNIQUE,
     size_bytes         INTEGER NOT NULL,
-    content_hash       BLOB NOT NULL,
+    content_hash       BLOB NOT NULL CHECK(length(content_hash) = 32),
     status             TEXT NOT NULL,
     pinned             INTEGER NOT NULL DEFAULT 0,
     updated_at         TEXT NOT NULL
