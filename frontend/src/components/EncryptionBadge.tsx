@@ -1,30 +1,31 @@
+import { Link } from "react-router-dom";
+
 // EncryptionBadge renders the privacy mode of a folder as a small pill
 // next to its name. Mode strings come from the API (`encryption_mode`
 // field on Folder) and map to two product-named modes per
 // docs/PRODUCT.md "Per-folder privacy modes":
 //
-//   - "strict_zk"          -> "strict zero-knowledge"
+//   - "strict_zk"          -> "zero-knowledge"
 //                             (opt-in; server never sees plaintext;
 //                              no preview / no search / no virus scan)
-//   - "managed_encrypted"  -> "managed" (the default)
+//   - "managed_encrypted"  -> "confidential" (the default)
 //                             (gateway-side encryption at rest; server
 //                              can read plaintext in memory during
 //                              request handling, which is what enables
 //                              preview / search / virus scanning)
-//   - anything else / missing -> default to the managed rendering, so
-//                                legacy rows without the field stay clean
+//   - anything else / missing -> default to the confidential rendering,
+//                                so legacy rows without the field stay
+//                                clean
 //
-// The badge label is deliberately kept to the short canonical mode
-// name ("managed" / "strict zero-knowledge") so it matches the
-// dialog's "Confidential managed (default)" / "Strict zero-knowledge"
-// radio labels and the PrivacyPage section headings — customers see
-// the same vocabulary everywhere a folder is rendered. The
-// server-readable trade-off is surfaced through the badge tooltip
-// (below) and the PrivacyPage table, not through the badge text
-// itself, to avoid two different customer-facing labels for the same
-// mode. docs/PRODUCT.md is explicit only about NOT calling the
-// managed mode "zero-knowledge" — "managed" satisfies that
-// constraint and matches the brand vocabulary used elsewhere.
+// The badge label is deliberately short — "confidential" /
+// "zero-knowledge" — to match the customer-facing brand vocabulary
+// (docs/BRAND.md): the product is *not* zero-knowledge by default, and
+// the badge must never claim it is. The server-readable trade-off is
+// surfaced through the badge tooltip (below) and the PrivacyPage table.
+// Per docs/PRODUCT.md, ManagedEncrypted must be called "confidential"
+// in customer-facing UI — never "zero-knowledge", "encrypted-at-rest
+// only", or anything that implies the server cannot read the bytes.
+//
 // EncryptionMode is defined in api/client.ts (the wire-level types
 // module) so the API request/response shape and the UI share a single
 // source of truth for the union. Re-exported here for ergonomic imports
@@ -38,10 +39,10 @@ export interface EncryptionBadgeProps {
   // carry the field at all, OR a hypothetical future mode the server
   // starts emitting before the frontend has been re-deployed. The
   // runtime branch (`mode === "strict_zk"`) is the single source of
-  // truth — unknown values fall through to the managed
-  // rendering, matching the documented "missing -> managed" contract
-  // above. Callers that DO know the mode at compile time should still
-  // declare their own state as `EncryptionMode` for autocomplete; the
+  // truth — unknown values fall through to the confidential rendering,
+  // matching the documented "missing -> confidential" contract above.
+  // Callers that DO know the mode at compile time should still declare
+  // their own state as `EncryptionMode` for autocomplete; the
   // assignment widens to string here at the prop boundary, which is
   // fine.
   mode?: string;
@@ -49,32 +50,81 @@ export interface EncryptionBadgeProps {
   // or "header" (larger, alongside the current folder in the breadcrumb).
   // Both render the same colour / label; only padding + font scale up.
   size?: "row" | "header";
+  // linkToHelp controls whether the badge renders as a clickable
+  // `<Link>` to /drive/privacy (the brand-aligned customer explainer
+  // page) or as a plain `<span>`. Default true so every appearance of
+  // the badge is also a discovery affordance for the privacy modes
+  // documentation — a small but load-bearing piece of the "be honest
+  // about what 'ZK' means" rebrand (see docs/BRAND.md). Two situations
+  // require linkToHelp={false}:
+  //
+  //   1. The badge is rendered INSIDE another `<a>` / `<Link>` (e.g.
+  //      a folder row whose entire surface is the navigation target).
+  //      Nesting `<a>` is invalid HTML; callers must hoist the badge
+  //      out of the outer anchor or pass linkToHelp={false}.
+  //   2. The badge is rendered ON the privacy page itself, where the
+  //      same-page link would do nothing useful.
+  linkToHelp?: boolean;
 }
 
-export default function EncryptionBadge({ mode, size = "row" }: EncryptionBadgeProps) {
+export default function EncryptionBadge({
+  mode,
+  size = "row",
+  linkToHelp = true,
+}: EncryptionBadgeProps) {
   const isStrict = mode === "strict_zk";
-  const label = isStrict ? "strict zero-knowledge" : "managed";
+  const label = isStrict ? "zero-knowledge" : "confidential";
+  // The tooltip retains the longer, technically-precise framing so a
+  // user who hovers gets the full "server can read plaintext in
+  // memory" disclosure. The short pill label is for at-a-glance
+  // recognition; the tooltip is for the trade-off.
   const title = isStrict
-    ? "Strict zero-knowledge: end-to-end encrypted. The server cannot decrypt this folder, so previews, full-text search, and virus scanning are disabled here."
-    : "Server-readable (confidential managed storage): encrypted at rest, but the server can read plaintext in memory during request handling — which is what enables previews, full-text search, and virus scanning.";
+    ? "Zero-knowledge: end-to-end encrypted. The server cannot decrypt this folder, so previews, full-text search, and virus scanning are disabled here. Click to learn more about privacy modes."
+    : "Confidential (managed encrypted storage): encrypted at rest, but the server can read plaintext in memory during request handling — which is what enables previews, full-text search, and virus scanning. NOT zero-knowledge. Click to learn more about privacy modes.";
   const padding = size === "header" ? "2px 10px" : "1px 6px";
   const fontSize = size === "header" ? 12 : 10;
+  const style = {
+    fontSize,
+    padding,
+    borderRadius: 999,
+    background: isStrict ? "#fee2e2" : "#dcfce7",
+    color: isStrict ? "#991b1b" : "#166534",
+    whiteSpace: "nowrap" as const,
+    // border on the badge makes both variants legible against the
+    // page background even in high-contrast / forced-colors mode.
+    border: `1px solid ${isStrict ? "#fca5a5" : "#86efac"}`,
+    textDecoration: "none",
+    display: "inline-block",
+  };
+  const dataMode = isStrict ? "strict_zk" : "managed_encrypted";
+
+  if (linkToHelp) {
+    return (
+      <Link
+        to="/drive/privacy"
+        title={title}
+        data-testid="encryption-badge"
+        data-mode={dataMode}
+        // The badge link must not steal focus when keyboard users tab
+        // through file rows — the parent row navigation should still be
+        // the primary affordance. We keep it focusable (default) so
+        // screen reader users can reach it, but the visual outline is
+        // suppressed in favour of the existing pill background; assistive
+        // tech still announces the link role + accessible name.
+        aria-label={`${label} — learn about privacy modes`}
+        style={style}
+      >
+        {label}
+      </Link>
+    );
+  }
+
   return (
     <span
       title={title}
       data-testid="encryption-badge"
-      data-mode={isStrict ? "strict_zk" : "managed_encrypted"}
-      style={{
-        fontSize,
-        padding,
-        borderRadius: 999,
-        background: isStrict ? "#fee2e2" : "#dcfce7",
-        color: isStrict ? "#991b1b" : "#166534",
-        whiteSpace: "nowrap",
-        // border on the badge makes both variants legible against the
-        // page background even in high-contrast / forced-colors mode.
-        border: `1px solid ${isStrict ? "#fca5a5" : "#86efac"}`,
-      }}
+      data-mode={dataMode}
+      style={style}
     >
       {label}
     </span>

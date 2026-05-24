@@ -53,40 +53,49 @@ export default function FolderTree({ currentFolderID }: { currentFolderID: strin
       ) : null}
       <ul style={{ listStyle: "none", padding: 0, margin: "8px 0 0" }}>
         {rootFolders.map((f) => (
-          <li key={f.id}>
+          <li
+            key={f.id}
+            style={{
+              display: "flex",
+              alignItems: "center",
+              gap: 6,
+              padding: "6px 8px",
+              borderRadius: 4,
+              background: currentFolderID === f.id ? "#eef2ff" : "transparent",
+            }}
+          >
+            {/*
+              The folder-name `<Link>` and the privacy-mode badge are
+              siblings here (not parent/child) so the badge can render
+              as its own clickable `<Link to="/drive/privacy">` without
+              nesting `<a>` inside `<a>` — which is invalid HTML and
+              suppresses badge click events in most browsers. The row
+              navigates to the folder when the user clicks the name;
+              the badge navigates to the brand-aligned privacy page
+              explainer.
+            */}
             <Link
               to={`/drive/folder/${f.id}`}
               style={{
-                display: "flex",
-                alignItems: "center",
-                gap: 6,
-                padding: "6px 8px",
-                borderRadius: 4,
-                background: currentFolderID === f.id ? "#eef2ff" : "transparent",
+                flex: 1,
+                overflow: "hidden",
+                textOverflow: "ellipsis",
+                whiteSpace: "nowrap",
               }}
             >
-              <span
-                style={{
-                  flex: 1,
-                  overflow: "hidden",
-                  textOverflow: "ellipsis",
-                  whiteSpace: "nowrap",
-                }}
-              >
-                {f.name}
-              </span>
-              {/*
-                Privacy-mode badge sits at the end of each sidebar row
-                so users can see at a glance which folders are strict-
-                ZK (server-blind) without having to open them. This is
-                the PROPOSAL §3.3 "surface the mode everywhere a
-                folder is rendered" contract: file list + breadcrumb
-                + sidebar. EncryptionBadge falls back to the managed
-                rendering for folders missing the field (pre-Phase-4
-                rows), so the tree still renders cleanly.
-              */}
-              <EncryptionBadge mode={f.encryption_mode} />
+              {f.name}
             </Link>
+            {/*
+              Privacy-mode badge sits at the end of each sidebar row
+              so users can see at a glance which folders are strict-
+              ZK (server-blind) without having to open them. This is
+              the PROPOSAL §3.3 "surface the mode everywhere a folder
+              is rendered" contract: file list + breadcrumb + sidebar.
+              EncryptionBadge falls back to the confidential rendering
+              for folders missing the field (pre-Phase-4 rows), so the
+              tree still renders cleanly.
+            */}
+            <EncryptionBadge mode={f.encryption_mode} />
           </li>
         ))}
       </ul>

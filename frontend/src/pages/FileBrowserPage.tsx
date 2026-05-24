@@ -407,10 +407,10 @@ function CreateFolderDialog({
               checked={mode === "managed_encrypted"}
               onChange={() => setMode("managed_encrypted")}
             />{" "}
-            <strong>Confidential managed</strong> (default) &mdash; the server
-            can read plaintext in memory during request handling, which is
-            what enables previews, search, and virus scanning. Encrypted at
-            rest. <em>Not</em> zero-knowledge.
+            <strong>Confidential managed</strong> (recommended) &mdash; the
+            server can read plaintext in memory during request handling,
+            which is what enables previews, search, and virus scanning.
+            Encrypted at rest. <em>Not</em> zero-knowledge.
           </label>
           <label style={{ display: "block" }}>
             <input
@@ -421,9 +421,61 @@ function CreateFolderDialog({
               onChange={() => setMode("strict_zk")}
             />{" "}
             <strong>Strict zero-knowledge</strong> &mdash; end-to-end
-            encrypted, the server cannot decrypt this folder. Previews,
-            full-text search, and virus scanning are disabled.
+            encrypted, the server cannot decrypt this folder. You hold the
+            keys. Previews, full-text search, and virus scanning are
+            disabled.
           </label>
+          {/*
+            Side-by-side comparison table so the user can see the
+            exact trade-offs each mode entails before committing. The
+            row order matches docs/PRODUCT.md §3.3 and PrivacyPage so
+            the customer-facing story is consistent across every
+            surface ("be honest about what 'ZK' means" — docs/BRAND.md).
+          */}
+          <table
+            aria-label="Privacy mode comparison"
+            style={{
+              width: "100%",
+              borderCollapse: "collapse",
+              fontSize: 12,
+              marginTop: 12,
+            }}
+          >
+            <thead>
+              <tr>
+                <th style={cmpTh} scope="col">&nbsp;</th>
+                <th style={cmpTh} scope="col">Confidential</th>
+                <th style={cmpTh} scope="col">Zero-knowledge</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <th style={cmpRowTh} scope="row">Previews / thumbnails</th>
+                <td style={cmpTdYes}>Yes</td>
+                <td style={cmpTdNo}>No</td>
+              </tr>
+              <tr>
+                <th style={cmpRowTh} scope="row">Full-text search</th>
+                <td style={cmpTdYes}>Yes</td>
+                <td style={cmpTdNo}>Metadata only</td>
+              </tr>
+              <tr>
+                <th style={cmpRowTh} scope="row">Virus / malware scanning</th>
+                <td style={cmpTdYes}>Yes</td>
+                <td style={cmpTdNo}>No</td>
+              </tr>
+              <tr>
+                <th style={cmpRowTh} scope="row">Admin recovery</th>
+                <td style={cmpTdYes}>Yes</td>
+                <td style={cmpTdNo}>No (you hold the keys)</td>
+              </tr>
+              <tr>
+                <th style={cmpRowTh} scope="row">Server can read plaintext</th>
+                <td style={cmpTdNo}>In memory only</td>
+                <td style={cmpTdYes}>Never</td>
+              </tr>
+            </tbody>
+          </table>
           {mode === "strict_zk" ? (
             <div
               role="alert"
@@ -438,8 +490,8 @@ function CreateFolderDialog({
               }}
             >
               Strict-ZK is irreversible once the folder has content: there is
-              no server-side migration path back to managed mode because the
-              server never had the plaintext to begin with.
+              no server-side migration path back to confidential mode because
+              the server never had the plaintext to begin with.
             </div>
           ) : null}
           <p style={{ fontSize: 12, color: "#6b7280", margin: "8px 0 0" }}>
@@ -616,4 +668,38 @@ const btn: React.CSSProperties = {
   border: "1px solid #d1d5db",
   borderRadius: 4,
   fontSize: 13,
+};
+
+// Privacy-mode comparison-table styles used by CreateFolderDialog. The
+// table mirrors the docs/PRODUCT.md §3.3 row order so a customer who
+// reads the docs and then opens the dialog sees the same trade-off
+// matrix; "Yes" tones are green to match the confidential badge and
+// "No" tones are red to match the zero-knowledge badge, keeping the
+// EncryptionBadge component the single source of colour vocabulary.
+const cmpTh: React.CSSProperties = {
+  textAlign: "left",
+  padding: "4px 8px",
+  borderBottom: "1px solid #e5e7eb",
+  color: "#374151",
+  fontWeight: 500,
+};
+
+const cmpRowTh: React.CSSProperties = {
+  ...cmpTh,
+  fontWeight: 400,
+  color: "#4b5563",
+};
+
+const cmpTdYes: React.CSSProperties = {
+  padding: "4px 8px",
+  borderBottom: "1px solid #f3f4f6",
+  color: "#166534",
+  background: "#f0fdf4",
+};
+
+const cmpTdNo: React.CSSProperties = {
+  padding: "4px 8px",
+  borderBottom: "1px solid #f3f4f6",
+  color: "#991b1b",
+  background: "#fef2f2",
 };

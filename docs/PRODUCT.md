@@ -190,6 +190,49 @@ Honest framing that the UI must surface:
 - **Customer Key Control** is strict ZK plus customer-held KMS.
   Losing the key loses the data. No admin recovery path exists.
 
+### 3.3.1 Brand alignment
+
+The product is named "ZK Drive" but the default `ManagedEncrypted`
+mode is **not** zero-knowledge. To prevent the misleading reading,
+every customer-facing surface (badge labels, dialogs, marketing copy,
+sales decks, help articles, support replies) must follow the phrasing
+rules in [`docs/BRAND.md`](BRAND.md). The short version:
+
+- "ZK" describes the platform's **capability** to host strict
+  zero-knowledge folders alongside server-readable ones. It is *not*
+  a claim about every byte of every folder.
+- The canonical customer-facing names for the two modes are
+  **Confidential** (default; maps to `ManagedEncrypted`) and
+  **Zero-knowledge** (opt-in per folder; maps to `StrictZK`).
+- NEVER write "ZK Drive is zero-knowledge" unqualified — the correct
+  phrasing is "ZK Drive supports zero-knowledge per folder" or
+  similar.
+- NEVER call `ManagedEncrypted` zero-knowledge in customer-facing
+  copy.
+- ALWAYS pair the strict zero-knowledge claim with the disabled
+  features (no previews, no full-text search, no virus scan, no admin
+  recovery). The trade-off is part of the product, not a footnote.
+- ALWAYS link customer-facing privacy claims to the in-product
+  PrivacyPage (`/drive/privacy`) so the user can verify them at the
+  point of decision. The `EncryptionBadge` component renders every
+  badge as a link to that page by default.
+
+Marketing-tagline rules:
+
+> **ZK Drive — Zero-Knowledge When You Need It, Seamless When You Don't.**
+
+Sub-tagline:
+
+> Every workspace ships with confidential managed storage — encrypted
+> at rest, with previews, full-text search, and virus scanning. Turn
+> on strict zero-knowledge per folder when you need the server out of
+> the loop: your keys, your control, no server access.
+
+The full customer FAQ — including "Is ZK Drive zero-knowledge by
+default?", "Why isn't every folder zero-knowledge?", and "Is the
+platform name dishonest then?" — lives in `docs/BRAND.md`. Update both
+files in the same PR if either changes.
+
 ### 3.4 Differentiating features
 
 | Feature                                   | Why it differentiates                                                                                |
