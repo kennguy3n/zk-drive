@@ -99,6 +99,18 @@ impl ChunkAadFormat {
 pub struct Options {
     /// Plaintext chunk size in bytes. `None` selects
     /// [`DEFAULT_CHUNK_SIZE`].
+    ///
+    /// **Encrypt / decrypt must agree on this value.** The on-wire
+    /// frame format does not encode chunk size; [`decrypt`] uses
+    /// `pt.len() < chunk_size` to detect the last chunk and stop.
+    /// Decrypting with a `chunk_size` larger than the one passed to
+    /// [`encrypt`] would treat the first chunk as the last and
+    /// silently truncate the output. The recommended path is to
+    /// leave this `None` on both sides so [`DEFAULT_CHUNK_SIZE`]
+    /// (16 MiB, matching the Go SDK's `client_sdk.DefaultChunkSize`)
+    /// is used uniformly; only override it in tests that exercise
+    /// boundary conditions and always pair encrypt + decrypt under
+    /// the same `Options`.
     pub chunk_size: Option<usize>,
     /// If true, use HKDF-derived deterministic per-chunk nonces
     /// instead of random ones. Required for client-side

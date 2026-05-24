@@ -9,6 +9,18 @@ use zk_sync_api::Mutation;
 #[derive(Debug, Clone)]
 pub enum LocalEvent {
     /// A file was created or modified.
+    ///
+    /// `size_bytes` and `content_hash` are sampled from the same
+    /// open file descriptor inside [`crate::watcher::Watcher`] but
+    /// are **not** guaranteed to reflect an atomically-consistent
+    /// snapshot of the file: a concurrent writer can extend the
+    /// file between `fstat` and the streaming hash read. Consumers
+    /// that need a strictly-paired (size, hash) tuple must
+    /// re-stat the file themselves under whatever locking they own;
+    /// the engine treats `content_hash` as the source of truth for
+    /// dedup (see `Engine::handle_local`) and is robust to
+    /// transient size drift because `set_local_state` overwrites
+    /// both fields atomically on the next event.
     Upsert {
         path: PathBuf,
         size_bytes: u64,
