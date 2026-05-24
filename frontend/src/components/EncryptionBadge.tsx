@@ -78,9 +78,17 @@ export default function EncryptionBadge({
   // user who hovers gets the full "server can read plaintext in
   // memory" disclosure. The short pill label is for at-a-glance
   // recognition; the tooltip is for the trade-off.
-  const title = isStrict
-    ? "Zero-knowledge: end-to-end encrypted. The server cannot decrypt this folder, so previews, full-text search, and virus scanning are disabled here. Click to learn more about privacy modes."
-    : "Confidential (managed encrypted storage): encrypted at rest, but the server can read plaintext in memory during request handling — which is what enables previews, full-text search, and virus scanning. NOT zero-knowledge. Click to learn more about privacy modes.";
+  //
+  // The "Click to learn more" hint is only appended when the badge is
+  // actually clickable (linkToHelp=true). On the privacy page itself,
+  // and anywhere else that opts out of the help link, the badge is a
+  // plain `<span>` and the hint would be a lie — so we suppress it.
+  const body = isStrict
+    ? "Zero-knowledge: end-to-end encrypted. The server cannot decrypt this folder, so previews, full-text search, and virus scanning are disabled here."
+    : "Confidential (managed encrypted storage): encrypted at rest, but the server can read plaintext in memory during request handling — which is what enables previews, full-text search, and virus scanning. NOT zero-knowledge.";
+  const title = linkToHelp
+    ? `${body} Click to learn more about privacy modes.`
+    : body;
   const padding = size === "header" ? "2px 10px" : "1px 6px";
   const fontSize = size === "header" ? 12 : 10;
   const style = {
