@@ -45,10 +45,29 @@ RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w -X github.com/ke
 
 # ---- Runtime stage ----
 # debian:bookworm-slim (instead of distroless static) so the worker
-# can shell out to pdftoppm (poppler-utils) for PDF preview rendering.
-# poppler-utils is GPL but used only as an external subprocess by the
-# worker, so it does not affect the proprietary licence of the Go
-# binaries copied in below.
+# can shell out to external preview tools. Each tool's licence is
+# called out here so the proprietary-build implications are auditable
+# from this single Dockerfile rather than scattered across the
+# Go handler files:
+#
+#   poppler-utils (pdftoppm)     GPL — subprocess, not linked
+#   libreoffice                  MPL-2.0 — subprocess, not linked
+#   ffmpeg                       LGPL — subprocess, not linked
+#   librsvg2-bin (rsvg-convert)  LGPL — subprocess, not linked
+#   imagemagick                  ImageMagick Licence (Apache-2.0-style)
+#                                 — subprocess, not linked
+#   audiowaveform (optional)     not installed in the default image
+#                                 because the upstream Debian package
+#                                 is not available everywhere; the
+#                                 audio handler transparently falls
+#                                 back to ffmpeg's showwavespic when
+#                                 audiowaveform is missing. Bake it
+#                                 in per-deployment if you want the
+#                                 BBC-quality output.
+#
+# All shelled-out — none of these are linked into the Go binaries —
+# so they do not affect the proprietary licence of the binaries copied
+# in below.
 FROM debian:bookworm-slim AS runtime
 WORKDIR /app
 
@@ -56,9 +75,19 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         ca-certificates \
         poppler-utils \
+        libreoffice-core \
+        libreoffice-writer \
+        libreoffice-calc \
+        libreoffice-impress \
+        ffmpeg \
+        librsvg2-bin \
+        imagemagick \
     && rm -rf /var/lib/apt/lists/* \
     && groupadd --system --gid 65532 nonroot \
-    && useradd --system --uid 65532 --gid 65532 --home-dir /app nonroot
+    && useradd --system --uid 65532 --gid 65532 --home-dir /app nonroot \
+    && sed -i 's@<policy domain="coder" rights="none" pattern="PS"/>@<policy domain="coder" rights="read" pattern="PS"/>@' /etc/ImageMagick-6/policy.xml \
+    && sed -i 's@<policy domain="coder" rights="none" pattern="EPS"/>@<policy domain="coder" rights="read" pattern="EPS"/>@' /etc/ImageMagick-6/policy.xml \
+    && sed -i 's@<policy domain="coder" rights="none" pattern="PDF"/>@<policy domain="coder" rights="read" pattern="PDF"/>@' /etc/ImageMagick-6/policy.xml
 
 COPY --from=builder /out/server /app/server
 COPY --from=builder /out/worker /app/worker

@@ -28,7 +28,7 @@ var pdftoppmBinary = "pdftoppm"
 // than a hard failure.
 func renderPDFFirstPage(ctx context.Context, pdfBytes []byte) (image.Image, error) {
 	if _, err := exec.LookPath(pdftoppmBinary); err != nil {
-		return nil, fmt.Errorf("%w: pdftoppm not installed", ErrUnsupportedMime)
+		return nil, missingBinaryErr("pdftoppm")
 	}
 
 	dir, err := os.MkdirTemp("", "zkdrive-pdf-*")
@@ -69,4 +69,8 @@ func renderPDFFirstPage(ctx context.Context, pdfBytes []byte) (image.Image, erro
 		return nil, fmt.Errorf("decode pdftoppm output: %w", err)
 	}
 	return img, nil
+}
+
+func init() {
+	Register(RendererFunc(renderPDFFirstPage), "application/pdf")
 }
