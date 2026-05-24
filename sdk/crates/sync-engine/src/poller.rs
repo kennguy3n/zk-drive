@@ -128,6 +128,21 @@ impl RemotePoller {
                 .list_changes(self.workspace_id, since, Some(self.page_size))
                 .await?;
             if page.mutations.is_empty() && !page.has_more {
+                // Steady-state "no more changes" response. Refuse to
+                // persist a cursor that regressed (a misbehaving
+                // server could otherwise rewind us); fall through to
+                // the outer backoff loop instead.
+                if page.cursor < since {
+                    warn!(
+                        workspace_id = %self.workspace_id,
+                        since,
+                        cursor = page.cursor,
+                        "changefeed returned a backwards cursor on empty page; aborting catch-up"
+                    );
+                    return Err(crate::SyncError::Other(
+                        "changefeed cursor went backwards".into(),
+                    ));
+                }
                 self.catalogue
                     .lock()
                     .await
@@ -140,21 +155,16 @@ impl RemotePoller {
                     return Ok(()); // consumer gone
                 }
             }
-            self.catalogue
-                .lock()
-                .await
-                .set_cursor(self.workspace_id, page.cursor)?;
-            if !page.has_more {
-                return Ok(());
-            }
-            // Defensive: a misbehaving server could return
-            // `has_more=true` with an unchanged cursor (and either
-            // empty or replayed mutations), which would spin this
-            // loop hot against the API. Bail out and let the outer
-            // run-loop's exponential backoff handle the retry --
-            // that grows the request interval instead of pegging a
-            // CPU.
-            if page.cursor <= since {
+            // Defensive: a misbehaving server could return a cursor
+            // that did NOT advance (`has_more=true` + same/lower cursor),
+            // which would either spin this loop hot or, worse, regress
+            // the persisted cursor and force the engine to re-process
+            // mutations that the receiver already saw. Verify advancement
+            // BEFORE writing the cursor back so a bad page never
+            // contaminates the catalogue. A non-strict equal-cursor
+            // page with `has_more=false` is still safe to persist (it's
+            // the steady-state "no more changes" response).
+            if page.has_more && page.cursor <= since {
                 warn!(
                     workspace_id = %self.workspace_id,
                     since,
@@ -164,6 +174,27 @@ impl RemotePoller {
                 return Err(crate::SyncError::Other(
                     "changefeed cursor did not advance".into(),
                 ));
+            }
+            if page.cursor < since {
+                // Server regressed the cursor while reporting
+                // has_more=false. Don't persist a backward value;
+                // bail and let the outer loop retry.
+                warn!(
+                    workspace_id = %self.workspace_id,
+                    since,
+                    cursor = page.cursor,
+                    "changefeed returned a backwards cursor with has_more=false; aborting catch-up"
+                );
+                return Err(crate::SyncError::Other(
+                    "changefeed cursor went backwards".into(),
+                ));
+            }
+            self.catalogue
+                .lock()
+                .await
+                .set_cursor(self.workspace_id, page.cursor)?;
+            if !page.has_more {
+                return Ok(());
             }
         }
     }

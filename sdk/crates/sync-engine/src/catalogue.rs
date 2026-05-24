@@ -307,6 +307,43 @@ impl Catalogue {
         Ok(())
     }
 
+    /// Run `f` inside an explicit `BEGIN IMMEDIATE` ... `COMMIT`
+    /// transaction. Multi-step engine operations (e.g. the Rename
+    /// handler which performs `set_local_path` + `set_status` +
+    /// `upsert` in sequence) call into this so a failure halfway
+    /// through rolls every mutation back as a unit. Without it the
+    /// individual `Catalogue::*` methods only have implicit
+    /// auto-commit semantics, which would leave the catalogue
+    /// half-displaced if (say) step 2 hits ENOSPC.
+    ///
+    /// `f` operates against the same `&mut Catalogue` -- the
+    /// underlying connection joins the open transaction, so no
+    /// special routing through a `Transaction` handle is needed.
+    /// Nested `with_txn` calls would error: SQLite doesn't permit
+    /// nested transactions without SAVEPOINTs, and the catalogue's
+    /// engine call sites never nest.
+    pub fn with_txn<F, T>(&mut self, f: F) -> Result<T>
+    where
+        F: FnOnce(&mut Self) -> Result<T>,
+    {
+        self.conn.execute_batch("BEGIN IMMEDIATE")?;
+        match f(self) {
+            Ok(v) => {
+                self.conn.execute_batch("COMMIT")?;
+                Ok(v)
+            }
+            Err(e) => {
+                // ROLLBACK best-effort: if even the rollback itself
+                // fails the connection is in an indeterminate state
+                // and the caller will surface the original error
+                // anyway; SQLite WAL recovery handles the partial
+                // transaction on the next open.
+                let _ = self.conn.execute_batch("ROLLBACK");
+                Err(e)
+            }
+        }
+    }
+
     /// Update `status`, `content_hash`, and `size_bytes` atomically.
     /// Used by the engine when a local file change is detected: the
     /// state machine needs to flip status (e.g. `UpToDate -> LocalDirty`)
@@ -566,6 +603,43 @@ mod tests {
         assert_eq!(cat.get_cursor(ws).unwrap(), 42);
         cat.set_cursor(ws, 100).unwrap();
         assert_eq!(cat.get_cursor(ws).unwrap(), 100);
+    }
+
+    /// `with_txn` must commit on Ok and rollback on Err. The
+    /// rollback path is the load-bearing property: the engine's
+    /// Rename handler relies on it to undo `set_local_path` + an
+    /// implicit row repoint as a unit when a downstream mutation
+    /// fails.
+    #[test]
+    fn with_txn_commits_on_ok_and_rolls_back_on_err() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut cat = Catalogue::open(tmp.path().join("c.db"), Uuid::new_v4()).unwrap();
+        let r = rec("base.bin");
+        cat.upsert(&r).unwrap();
+        let id = r.remote_file_id;
+
+        // Ok path: status flips and is visible after with_txn returns.
+        cat.with_txn(|c| c.set_status(id, SyncStatus::LocalDirty))
+            .unwrap();
+        assert_eq!(
+            cat.get(id).unwrap().unwrap().status,
+            SyncStatus::LocalDirty,
+            "with_txn must commit a successful mutation"
+        );
+
+        // Err path: status flip is rolled back when the closure returns Err.
+        let err = cat
+            .with_txn(|c| -> Result<()> {
+                c.set_status(id, SyncStatus::Conflict)?;
+                Err(crate::SyncError::Other("simulated mid-txn failure".into()))
+            })
+            .unwrap_err();
+        assert!(format!("{err}").contains("simulated mid-txn failure"));
+        assert_eq!(
+            cat.get(id).unwrap().unwrap().status,
+            SyncStatus::LocalDirty,
+            "with_txn must roll back partial mutations on Err"
+        );
     }
 
     #[test]

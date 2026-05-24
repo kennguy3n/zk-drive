@@ -13,6 +13,7 @@ use std::sync::Arc;
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
+use notify::event::ModifyKind;
 use notify::{Event, EventKind, RecursiveMode, Watcher as NotifyWatcher};
 use tokio::sync::mpsc;
 
@@ -199,22 +200,58 @@ fn flush(pending: &mut Vec<(PathBuf, Instant, EventKind)>, tx: &mpsc::Sender<Loc
             // because the watcher thread has no recovery path -- the
             // channel would just receive a noisy `Delete` it can't
             // tell apart from a real deletion.
-            EventKind::Modify(_) | EventKind::Create(_) | EventKind::Other => {
-                match std::fs::File::open(&path) {
-                    Ok(f) => {
-                        let size = f.metadata().ok().map(|m| m.len()).unwrap_or(0);
-                        match content_hash(f) {
-                            Ok(hash) => Some(LocalEvent::Upsert {
-                                path: path.clone(),
-                                size_bytes: size,
-                                content_hash: hash,
-                            }),
-                            Err(_) => None,
-                        }
+            EventKind::Modify(ref mk) => match std::fs::File::open(&path) {
+                Ok(f) => {
+                    let size = f.metadata().ok().map(|m| m.len()).unwrap_or(0);
+                    match content_hash(f) {
+                        Ok(hash) => Some(LocalEvent::Upsert {
+                            path: path.clone(),
+                            size_bytes: size,
+                            content_hash: hash,
+                        }),
+                        Err(_) => None,
                     }
-                    Err(_) => None,
                 }
-            }
+                Err(err) => {
+                    // A `Modify(Name(_))` whose source path no longer
+                    // exists is the strongest signal `notify` gives
+                    // us that a rename moved the file away from this
+                    // path. Surface it as a `Delete` so the
+                    // catalogue's stale row is reconciled now rather
+                    // than waiting for `Engine::rescan`. Only emit
+                    // for `NotFound` (not e.g. PermissionDenied)
+                    // because the latter doesn't imply absence and
+                    // would create spurious deletes for permission
+                    // flips. Other `Modify(_)` variants
+                    // (`Modify(Data(...))`, `Modify(Metadata(...))`,
+                    // ...) keep their pre-existing silent-drop
+                    // behaviour: a transient open failure on a
+                    // content edit is far more likely than a real
+                    // rename, and we don't want to mis-translate it
+                    // into a Delete.
+                    if matches!(mk, ModifyKind::Name(_))
+                        && err.kind() == std::io::ErrorKind::NotFound
+                    {
+                        Some(LocalEvent::Delete { path: path.clone() })
+                    } else {
+                        None
+                    }
+                }
+            },
+            EventKind::Create(_) | EventKind::Other => match std::fs::File::open(&path) {
+                Ok(f) => {
+                    let size = f.metadata().ok().map(|m| m.len()).unwrap_or(0);
+                    match content_hash(f) {
+                        Ok(hash) => Some(LocalEvent::Upsert {
+                            path: path.clone(),
+                            size_bytes: size,
+                            content_hash: hash,
+                        }),
+                        Err(_) => None,
+                    }
+                }
+                Err(_) => None,
+            },
             _ => None,
         };
         if let Some(e) = evt {
@@ -312,5 +349,76 @@ mod tests {
         }
         assert!(saw_real, "watcher must still surface real files");
         assert!(!saw_stub, "watcher must drop events under placeholder dir");
+    }
+
+    /// `flush` must surface a `Delete` when it sees a
+    /// `Modify(Name(_))` whose source path no longer exists. This is
+    /// the strongest signal `notify` gives us that a rename moved
+    /// the file away; without this the catalogue row would stay
+    /// stale until the next reconciliation pass.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn modify_name_emits_delete_when_source_missing() {
+        use notify::event::{ModifyKind, RenameMode};
+
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("renamed-away.txt");
+        // Path does not exist on disk; mimic notify's
+        // Modify(Name(From)) event for a file that has just moved.
+        let kind = EventKind::Modify(ModifyKind::Name(RenameMode::From));
+        let pending = vec![(missing.clone(), Instant::now(), kind)];
+
+        let (tx, mut rx) = mpsc::channel::<LocalEvent>(4);
+        // `flush` uses `blocking_send` which would panic if invoked
+        // directly on a tokio worker; route it through
+        // `spawn_blocking`, mirroring how the watcher thread itself
+        // sits on a dedicated OS thread.
+        let missing_for_assert = missing.clone();
+        tokio::task::spawn_blocking(move || {
+            let mut pending = pending;
+            flush(&mut pending, &tx);
+            assert!(pending.is_empty(), "flush must drain the pending vec");
+            missing_for_assert
+        })
+        .await
+        .unwrap();
+        let ev = rx.recv().await.expect("flush must emit one event");
+        match ev {
+            LocalEvent::Delete { path } => assert_eq!(path, missing),
+            other => panic!("expected Delete, got {other:?}"),
+        }
+    }
+
+    /// A `Modify(Data(_))` event whose path can't be opened must
+    /// still be silently dropped -- it is far more likely a transient
+    /// open failure on a content edit than a real rename.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn modify_data_drops_silently_when_open_fails() {
+        use notify::event::{DataChange, ModifyKind};
+
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("not-renamed.txt");
+        let kind = EventKind::Modify(ModifyKind::Data(DataChange::Content));
+        let pending = vec![(missing.clone(), Instant::now(), kind)];
+
+        let (tx, mut rx) = mpsc::channel::<LocalEvent>(4);
+        tokio::task::spawn_blocking(move || {
+            let mut pending = pending;
+            flush(&mut pending, &tx);
+        })
+        .await
+        .unwrap();
+        let observed = tokio::time::timeout(Duration::from_millis(50), rx.recv())
+            .await
+            .ok();
+        // `Some(None)` would mean the channel closed while empty
+        // (sender dropped at end of spawn_blocking, no event sent);
+        // `None` would mean the timeout elapsed without a recv. Both
+        // satisfy 'no event emitted'.
+        match observed {
+            None | Some(None) => {}
+            Some(Some(ev)) => {
+                panic!("Modify(Data(_)) with a missing path must not emit any event, got {ev:?}")
+            }
+        }
     }
 }

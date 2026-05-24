@@ -187,52 +187,70 @@ impl Engine {
                 Ok(())
             }
             LocalEvent::Rename { from, to } => {
+                // Wrap the entire multi-step Rename in an explicit
+                // SQLite transaction so a failure halfway through
+                // (e.g. disk-full on the second UPDATE) rolls every
+                // mutation back as a unit. Without this, the
+                // catalogue could end up with the displaced row's
+                // path repointed into the tombstone dir but its
+                // status still UpToDate -- a half-displaced state
+                // the next reconciliation pass would mis-handle.
                 let mut cat = self.catalogue.lock().await;
-                let Some(existing) = cat.by_local_path(&from)? else {
-                    return Ok(());
-                };
-                // Defensive: a rename into a path the catalogue is
-                // already tracking would violate UNIQUE(local_path)
-                // when we re-upsert `existing` with its new path.
-                // Treat the displaced row as locally deleted (the
-                // operating system overwrote its on-disk bytes) so
-                // the next sync pushes a tombstone for it, then
-                // proceed with the rename. Order matters: we must
-                // free the target path inside the same catalogue
-                // transaction we own the lock for, otherwise a
-                // concurrent task could race in between.
-                if let Some(displaced) = cat.by_local_path(&to)? {
-                    if displaced.remote_file_id != existing.remote_file_id {
-                        let parked = tombstone_dir(&self.config.root)
-                            .join(displaced.remote_file_id.to_string());
-                        cat.set_local_path(displaced.remote_file_id, &parked)?;
-                        // The displaced row's on-disk bytes are gone
-                        // (the OS just overwrote them). Route it
-                        // through the delete-side transition so the
-                        // upload flow pushes a tombstone, not stale
-                        // bytes.
-                        let displaced_next = displaced.status.next_on_local_delete();
-                        if displaced_next != displaced.status {
-                            cat.set_status(displaced.remote_file_id, displaced_next)?;
+                let root = self.config.root.clone();
+                let outcome = cat.with_txn(|cat| {
+                    let Some(existing) = cat.by_local_path(&from)? else {
+                        return Ok(None);
+                    };
+                    // Defensive: a rename into a path the catalogue
+                    // is already tracking would violate
+                    // UNIQUE(local_path) when we re-upsert `existing`
+                    // with its new path. Treat the displaced row as
+                    // locally deleted (the operating system
+                    // overwrote its on-disk bytes) so the next sync
+                    // pushes a tombstone for it, then proceed with
+                    // the rename. Order matters: we must free the
+                    // target path inside the same catalogue
+                    // transaction.
+                    let mut displaced_info: Option<(Uuid, SyncStatus)> = None;
+                    if let Some(displaced) = cat.by_local_path(&to)? {
+                        if displaced.remote_file_id != existing.remote_file_id {
+                            let parked =
+                                tombstone_dir(&root).join(displaced.remote_file_id.to_string());
+                            cat.set_local_path(displaced.remote_file_id, &parked)?;
+                            // The displaced row's on-disk bytes are
+                            // gone (the OS just overwrote them).
+                            // Route it through the delete-side
+                            // transition so the upload flow pushes a
+                            // tombstone, not stale bytes.
+                            let displaced_next = displaced.status.next_on_local_delete();
+                            if displaced_next != displaced.status {
+                                cat.set_status(displaced.remote_file_id, displaced_next)?;
+                            }
+                            displaced_info = Some((displaced.remote_file_id, displaced_next));
                         }
+                    }
+                    let mut new_rec = existing.clone();
+                    new_rec.local_path = to.clone();
+                    // The source row's content still exists on disk
+                    // (just at a different path), so this is the
+                    // upsert side of the state machine even though
+                    // the user thinks of it as a 'move'.
+                    new_rec.status = existing.status.next_on_local_upsert();
+                    new_rec.updated_at = chrono::Utc::now();
+                    cat.upsert(&new_rec)?;
+                    Ok(Some((new_rec.status, displaced_info)))
+                })?;
+                if let Some((status, displaced_info)) = outcome {
+                    if let Some((displaced_id, displaced_next)) = displaced_info {
                         info!(
                             ?to,
-                            displaced_file_id = %displaced.remote_file_id,
+                            displaced_file_id = %displaced_id,
                             ?displaced_next,
                             "rename target already tracked; displaced row marked deleted"
                         );
                     }
+                    info!(?from, ?to, ?status, "local rename recorded");
                 }
-                let mut new_rec = existing.clone();
-                new_rec.local_path = to.clone();
-                // The source row's content still exists on disk (just
-                // at a different path), so this is the upsert side of
-                // the state machine even though the user thinks of it
-                // as a 'move'.
-                new_rec.status = existing.status.next_on_local_upsert();
-                new_rec.updated_at = chrono::Utc::now();
-                cat.upsert(&new_rec)?;
-                info!(?from, ?to, status = ?new_rec.status, "local rename recorded");
                 Ok(())
             }
         }
