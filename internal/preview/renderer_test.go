@@ -132,6 +132,62 @@ func TestRendererRegistry(t *testing.T) {
 			return image.NewRGBA(image.Rect(0, 0, 1, 1)), nil
 		}), "  ")
 	})
+
+	t.Run("Register on duplicate MIME panics", func(t *testing.T) {
+		// init() order is non-deterministic across handler files, so
+		// silently overwriting a duplicate registration would mean
+		// the wrong renderer could be wired in at random across
+		// builds. Register MUST fail loudly so the offending handler
+		// is caught at boot time. See the doc comment on Register
+		// for the full rationale.
+		const mime = "x-test/duplicate-panic"
+		Unregister(mime)
+		t.Cleanup(func() { Unregister(mime) })
+		fake := RendererFunc(func(_ context.Context, _ []byte) (image.Image, error) {
+			return image.NewRGBA(image.Rect(0, 0, 1, 1)), nil
+		})
+		Register(fake, mime) // first registration: fine.
+		defer func() {
+			r := recover()
+			if r == nil {
+				t.Fatal("expected duplicate Register to panic")
+			}
+			msg, ok := r.(string)
+			if !ok {
+				t.Fatalf("panic was not a string: %T %v", r, r)
+			}
+			if !strings.Contains(msg, mime) {
+				t.Errorf("panic message %q should name the conflicting MIME %q", msg, mime)
+			}
+		}()
+		Register(fake, mime) // second: must panic.
+	})
+
+	t.Run("replaceForTest overrides duplicate without panic", func(t *testing.T) {
+		// The test-only escape hatch: needed for tests that want to
+		// stand in a stub for a real handler that's already
+		// registered by its init() block. We verify (a) it does NOT
+		// panic on an existing key, and (b) the renderer it
+		// installs is the one returned by lookup.
+		const mime = "x-test/replace-for-test"
+		Unregister(mime)
+		t.Cleanup(func() { Unregister(mime) })
+		first := image.NewRGBA(image.Rect(0, 0, 1, 1))
+		second := image.NewRGBA(image.Rect(0, 0, 2, 2))
+		Register(RendererFunc(func(_ context.Context, _ []byte) (image.Image, error) {
+			return first, nil
+		}), mime)
+		replaceForTest(RendererFunc(func(_ context.Context, _ []byte) (image.Image, error) {
+			return second, nil
+		}), mime)
+		got, err := lookup(mime).Render(context.Background(), nil)
+		if err != nil {
+			t.Fatalf("lookup().Render: %v", err)
+		}
+		if got != second {
+			t.Errorf("replaceForTest did not swap the renderer; got %p want %p", got, second)
+		}
+	})
 }
 
 // TestErrUnsupportedDependencyMissing asserts the error-chain contract

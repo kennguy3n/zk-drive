@@ -61,10 +61,19 @@ var (
 
 // Register associates a Renderer with each of the supplied MIME types.
 // MIME types are normalised (lowercase, whitespace trimmed) so callers
-// can be loose with capitalisation. Re-registration replaces the
-// existing entry — this is intentional for tests that swap a real
-// handler with a fake; production handlers never register the same
-// MIME twice.
+// can be loose with capitalisation.
+//
+// Duplicate registrations PANIC. Go does not guarantee init() execution
+// order across files in a package, so if two handler files claimed the
+// same MIME the winner would silently be whichever init() ran second.
+// Failing loudly at boot is much better than serving the wrong renderer
+// at runtime, and forces the offending handler to be deleted (or
+// declared explicitly via the test-only replaceForTest path) before
+// the package can even start. The panic carries the conflicting MIME
+// so the boot log immediately names the culprit.
+//
+// Tests that need to swap a real handler for a fake use Unregister
+// (or replaceForTest below) — they never rely on silent overwrite.
 func Register(r Renderer, mimes ...string) {
 	if r == nil {
 		panic("preview: Register called with nil Renderer")
@@ -76,8 +85,33 @@ func Register(r Renderer, mimes ...string) {
 		if key == "" {
 			panic("preview: Register called with empty MIME type")
 		}
+		if _, dup := registry[key]; dup {
+			panic("preview: duplicate Renderer registration for MIME " + key +
+				" — every MIME must be claimed by exactly one handler file; " +
+				"use Unregister or replaceForTest if you need to override in a test")
+		}
 		registry[key] = r
 	}
+}
+
+// replaceForTest unconditionally swaps in a renderer for a MIME, even
+// if one is already registered. It exists ONLY for tests that need to
+// stand in a stub without going through Unregister → Register (which
+// would race the production handler's init()). Production code MUST
+// use Register and tolerate the duplicate-registration panic. The
+// function is lowercase so it cannot be called from outside the
+// package.
+func replaceForTest(r Renderer, mime string) {
+	if r == nil {
+		panic("preview: replaceForTest called with nil Renderer")
+	}
+	registryMu.Lock()
+	defer registryMu.Unlock()
+	key := normalizeMime(mime)
+	if key == "" {
+		panic("preview: replaceForTest called with empty MIME type")
+	}
+	registry[key] = r
 }
 
 // Unregister removes the renderer for a MIME type, if any. Only used
