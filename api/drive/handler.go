@@ -408,6 +408,16 @@ func buildChangefeedInput(
 	// from the metadata blob (whether or not a value was lifted)
 	// so the wire format is consistent across root vs. non-root
 	// creates and single vs. bulk operations.
+	//
+	// TODO(activity-schema): replace the string-keyed metadata map
+	// with a typed activityMetadata struct so the lift contract is
+	// enforced at compile time. The current convention relies on
+	// every caller spelling the right key (e.g. folder_id, not
+	// folderID); a typo would silently leave parent_id = NULL on
+	// the change_log row. A single-file refactor that introduces
+	// the struct and migrates all callers is tracked in the
+	// desktop-sync backlog and is intentionally out of scope here
+	// to keep the changefeed P1a PR focused.
 	parentKeys := [...]string{"folder_id", "parent_folder_id", "new_parent_folder_id", "target"}
 	var parentKeyPresent bool
 	for _, k := range parentKeys {
