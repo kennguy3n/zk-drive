@@ -116,7 +116,12 @@ impl<'c> ChangefeedClient<'c> {
                 q.append_pair("limit", &l.to_string());
             }
         }
-        let resp = self.client.http.get(url).send().await?;
+        let resp = self
+            .client
+            .request(reqwest::Method::GET, url)
+            .await?
+            .send()
+            .await?;
         let status = resp.status();
         let body = resp.text().await?;
         if !status.is_success() {
@@ -135,11 +140,12 @@ impl<'c> ChangefeedClient<'c> {
     /// failure or with `None` on a clean server-initiated close.
     /// Callers reconnect with the highest observed `sequence` as
     /// `since` to resume cleanly.
-    pub async fn stream_changes(
-        &self,
-        workspace_id: Uuid,
-        bearer_token: &str,
-    ) -> Result<ChangeEventStream> {
+    ///
+    /// The bearer token is fetched from the client's
+    /// [`crate::transport::TokenProvider`] **at handshake time**, so
+    /// reconnect-on-disconnect picks up freshly-refreshed tokens
+    /// without callers having to thread a new string through.
+    pub async fn stream_changes(&self, workspace_id: Uuid) -> Result<ChangeEventStream> {
         let mut url = join(
             self.client.base(),
             &format!("api/v1/workspaces/{workspace_id}/changes/stream",),
@@ -160,9 +166,8 @@ impl<'c> ChangefeedClient<'c> {
             }
         }
 
-        let req = tungstenite::handshake::client::Request::builder()
+        let mut req_builder = tungstenite::handshake::client::Request::builder()
             .uri(url.as_str())
-            .header("Authorization", format!("Bearer {bearer_token}"))
             .header("Host", url.host_str().unwrap_or(""))
             .header("Upgrade", "websocket")
             .header("Connection", "Upgrade")
@@ -170,7 +175,11 @@ impl<'c> ChangefeedClient<'c> {
                 "Sec-WebSocket-Key",
                 tungstenite::handshake::client::generate_key(),
             )
-            .header("Sec-WebSocket-Version", "13")
+            .header("Sec-WebSocket-Version", "13");
+        if let Some(token) = self.client.access_token().await? {
+            req_builder = req_builder.header("Authorization", format!("Bearer {token}"));
+        }
+        let req = req_builder
             .body(())
             .map_err(|e| ApiError::websocket(format!("build ws request: {e}")))?;
 

@@ -17,6 +17,15 @@ use crate::error::{Error, Result};
 /// Matches `client_sdk.DefaultChunkSize` in the Go SDK (16 MiB).
 pub const DEFAULT_CHUNK_SIZE: usize = 16 * 1024 * 1024;
 
+/// Hard upper bound on plaintext chunk size. The on-wire frame uses
+/// a 4-byte big-endian field for the ciphertext length
+/// (plaintext_len + Poly1305 tag), so the largest representable
+/// chunk is `u32::MAX - TAG_OVERHEAD`. Going past this would silently
+/// truncate the length field. We reject oversize chunks at
+/// [`encrypt`] / [`decrypt`] entry rather than relying on a
+/// `debug_assert` that vanishes in release.
+pub const MAX_CHUNK_SIZE: usize = (u32::MAX as usize) - TAG_OVERHEAD;
+
 /// Canonical algorithm string recorded in
 /// [`crate::envelope::WrappedDataEncryptionKey::algorithm`] for
 /// SDK-sealed objects. Matches `client_sdk.ContentAlgorithm` in Go.
@@ -104,10 +113,24 @@ pub struct Options {
 }
 
 impl Options {
-    fn chunk_size(&self) -> usize {
+    /// Resolved chunk size (applies the [`DEFAULT_CHUNK_SIZE`] default
+    /// when the caller didn't specify one).
+    fn chunk_size_unchecked(&self) -> usize {
         self.chunk_size
             .filter(|&n| n > 0)
             .unwrap_or(DEFAULT_CHUNK_SIZE)
+    }
+
+    /// Validates that the resolved chunk size fits the on-wire 4-byte
+    /// length field. See [`MAX_CHUNK_SIZE`].
+    fn checked_chunk_size(&self) -> Result<usize> {
+        let n = self.chunk_size_unchecked();
+        if n == 0 || n > MAX_CHUNK_SIZE {
+            return Err(Error::InvalidFrame(format!(
+                "chunk_size {n} out of range (must be 1..={MAX_CHUNK_SIZE})"
+            )));
+        }
+        Ok(n)
     }
 }
 
@@ -147,7 +170,7 @@ pub fn encrypt<R: Read, W: Write>(
 ) -> Result<()> {
     let aead = XChaCha20Poly1305::new(dek.as_bytes().into());
     let mut src = plaintext;
-    let chunk_size = opts.chunk_size();
+    let chunk_size = opts.checked_chunk_size()?;
     let mut buf = vec![0u8; chunk_size];
     let mut chunk_index: u64 = 0;
     loop {
@@ -181,9 +204,24 @@ pub fn encrypt<R: Read, W: Write>(
         chunk_index = chunk_index
             .checked_add(1)
             .expect("chunk_index overflow (u64 — file > 2^64 chunks?)");
+        // checked_chunk_size enforces chunk_size + TAG_OVERHEAD <=
+        // u32::MAX, so `sealed.len()` is always representable in a u32.
+        // A debug_assert is a belt-and-braces guard if the invariant
+        // is ever broken by a future refactor.
+        debug_assert!(
+            sealed.len() <= u32::MAX as usize,
+            "ciphertext length {} exceeds u32::MAX",
+            sealed.len()
+        );
+        let sealed_len_u32 = u32::try_from(sealed.len()).map_err(|_| {
+            Error::InvalidFrame(format!(
+                "ciphertext length {} would overflow on-wire u32",
+                sealed.len()
+            ))
+        })?;
         let mut header = [0u8; CHUNK_HEADER_SIZE];
         header[..NONCE_SIZE].copy_from_slice(&nonce_bytes);
-        header[NONCE_SIZE..].copy_from_slice(&(sealed.len() as u32).to_be_bytes());
+        header[NONCE_SIZE..].copy_from_slice(&sealed_len_u32.to_be_bytes());
         out.write_all(&header)?;
         out.write_all(&sealed)?;
         if n < chunk_size {
@@ -202,8 +240,9 @@ pub fn decrypt<R: Read, W: Write>(
 ) -> Result<()> {
     let aead = XChaCha20Poly1305::new(dek.as_bytes().into());
     let mut src = ciphertext;
-    let chunk_size = opts.chunk_size();
-    let max_ct = (chunk_size + TAG_OVERHEAD) as u32;
+    let chunk_size = opts.checked_chunk_size()?;
+    // checked_chunk_size guarantees this fits in u32.
+    let max_ct = u32::try_from(chunk_size + TAG_OVERHEAD).expect("checked_chunk_size invariant");
     let mut chunk_index: u64 = 0;
     loop {
         let mut header = [0u8; CHUNK_HEADER_SIZE];
@@ -494,5 +533,37 @@ mod tests {
             let got = derive_convergent_nonce(&dek, idx, NONCE_SIZE).unwrap();
             assert_eq!(got, expected, "idx={idx}");
         }
+    }
+
+    #[test]
+    fn oversize_chunk_size_rejected() {
+        let dek = fixed_dek();
+        let err = encrypt_to_vec(
+            b"x",
+            &dek,
+            Options {
+                chunk_size: Some(MAX_CHUNK_SIZE + 1),
+                ..Default::default()
+            },
+        )
+        .unwrap_err();
+        assert!(matches!(err, Error::InvalidFrame(_)), "got {err:?}");
+    }
+
+    #[test]
+    fn zero_chunk_size_falls_back_to_default() {
+        // chunk_size: Some(0) is filtered to the default value
+        // (16 MiB) by chunk_size_unchecked, so encrypt should succeed.
+        let dek = fixed_dek();
+        let ct = encrypt_to_vec(
+            b"hello",
+            &dek,
+            Options {
+                chunk_size: Some(0),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert!(!ct.is_empty());
     }
 }

@@ -11,6 +11,7 @@ use std::path::{Path, PathBuf};
 
 use rusqlite::{params, OptionalExtension};
 use serde::{Deserialize, Serialize};
+use tracing::warn;
 use uuid::Uuid;
 
 use crate::Result;
@@ -46,14 +47,28 @@ impl SyncStatus {
         }
     }
 
+    /// Maps a persisted status string back to a [`SyncStatus`].
+    ///
+    /// Unknown / unrecognised strings degrade to `UpToDate` so the
+    /// catalogue stays openable across SDK upgrades that may have
+    /// introduced new status variants, but a `tracing::warn` is
+    /// emitted so the operator can investigate. A silent fallthrough
+    /// here would mask sync-state corruption.
     fn parse(s: &str) -> Self {
         match s {
+            "up_to_date" => SyncStatus::UpToDate,
             "local_dirty" => SyncStatus::LocalDirty,
             "remote_dirty" => SyncStatus::RemoteDirty,
             "conflict" => SyncStatus::Conflict,
             "in_flight" => SyncStatus::InFlight,
             "evicted" => SyncStatus::Evicted,
-            _ => SyncStatus::UpToDate,
+            other => {
+                warn!(
+                    status = other,
+                    "unknown SyncStatus persisted in catalogue; falling back to UpToDate"
+                );
+                SyncStatus::UpToDate
+            }
         }
     }
 }

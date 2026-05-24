@@ -15,7 +15,7 @@
 //! the workspace cursor in the [`Catalogue`].
 
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use futures::StreamExt;
 use tokio::sync::mpsc;
@@ -29,31 +29,71 @@ use crate::catalogue::Catalogue;
 use crate::events::RemoteEvent;
 use crate::Result;
 
+/// Initial backoff for both catch-up and live retry loops.
+const INITIAL_BACKOFF: Duration = Duration::from_millis(500);
+
+/// Maximum backoff for both catch-up and live retry loops.
+const MAX_BACKOFF: Duration = Duration::from_secs(30);
+
+/// Minimum duration the live WebSocket loop must stay connected for
+/// us to treat the session as "successful" and reset its backoff. If
+/// the socket churns faster than this, the live backoff continues to
+/// grow regardless of how often the HTTP catch-up succeeds — that
+/// way a persistently broken WebSocket endpoint can't be papered over
+/// by a working HTTP path.
+const LIVE_SUCCESS_THRESHOLD: Duration = Duration::from_secs(15);
+
 pub struct RemotePoller {
     pub workspace_id: Uuid,
     pub client: Arc<Client>,
     pub catalogue: Arc<Mutex<Catalogue>>,
-    pub bearer: String,
     pub page_size: u32,
 }
 
 impl RemotePoller {
     /// Runs the catch-up + live loop, pushing events to `tx`. Returns
     /// only when `tx` is closed (i.e. the engine shut down).
+    ///
+    /// Catch-up and live use **independent backoffs**. Resetting a
+    /// shared backoff after every successful catch-up would defeat
+    /// the live-loop's exponential backoff in the failure mode where
+    /// the WebSocket endpoint is persistently down but the HTTP
+    /// endpoint works — the live loop would never grow past the
+    /// second step.
     pub async fn run(self, tx: mpsc::Sender<RemoteEvent>) -> Result<()> {
-        let mut backoff = Duration::from_millis(500);
+        let mut catch_up_backoff = INITIAL_BACKOFF;
+        let mut live_backoff = INITIAL_BACKOFF;
         loop {
             if let Err(e) = self.catch_up(&tx).await {
                 warn!("changefeed catch-up failed: {e:?}");
-                tokio::time::sleep(backoff).await;
-                backoff = (backoff * 2).min(Duration::from_secs(30));
+                tokio::time::sleep(catch_up_backoff).await;
+                catch_up_backoff = (catch_up_backoff * 2).min(MAX_BACKOFF);
                 continue;
             }
-            backoff = Duration::from_millis(500);
-            if let Err(e) = self.live(&tx).await {
-                warn!("changefeed live subscription dropped: {e:?}");
-                tokio::time::sleep(backoff).await;
-                backoff = (backoff * 2).min(Duration::from_secs(30));
+            catch_up_backoff = INITIAL_BACKOFF;
+
+            let started = Instant::now();
+            let live_result = self.live(&tx).await;
+            let ran_for = started.elapsed();
+            match live_result {
+                Ok(_) if ran_for >= LIVE_SUCCESS_THRESHOLD => {
+                    live_backoff = INITIAL_BACKOFF;
+                }
+                Ok(_) => {
+                    // Disconnect happened too quickly to count as a
+                    // healthy session — grow live backoff anyway.
+                    warn!(
+                        "changefeed live subscription closed after {:?}; growing backoff",
+                        ran_for
+                    );
+                    tokio::time::sleep(live_backoff).await;
+                    live_backoff = (live_backoff * 2).min(MAX_BACKOFF);
+                }
+                Err(e) => {
+                    warn!("changefeed live subscription dropped: {e:?}");
+                    tokio::time::sleep(live_backoff).await;
+                    live_backoff = (live_backoff * 2).min(MAX_BACKOFF);
+                }
             }
         }
     }
@@ -89,7 +129,7 @@ impl RemotePoller {
 
     async fn live(&self, tx: &mpsc::Sender<RemoteEvent>) -> Result<()> {
         let mut stream = ChangefeedClient::new(&self.client)
-            .stream_changes(self.workspace_id, &self.bearer)
+            .stream_changes(self.workspace_id)
             .await?;
         while let Some(item) = stream.next().await {
             match item? {

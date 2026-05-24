@@ -62,7 +62,12 @@ impl<'c> FsClient<'c> {
     /// `GET /api/v1/files/{file_id}`
     pub async fn get_file(&self, file_id: Uuid) -> Result<File> {
         let url = join(self.client.base(), &format!("api/v1/files/{file_id}"))?;
-        let resp = self.client.http.get(url).send().await?;
+        let resp = self
+            .client
+            .request(reqwest::Method::GET, url)
+            .await?
+            .send()
+            .await?;
         let status = resp.status();
         let body = resp.text().await?;
         if !status.is_success() {
@@ -77,7 +82,12 @@ impl<'c> FsClient<'c> {
     /// `GET /api/v1/folders/{folder_id}`
     pub async fn get_folder(&self, folder_id: Uuid) -> Result<Folder> {
         let url = join(self.client.base(), &format!("api/v1/folders/{folder_id}"))?;
-        let resp = self.client.http.get(url).send().await?;
+        let resp = self
+            .client
+            .request(reqwest::Method::GET, url)
+            .await?
+            .send()
+            .await?;
         let status = resp.status();
         let body = resp.text().await?;
         if !status.is_success() {
@@ -110,8 +120,8 @@ impl<'c> FsClient<'c> {
         let url = join(self.client.base(), "api/v1/files")?;
         let resp = self
             .client
-            .http
-            .post(url)
+            .request(reqwest::Method::POST, url)
+            .await?
             .json(&Req {
                 folder_id,
                 name,

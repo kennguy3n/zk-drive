@@ -114,7 +114,6 @@ async fn main() -> anyhow::Result<()> {
                 workspace_id: workspace,
                 client: client.clone(),
                 catalogue: catalogue.clone(),
-                bearer: args.bearer.clone(),
                 page_size,
             };
             tokio::spawn(async move {

@@ -64,8 +64,8 @@ impl<'c> StorageClient<'c> {
         let url = join(self.client.base(), &path)?;
         let resp = self
             .client
-            .http
-            .post(url)
+            .request(reqwest::Method::POST, url)
+            .await?
             .json(&Req { size_bytes })
             .send()
             .await?;
@@ -84,7 +84,12 @@ impl<'c> StorageClient<'c> {
     pub async fn request_download(&self, file_id: Uuid) -> Result<PresignedDownload> {
         let path = format!("api/v1/files/{file_id}/downloads");
         let url = join(self.client.base(), &path)?;
-        let resp = self.client.http.get(url).send().await?;
+        let resp = self
+            .client
+            .request(reqwest::Method::GET, url)
+            .await?
+            .send()
+            .await?;
         let status = resp.status();
         let body = resp.text().await?;
         if !status.is_success() {

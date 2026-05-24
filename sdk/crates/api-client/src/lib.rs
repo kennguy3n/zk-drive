@@ -29,4 +29,4 @@ pub use changefeed::{ChangeEvent, ChangeEventStream, ChangefeedClient, Changefee
 pub use error::{ApiError, Result};
 pub use fs::{File, FileVersion, Folder, FsClient};
 pub use storage::{PresignedDownload, PresignedUpload, StorageClient};
-pub use transport::{Bearer, Client, ClientBuilder};
+pub use transport::{Bearer, Client, ClientBuilder, StaticBearer, TokenProvider};

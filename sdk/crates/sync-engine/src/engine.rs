@@ -11,7 +11,7 @@ use tracing::{info, warn};
 use uuid::Uuid;
 use zk_sync_api::Client;
 
-use crate::catalogue::{Catalogue, SyncStatus};
+use crate::catalogue::{Catalogue, FileRecord, SyncStatus};
 use crate::conflict::{ConflictPolicy, LastWriterWins};
 use crate::events::{LocalEvent, RemoteEvent};
 use crate::Result;
@@ -57,6 +57,18 @@ impl Engine {
     pub fn with_policy(mut self, policy: Arc<dyn ConflictPolicy>) -> Self {
         self.policy = policy;
         self
+    }
+
+    /// Build a tentative local path for a remote file we've just
+    /// learned about over the change feed but haven't downloaded
+    /// yet. The folder hierarchy is resolved on first download
+    /// (PR5); for now the placeholder lives at `<root>/<name>` so
+    /// the catalogue row has a non-empty path. Falls back to the
+    /// resource id if the mutation arrived without a name (e.g.
+    /// truncated by a future server-side change).
+    fn local_path_for(&self, name: &str) -> PathBuf {
+        let safe = if name.is_empty() { "_" } else { name };
+        self.config.root.join(safe)
     }
 
     /// Drive both event channels until either is closed.
@@ -124,8 +136,37 @@ impl Engine {
         match ev {
             RemoteEvent::FileCreated(_) | RemoteEvent::FileUpdated(_) => {
                 let mut cat = self.catalogue.lock().await;
-                if let Some(_existing) = cat.get(m.resource_id)? {
-                    cat.set_status(m.resource_id, SyncStatus::RemoteDirty)?;
+                match cat.get(m.resource_id)? {
+                    Some(_existing) => {
+                        cat.set_status(m.resource_id, SyncStatus::RemoteDirty)?;
+                    }
+                    None => {
+                        // Brand-new remote file. Materialise a
+                        // placeholder catalogue row so the downloader
+                        // (wired in PR5) can pick it up. Dropping the
+                        // event on the floor here would mean a new
+                        // remote file never becomes visible locally.
+                        let local_path = self.local_path_for(&m.name);
+                        let rec = FileRecord {
+                            remote_file_id: m.resource_id,
+                            // Version id arrives on the subsequent
+                            // metadata fetch / download; zero
+                            // sentinel means "not yet known".
+                            remote_version_id: Uuid::nil(),
+                            local_path,
+                            size_bytes: 0,
+                            content_hash: [0u8; 32],
+                            status: SyncStatus::RemoteDirty,
+                            pinned: false,
+                            updated_at: chrono::Utc::now(),
+                        };
+                        cat.upsert(&rec)?;
+                        info!(
+                            file_id = %m.resource_id,
+                            name = %m.name,
+                            "new remote file registered; awaiting first download"
+                        );
+                    }
                 }
                 Ok(())
             }
@@ -157,5 +198,103 @@ impl Engine {
                 Ok(())
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::events::RemoteEvent;
+    use chrono::Utc;
+    use tempfile::TempDir;
+    use zk_sync_api::Mutation;
+
+    fn engine_for(tempdir: &TempDir) -> (Engine, Arc<Mutex<Catalogue>>) {
+        let cat = Catalogue::open(tempdir.path().join("cat.db")).unwrap();
+        let catalogue = Arc::new(Mutex::new(cat));
+        let client = Arc::new(
+            zk_sync_api::Client::builder("https://example.com")
+                .build()
+                .unwrap(),
+        );
+        let engine = Engine::new(
+            EngineConfig {
+                workspace_id: Uuid::new_v4(),
+                root: tempdir.path().to_path_buf(),
+                chunk_size: None,
+            },
+            client,
+            catalogue.clone(),
+        );
+        (engine, catalogue)
+    }
+
+    #[tokio::test]
+    async fn file_created_for_unknown_file_inserts_remote_dirty_stub() {
+        let tempdir = TempDir::new().unwrap();
+        let (engine, catalogue) = engine_for(&tempdir);
+        let file_id = Uuid::new_v4();
+        let workspace_id = engine.config.workspace_id;
+        let ev = RemoteEvent::FileCreated(Mutation {
+            sequence: 1,
+            workspace_id,
+            actor_id: None,
+            kind: "file".into(),
+            op: "create".into(),
+            resource_id: file_id,
+            parent_id: None,
+            name: "report.docx".into(),
+            metadata: None,
+            occurred_at: Utc::now(),
+        });
+        engine.handle_remote(ev).await.unwrap();
+        let cat = catalogue.lock().await;
+        let rec = cat.get(file_id).unwrap().expect("stub row must exist");
+        assert_eq!(rec.status, SyncStatus::RemoteDirty);
+        assert_eq!(rec.remote_version_id, Uuid::nil());
+        assert_eq!(rec.local_path, tempdir.path().join("report.docx"));
+    }
+
+    #[tokio::test]
+    async fn file_updated_for_known_file_keeps_existing_metadata() {
+        let tempdir = TempDir::new().unwrap();
+        let (engine, catalogue) = engine_for(&tempdir);
+        let file_id = Uuid::new_v4();
+        let workspace_id = engine.config.workspace_id;
+        let version_id = Uuid::new_v4();
+        {
+            let mut cat = catalogue.lock().await;
+            cat.upsert(&FileRecord {
+                remote_file_id: file_id,
+                remote_version_id: version_id,
+                local_path: tempdir.path().join("notes.md"),
+                size_bytes: 1024,
+                content_hash: [0xAB; 32],
+                status: SyncStatus::UpToDate,
+                pinned: false,
+                updated_at: Utc::now(),
+            })
+            .unwrap();
+        }
+        let ev = RemoteEvent::FileUpdated(Mutation {
+            sequence: 2,
+            workspace_id,
+            actor_id: None,
+            kind: "file".into(),
+            op: "update".into(),
+            resource_id: file_id,
+            parent_id: None,
+            name: "notes.md".into(),
+            metadata: None,
+            occurred_at: Utc::now(),
+        });
+        engine.handle_remote(ev).await.unwrap();
+        let cat = catalogue.lock().await;
+        let rec = cat.get(file_id).unwrap().unwrap();
+        assert_eq!(rec.status, SyncStatus::RemoteDirty);
+        // Existing version + hash preserved \u2014 set_status only flips status/updated_at.
+        assert_eq!(rec.remote_version_id, version_id);
+        assert_eq!(rec.content_hash, [0xAB; 32]);
+        assert_eq!(rec.size_bytes, 1024);
     }
 }
