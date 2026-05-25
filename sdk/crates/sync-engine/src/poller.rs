@@ -48,6 +48,11 @@ pub struct RemotePoller {
     pub client: Arc<Client>,
     pub catalogue: Arc<Mutex<Catalogue>>,
     pub page_size: u32,
+    /// Shared connectivity flag. The poller updates this on every
+    /// HTTP / WebSocket attempt so consumers (CLI `status`, the
+    /// future Tauri tray) can render a truthful online/offline
+    /// indicator. Cloned freely; reading is cheap.
+    pub online: crate::OnlineState,
 }
 
 impl RemotePoller {
@@ -124,9 +129,17 @@ impl RemotePoller {
         }
         loop {
             let since = self.catalogue.lock().await.get_cursor(self.workspace_id)?;
-            let page = ChangefeedClient::new(&self.client)
+            // Capture the result so we can update the shared online
+            // flag regardless of branch. A transport error here is
+            // the canonical "server unreachable" signal; the engine
+            // doesn't have a separate health-probe loop so this is
+            // also the only place the offline flag gets set during
+            // catch-up.
+            let result = ChangefeedClient::new(&self.client)
                 .list_changes(self.workspace_id, since, Some(self.page_size))
-                .await?;
+                .await;
+            self.online.record_api_result(&result);
+            let page = result?;
             if page.mutations.is_empty() && !page.has_more {
                 // Steady-state "no more changes" response. Refuse to
                 // persist a cursor that regressed (a misbehaving
@@ -222,9 +235,17 @@ impl RemotePoller {
         // cursor" instead of conflating that with "legitimately new
         // sync agents".
         let since = self.catalogue.lock().await.get_cursor(self.workspace_id)?;
-        let mut stream = ChangefeedClient::new(&self.client)
+        // Same online-flag handling as catch_up. tokio-tungstenite
+        // wraps both DNS / connect failures and WebSocket protocol
+        // errors in `ApiError::WebSocket`; `record_api_result`
+        // conservatively marks the engine offline for either,
+        // because both are conditions the engine can't recover
+        // from without retrying the network.
+        let stream_result = ChangefeedClient::new(&self.client)
             .stream_changes(self.workspace_id, Some(since))
-            .await?;
+            .await;
+        self.online.record_api_result(&stream_result);
+        let mut stream = stream_result?;
         while let Some(item) = stream.next().await {
             match item? {
                 zk_sync_api::ChangeEvent::Change(m) => {

@@ -24,6 +24,11 @@ pub struct Engine {
     pub client: Arc<Client>,
     pub catalogue: Arc<Mutex<Catalogue>>,
     pub policy: Arc<dyn ConflictPolicy>,
+    /// Shared connectivity flag. The poller updates this on every
+    /// HTTP / WebSocket attempt; the engine itself reads it (for the
+    /// future uploader that needs to back off when offline) and
+    /// exposes it to the CLI / Tauri shell via [`Engine::online`].
+    pub online: crate::OnlineState,
 }
 
 #[derive(Debug, Clone)]
@@ -38,6 +43,15 @@ pub struct EngineConfig {
     /// Strict-ZK uploads. The default
     /// [`zk_sync_crypto::DEFAULT_CHUNK_SIZE`] matches the Go SDK.
     pub chunk_size: Option<usize>,
+    /// Maximum total bytes the local cache may occupy across all
+    /// non-pinned `UpToDate` rows. `None` disables eviction (the
+    /// engine treats the local disk as unbounded). The engine's
+    /// background loop runs [`crate::evict_to_quota`] whenever the
+    /// catalogue's [`Catalogue::total_cached_bytes`] exceeds this
+    /// value; pinned rows and rows in any non-`UpToDate` status are
+    /// excluded from eviction (see [`crate::eviction`] for the full
+    /// safety contract).
+    pub disk_quota_bytes: Option<u64>,
 }
 
 impl Engine {
@@ -51,12 +65,31 @@ impl Engine {
             client,
             catalogue,
             policy: Arc::new(LastWriterWins),
+            online: crate::OnlineState::new(),
         }
     }
 
     pub fn with_policy(mut self, policy: Arc<dyn ConflictPolicy>) -> Self {
         self.policy = policy;
         self
+    }
+
+    /// Re-use an existing connectivity handle. The desktop agent
+    /// constructs one [`crate::OnlineState`] and shares it across
+    /// every worker (poller, future uploader, Tauri tray polling
+    /// thread) so the user sees a single coherent connectivity
+    /// indicator.
+    pub fn with_online(mut self, online: crate::OnlineState) -> Self {
+        self.online = online;
+        self
+    }
+
+    /// Snapshot the engine's view of the world. Cheap (one SQL
+    /// aggregate query); see [`crate::StatusSnapshot`] for the
+    /// reported fields.
+    pub async fn snapshot(&self) -> Result<crate::StatusSnapshot> {
+        let cat = self.catalogue.lock().await;
+        crate::StatusSnapshot::from_catalogue(&cat, self.config.disk_quota_bytes, self.online.get())
     }
 
     /// Build a placeholder local path for a remote file we've just
@@ -226,6 +259,7 @@ impl Engine {
                     // remap it once the server assigns the real one) so
                     // the row is visible to status queries immediately.
                     let local_id = Uuid::new_v4();
+                    let now = chrono::Utc::now();
                     let rec = FileRecord {
                         remote_file_id: local_id,
                         // Zero version sentinel = "not yet uploaded".
@@ -235,7 +269,12 @@ impl Engine {
                         content_hash,
                         status: SyncStatus::LocalDirty,
                         pinned: false,
-                        updated_at: chrono::Utc::now(),
+                        updated_at: now,
+                        // A new row's last_accessed = its updated_at:
+                        // the user just created the file, so it's
+                        // both the newest write AND the newest read
+                        // by definition.
+                        last_accessed_at: now,
                     };
                     cat.upsert(&rec)?;
                     info!(
@@ -359,6 +398,7 @@ impl Engine {
                     }
                     None => {
                         let local_path = self.placeholder_path_for(m.resource_id);
+                        let now = chrono::Utc::now();
                         let rec = FileRecord {
                             remote_file_id: m.resource_id,
                             // Version id arrives on the subsequent
@@ -370,7 +410,12 @@ impl Engine {
                             content_hash: [0u8; 32],
                             status: SyncStatus::RemoteDirty,
                             pinned: false,
-                            updated_at: chrono::Utc::now(),
+                            updated_at: now,
+                            // The placeholder hasn't been read yet --
+                            // last_accessed seeds to the create time
+                            // and gets refreshed by the downloader
+                            // (PR6) when the real content arrives.
+                            last_accessed_at: now,
                         };
                         cat.upsert(&rec)?;
                         info!(
@@ -450,6 +495,7 @@ mod tests {
                 workspace_id,
                 root: tempdir.path().to_path_buf(),
                 chunk_size: None,
+                disk_quota_bytes: None,
             },
             client,
             catalogue.clone(),
@@ -656,6 +702,7 @@ mod tests {
                 status: SyncStatus::UpToDate,
                 pinned: false,
                 updated_at: Utc::now(),
+                last_accessed_at: Utc::now(),
             })
             .unwrap();
         }
@@ -705,6 +752,7 @@ mod tests {
                 status: SyncStatus::UpToDate,
                 pinned: false,
                 updated_at: Utc::now(),
+                last_accessed_at: Utc::now(),
             })
             .unwrap();
             cat.upsert(&FileRecord {
@@ -716,6 +764,7 @@ mod tests {
                 status: SyncStatus::UpToDate,
                 pinned: false,
                 updated_at: Utc::now(),
+                last_accessed_at: Utc::now(),
             })
             .unwrap();
         }
@@ -764,6 +813,7 @@ mod tests {
                 status: SyncStatus::LocalDirty,
                 pinned: false,
                 updated_at: Utc::now(),
+                last_accessed_at: Utc::now(),
             })
             .unwrap();
         }
@@ -808,6 +858,7 @@ mod tests {
                 status: SyncStatus::RemoteDirty,
                 pinned: false,
                 updated_at: Utc::now(),
+                last_accessed_at: Utc::now(),
             })
             .unwrap();
         }
@@ -954,6 +1005,7 @@ mod tests {
                 status: SyncStatus::UpToDate,
                 pinned: false,
                 updated_at: Utc::now(),
+                last_accessed_at: Utc::now(),
             })
             .unwrap();
         }
@@ -1022,6 +1074,7 @@ mod tests {
                 status: SyncStatus::UpToDate,
                 pinned: false,
                 updated_at: Utc::now(),
+                last_accessed_at: Utc::now(),
             })
             .unwrap();
         }
@@ -1054,6 +1107,7 @@ mod tests {
                 status: SyncStatus::LocalDeleted,
                 pinned: false,
                 updated_at: Utc::now(),
+                last_accessed_at: Utc::now(),
             })
             .unwrap();
         }
@@ -1104,6 +1158,7 @@ mod tests {
                 status: SyncStatus::LocalDeleted,
                 pinned: false,
                 updated_at: Utc::now(),
+                last_accessed_at: Utc::now(),
             })
             .unwrap();
         }
@@ -1153,6 +1208,7 @@ mod tests {
                 status: SyncStatus::Evicted,
                 pinned: false,
                 updated_at: Utc::now(),
+                last_accessed_at: Utc::now(),
             })
             .unwrap();
         }
@@ -1203,6 +1259,7 @@ mod tests {
                 status: SyncStatus::RemoteDeleted,
                 pinned: false,
                 updated_at: Utc::now(),
+                last_accessed_at: Utc::now(),
             })
             .unwrap();
         }
@@ -1256,6 +1313,7 @@ mod tests {
                 status: SyncStatus::UpToDate,
                 pinned: false,
                 updated_at: Utc::now(),
+                last_accessed_at: Utc::now(),
             })
             .unwrap();
         }
@@ -1302,6 +1360,7 @@ mod tests {
                 status: SyncStatus::LocalDirty,
                 pinned: false,
                 updated_at: Utc::now(),
+                last_accessed_at: Utc::now(),
             })
             .unwrap();
         }
