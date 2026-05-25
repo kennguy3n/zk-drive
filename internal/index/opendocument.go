@@ -6,7 +6,6 @@ import (
 	"encoding/xml"
 	"fmt"
 	"io"
-	"strings"
 )
 
 // odfContentEntry is the path inside every OpenDocument archive
@@ -110,7 +109,13 @@ func parseODFContent(r io.Reader) (string, error) {
 	}
 
 	var (
-		sb            strings.Builder
+		// bytes.Buffer (not strings.Builder) so we can Truncate()
+		// in O(1) when we need to drop the synthetic intra-cell
+		// space we emitted on </text:p>. Builder's only mutation
+		// API is Reset(), which would force a full String()+Reset()
+		// rebuild — O(n) per cell close and quadratic over the
+		// whole sheet on large .ods files.
+		buf bytes.Buffer
 		// textDepth counts how many text-bearing elements are
 		// open. CharData is emitted iff textDepth > 0, so style
 		// metadata buried under text:style-region-element does
@@ -132,6 +137,20 @@ func parseODFContent(r io.Reader) (string, error) {
 		// emitted any cell content. Empty rows are dropped to
 		// avoid runs of blank lines polluting the FTS corpus.
 		rowDirty bool
+		// pendingSyntheticSpace is true iff the LAST byte written
+		// to buf is the synthetic ' ' we emitted on </text:p> or
+		// </text:h> close inside a spreadsheet cell. On </table-
+		// cell> close we Truncate exactly that one byte so the
+		// '\t' terminator sits flush against the cell's last real
+		// content. Any subsequent emission (CharData, line-break,
+		// tab, `s` element, another paragraph close) clears the
+		// flag — that way user-typed trailing spaces in the
+		// cell's actual content survive untouched. The previous
+		// `TrimRight(s, " ")` approach would strip those too,
+		// silently losing semantic whitespace in cells like
+		// `"product code   "` where the trailing spaces are part
+		// of the value.
+		pendingSyntheticSpace bool
 	)
 
 	for {
@@ -151,15 +170,23 @@ func parseODFContent(r io.Reader) (string, error) {
 					textDepth++
 				case "line-break":
 					if textDepth > 0 {
-						sb.WriteByte('\n')
+						buf.WriteByte('\n')
+						pendingSyntheticSpace = false
 					}
 				case "tab":
 					if textDepth > 0 {
-						sb.WriteByte('\t')
+						buf.WriteByte('\t')
+						pendingSyntheticSpace = false
 					}
 				case "s":
 					if textDepth > 0 {
-						sb.WriteByte(' ')
+						buf.WriteByte(' ')
+						// `text:s` is a user-meaningful
+						// non-breaking-space element, not the
+						// synthetic intra-cell separator we
+						// emit on </text:p>. Do NOT mark it
+						// pending — it must survive cell close.
+						pendingSyntheticSpace = false
 					}
 				}
 			case odfTableNamespace:
@@ -182,9 +209,10 @@ func parseODFContent(r io.Reader) (string, error) {
 						// Avoids the awkward "value\n\t"
 						// sequence on the common single-
 						// paragraph cell case.
-						sb.WriteByte(' ')
+						buf.WriteByte(' ')
+						pendingSyntheticSpace = true
 					} else {
-						sb.WriteByte('\n')
+						buf.WriteByte('\n')
 					}
 				case "span", "a":
 					textDepth--
@@ -194,32 +222,43 @@ func parseODFContent(r io.Reader) (string, error) {
 				case "table-cell":
 					textDepth--
 					cellDepth--
-					// Strip the trailing intra-cell space we
-					// just emitted on </text:p> so the '\t'
-					// terminator sits immediately after the
-					// cell's value. The buffered builder
-					// gives us no Bytes() handle, so we
-					// dump-and-rebuild via String() — only
-					// runs on cell close (cheap relative to
-					// the cell's content).
-					if s := sb.String(); strings.HasSuffix(s, " ") {
-						sb.Reset()
-						sb.WriteString(strings.TrimRight(s, " "))
+					// Drop EXACTLY the synthetic intra-cell
+					// space the most recent </text:p> emitted,
+					// then write the cell's '\t' terminator.
+					// bytes.Buffer.Truncate is O(1) — no copy
+					// of accumulated text — so this stays
+					// linear over the whole sheet even for
+					// .ods files with hundreds of thousands of
+					// cells.
+					//
+					// User-typed trailing spaces (e.g. a cell
+					// whose value really is "product code   ")
+					// reach this point with pendingSynthetic-
+					// Space == false because the CharData write
+					// cleared the flag, so they survive
+					// untouched. This is the correctness fix
+					// for the previous TrimRight pattern,
+					// which stripped every trailing space
+					// indiscriminately.
+					if pendingSyntheticSpace {
+						buf.Truncate(buf.Len() - 1)
+						pendingSyntheticSpace = false
 					}
-					sb.WriteByte('\t')
+					buf.WriteByte('\t')
 					rowDirty = true
 				case "table-row":
 					if rowDirty {
-						sb.WriteByte('\n')
+						buf.WriteByte('\n')
 						rowDirty = false
 					}
 				}
 			}
 		case xml.CharData:
 			if textDepth > 0 && len(t) > 0 {
-				sb.Write(t)
+				buf.Write(t)
+				pendingSyntheticSpace = false
 			}
 		}
 	}
-	return sb.String(), nil
+	return buf.String(), nil
 }

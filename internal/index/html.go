@@ -144,7 +144,44 @@ func extractHTMLText(body []byte) (string, error) {
 			name, _ := z.TagName()
 			n := string(name)
 			if _, skip := htmlSkipTags[n]; skip {
+				// A nested skip-tag opening (e.g. <template>
+				// inside <template>, or a <head> opening inside
+				// some weird wrapper) still needs to be pushed
+				// onto skipStack so the matching close pops the
+				// right depth — even when we're already inside
+				// a skip section. The check therefore comes
+				// BEFORE the in-skip-section guard below.
 				skipStack = append(skipStack, n)
+				continue
+			}
+			if len(skipStack) > 0 {
+				// Inside a skip section. Two failure modes if
+				// we let the next two branches run unguarded:
+				//
+				//   1. A <pre> nested inside <template> /
+				//      <object> / <svg> would increment preDepth
+				//      without a corresponding decrement, because
+				//      the EndTagToken branch above bails on
+				//      `if len(skipStack) > 0 { continue }`
+				//      BEFORE the `if n == "pre"` decrement runs.
+				//      Once we leave the skip section, preDepth
+				//      stays elevated forever and we lose
+				//      whitespace collapsing on every subsequent
+				//      text run.
+				//
+				//   2. Block-tag openings inside a skip section
+				//      (e.g. <div> inside <template>) would emit
+				//      spurious newlines into the output even
+				//      though no body text gets through — every
+				//      <h1>/<p>/<div> inside <head> would leave
+				//      a phantom paragraph break.
+				//
+				// (The skip tags the Go html tokenizer treats as
+				// rawtext — <script>, <style>, <noscript>,
+				// <iframe> — never produce inner start/end
+				// tokens, so this only manifests for the parsed-
+				// content skip tags: <template>, <head>,
+				// <object>, <embed>, <svg>.)
 				continue
 			}
 			if n == "pre" {

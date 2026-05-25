@@ -122,3 +122,68 @@ func TestExtractHTMLText_LargeRunDoesNotCopyBuilder(t *testing.T) {
 		t.Errorf("output is unexpectedly short (%d bytes), suggests data loss", len(got))
 	}
 }
+
+// TestExtractHTMLText_StartTagInsideSkipSectionDoesNotEmitNewline
+// pins the StartTagToken's `if len(skipStack) > 0 { continue }`
+// guard. Before that fix, a <div> nested inside <template> /
+// <head> / <object> would fall through to the htmlBlockTags branch
+// and emit a phantom '\n' into the output even though no body
+// text from that subtree was supposed to come through. Equally
+// importantly, a nested <pre> inside the skip section would
+// increment preDepth WITHOUT a matching decrement (because
+// EndTagToken bails on `len(skipStack) > 0` before checking
+// `n == "pre"`), corrupting whitespace collapsing for every
+// subsequent text run after we leave the skip section.
+func TestExtractHTMLText_StartTagInsideSkipSectionDoesNotEmitNewline(t *testing.T) {
+	// <template> is parsed (not raw-text), so its inner <div> /
+	// <p> / <pre> tokens DO reach the tokenizer's StartTag branch.
+	body := []byte("<html><body>before<template><div>x</div><pre>y</pre></template>after</body></html>")
+	got, err := extractHTMLText(body)
+	if err != nil {
+		t.Fatalf("extractHTMLText: %v", err)
+	}
+	// "x" and "y" inside <template> must NOT leak.
+	if strings.Contains(got, "x") || strings.Contains(got, "y") {
+		t.Errorf("template content leaked: %q", got)
+	}
+	// "before" and "after" are body text and MUST be preserved.
+	if !strings.Contains(got, "before") || !strings.Contains(got, "after") {
+		t.Errorf("body text was wrongly suppressed: %q", got)
+	}
+	// Critically: no phantom newline between "before" and the
+	// next content. The <div> close inside <template> used to
+	// emit a '\n' on the unguarded EndTagToken path; we now
+	// expect "before" followed directly by "after" (with no
+	// gap-filler block separator, since <template> itself isn't
+	// a block tag).
+	if strings.Contains(got, "before\n\nafter") {
+		t.Errorf("phantom block separator from skipped <div>: %q", got)
+	}
+}
+
+// TestExtractHTMLText_PreAfterSkipSectionStillCollapsesWhitespace
+// is the preDepth-corruption guard: if a <pre> opening inside a
+// skip section increments preDepth (and the matching close is
+// dropped without decrement), the following non-pre text run
+// would skip whitespace collapsing and bloat the FTS index with
+// every newline / indent from the source.
+func TestExtractHTMLText_PreAfterSkipSectionStillCollapsesWhitespace(t *testing.T) {
+	body := []byte("<html><body><template><pre>inside</pre></template><p>after\n\n\nblock</p></body></html>")
+	got, err := extractHTMLText(body)
+	if err != nil {
+		t.Fatalf("extractHTMLText: %v", err)
+	}
+	if strings.Contains(got, "inside") {
+		t.Errorf("template <pre> content leaked: %q", got)
+	}
+	// The "after\n\n\nblock" string in source must be collapsed
+	// by collapseHTMLWhitespace — meaning preDepth was correctly
+	// 0 when this text token arrived. A persistent preDepth > 0
+	// would leave the triple newline intact.
+	if strings.Contains(got, "after\n\n\nblock") {
+		t.Errorf("preDepth leaked across skip section, source whitespace not collapsed: %q", got)
+	}
+	if !strings.Contains(got, "after") || !strings.Contains(got, "block") {
+		t.Errorf("expected both 'after' and 'block' in output: %q", got)
+	}
+}

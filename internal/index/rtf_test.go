@@ -198,3 +198,64 @@ func TestExtractRTFText_OrphanHighSurrogateDoesNotBleed(t *testing.T) {
 		t.Errorf("orphan high surrogate ate surrounding text: %q", got)
 	}
 }
+
+// TestExtractRTFText_SurrogatePairWithHexEscapedFallback covers the
+// Word-style emission where each fallback byte is encoded as `\'XX`
+// (hex escape) rather than a literal byte. The previous skip loop
+// terminated on the first `\` it saw, so the low-surrogate `\u`
+// was never found and the non-BMP code point was silently dropped.
+// The fix recognises `\'XX` as one fallback character occupying
+// four source bytes.
+func TestExtractRTFText_SurrogatePairWithHexEscapedFallback(t *testing.T) {
+	// U+1F600 (😀) — high 0xD83D=55357, low 0xDE00=56832. Each
+	// fallback byte is hex-escaped as `\'3F` (`?`).
+	body := []byte("{\\rtf1 hi \\u55357\\'3F\\u56832\\'3F end}")
+	got, err := extractRTFText(body)
+	if err != nil {
+		t.Fatalf("extractRTFText: %v", err)
+	}
+	if !strings.ContainsRune(got, 0x1F600) {
+		t.Errorf("hex-escaped fallback bytes blocked surrogate decode, got: %q", got)
+	}
+	if !strings.Contains(got, "hi") || !strings.Contains(got, "end") {
+		t.Errorf("expected surrounding text to survive surrogate decode, got: %q", got)
+	}
+}
+
+// TestExtractRTFText_SurrogatePairWithEscapedLiteralFallback covers
+// the case where the fallback byte is itself an escaped literal
+// (\\ \{ \}). Two source bytes, one fallback character. The fix
+// recognises this so the surrogate pair still resolves.
+func TestExtractRTFText_SurrogatePairWithEscapedLiteralFallback(t *testing.T) {
+	// Fallback is the escaped literal `\\` (one backslash char).
+	body := []byte("{\\rtf1 hi \\u55357\\\\\\u56832\\\\ end}")
+	got, err := extractRTFText(body)
+	if err != nil {
+		t.Fatalf("extractRTFText: %v", err)
+	}
+	if !strings.ContainsRune(got, 0x1F600) {
+		t.Errorf("escaped-literal fallback blocked surrogate decode, got: %q", got)
+	}
+}
+
+// TestExtractRTFText_HexEscapedFallbackUnderUC2 covers the multi-
+// fallback case: \uc2 means each \u consumes TWO fallback
+// characters, and those fallbacks may freely mix hex escapes and
+// literals. The skip loop must count semantic characters, not
+// source bytes, across the mix.
+func TestExtractRTFText_HexEscapedFallbackUnderUC2(t *testing.T) {
+	// \uc2 then U+1F600. High surrogate consumes 2 fallback
+	// chars: `\'3F` (hex) + `?` (literal). Low surrogate
+	// consumes 2: `?` (literal) + `\'3F` (hex).
+	body := []byte("{\\rtf1\\uc2 hi \\u55357\\'3F?\\u56832?\\'3F end}")
+	got, err := extractRTFText(body)
+	if err != nil {
+		t.Fatalf("extractRTFText: %v", err)
+	}
+	if !strings.ContainsRune(got, 0x1F600) {
+		t.Errorf("mixed hex/literal fallback under \\uc2 blocked surrogate, got: %q", got)
+	}
+	if !strings.Contains(got, "hi") || !strings.Contains(got, "end") {
+		t.Errorf("expected surrounding text intact, got: %q", got)
+	}
+}

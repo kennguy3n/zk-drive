@@ -347,12 +347,77 @@ func parseControlWordWithValue(body []byte, i int) (name string, value int, hasV
 // tryReadUnicodeEscape attempts to read another \uN escape
 // immediately after a high surrogate. Returns the decoded rune, the
 // new offset, and a success flag.
+//
+// The fallback-byte skip loop counts SEMANTIC characters per the
+// RTF 1.9.1 §1.4.7 spec, NOT source bytes. RTF permits each
+// fallback character to be encoded in any of three forms:
+//
+//   - a literal byte (e.g. `A`)         \u8704 A...
+//   - an escaped-literal RTF sequence:  \u8704 \\ ...  or  \{  \}
+//   - a hex-escaped byte:               \u8704 \'3F ...
+//
+// All three forms count as ONE fallback character for the purposes
+// of \uc skipping. The previous implementation broke on the first
+// `\` it saw, silently failing whenever a producer (notably Microsoft
+// Word, which routinely hex-escapes high-bit characters) inserted
+// `\'XX` as the fallback. Result: the low-surrogate `\u` that
+// followed was never found, and any non-BMP code point (CJK
+// supplementary plane, emoji, mathematical symbols) was dropped
+// from the FTS index.
+//
+// The fix here recognises each of the three encodings and advances
+// the byte offset by the correct source-byte width (1 / 2 / 4) per
+// consumed fallback character. Any other `\` (e.g. a control word
+// like `\bin`) terminates the skip — those are not legal fallback
+// encodings under the spec, so we stop and let the main parser
+// see the unexpected sequence.
 func tryReadUnicodeEscape(body []byte, i int, ucSkip int) (rune, int, bool) {
-	// Consume any ANSI fallback bytes first.
 	for ucSkip > 0 && i < len(body) {
-		if body[i] == '\\' || body[i] == '{' || body[i] == '}' {
+		if body[i] == '{' || body[i] == '}' {
+			// Brace boundary terminates fallback consumption
+			// per spec — fallback bytes never cross a group
+			// boundary.
 			break
 		}
+		if body[i] == '\\' {
+			if i+1 >= len(body) {
+				break
+			}
+			switch body[i+1] {
+			case '\'':
+				// `\'XX` hex-escaped fallback byte: 4
+				// source bytes (`\`, `'`, hex, hex) =
+				// 1 fallback character. Advance past
+				// the two hex digits if they're really
+				// hex; if the input is malformed (non-
+				// hex byte after `\'`) just advance the
+				// minimum we know is safe (`\'` itself,
+				// 2 bytes) and let the spec-compliant
+				// loop bail on the next iteration.
+				if i+3 < len(body) && isHex(body[i+2]) && isHex(body[i+3]) {
+					i += 4
+				} else {
+					i += 2
+				}
+			case '\\', '{', '}':
+				// Escaped-literal fallback byte: 2
+				// source bytes = 1 fallback character.
+				i += 2
+			default:
+				// Any other `\`-prefixed sequence is a
+				// control word, not a fallback byte
+				// encoding. Stop skipping and let the
+				// `body[i] != '\\' || body[i+1] != 'u'`
+				// check below decide whether this is
+				// the low-surrogate `\u` or unrelated.
+				ucSkip = 0
+				continue
+			}
+			ucSkip--
+			continue
+		}
+		// Plain literal byte: 1 source byte = 1 fallback
+		// character.
 		i++
 		ucSkip--
 	}
@@ -368,6 +433,10 @@ func tryReadUnicodeEscape(body []byte, i int, ucSkip int) (rune, int, bool) {
 		code += 0x10000
 	}
 	return rune(code), end, true
+}
+
+func isHex(c byte) bool {
+	return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')
 }
 
 func isLetter(c byte) bool {
