@@ -20,7 +20,8 @@ use uuid::Uuid;
 
 use zk_sync_api::{Bearer, Client};
 use zk_sync_engine::{
-    placeholder_dir, tombstone_dir, Catalogue, Engine, EngineConfig, RemotePoller, Watcher,
+    evict_to_quota, placeholder_dir, tombstone_dir, Catalogue, ConnectivityState, Engine,
+    EngineConfig, EvictionTrigger, OnlineState, RemotePoller, StatusSnapshot, Watcher,
 };
 
 #[derive(Parser)]
@@ -65,6 +66,27 @@ enum Cmd {
     Status {
         #[arg(long)]
         workspace: Uuid,
+        /// Emit JSON instead of the human-readable summary so the
+        /// Tauri shell (and curious operators) can pipe the output
+        /// through `jq` without reparsing prose.
+        #[arg(long)]
+        json: bool,
+        /// Disk-quota the snapshot should compare cached_bytes
+        /// against, in bytes. When omitted (default), the snapshot
+        /// has no quota to compare against and `over_quota` is
+        /// always `false`. Pass the same value here that you
+        /// passed to `--disk-quota-bytes` on `run` so a monitoring
+        /// script invoking `zk-sync status --json` sees the same
+        /// `over_quota` truth the running engine would.
+        ///
+        /// This is a separate flag (not auto-discovered from the
+        /// catalogue) because the catalogue does NOT persist the
+        /// engine's runtime config -- the quota is an operator
+        /// policy, not a property of the synced data. A `status`
+        /// invocation on a host with no running engine has no
+        /// other way to learn what quota the operator intends.
+        #[arg(long)]
+        disk_quota_bytes: Option<u64>,
     },
     /// Run the long-lived sync loop until SIGINT.
     Run {
@@ -75,6 +97,45 @@ enum Cmd {
         /// Server-side page size for the catch-up cursor walk.
         #[arg(long, default_value = "500")]
         page_size: u32,
+        /// Maximum bytes the local cache may occupy. When the cache
+        /// exceeds this size the engine triggers LRU eviction on
+        /// non-pinned `UpToDate` rows. Omit to disable eviction.
+        #[arg(long)]
+        disk_quota_bytes: Option<u64>,
+    },
+    /// Mark a file for offline retention (excluded from LRU eviction).
+    Pin {
+        #[arg(long)]
+        workspace: Uuid,
+        /// Remote file id (UUID) to pin. The CLI takes the remote
+        /// id rather than the local path so an operator can pin a
+        /// file that has been evicted (no longer on disk) -- a
+        /// pin-by-path-only API would require the file to be
+        /// materialised first, defeating the purpose for a user
+        /// who knows the id from the web UI.
+        #[arg(long)]
+        file: Uuid,
+    },
+    /// Clear the offline-pin bit on a file.
+    Unpin {
+        #[arg(long)]
+        workspace: Uuid,
+        #[arg(long)]
+        file: Uuid,
+    },
+    /// Run a one-shot LRU eviction pass. Used by the Tauri tray
+    /// "Free up space" button and by `cron` setups that want to
+    /// keep the cache trimmed without running the long-lived `run`
+    /// loop.
+    Evict {
+        #[arg(long)]
+        workspace: Uuid,
+        /// Bytes the cache must be brought at or below. Use `0` to
+        /// evict every non-pinned `UpToDate` row.
+        #[arg(long)]
+        quota_bytes: u64,
+        #[arg(long)]
+        root: PathBuf,
     },
 }
 
@@ -187,8 +248,11 @@ async fn main() -> anyhow::Result<()> {
     // the workspace out of the subcommand here and surface it to the
     // catalogue opener.
     let workspace_id = match &args.cmd {
-        Cmd::Status { workspace } => *workspace,
+        Cmd::Status { workspace, .. } => *workspace,
         Cmd::Run { workspace, .. } => *workspace,
+        Cmd::Pin { workspace, .. } => *workspace,
+        Cmd::Unpin { workspace, .. } => *workspace,
+        Cmd::Evict { workspace, .. } => *workspace,
     };
     let cat = Catalogue::open(&catalogue_path, workspace_id)?;
     let catalogue = Arc::new(Mutex::new(cat));
@@ -201,19 +265,124 @@ async fn main() -> anyhow::Result<()> {
     // has lost network credentials to diagnose what the agent
     // thought the last-known state was.
     match args.cmd {
-        Cmd::Status { workspace } => {
+        Cmd::Status {
+            workspace,
+            json,
+            disk_quota_bytes,
+        } => {
             let c = catalogue.lock().await;
             let cursor = c.get_cursor(workspace)?;
-            // `list_all` is safe to report as a per-workspace count
-            // because the catalogue itself is workspace-scoped (see
-            // Catalogue::open).
-            let n = c.list_all()?.len();
-            println!("workspace={workspace} cursor={cursor} tracked_files={n}");
+            // The engine isn't running here so we can't surface a
+            // live connectivity flag; report `Unknown` instead of
+            // lying about online state. The status snapshot is
+            // otherwise authoritative (everything else comes from
+            // SQLite). The quota comes in via --disk-quota-bytes
+            // (None means: don't compute over_quota); see the flag
+            // doc on Cmd::Status for why this isn't auto-discovered.
+            let snap =
+                StatusSnapshot::from_catalogue(&c, disk_quota_bytes, ConnectivityState::Unknown)?;
+            if json {
+                // Include the cursor in a JSON envelope alongside
+                // the snapshot so tools that diff `status --json`
+                // can detect new catch-up progress.
+                let envelope = serde_json::json!({
+                    "cursor": cursor,
+                    "snapshot": snap,
+                });
+                println!("{}", serde_json::to_string_pretty(&envelope)?);
+            } else {
+                // Human-readable line mirrors the full
+                // StatusCounts struct that `--json` emits, so an
+                // operator on a remote shell diagnosing a stuck
+                // upload queue or a tombstone-leak doesn't have
+                // to rerun with `--json | jq` to see the
+                // local_deleted / remote_deleted / in_flight
+                // counters. Any future SyncStatus variant must be
+                // added here (and to the `kv()` helper below) to
+                // preserve parity with the JSON snapshot.
+                let kv = |k: &str, v: u64| format!("{k}={v}");
+                println!(
+                    "workspace={workspace} cursor={cursor} \
+                     {cached} {pinned} {up_to_date} {local_dirty} {remote_dirty} \
+                     {conflict} {evicted} {local_deleted} {remote_deleted} {in_flight} \
+                     connectivity={connectivity}",
+                    cached = kv("cached_bytes", snap.cached_bytes),
+                    pinned = kv("pinned", snap.pinned_count),
+                    up_to_date = kv("up_to_date", snap.status_counts.up_to_date),
+                    local_dirty = kv("local_dirty", snap.status_counts.local_dirty),
+                    remote_dirty = kv("remote_dirty", snap.status_counts.remote_dirty),
+                    conflict = kv("conflict", snap.status_counts.conflict),
+                    evicted = kv("evicted", snap.status_counts.evicted),
+                    local_deleted = kv("local_deleted", snap.status_counts.local_deleted),
+                    remote_deleted = kv("remote_deleted", snap.status_counts.remote_deleted),
+                    in_flight = kv("in_flight", snap.status_counts.in_flight),
+                    connectivity = match snap.connectivity {
+                        zk_sync_engine::ConnectivityStateOwned::Online => "online",
+                        zk_sync_engine::ConnectivityStateOwned::Offline => "offline",
+                        zk_sync_engine::ConnectivityStateOwned::Unknown => "unknown",
+                    },
+                );
+            }
+        }
+        Cmd::Pin { workspace: _, file } => {
+            let mut c = catalogue.lock().await;
+            match c.set_pinned(file, true)? {
+                Some(prior) => {
+                    if prior {
+                        info!(file = %file, "file was already pinned; no-op");
+                    } else {
+                        info!(file = %file, "file pinned");
+                    }
+                }
+                None => {
+                    eprintln!("file {file} is not tracked by this catalogue");
+                    std::process::exit(2);
+                }
+            }
+        }
+        Cmd::Unpin { workspace: _, file } => {
+            let mut c = catalogue.lock().await;
+            match c.set_pinned(file, false)? {
+                Some(prior) => {
+                    if !prior {
+                        info!(file = %file, "file was already unpinned; no-op");
+                    } else {
+                        info!(file = %file, "file unpinned; eligible for eviction");
+                    }
+                }
+                None => {
+                    eprintln!("file {file} is not tracked by this catalogue");
+                    std::process::exit(2);
+                }
+            }
+        }
+        Cmd::Evict {
+            workspace: _,
+            quota_bytes,
+            root,
+        } => {
+            let mut c = catalogue.lock().await;
+            let report = evict_to_quota(&mut c, &root, quota_bytes, EvictionTrigger::Manual)?;
+            println!(
+                "evicted={} reclaimed_bytes={} final_cached_bytes={} unreachable={}",
+                report.evicted_count,
+                report.bytes_reclaimed,
+                report.final_cached_bytes,
+                report.quota_unreachable,
+            );
+            if report.quota_unreachable {
+                // Surface a non-zero exit so a cron-driven run
+                // shows up in the operator's email; the agent
+                // can't free more space on its own and the user
+                // needs to either raise the quota or unpin rows.
+                std::process::exit(3);
+            }
         }
         Cmd::Run {
             workspace,
             root,
             page_size,
+            disk_quota_bytes,
         } => {
             let bearer = load_bearer(args.bearer_file.as_deref())?;
             let client = Arc::new(
@@ -236,11 +405,17 @@ async fn main() -> anyhow::Result<()> {
                 local_tx,
             )?;
 
+            // A single connectivity flag is shared between the
+            // poller (writer) and the engine (reader) so the
+            // future upload loop can back off cleanly when the
+            // network drops.
+            let online = OnlineState::new();
             let poller = RemotePoller {
                 workspace_id: workspace,
                 client: client.clone(),
                 catalogue: catalogue.clone(),
                 page_size,
+                online: online.clone(),
             };
             tokio::spawn(async move {
                 if let Err(e) = poller.run(remote_tx).await {
@@ -253,10 +428,12 @@ async fn main() -> anyhow::Result<()> {
                     workspace_id: workspace,
                     root,
                     chunk_size: None,
+                    disk_quota_bytes,
                 },
                 client,
                 catalogue,
-            );
+            )
+            .with_online(online);
             info!("zk-sync started");
             engine.run(local_rx, remote_rx).await?;
         }

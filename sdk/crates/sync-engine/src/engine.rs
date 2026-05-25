@@ -24,6 +24,11 @@ pub struct Engine {
     pub client: Arc<Client>,
     pub catalogue: Arc<Mutex<Catalogue>>,
     pub policy: Arc<dyn ConflictPolicy>,
+    /// Shared connectivity flag. The poller updates this on every
+    /// HTTP / WebSocket attempt; the engine itself reads it (for the
+    /// future uploader that needs to back off when offline) and
+    /// exposes it to the CLI / Tauri shell via [`Engine::online`].
+    pub online: crate::OnlineState,
 }
 
 #[derive(Debug, Clone)]
@@ -38,6 +43,15 @@ pub struct EngineConfig {
     /// Strict-ZK uploads. The default
     /// [`zk_sync_crypto::DEFAULT_CHUNK_SIZE`] matches the Go SDK.
     pub chunk_size: Option<usize>,
+    /// Maximum total bytes the local cache may occupy across all
+    /// non-pinned `UpToDate` rows. `None` disables eviction (the
+    /// engine treats the local disk as unbounded). The engine's
+    /// background loop runs [`crate::evict_to_quota`] whenever the
+    /// catalogue's [`Catalogue::total_cached_bytes`] exceeds this
+    /// value; pinned rows and rows in any non-`UpToDate` status are
+    /// excluded from eviction (see [`crate::eviction`] for the full
+    /// safety contract).
+    pub disk_quota_bytes: Option<u64>,
 }
 
 impl Engine {
@@ -51,12 +65,31 @@ impl Engine {
             client,
             catalogue,
             policy: Arc::new(LastWriterWins),
+            online: crate::OnlineState::new(),
         }
     }
 
     pub fn with_policy(mut self, policy: Arc<dyn ConflictPolicy>) -> Self {
         self.policy = policy;
         self
+    }
+
+    /// Re-use an existing connectivity handle. The desktop agent
+    /// constructs one [`crate::OnlineState`] and shares it across
+    /// every worker (poller, future uploader, Tauri tray polling
+    /// thread) so the user sees a single coherent connectivity
+    /// indicator.
+    pub fn with_online(mut self, online: crate::OnlineState) -> Self {
+        self.online = online;
+        self
+    }
+
+    /// Snapshot the engine's view of the world. Cheap (one SQL
+    /// aggregate query); see [`crate::StatusSnapshot`] for the
+    /// reported fields.
+    pub async fn snapshot(&self) -> Result<crate::StatusSnapshot> {
+        let cat = self.catalogue.lock().await;
+        crate::StatusSnapshot::from_catalogue(&cat, self.config.disk_quota_bytes, self.online.get())
     }
 
     /// Build a placeholder local path for a remote file we've just
@@ -111,18 +144,153 @@ pub fn tombstone_dir(root: &std::path::Path) -> PathBuf {
     root.join(TOMBSTONE_DIR_NAME)
 }
 
+/// Interval between background eviction sweeps when
+/// [`EngineConfig::disk_quota_bytes`] is set. The engine never
+/// evicts in the hot path of an event (eviction takes a write
+/// lock on the catalogue and may unlink dozens of files); it
+/// runs on this cadence so the steady-state IO is predictable.
+///
+/// 30 seconds is a compromise: short enough that a burst of
+/// downloads can't push the cache far past quota before the next
+/// sweep, long enough that the eviction overhead (a single index
+/// probe and a `SUM` query) is amortised across many events.
+/// Operators who need a different cadence can call
+/// [`crate::evict_to_quota`] directly from a custom scheduler.
+pub const EVICTION_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
+
 impl Engine {
-    /// Drive both event channels until either is closed.
+    /// Drive both event channels until either is closed. When
+    /// [`EngineConfig::disk_quota_bytes`] is set, also runs a
+    /// background eviction sweep every [`EVICTION_INTERVAL`].
+    ///
+    /// Shutdown semantics: the engine returns `Ok(())` as soon as
+    /// EITHER channel is closed. This is a deliberate departure
+    /// from the pre-PR5 contract -- the original `Some(ev) =
+    /// recv() => ...` / `else => return Ok(())` pattern only
+    /// exited when BOTH channels closed, because the `select!`
+    /// `else` arm only fires when every enabled arm produces
+    /// `None`. Two reasons motivated the change:
+    ///
+    ///   1. With `disk_quota_bytes = Some`, the eviction tick arm
+    ///      is permanently ready, so the `else` branch is
+    ///      unreachable and the engine would loop forever on
+    ///      shutdown (Devin Review R3 #1). The bug is silent and
+    ///      unbounded -- no caller is going to wait for the dead
+    ///      branch to fire.
+    ///
+    ///   2. For the production CLI flow there is no caller that
+    ///      benefits from "drain one side after the other has
+    ///      already closed". Ctrl-C closes the watcher and the
+    ///      poller together (both abort on `tokio::signal::ctrl_c`
+    ///      in `cli/src/main.rs`), and during a controlled
+    ///      disconnect the desktop shell closes both senders
+    ///      before awaiting the engine handle. The historical
+    ///      drain-then-exit path was effectively dead code.
+    ///
+    /// Result: `either-closed` is the new shutdown contract,
+    /// applied uniformly whether or not a disk quota is
+    /// configured. Tests in this file (`run_terminates_when_*`)
+    /// pin it.
     pub async fn run(
         self,
         mut local_rx: mpsc::Receiver<LocalEvent>,
         mut remote_rx: mpsc::Receiver<RemoteEvent>,
     ) -> Result<()> {
+        // The eviction ticker is only armed when a quota is
+        // configured. We always construct an `Interval` so the
+        // `select!` arm type-checks, but when the quota is None
+        // we never call `evict_to_quota` and the tick is a no-op.
+        // This avoids a separate `if let` ladder + duplicated
+        // `select!` blocks for the with/without-quota cases.
+        let mut evict_tick = tokio::time::interval(EVICTION_INTERVAL);
+        // Skip the immediate first tick that tokio fires when an
+        // interval is created -- we want the FIRST eviction to
+        // happen one interval after engine start, not at t=0
+        // (which would block event processing during catch-up).
+        evict_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        evict_tick.tick().await;
         loop {
             tokio::select! {
-                Some(ev) = local_rx.recv() => self.handle_local(ev).await?,
-                Some(ev) = remote_rx.recv() => self.handle_remote(ev).await?,
-                else => return Ok(()),
+                // Each channel arm matches the FULL `Option<...>`
+                // so a closed channel (recv returning `None`) is
+                // handled explicitly with an early return, rather
+                // than the previous `Some(ev) =` pattern which
+                // would silently drop the closure signal and let
+                // the `select!` keep polling. This is the fix for
+                // Devin Review R3 #1: with the always-ready
+                // eviction tick arm present, the `else` branch is
+                // unreachable -- the only way to signal shutdown
+                // is to return from the matched arm.
+                ev = local_rx.recv() => {
+                    let Some(ev) = ev else { return Ok(()); };
+                    self.handle_local(ev).await?;
+                }
+                ev = remote_rx.recv() => {
+                    let Some(ev) = ev else { return Ok(()); };
+                    self.handle_remote(ev).await?;
+                }
+                _ = evict_tick.tick(), if self.config.disk_quota_bytes.is_some() => {
+                    // The `if` guard on the select arm means this
+                    // arm is disabled entirely when no quota is
+                    // configured -- tokio won't even poll the
+                    // ticker. The unwrap below is therefore safe.
+                    let quota = self.config.disk_quota_bytes.expect("guard checked");
+                    let cat_for_size = self.catalogue.lock().await;
+                    let current = cat_for_size.total_cached_bytes()?;
+                    drop(cat_for_size);
+                    if current <= quota {
+                        continue;
+                    }
+                    let mut cat = self.catalogue.lock().await;
+                    match crate::evict_to_quota(
+                        &mut cat,
+                        &self.config.root,
+                        quota,
+                        crate::EvictionTrigger::QuotaExceeded,
+                    ) {
+                        Ok(report) => {
+                            if report.evicted_count > 0 {
+                                info!(
+                                    workspace = %self.config.workspace_id,
+                                    evicted = report.evicted_count,
+                                    reclaimed_bytes = report.bytes_reclaimed,
+                                    final_bytes = report.final_cached_bytes,
+                                    quota_unreachable = report.quota_unreachable,
+                                    "background eviction sweep complete",
+                                );
+                            }
+                            if report.quota_unreachable {
+                                // The cache is still over quota
+                                // but every non-pinned UpToDate
+                                // row was unreachable (typically
+                                // every byte over quota is held
+                                // by pinned content). Log once
+                                // per sweep so an operator can
+                                // notice without spamming when
+                                // the user just over-pinned.
+                                warn!(
+                                    workspace = %self.config.workspace_id,
+                                    final_bytes = report.final_cached_bytes,
+                                    quota = quota,
+                                    "background eviction left cache over quota: \
+                                     pinned content exceeds quota or every \
+                                     evictable row is locked",
+                                );
+                            }
+                        }
+                        Err(e) => {
+                            // Eviction errors are non-fatal: the
+                            // cache stays larger than the operator
+                            // wanted but the engine remains
+                            // correct. The next tick retries.
+                            warn!(
+                                workspace = %self.config.workspace_id,
+                                err = %e,
+                                "background eviction sweep failed; will retry on next tick",
+                            );
+                        }
+                    }
+                }
             }
         }
     }
@@ -226,6 +394,7 @@ impl Engine {
                     // remap it once the server assigns the real one) so
                     // the row is visible to status queries immediately.
                     let local_id = Uuid::new_v4();
+                    let now = chrono::Utc::now();
                     let rec = FileRecord {
                         remote_file_id: local_id,
                         // Zero version sentinel = "not yet uploaded".
@@ -235,7 +404,12 @@ impl Engine {
                         content_hash,
                         status: SyncStatus::LocalDirty,
                         pinned: false,
-                        updated_at: chrono::Utc::now(),
+                        updated_at: now,
+                        // A new row's last_accessed = its updated_at:
+                        // the user just created the file, so it's
+                        // both the newest write AND the newest read
+                        // by definition.
+                        last_accessed_at: now,
                     };
                     cat.upsert(&rec)?;
                     info!(
@@ -359,6 +533,7 @@ impl Engine {
                     }
                     None => {
                         let local_path = self.placeholder_path_for(m.resource_id);
+                        let now = chrono::Utc::now();
                         let rec = FileRecord {
                             remote_file_id: m.resource_id,
                             // Version id arrives on the subsequent
@@ -370,7 +545,12 @@ impl Engine {
                             content_hash: [0u8; 32],
                             status: SyncStatus::RemoteDirty,
                             pinned: false,
-                            updated_at: chrono::Utc::now(),
+                            updated_at: now,
+                            // The placeholder hasn't been read yet --
+                            // last_accessed seeds to the create time
+                            // and gets refreshed by the downloader
+                            // (PR6) when the real content arrives.
+                            last_accessed_at: now,
                         };
                         cat.upsert(&rec)?;
                         info!(
@@ -450,6 +630,7 @@ mod tests {
                 workspace_id,
                 root: tempdir.path().to_path_buf(),
                 chunk_size: None,
+                disk_quota_bytes: None,
             },
             client,
             catalogue.clone(),
@@ -656,6 +837,7 @@ mod tests {
                 status: SyncStatus::UpToDate,
                 pinned: false,
                 updated_at: Utc::now(),
+                last_accessed_at: Utc::now(),
             })
             .unwrap();
         }
@@ -705,6 +887,7 @@ mod tests {
                 status: SyncStatus::UpToDate,
                 pinned: false,
                 updated_at: Utc::now(),
+                last_accessed_at: Utc::now(),
             })
             .unwrap();
             cat.upsert(&FileRecord {
@@ -716,6 +899,7 @@ mod tests {
                 status: SyncStatus::UpToDate,
                 pinned: false,
                 updated_at: Utc::now(),
+                last_accessed_at: Utc::now(),
             })
             .unwrap();
         }
@@ -764,6 +948,7 @@ mod tests {
                 status: SyncStatus::LocalDirty,
                 pinned: false,
                 updated_at: Utc::now(),
+                last_accessed_at: Utc::now(),
             })
             .unwrap();
         }
@@ -808,6 +993,7 @@ mod tests {
                 status: SyncStatus::RemoteDirty,
                 pinned: false,
                 updated_at: Utc::now(),
+                last_accessed_at: Utc::now(),
             })
             .unwrap();
         }
@@ -954,6 +1140,7 @@ mod tests {
                 status: SyncStatus::UpToDate,
                 pinned: false,
                 updated_at: Utc::now(),
+                last_accessed_at: Utc::now(),
             })
             .unwrap();
         }
@@ -1022,6 +1209,7 @@ mod tests {
                 status: SyncStatus::UpToDate,
                 pinned: false,
                 updated_at: Utc::now(),
+                last_accessed_at: Utc::now(),
             })
             .unwrap();
         }
@@ -1054,6 +1242,7 @@ mod tests {
                 status: SyncStatus::LocalDeleted,
                 pinned: false,
                 updated_at: Utc::now(),
+                last_accessed_at: Utc::now(),
             })
             .unwrap();
         }
@@ -1104,6 +1293,7 @@ mod tests {
                 status: SyncStatus::LocalDeleted,
                 pinned: false,
                 updated_at: Utc::now(),
+                last_accessed_at: Utc::now(),
             })
             .unwrap();
         }
@@ -1153,6 +1343,7 @@ mod tests {
                 status: SyncStatus::Evicted,
                 pinned: false,
                 updated_at: Utc::now(),
+                last_accessed_at: Utc::now(),
             })
             .unwrap();
         }
@@ -1203,6 +1394,7 @@ mod tests {
                 status: SyncStatus::RemoteDeleted,
                 pinned: false,
                 updated_at: Utc::now(),
+                last_accessed_at: Utc::now(),
             })
             .unwrap();
         }
@@ -1256,6 +1448,7 @@ mod tests {
                 status: SyncStatus::UpToDate,
                 pinned: false,
                 updated_at: Utc::now(),
+                last_accessed_at: Utc::now(),
             })
             .unwrap();
         }
@@ -1302,6 +1495,7 @@ mod tests {
                 status: SyncStatus::LocalDirty,
                 pinned: false,
                 updated_at: Utc::now(),
+                last_accessed_at: Utc::now(),
             })
             .unwrap();
         }
@@ -1323,5 +1517,223 @@ mod tests {
         let cat = catalogue.lock().await;
         let rec = cat.get(file_id).unwrap().unwrap();
         assert_eq!(rec.status, SyncStatus::Conflict);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn background_eviction_fires_when_quota_exceeded() {
+        // Regression test for the doc-vs-implementation gap flagged
+        // in Devin Review R2: `EngineConfig::disk_quota_bytes`
+        // documents that the engine's background loop runs
+        // `evict_to_quota`. Assert it actually does by configuring a
+        // tight quota, seeding the catalogue over it, running the
+        // engine for one eviction interval, and checking the
+        // catalogue dropped under quota.
+        //
+        // `start_paused = true` gives us a deterministic virtual
+        // clock; `tokio::time::advance(EVICTION_INTERVAL + ...)`
+        // forces exactly one sweep without sleeping in real time.
+        let tempdir = TempDir::new().unwrap();
+        let workspace_id = Uuid::new_v4();
+        let cat = Catalogue::open(tempdir.path().join("cat.db"), workspace_id).unwrap();
+        let catalogue = Arc::new(Mutex::new(cat));
+        // Seed three 100-byte files; quota = 150 => evict 2 oldest.
+        let now = Utc::now();
+        for (i, age) in [300, 200, 100].iter().enumerate() {
+            let p = tempdir.path().join(format!("f{i}.bin"));
+            std::fs::write(&p, vec![b'x'; 100]).unwrap();
+            let rec = FileRecord {
+                remote_file_id: Uuid::new_v4(),
+                remote_version_id: Uuid::new_v4(),
+                local_path: p,
+                size_bytes: 100,
+                content_hash: [i as u8; 32],
+                status: SyncStatus::UpToDate,
+                pinned: false,
+                updated_at: now - chrono::Duration::seconds(*age),
+                last_accessed_at: now - chrono::Duration::seconds(*age),
+            };
+            catalogue.lock().await.upsert(&rec).unwrap();
+        }
+        assert_eq!(catalogue.lock().await.total_cached_bytes().unwrap(), 300);
+
+        let client = Arc::new(
+            zk_sync_api::Client::builder("https://example.com")
+                .build()
+                .unwrap(),
+        );
+        let engine = Engine::new(
+            EngineConfig {
+                workspace_id,
+                root: tempdir.path().to_path_buf(),
+                chunk_size: None,
+                disk_quota_bytes: Some(150),
+            },
+            client,
+            catalogue.clone(),
+        );
+        // Channels are wired but never sent to. The engine's run
+        // loop must reach the eviction tick on its own.
+        let (_local_tx, local_rx) = tokio::sync::mpsc::channel::<LocalEvent>(1);
+        let (_remote_tx, remote_rx) = tokio::sync::mpsc::channel::<RemoteEvent>(1);
+        let handle = tokio::spawn(async move { engine.run(local_rx, remote_rx).await });
+
+        // Sleep advances virtual time AND yields to the runtime
+        // scheduler. With `start_paused = true` the runtime
+        // auto-advances time when every task is blocked on a
+        // deadline, so the engine task's `evict_tick.tick()` will
+        // fire as part of this sleep -- not on a wall-clock 60s
+        // wait. The +5s slop is to ensure we're past one full
+        // EVICTION_INTERVAL after the initial discarded tick.
+        tokio::time::sleep(EVICTION_INTERVAL + std::time::Duration::from_secs(5)).await;
+        // Give the engine task one more cooperative yield so any
+        // work it kicked off in the tick handler (lock acquisition,
+        // unlink syscalls) can finish before we observe the
+        // catalogue.
+        for _ in 0..16 {
+            tokio::task::yield_now().await;
+        }
+
+        let bytes = catalogue.lock().await.total_cached_bytes().unwrap();
+        assert!(
+            bytes <= 150,
+            "background eviction must bring cache under quota; got {} > 150",
+            bytes
+        );
+        // Belt-and-braces: the two oldest rows must be Evicted.
+        let cat = catalogue.lock().await;
+        let evicted = cat
+            .count_by_status(SyncStatus::Evicted)
+            .expect("count_by_status");
+        assert_eq!(evicted, 2, "two oldest rows must be Evicted");
+        drop(cat);
+        handle.abort();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn run_terminates_when_local_channel_closes_with_quota_set() {
+        // Regression for Devin Review R3 #1: with disk_quota_bytes
+        // configured, the eviction tick arm is always ready, which
+        // previously masked the `else` branch and made the engine
+        // loop forever after channels closed. Assert closing
+        // local_rx causes run() to return Ok(()) within a bounded
+        // virtual-time window.
+        let tempdir = TempDir::new().unwrap();
+        let workspace_id = Uuid::new_v4();
+        let cat = Catalogue::open(tempdir.path().join("cat.db"), workspace_id).unwrap();
+        let catalogue = Arc::new(Mutex::new(cat));
+        let client = Arc::new(
+            zk_sync_api::Client::builder("https://example.com")
+                .build()
+                .unwrap(),
+        );
+        let engine = Engine::new(
+            EngineConfig {
+                workspace_id,
+                root: tempdir.path().to_path_buf(),
+                chunk_size: None,
+                disk_quota_bytes: Some(1 << 30),
+            },
+            client,
+            catalogue.clone(),
+        );
+        let (local_tx, local_rx) = tokio::sync::mpsc::channel::<LocalEvent>(1);
+        let (_remote_tx, remote_rx) = tokio::sync::mpsc::channel::<RemoteEvent>(1);
+        let handle = tokio::spawn(async move { engine.run(local_rx, remote_rx).await });
+        drop(local_tx);
+        // Bounded virtual-time wait: the engine should return as
+        // soon as the closed channel is observed. Cap at one full
+        // EVICTION_INTERVAL + slack so we don't depend on the
+        // exact poll order in `select!` but we DO catch a
+        // regression where shutdown only happens after a tick.
+        let result = tokio::time::timeout(
+            EVICTION_INTERVAL + std::time::Duration::from_secs(5),
+            handle,
+        )
+        .await
+        .expect("engine must terminate within one EVICTION_INTERVAL of channel close")
+        .expect("engine task must not panic");
+        result.expect("engine must return Ok(()) on channel close");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn run_terminates_when_remote_channel_closes_with_quota_set() {
+        // Mirror of run_terminates_when_local_channel_closes: the
+        // shell closes channels in either order depending on the
+        // shutdown path (controlled disconnect vs. abrupt restart),
+        // so both orderings must work.
+        let tempdir = TempDir::new().unwrap();
+        let (engine, _catalogue) = engine_for(&tempdir);
+        let client = Arc::new(
+            zk_sync_api::Client::builder("https://example.com")
+                .build()
+                .unwrap(),
+        );
+        let engine = Engine::new(
+            EngineConfig {
+                workspace_id: engine.config.workspace_id,
+                root: engine.config.root.clone(),
+                chunk_size: engine.config.chunk_size,
+                disk_quota_bytes: Some(1 << 30),
+            },
+            client,
+            engine.catalogue.clone(),
+        );
+        let (_local_tx, local_rx) = tokio::sync::mpsc::channel::<LocalEvent>(1);
+        let (remote_tx, remote_rx) = tokio::sync::mpsc::channel::<RemoteEvent>(1);
+        let handle = tokio::spawn(async move { engine.run(local_rx, remote_rx).await });
+        drop(remote_tx);
+        let result = tokio::time::timeout(
+            EVICTION_INTERVAL + std::time::Duration::from_secs(5),
+            handle,
+        )
+        .await
+        .expect("engine must terminate within one EVICTION_INTERVAL of channel close")
+        .expect("engine task must not panic");
+        result.expect("engine must return Ok(()) on channel close");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn background_eviction_disabled_when_no_quota() {
+        // When `disk_quota_bytes` is None the eviction arm of the
+        // select! must be disabled entirely. Seed the catalogue
+        // over what a naive evictor would consider over-quota,
+        // advance time well past one interval, and assert nothing
+        // got evicted.
+        let tempdir = TempDir::new().unwrap();
+        let (engine, catalogue) = engine_for(&tempdir);
+        let now = Utc::now();
+        let p = tempdir.path().join("f.bin");
+        std::fs::write(&p, vec![b'x'; 100]).unwrap();
+        catalogue
+            .lock()
+            .await
+            .upsert(&FileRecord {
+                remote_file_id: Uuid::new_v4(),
+                remote_version_id: Uuid::new_v4(),
+                local_path: p,
+                size_bytes: 100,
+                content_hash: [0u8; 32],
+                status: SyncStatus::UpToDate,
+                pinned: false,
+                updated_at: now,
+                last_accessed_at: now,
+            })
+            .unwrap();
+        let (_local_tx, local_rx) = tokio::sync::mpsc::channel::<LocalEvent>(1);
+        let (_remote_tx, remote_rx) = tokio::sync::mpsc::channel::<RemoteEvent>(1);
+        let handle = tokio::spawn(async move { engine.run(local_rx, remote_rx).await });
+        // Sleep past several intervals worth of virtual time; if
+        // the eviction arm were mistakenly armed it would have
+        // fired by now and we'd see Evicted rows below.
+        tokio::time::sleep(EVICTION_INTERVAL * 3).await;
+        for _ in 0..16 {
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(catalogue.lock().await.total_cached_bytes().unwrap(), 100);
+        let cat = catalogue.lock().await;
+        let evicted = cat.count_by_status(SyncStatus::Evicted).unwrap();
+        assert_eq!(evicted, 0, "no quota => no eviction");
+        drop(cat);
+        handle.abort();
     }
 }

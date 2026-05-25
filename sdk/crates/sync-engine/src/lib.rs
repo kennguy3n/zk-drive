@@ -19,20 +19,26 @@
 
 mod catalogue;
 mod conflict;
+mod connectivity;
 mod engine;
 mod events;
+mod eviction;
 mod hash;
 mod poller;
+mod status;
 mod watcher;
 
 pub use catalogue::{Catalogue, FileRecord, SyncStatus};
 pub use conflict::ConflictPolicy;
+pub use connectivity::{ConnectivityState, OnlineState};
 pub use engine::{
     placeholder_dir, tombstone_dir, Engine, EngineConfig, PLACEHOLDER_DIR_NAME, TOMBSTONE_DIR_NAME,
 };
 pub use events::{LocalEvent, RemoteEvent};
+pub use eviction::{evict_to_quota, EvictionReport, EvictionTrigger};
 pub use hash::content_hash;
 pub use poller::RemotePoller;
+pub use status::{ConnectivityStateOwned, Snapshot as StatusSnapshot, SyncStatusCounts};
 pub use watcher::Watcher;
 
 use thiserror::Error;
