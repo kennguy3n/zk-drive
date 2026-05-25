@@ -331,7 +331,24 @@ impl Engine {
     async fn handle_remote(&self, ev: RemoteEvent) -> Result<()> {
         let m = ev.mutation().clone();
         match ev {
-            RemoteEvent::FileCreated(_) | RemoteEvent::FileUpdated(_) => {
+            // All four "remote file changed in some way" variants take
+            // the same path: refresh status on existing rows; for an
+            // unknown resource_id (we missed the create -- e.g. catch-
+            // up cursor was corrupted, replica gap, or a 4xx ate the
+            // antecedent event) materialise a placeholder so the row
+            // becomes visible to the PR5 downloader instead of being
+            // silently dropped on the floor.
+            //
+            // Including FileRenamed / FileMoved in this fallback closes
+            // a defensive gap: a rename event for a file we've never
+            // seen used to be a no-op, which meant a corrupted change
+            // feed cursor could permanently lose the file. Now the
+            // engine recovers by stubbing the row and letting the
+            // downloader fetch metadata to learn the real path.
+            RemoteEvent::FileCreated(_)
+            | RemoteEvent::FileUpdated(_)
+            | RemoteEvent::FileRenamed(_)
+            | RemoteEvent::FileMoved(_) => {
                 let mut cat = self.catalogue.lock().await;
                 match cat.get(m.resource_id)? {
                     Some(existing) => {
@@ -341,11 +358,6 @@ impl Engine {
                         }
                     }
                     None => {
-                        // Brand-new remote file. Materialise a
-                        // placeholder catalogue row so the downloader
-                        // (wired in PR5) can pick it up. Dropping the
-                        // event on the floor here would mean a new
-                        // remote file never becomes visible locally.
                         let local_path = self.placeholder_path_for(m.resource_id);
                         let rec = FileRecord {
                             remote_file_id: m.resource_id,
@@ -364,7 +376,10 @@ impl Engine {
                         info!(
                             file_id = %m.resource_id,
                             name = %m.name,
-                            "new remote file registered; awaiting first download"
+                            op = %m.op,
+                            "remote file event for unknown resource id; \
+                             materialised placeholder so the downloader \
+                             can recover (likely cursor gap upstream)"
                         );
                     }
                 }
@@ -380,19 +395,15 @@ impl Engine {
                 // force it to re-stat the server for every dirty row
                 // just to disambiguate, defeating the whole point of
                 // the change feed.
+                //
+                // Unknown-resource FileDeleted is correctly a no-op:
+                // a row we never saw to begin with does not need to be
+                // unlinked locally, and we'd have nothing useful to
+                // record about it. This is the only Remote* variant
+                // that does NOT fall through to the placeholder path.
                 let mut cat = self.catalogue.lock().await;
                 if let Some(existing) = cat.get(m.resource_id)? {
                     let next = existing.status.next_on_remote_delete();
-                    if next != existing.status {
-                        cat.set_status(m.resource_id, next)?;
-                    }
-                }
-                Ok(())
-            }
-            RemoteEvent::FileRenamed(_) | RemoteEvent::FileMoved(_) => {
-                let mut cat = self.catalogue.lock().await;
-                if let Some(existing) = cat.get(m.resource_id)? {
-                    let next = existing.status.next_on_remote_change();
                     if next != existing.status {
                         cat.set_status(m.resource_id, next)?;
                     }
@@ -505,6 +516,126 @@ mod tests {
         let ra = cat.get(a).unwrap().unwrap();
         let rb = cat.get(b).unwrap().unwrap();
         assert_ne!(ra.local_path, rb.local_path);
+    }
+
+    #[tokio::test]
+    async fn file_renamed_for_unknown_resource_materialises_placeholder() {
+        // R12 #2: previously, `FileRenamed` / `FileMoved` for a
+        // resource id we'd never seen was silently dropped (no
+        // `None` arm in the match). That meant a corrupted /
+        // gapped change-feed cursor -- where the antecedent
+        // `FileCreated` was lost -- would permanently lose the
+        // file from the local view. The fix collapses Created /
+        // Updated / Renamed / Moved into the same arm so all
+        // four can materialise a placeholder for the downloader
+        // to recover.
+        let tempdir = TempDir::new().unwrap();
+        let (engine, catalogue) = engine_for(&tempdir);
+        let workspace_id = engine.config.workspace_id;
+        let file_id = Uuid::new_v4();
+        engine
+            .handle_remote(RemoteEvent::FileRenamed(Mutation {
+                sequence: 17,
+                workspace_id,
+                actor_id: None,
+                kind: "file".into(),
+                op: "rename".into(),
+                resource_id: file_id,
+                parent_id: None,
+                name: "renamed-out-of-thin-air.md".into(),
+                metadata: None,
+                occurred_at: Utc::now(),
+            }))
+            .await
+            .expect("rename of unknown file must self-heal, not panic");
+        let cat = catalogue.lock().await;
+        let rec = cat
+            .get(file_id)
+            .unwrap()
+            .expect("rename of unknown file must materialise a placeholder row");
+        assert_eq!(
+            rec.status,
+            SyncStatus::RemoteDirty,
+            "placeholder row must be marked RemoteDirty so the \
+             downloader picks it up and fetches metadata to learn \
+             the real path"
+        );
+        assert_eq!(
+            rec.remote_version_id,
+            Uuid::nil(),
+            "version id must use the zero sentinel until the first \
+             metadata fetch resolves the actual server version"
+        );
+    }
+
+    #[tokio::test]
+    async fn file_moved_for_unknown_resource_materialises_placeholder() {
+        // Companion to file_renamed_for_unknown_resource: same gap,
+        // different event kind. Locks the move-side of the R12 #2
+        // fix so a future split of FileRenamed and FileMoved into
+        // separate arms can't reintroduce the silent-drop on one of
+        // them.
+        let tempdir = TempDir::new().unwrap();
+        let (engine, catalogue) = engine_for(&tempdir);
+        let workspace_id = engine.config.workspace_id;
+        let file_id = Uuid::new_v4();
+        engine
+            .handle_remote(RemoteEvent::FileMoved(Mutation {
+                sequence: 23,
+                workspace_id,
+                actor_id: None,
+                kind: "file".into(),
+                op: "move".into(),
+                resource_id: file_id,
+                parent_id: None,
+                name: "moved-out-of-thin-air.md".into(),
+                metadata: None,
+                occurred_at: Utc::now(),
+            }))
+            .await
+            .expect("move of unknown file must self-heal, not panic");
+        let cat = catalogue.lock().await;
+        let rec = cat.get(file_id).unwrap().expect(
+            "move of unknown file must materialise a placeholder row so the downloader can recover",
+        );
+        assert_eq!(rec.status, SyncStatus::RemoteDirty);
+    }
+
+    #[tokio::test]
+    async fn file_deleted_for_unknown_resource_is_correctly_a_noop() {
+        // R12 #2: the FileDeleted handler is the only Remote* file
+        // variant that deliberately does NOT fall through to the
+        // placeholder path. A delete for a row we never saw to begin
+        // with should not materialise a stub -- there is nothing
+        // useful to record about it and no local copy to unlink.
+        // This test pins that boundary so a future "for symmetry"
+        // refactor doesn't accidentally start spawning placeholder
+        // rows for events that are inherently terminal.
+        let tempdir = TempDir::new().unwrap();
+        let (engine, catalogue) = engine_for(&tempdir);
+        let workspace_id = engine.config.workspace_id;
+        let file_id = Uuid::new_v4();
+        engine
+            .handle_remote(RemoteEvent::FileDeleted(Mutation {
+                sequence: 29,
+                workspace_id,
+                actor_id: None,
+                kind: "file".into(),
+                op: "delete".into(),
+                resource_id: file_id,
+                parent_id: None,
+                name: "never-seen.md".into(),
+                metadata: None,
+                occurred_at: Utc::now(),
+            }))
+            .await
+            .expect("delete of unknown file must be a clean no-op");
+        let cat = catalogue.lock().await;
+        assert!(
+            cat.get(file_id).unwrap().is_none(),
+            "delete of unknown file must not materialise a placeholder; \
+             there's no local copy and nothing useful to record"
+        );
     }
 
     #[tokio::test]
