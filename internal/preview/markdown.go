@@ -407,11 +407,23 @@ func nodeText(n ast.Node, source []byte) string {
 			switch tn := child.(type) {
 			case *ast.Text:
 				sb.Write(tn.Segment.Value(source))
-				if tn.SoftLineBreak() {
-					sb.WriteByte(' ')
-				}
+				// Hard line breaks take precedence over soft line
+				// breaks because goldmark sets BOTH flags on the
+				// same *ast.Text node when a hard break is present
+				// (the hard-break parser layers on top of the soft-
+				// break detection rather than replacing it). This
+				// mirrors goldmark's own HTML renderer pattern
+				// (`if HardLineBreak { ... } else if SoftLineBreak
+				// { ... }`) — two independent ifs would emit
+				// `" \n"` (trailing space before the newline) on a
+				// hard break, which is invisible in the rasteriser
+				// but technically wrong and would round-trip
+				// differently if the output were ever piped
+				// through a whitespace-significant downstream.
 				if tn.HardLineBreak() {
 					sb.WriteByte('\n')
+				} else if tn.SoftLineBreak() {
+					sb.WriteByte(' ')
 				}
 			case *ast.String:
 				sb.Write(tn.Value)
@@ -493,6 +505,18 @@ func emitCodeLines(n ast.Node, source []byte, emit func(string)) {
 // The extension AST exposes the table as Header (the first row),
 // followed by RowN children. We walk both, calling nodeText on each
 // cell to flatten its inline content.
+//
+// AST-shape resilience: goldmark v1.8.2 places TableRow nodes as
+// direct children of Table (no intermediate TableBody wrapper), but
+// future goldmark versions or alternative table renderers might
+// introduce a wrapping node (e.g. `*extast.TableBody`). To keep this
+// renderer robust to that shape change, we recursively descend into
+// any non-row block child looking for the actual TableHeader /
+// TableRow nodes — so a hypothetical Table → TableBody → TableRow
+// shape still emits all data rows rather than silently dropping the
+// table body. This is defense-in-depth; the test
+// TestWalkMarkdownAST_GFMTableEmitsTabSeparatedRows still pins the
+// current v1.8.2 shape.
 func emitTable(t *extast.Table, source []byte, emit func(string)) {
 	emitRow := func(row ast.Node) {
 		var cells []string
@@ -501,15 +525,24 @@ func emitTable(t *extast.Table, source []byte, emit func(string)) {
 		}
 		emit(strings.Join(cells, "\t"))
 	}
-	for c := t.FirstChild(); c != nil; c = c.NextSibling() {
-		switch row := c.(type) {
-		case *extast.TableHeader:
-			emitRow(row)
-			emit(strings.Repeat("-", 24))
-		case *extast.TableRow:
-			emitRow(row)
+	var walkRows func(n ast.Node)
+	walkRows = func(n ast.Node) {
+		for c := n.FirstChild(); c != nil; c = c.NextSibling() {
+			switch row := c.(type) {
+			case *extast.TableHeader:
+				emitRow(row)
+				emit(strings.Repeat("-", 24))
+			case *extast.TableRow:
+				emitRow(row)
+			default:
+				// Non-row block (potential TableBody-style
+				// wrapper in a future goldmark version) —
+				// recurse so we don't lose its rows.
+				walkRows(c)
+			}
 		}
 	}
+	walkRows(t)
 }
 
 // formatOrdinal returns a string ordinal index for a list item. It's
