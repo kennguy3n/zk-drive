@@ -296,18 +296,78 @@ func (h *DocumentHub) RoomSize(documentID uuid.UUID) int {
 
 // SendSnapshot pushes the cold-start bundle (snapshot + tail
 // deltas, length-prefix framed) to a single client as a
-// SyncStepUpdates frame. Called by the HTTP upgrade path after
-// Register so the joining editor can rebuild its Y.Doc immediately
-// without an extra HTTP round-trip.
+// SyncStepUpdates frame. Used by tests and any path that needs to
+// deliver a snapshot to an already-registered client.
+//
+// IMPORTANT: do NOT use this on the WS upgrade path — by the time
+// SendSnapshot runs, the client is already visible to peer
+// broadcastExcept calls, which can wedge a SyncUpdate ahead of the
+// snapshot in the client's outbound FIFO. The upgrade path must
+// use RegisterWithSnapshot, which atomically enqueues the snapshot
+// AND inserts the client into the room under the same lock so the
+// "snapshot first" invariant holds.
 //
 // The hub does NOT call documents.Snapshot itself: the HTTP layer
 // fetches the bundle (so a snapshot read error surfaces during the
 // upgrade handshake as a clean 5xx instead of a half-open WS
 // connection). This function just frames + delivers the bytes.
 func (h *DocumentHub) SendSnapshot(c *DocumentClient, yState []byte, tail [][]byte) {
-	bundle := AssembleSnapshotBundle(yState, tail)
-	frame := EncodeSyncStepUpdates(bundle)
+	frame := encodeSnapshotFrame(yState, tail)
 	h.deliverTo(c, frame)
+}
+
+// encodeSnapshotFrame builds a SyncStepUpdates frame containing a
+// length-prefix bundle of (y_state, tail[0], tail[1], ...). Pure
+// function; safe to call from any goroutine.
+func encodeSnapshotFrame(yState []byte, tail [][]byte) []byte {
+	bundle := AssembleSnapshotBundle(yState, tail)
+	return EncodeSyncStepUpdates(bundle)
+}
+
+// RegisterWithSnapshot atomically inserts c into its document's
+// room AND enqueues the cold-open snapshot frame into c.send
+// under the same critical section. This is the only correct way
+// to join a new client to an active room — using Register
+// followed by SendSnapshot opens a race window where a concurrent
+// broadcastExcept from a peer can wedge a SyncUpdate into c.send
+// BEFORE the snapshot, violating the FIFO contract the client
+// relies on (the snapshot establishes the Y.Doc baseline that
+// every subsequent update is applied against).
+//
+// Lock ordering: h.mu.Lock → r.mu.Lock. The enqueue happens while
+// r.mu.Lock is held, BEFORE r.clients[c] = {} makes the client a
+// broadcast target. Any concurrent broadcastExcept must wait on
+// r.mu.RLock, by which point the snapshot is already in c.send
+// and the client's insertion has been published.
+//
+// The enqueue is non-blocking; c.send is freshly allocated with
+// ClientSendBufferSize capacity (128), so a single frame can
+// never block. If it somehow did (defensive only), we log and
+// continue — the client will see an empty initial state and the
+// next peer update / Y.Doc reconciliation will repair it.
+func (h *DocumentHub) RegisterWithSnapshot(c *DocumentClient, yState []byte, tail [][]byte) {
+	frame := encodeSnapshotFrame(yState, tail)
+	c.hub = h
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	r, ok := h.rooms[c.DocumentID]
+	if !ok {
+		r = newRoom()
+		h.rooms[c.DocumentID] = r
+	}
+	r.mu.Lock()
+	// Enqueue snapshot FIRST, then insert into the room. Both
+	// happen under r.mu.Lock so no broadcastExcept can interleave.
+	select {
+	case c.send <- frame:
+	default:
+		// c.send has capacity ClientSendBufferSize and is freshly
+		// created, so this should be unreachable in production.
+		// Log defensively rather than blocking the lock holder.
+		c.logger.Warn("collab: snapshot enqueue dropped on registration; buffer unexpectedly full")
+	}
+	r.clients[c] = struct{}{}
+	r.mu.Unlock()
 }
 
 // ErrCollabDisabled is returned by Handle when an inbound frame

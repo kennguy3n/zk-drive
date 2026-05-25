@@ -166,7 +166,6 @@ func (h *Handler) ServeDocumentCollab(w http.ResponseWriter, r *http.Request) {
 		canWrite,
 		collab.FromDocumentCapability(document.ResolveCapability(parent.EncryptionMode)),
 	)
-	h.collab.Register(client)
 
 	// Push the snapshot bundle BEFORE any other frame so the
 	// client's Y.Doc is initialized before it sees peer updates.
@@ -175,7 +174,14 @@ func (h *Handler) ServeDocumentCollab(w http.ResponseWriter, r *http.Request) {
 	for _, d := range snap.TailDeltas {
 		tailPayloads = append(tailPayloads, d.Payload)
 	}
-	h.collab.SendSnapshot(client, snap.Document.YState, tailPayloads)
+	// RegisterWithSnapshot atomically enqueues the snapshot frame
+	// AND inserts the client into the room under the same lock,
+	// guaranteeing the snapshot is the first frame in client.send
+	// even if peers are concurrently broadcasting updates. Using
+	// separate Register + SendSnapshot would open a race window
+	// where a peer's SyncUpdate could land in the FIFO ahead of
+	// the snapshot, breaking the Y.Doc baseline contract.
+	h.collab.RegisterWithSnapshot(client, snap.Document.YState, tailPayloads)
 
 	logger := slog.Default().With(
 		"subsystem", "collab",

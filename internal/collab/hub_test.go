@@ -397,6 +397,67 @@ func TestHub_SendSnapshot_DeliversBundle(t *testing.T) {
 	}
 }
 
+// TestHub_RegisterWithSnapshot_SnapshotFirst pins the invariant
+// that the snapshot frame is the first frame in c.send even when
+// a peer broadcasts an update racing against the new client's
+// registration. We register an originator first, then concurrently
+// (a) start a goroutine that pushes an update from the originator,
+// and (b) call RegisterWithSnapshot for the joining client. After
+// both complete we drain c.send and assert the FIRST frame is the
+// sync-step-updates snapshot, not a sync-update from the peer.
+func TestHub_RegisterWithSnapshot_SnapshotFirst(t *testing.T) {
+	docID := uuid.New()
+	svc, repo := newServiceWithStubs(t, docID, folder.EncryptionManagedEncrypted)
+	hub := NewDocumentHub(svc)
+
+	originator := NewClient(uuid.New(), uuid.New(), docID, true, Capability{PresenceAllowed: true, ServerSnapshotAllowed: true})
+	originator.WorkspaceID = uuid.New()
+	repo.metadata[docID].WorkspaceID = originator.WorkspaceID
+	hub.Register(originator)
+	// Drain the originator's queue so we don't confuse our peer
+	// frame with anything else.
+	drainSend(originator)
+
+	joiner := NewClient(uuid.New(), uuid.New(), docID, true, Capability{PresenceAllowed: true, ServerSnapshotAllowed: true})
+	joiner.WorkspaceID = originator.WorkspaceID
+
+	// Run RegisterWithSnapshot and the peer broadcast concurrently
+	// to stress the ordering invariant. Repeat many iterations
+	// across goroutines wouldn't help here — the invariant must
+	// hold deterministically per-call, not statistically.
+	state := []byte("BASELINE")
+	tail := [][]byte{[]byte("D1")}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_ = hub.Handle(context.Background(), originator, Frame{Type: MessageSync, SubType: SyncUpdate, Payload: []byte("peer-update")})
+	}()
+	hub.RegisterWithSnapshot(joiner, state, tail)
+	<-done
+
+	// First frame in joiner.send MUST be the snapshot
+	// (sync-step-updates), regardless of whether the peer
+	// broadcast landed before or after registration.
+	select {
+	case first := <-joiner.Send():
+		if first[0] != MessageSync || first[1] != SyncStepUpdates {
+			t.Fatalf("first frame in joiner.send must be sync-step-updates, got %d/%d", first[0], first[1])
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("no frame in joiner.send within 2s")
+	}
+}
+
+func drainSend(c *DocumentClient) {
+	for {
+		select {
+		case <-c.Send():
+		default:
+			return
+		}
+	}
+}
+
 func TestHub_SlowConsumer_Dropped(t *testing.T) {
 	docID := uuid.New()
 	svc, _ := newServiceWithStubs(t, docID, folder.EncryptionManagedEncrypted)
