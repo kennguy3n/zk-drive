@@ -50,9 +50,10 @@ type fakeRepo struct {
 	replaceSnapshotDoc  *Document
 	replaceSnapshotErr  error
 	replaceSnapshotArgs struct {
-		yState         []byte
-		yStateVector   []byte
-		upToSeq        int64
+		yState                  []byte
+		yStateVector            []byte
+		upToSeq                 int64
+		expectedSnapshotVersion int64
 	}
 }
 
@@ -129,13 +130,14 @@ func (r *fakeRepo) CountDeltasAfter(_ context.Context, _, _ uuid.UUID, _ int64) 
 	return r.countDeltasAfter, r.countDeltasAfterErr
 }
 
-func (r *fakeRepo) ReplaceSnapshot(_ context.Context, _, _ uuid.UUID, yState, yStateVector []byte, upToSeq int64) (*Document, error) {
+func (r *fakeRepo) ReplaceSnapshot(_ context.Context, _, _ uuid.UUID, yState, yStateVector []byte, upToSeq int64, expectedSnapshotVersion int64) (*Document, error) {
 	if r.replaceSnapshotErr != nil {
 		return nil, r.replaceSnapshotErr
 	}
 	r.replaceSnapshotArgs.yState = yState
 	r.replaceSnapshotArgs.yStateVector = yStateVector
 	r.replaceSnapshotArgs.upToSeq = upToSeq
+	r.replaceSnapshotArgs.expectedSnapshotVersion = expectedSnapshotVersion
 	return r.replaceSnapshotDoc, nil
 }
 
@@ -528,5 +530,67 @@ func TestService_Compact_NoTailIsNoOp(t *testing.T) {
 	}
 	if got != existing {
 		t.Fatalf("Compact should return the existing document unchanged when tail is empty")
+	}
+}
+
+// TestService_Compact_PassesObservedSnapshotVersion verifies the
+// optimistic-concurrency contract: Compact must forward the
+// snapshot_version it observed (via GetSnapshotBundle) to
+// ReplaceSnapshot so a concurrent compaction can be detected.
+// Without this, two folds racing against the same starting state
+// could both write — second writer would silently regress the
+// snapshot to a state missing the deltas the first writer folded.
+func TestService_Compact_PassesObservedSnapshotVersion(t *testing.T) {
+	t.Parallel()
+	svc, repo, parent := newServiceFixture(t, folder.EncryptionManagedEncrypted)
+	docID := uuid.New()
+	repo.docs = map[uuid.UUID]*Document{docID: {
+		ID:              docID,
+		WorkspaceID:     parent.WorkspaceID,
+		FolderID:        parent.ID,
+		YStateSeqFloor:  42,
+		SnapshotVersion: 7,
+	}}
+	repo.listDeltas = []*Delta{{DocumentID: docID, Seq: 43, Payload: []byte{1}}}
+	repo.replaceSnapshotDoc = &Document{
+		ID:              docID,
+		WorkspaceID:     parent.WorkspaceID,
+		FolderID:        parent.ID,
+		YStateSeqFloor:  43,
+		SnapshotVersion: 8,
+	}
+
+	if _, err := svc.Compact(context.Background(), parent.WorkspaceID, docID, func(_, _ []byte, _ []*Delta) ([]byte, []byte, int64, error) {
+		return []byte("snap"), []byte("vec"), 43, nil
+	}); err != nil {
+		t.Fatalf("Compact: %v", err)
+	}
+	if got := repo.replaceSnapshotArgs.expectedSnapshotVersion; got != 7 {
+		t.Fatalf("expected ReplaceSnapshot to receive expectedSnapshotVersion=7, got %d", got)
+	}
+}
+
+// TestService_Compact_SurfacesSnapshotVersionConflict ensures a
+// repo-level conflict propagates as ErrSnapshotVersionConflict so
+// the caller (P2b WS provider) can re-read + retry.
+func TestService_Compact_SurfacesSnapshotVersionConflict(t *testing.T) {
+	t.Parallel()
+	svc, repo, parent := newServiceFixture(t, folder.EncryptionManagedEncrypted)
+	docID := uuid.New()
+	repo.docs = map[uuid.UUID]*Document{docID: {
+		ID:              docID,
+		WorkspaceID:     parent.WorkspaceID,
+		FolderID:        parent.ID,
+		YStateSeqFloor:  42,
+		SnapshotVersion: 7,
+	}}
+	repo.listDeltas = []*Delta{{DocumentID: docID, Seq: 43, Payload: []byte{1}}}
+	repo.replaceSnapshotErr = ErrSnapshotVersionConflict
+
+	_, err := svc.Compact(context.Background(), parent.WorkspaceID, docID, func(_, _ []byte, _ []*Delta) ([]byte, []byte, int64, error) {
+		return []byte("snap"), []byte("vec"), 43, nil
+	})
+	if !errors.Is(err, ErrSnapshotVersionConflict) {
+		t.Fatalf("expected ErrSnapshotVersionConflict, got %v", err)
 	}
 }

@@ -50,7 +50,16 @@ type Repository interface {
 	// observer either sees (snapshot vN, deltas seq > floorN) or
 	// (snapshot vN+1, deltas seq > floorN+1) but never a torn
 	// state. Returns the updated Document.
-	ReplaceSnapshot(ctx context.Context, workspaceID, documentID uuid.UUID, yState, yStateVector []byte, upToSeq int64) (*Document, error)
+	//
+	// expectedSnapshotVersion is the snapshot_version observed at the
+	// start of the caller's read (typically via GetSnapshotBundle).
+	// If the current row's snapshot_version no longer matches — i.e.
+	// a concurrent Compact landed between the caller's read and its
+	// write — the call fails with ErrSnapshotVersionConflict so the
+	// caller can re-read + re-fold rather than write a fold computed
+	// against stale state. Pass 0 to skip the optimistic-concurrency
+	// check (e.g. initialisation paths that have no prior read).
+	ReplaceSnapshot(ctx context.Context, workspaceID, documentID uuid.UUID, yState, yStateVector []byte, upToSeq int64, expectedSnapshotVersion int64) (*Document, error)
 
 	// GetSnapshotBundle reads the document row AND its tail deltas
 	// (seq > y_state_seq_floor) in a single REPEATABLE READ
@@ -75,11 +84,35 @@ func NewPostgresRepository(pool *pgxpool.Pool) *PostgresRepository {
 
 const documentColumns = "id, workspace_id, folder_id, name, collab_mode, y_state, y_state_vector, y_state_seq_floor, snapshot_version, created_by, created_at, updated_at, deleted_at"
 
+// documentListColumns is documentColumns minus the (potentially large)
+// binary Yjs blobs. Used by list endpoints where the response struct
+// hides those fields anyway — selecting them would burn Postgres I/O
+// and Go heap for nothing. A scanned row's YState / YStateVector are
+// left nil; consumers that need them must call GetByID / Snapshot.
+const documentListColumns = "id, workspace_id, folder_id, name, collab_mode, y_state_seq_floor, snapshot_version, created_by, created_at, updated_at, deleted_at"
+
 func scanDocument(row pgx.Row) (*Document, error) {
 	d := &Document{}
 	if err := row.Scan(
 		&d.ID, &d.WorkspaceID, &d.FolderID, &d.Name, &d.CollabMode,
 		&d.YState, &d.YStateVector, &d.YStateSeqFloor, &d.SnapshotVersion,
+		&d.CreatedBy, &d.CreatedAt, &d.UpdatedAt, &d.DeletedAt,
+	); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, ErrNotFound
+		}
+		return nil, err
+	}
+	return d, nil
+}
+
+// scanDocumentListItem is the binary-free companion to scanDocument.
+// YState / YStateVector are left as nil byte slices.
+func scanDocumentListItem(row pgx.Row) (*Document, error) {
+	d := &Document{}
+	if err := row.Scan(
+		&d.ID, &d.WorkspaceID, &d.FolderID, &d.Name, &d.CollabMode,
+		&d.YStateSeqFloor, &d.SnapshotVersion,
 		&d.CreatedBy, &d.CreatedAt, &d.UpdatedAt, &d.DeletedAt,
 	); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -163,10 +196,13 @@ UPDATE documents
 // ordered by most-recently-updated first (matches the UI's
 // document-list panel default sort). Capped at MaxDocumentsPerFolder
 // so a pathological folder cannot slow-list the whole table — the
-// UI paginates well below this in normal operation.
+// UI paginates well below this in normal operation. Uses
+// documentListColumns to skip the (potentially MB-scale) Yjs binary
+// blobs since the API response struct hides them anyway; callers
+// who need YState must round-trip via GetByID / Snapshot.
 func (r *PostgresRepository) ListByFolder(ctx context.Context, workspaceID, folderID uuid.UUID) ([]*Document, error) {
 	q := `
-SELECT ` + documentColumns + `
+SELECT ` + documentListColumns + `
   FROM documents
  WHERE workspace_id = $1 AND folder_id = $2 AND deleted_at IS NULL
  ORDER BY updated_at DESC
@@ -179,7 +215,7 @@ SELECT ` + documentColumns + `
 
 	var out []*Document
 	for rows.Next() {
-		d, err := scanDocument(rows)
+		d, err := scanDocumentListItem(rows)
 		if err != nil {
 			return nil, err
 		}
@@ -259,8 +295,8 @@ func (r *PostgresRepository) ListDeltas(ctx context.Context, workspaceID, docume
 	if limit <= 0 {
 		limit = 100
 	}
-	if limit > 1000 {
-		limit = 1000
+	if limit > MaxDeltaListLimit {
+		limit = MaxDeltaListLimit
 	}
 	const q = `
 SELECT document_id, seq, payload, author_user_id, created_at, workspace_id
@@ -307,13 +343,19 @@ SELECT COUNT(*)
 // folded deltas — a concurrent AppendDelta would otherwise be able
 // to insert a delta with seq <= upToSeq between our compute and
 // our DELETE.
-func (r *PostgresRepository) ReplaceSnapshot(ctx context.Context, workspaceID, documentID uuid.UUID, yState, yStateVector []byte, upToSeq int64) (*Document, error) {
+func (r *PostgresRepository) ReplaceSnapshot(ctx context.Context, workspaceID, documentID uuid.UUID, yState, yStateVector []byte, upToSeq int64, expectedSnapshotVersion int64) (*Document, error) {
 	tx, err := r.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.Serializable})
 	if err != nil {
 		return nil, fmt.Errorf("begin compaction tx: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
+	// Optimistic concurrency: only update if snapshot_version is what
+	// the caller observed. expectedSnapshotVersion=0 opts out (used by
+	// init paths that never read a prior snapshot). When a concurrent
+	// Compact has bumped snapshot_version, the UPDATE matches zero
+	// rows, RETURNING reports ErrNoRows, and we map it to
+	// ErrSnapshotVersionConflict so the caller can re-read + retry.
 	q := `
 UPDATE documents
    SET y_state = $3,
@@ -322,9 +364,23 @@ UPDATE documents
        snapshot_version = snapshot_version + 1,
        updated_at = NOW()
  WHERE workspace_id = $1 AND id = $2 AND deleted_at IS NULL
+   AND ($6 = 0 OR snapshot_version = $6)
 RETURNING ` + documentColumns
-	d, err := scanDocument(tx.QueryRow(ctx, q, workspaceID, documentID, yState, yStateVector, upToSeq))
+	d, err := scanDocument(tx.QueryRow(ctx, q, workspaceID, documentID, yState, yStateVector, upToSeq, expectedSnapshotVersion))
 	if err != nil {
+		if errors.Is(err, ErrNotFound) && expectedSnapshotVersion != 0 {
+			// Disambiguate "row gone" from "version mismatch" — if the
+			// caller supplied a non-zero expected version and the
+			// row exists but with a different version, surface
+			// ErrSnapshotVersionConflict. Quick existence probe.
+			var exists bool
+			if probeErr := tx.QueryRow(ctx,
+				`SELECT EXISTS(SELECT 1 FROM documents WHERE workspace_id = $1 AND id = $2 AND deleted_at IS NULL)`,
+				workspaceID, documentID,
+			).Scan(&exists); probeErr == nil && exists {
+				return nil, ErrSnapshotVersionConflict
+			}
+		}
 		return nil, err
 	}
 

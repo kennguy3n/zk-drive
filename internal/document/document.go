@@ -119,7 +119,23 @@ const MaxNameBytes = 512
 // gets the same effective limit it asks for — the HTTP handler
 // clamps to this value and echoes the clamped result back, so the
 // `len(deltas) < limit` paging idiom remains reliable.
+//
+// INVARIANT: MaxDeltaPageLimit + 1 < MaxDeltaListLimit. The HTTP
+// handler probes one row beyond `limit` to populate `has_more`, so
+// the repo's internal cap must be strictly larger than the largest
+// probe to avoid silently truncating the probe (which would make
+// has_more=false incorrectly when more rows exist). Enforced by
+// TestDeltaListLimits_HandlerProbeFitsInRepoCap.
 const MaxDeltaPageLimit = 500
+
+// MaxDeltaListLimit is the repository's hard cap on a single
+// ListDeltas call. Exported so callers (and tests) can reason
+// about the worst-case query bound directly instead of inferring it
+// from a private constant. Sized comfortably above
+// MaxDeltaPageLimit + 1 (the handler's `has_more` probe) and above
+// MaxSnapshotTailDeltas (the snapshot bundle tail size) so neither
+// caller's intent is silently truncated by the repo's defensive cap.
+const MaxDeltaListLimit = 1000
 
 // MaxDocumentsPerFolder caps the per-folder list result. Documents
 // per folder are bounded in normal UX (the document panel paginates
@@ -137,4 +153,13 @@ var (
 	ErrPayloadTooLarge    = errors.New("delta payload too large")
 	ErrEmptyPayload       = errors.New("delta payload empty")
 	ErrSeqConflict        = errors.New("delta seq conflict; concurrent writer")
+	// ErrSnapshotVersionConflict is returned by ReplaceSnapshot when the
+	// caller's expected snapshot_version no longer matches the row's
+	// current snapshot_version, meaning a concurrent Compact landed
+	// between the caller's read of the document + tail and its attempt
+	// to write the fold. Callers should re-read via GetSnapshotBundle
+	// and retry the fold from scratch (the rows the previous fold
+	// folded have already been trimmed by the winning Compact, so
+	// re-running on the fresh state cannot regress the snapshot).
+	ErrSnapshotVersionConflict = errors.New("snapshot version conflict; concurrent compaction landed")
 )

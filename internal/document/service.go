@@ -281,12 +281,16 @@ type FoldFunc func(currentState, currentStateVector []byte, tail []*Delta) (newS
 // Compact runs the fold and atomically swaps the snapshot. Returns
 // the updated Document. Idempotent: re-running with an empty tail
 // is a no-op (returns the existing document unchanged).
+//
+// The read (doc + tail) happens inside a single REPEATABLE READ tx
+// via GetSnapshotBundle so a concurrent Compact cannot tear what
+// the fold sees, AND the write uses snapshot_version optimistic
+// concurrency so two folds racing against the same starting state
+// produce exactly one winner — the loser gets
+// ErrSnapshotVersionConflict and can retry against the now-trimmed
+// fresh tail.
 func (s *Service) Compact(ctx context.Context, workspaceID, documentID uuid.UUID, fold FoldFunc) (*Document, error) {
-	d, err := s.repo.GetByID(ctx, workspaceID, documentID)
-	if err != nil {
-		return nil, err
-	}
-	tail, err := s.repo.ListDeltas(ctx, workspaceID, documentID, d.YStateSeqFloor, MaxSnapshotTailDeltas)
+	d, tail, err := s.repo.GetSnapshotBundle(ctx, workspaceID, documentID, MaxSnapshotTailDeltas)
 	if err != nil {
 		return nil, err
 	}
@@ -303,7 +307,7 @@ func (s *Service) Compact(ctx context.Context, workspaceID, documentID uuid.UUID
 		// caller can log + retry.
 		return nil, errors.New("compaction fold returned non-progressing upToSeq")
 	}
-	return s.repo.ReplaceSnapshot(ctx, workspaceID, documentID, newState, newStateVector, upToSeq)
+	return s.repo.ReplaceSnapshot(ctx, workspaceID, documentID, newState, newStateVector, upToSeq, d.SnapshotVersion)
 }
 
 // MaxSnapshotTailDeltas caps the number of tail deltas returned by
