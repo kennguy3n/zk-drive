@@ -24,6 +24,8 @@ import (
 	"github.com/kennguy3n/zk-drive/internal/activity"
 	"github.com/kennguy3n/zk-drive/internal/audit"
 	"github.com/kennguy3n/zk-drive/internal/billing"
+	"github.com/kennguy3n/zk-drive/internal/changefeed"
+	"github.com/kennguy3n/zk-drive/internal/email"
 	"github.com/kennguy3n/zk-drive/internal/file"
 	"github.com/kennguy3n/zk-drive/internal/folder"
 	"github.com/kennguy3n/zk-drive/internal/jobs"
@@ -32,7 +34,6 @@ import (
 	"github.com/kennguy3n/zk-drive/internal/preview"
 	"github.com/kennguy3n/zk-drive/internal/search"
 	"github.com/kennguy3n/zk-drive/internal/sharing"
-	"github.com/kennguy3n/zk-drive/internal/email"
 	"github.com/kennguy3n/zk-drive/internal/storage"
 	"github.com/kennguy3n/zk-drive/internal/user"
 	"github.com/kennguy3n/zk-drive/internal/webhooks"
@@ -55,6 +56,7 @@ type Handler struct {
 	storageFactory *storage.ClientFactory
 	permissions    *permission.Service
 	activity       *activity.Service
+	changefeed     *changefeed.Service
 	sharing        *sharing.Service
 	search         *search.Service
 	clientRooms    *sharing.ClientRoomService
@@ -198,6 +200,16 @@ func (h *Handler) WithPreviews(r preview.Repository) *Handler {
 	return h
 }
 
+// WithChangefeed wires the change-feed service. When non-nil every
+// state-mutating logActivity call also records a durable Mutation
+// and broadcasts it workspace-wide for the desktop sync SDK. A nil
+// service silently disables the mirror so tests that don't care
+// about sync keep working unchanged.
+func (h *Handler) WithChangefeed(s *changefeed.Service) *Handler {
+	h.changefeed = s
+	return h
+}
+
 // WithStorageFactory wires a per-workspace storage client factory.
 // When set, presigned-URL handlers prefer the factory's per-workspace
 // client (resolved from workspace_storage_credentials) and fall back
@@ -238,13 +250,310 @@ func (h *Handler) notify(ctx context.Context, fn func(*notification.Service) err
 
 // logActivity is a nil-safe wrapper so callers don't need to null-check
 // every call-site. metadata may be nil.
+//
+// The activity log and the change feed are independently optional:
+// each is gated on its own service being wired, so a deployment can
+// enable one without the other. When the change feed is wired the
+// activity entry is mirrored to change_log for state-mutation
+// actions (file/folder create/rename/move/delete, file upload, tag
+// add/remove, permission grant/revoke). Pure-read actions
+// (file.download, file.bulk.download) are skipped — they do not
+// affect any client's reconciled state. The mirror is synchronous
+// so the durable cursor advances before the HTTP response, but a
+// failure is logged and swallowed (the activity entry is still
+// enqueued, the parent HTTP request still succeeds).
 func (h *Handler) logActivity(ctx context.Context, action, resourceType string, resourceID uuid.UUID, metadata map[string]any) {
+	workspaceID, _ := middleware.WorkspaceIDFromContext(ctx)
+	userID, _ := middleware.UserIDFromContext(ctx)
+	if h.activity != nil {
+		h.activity.LogAction(ctx, workspaceID, userID, action, resourceType, resourceID, metadata)
+	}
+	h.recordChange(ctx, workspaceID, userID, action, resourceType, resourceID, metadata)
+}
+
+// logActivityOnly mirrors logActivity but skips the change-feed leg.
+// Bulk handlers (api/drive/bulk.go) use this in their per-item loop
+// and call h.batchRecordChanges once at the end with the collected
+// inputs, so a 100-item bulk operation produces a single multi-row
+// change_log INSERT instead of 100 sequential ones. The activity
+// log is unaffected — it is already async (LogAction enqueues onto
+// a buffered channel) so per-item dispatch is cheap.
+//
+// CONTRACT for new bulk handlers: pair every logActivityOnly call
+// inside the loop with a single batchRecordChanges call after the
+// loop. Forgetting the second half silently drops the bulk
+// operation from the sync feed even though the activity log
+// records it. The opposite shape (one logActivity per item + no
+// batchRecord) also works but throws away the amortisation; only
+// use it for non-bulk paths.
+func (h *Handler) logActivityOnly(ctx context.Context, action, resourceType string, resourceID uuid.UUID, metadata map[string]any) {
 	if h.activity == nil {
 		return
 	}
 	workspaceID, _ := middleware.WorkspaceIDFromContext(ctx)
 	userID, _ := middleware.UserIDFromContext(ctx)
 	h.activity.LogAction(ctx, workspaceID, userID, action, resourceType, resourceID, metadata)
+}
+
+// recordChange translates an activity action into a changefeed
+// Mutation when the action is a state mutation. Skips read-only
+// actions and short-circuits when the changefeed service is not
+// wired. Errors are logged and swallowed — the change feed mirror
+// is a best-effort overlay on top of the durable activity log, and
+// a transient Postgres write failure here must not bubble up and
+// fail the parent HTTP request.
+func (h *Handler) recordChange(
+	ctx context.Context,
+	workspaceID, userID uuid.UUID,
+	action, resourceType string,
+	resourceID uuid.UUID,
+	metadata map[string]any,
+) {
+	if h.changefeed == nil {
+		return
+	}
+	if workspaceID == uuid.Nil || resourceID == uuid.Nil {
+		return
+	}
+	kind, op, ok := changefeedKindOpFor(action, resourceType)
+	if !ok {
+		return
+	}
+	in := buildChangefeedInput(workspaceID, userID, kind, op, resourceID, metadata)
+	if _, err := h.changefeed.Record(ctx, in); err != nil {
+		logging.FromContext(ctx).Error("changefeed record failed; activity still enqueued",
+			"action", action,
+			"resource_type", resourceType,
+			"resource_id", resourceID,
+			"err", err,
+		)
+	}
+}
+
+// changeInput is the per-item payload a bulk handler accumulates
+// inside its loop. The handler hands a slice of these to
+// batchRecordChanges after the loop completes, and the changefeed
+// service flushes them in a single multi-row INSERT.
+type changeInput struct {
+	Action       string
+	ResourceType string
+	ResourceID   uuid.UUID
+	Metadata     map[string]any
+}
+
+// batchRecordChanges flushes a slice of per-item change inputs to
+// the change feed in a single batch. Used by bulk handlers (move,
+// copy, delete, download enumeration that mutates) to amortise the
+// Postgres round-trip cost across an N-item operation. Read-only
+// actions and actions that don't map to a change-feed kind/op are
+// silently skipped here just like the per-item recordChange path.
+func (h *Handler) batchRecordChanges(ctx context.Context, items []changeInput) {
+	if h.changefeed == nil || len(items) == 0 {
+		return
+	}
+	workspaceID, _ := middleware.WorkspaceIDFromContext(ctx)
+	userID, _ := middleware.UserIDFromContext(ctx)
+	if workspaceID == uuid.Nil {
+		return
+	}
+	inputs := make([]changefeed.RecordInput, 0, len(items))
+	for _, it := range items {
+		if it.ResourceID == uuid.Nil {
+			continue
+		}
+		kind, op, ok := changefeedKindOpFor(it.Action, it.ResourceType)
+		if !ok {
+			continue
+		}
+		inputs = append(inputs, buildChangefeedInput(workspaceID, userID, kind, op, it.ResourceID, it.Metadata))
+	}
+	if len(inputs) == 0 {
+		return
+	}
+	if _, err := h.changefeed.BatchRecord(ctx, inputs); err != nil {
+		logging.FromContext(ctx).Error("changefeed batch record failed",
+			"count", len(inputs),
+			"err", err,
+		)
+	}
+}
+
+// buildChangefeedInput is the shared builder used by both the
+// per-item recordChange path and the bulk batchRecordChanges path.
+// It lifts parent_id / name out of the activity metadata into
+// dedicated columns and strips those keys from the metadata blob so
+// the lifted value is not stored twice per row. Sync clients get
+// the structured field; the original free-form metadata still
+// flows through but minus the duplicated keys.
+func buildChangefeedInput(
+	workspaceID, userID uuid.UUID,
+	kind, op string,
+	resourceID uuid.UUID,
+	metadata map[string]any,
+) changefeed.RecordInput {
+	in := changefeed.RecordInput{
+		WorkspaceID: workspaceID,
+		Kind:        kind,
+		Op:          op,
+		ResourceID:  resourceID,
+	}
+	if userID != uuid.Nil {
+		actor := userID
+		in.ActorID = &actor
+	}
+	// parentKeys is the (canonical) list of metadata keys whose
+	// value is the resource's parent folder. "target" is the legacy
+	// bulk-move convention used by BulkMove; the others come from
+	// the single-file paths (file.go, folder.go). All are stripped
+	// from the metadata blob (whether or not a value was lifted)
+	// so the wire format is consistent across root vs. non-root
+	// creates and single vs. bulk operations.
+	//
+	// TODO(activity-schema): replace the string-keyed metadata map
+	// with a typed activityMetadata struct so the lift contract is
+	// enforced at compile time. The current convention relies on
+	// every caller spelling the right key (e.g. folder_id, not
+	// folderID); a typo would silently leave parent_id = NULL on
+	// the change_log row. A single-file refactor that introduces
+	// the struct and migrates all callers is tracked in the
+	// desktop-sync backlog and is intentionally out of scope here
+	// to keep the changefeed P1a PR focused.
+	parentKeys := [...]string{"folder_id", "parent_folder_id", "new_parent_folder_id", "target"}
+	var parentKeyPresent bool
+	for _, k := range parentKeys {
+		raw, present := metadata[k]
+		if !present {
+			continue
+		}
+		parentKeyPresent = true
+		if in.ParentID != nil {
+			continue
+		}
+		if pid, ok := uuidFromAny(raw); ok {
+			in.ParentID = &pid
+		}
+	}
+	var nameKeyPresent bool
+	if raw, present := metadata["name"]; present {
+		nameKeyPresent = true
+		if n, ok := raw.(string); ok {
+			in.Name = n
+		}
+	}
+	// Strip the lifted keys from the metadata blob so the value is
+	// not stored redundantly in change_log.metadata alongside the
+	// dedicated columns. Crucially, we also strip when the key is
+	// present but the value couldn't be lifted (typed-nil pointer,
+	// empty string, etc.) — the structured column will be NULL in
+	// that case and a stray "parent_folder_id": null inside the
+	// JSONB blob would just be a wire-format inconsistency between
+	// root and non-root creates. We shallow-copy the caller's map
+	// so the activity log entry (which receives the original) is
+	// untouched.
+	if len(metadata) > 0 && (parentKeyPresent || nameKeyPresent) {
+		trimmed := make(map[string]any, len(metadata))
+		for k, v := range metadata {
+			trimmed[k] = v
+		}
+		if parentKeyPresent {
+			for _, k := range parentKeys {
+				delete(trimmed, k)
+			}
+		}
+		if nameKeyPresent {
+			delete(trimmed, "name")
+		}
+		if len(trimmed) > 0 {
+			in.Metadata = trimmed
+		}
+	} else if len(metadata) > 0 {
+		in.Metadata = metadata
+	}
+	return in
+}
+
+// uuidFromAny extracts a uuid.UUID from common dynamic-typed values
+// found in the activity metadata map: a uuid.UUID itself, its
+// string form, or a json.Number when the map came back through a
+// JSON unmarshal somewhere upstream. Returns (uuid.Nil, false) for
+// anything else so callers know to skip the field.
+func uuidFromAny(v any) (uuid.UUID, bool) {
+	switch x := v.(type) {
+	case uuid.UUID:
+		return x, true
+	case *uuid.UUID:
+		if x == nil {
+			return uuid.Nil, false
+		}
+		return *x, true
+	case string:
+		id, err := uuid.Parse(x)
+		if err != nil {
+			return uuid.Nil, false
+		}
+		return id, true
+	}
+	return uuid.Nil, false
+}
+
+// changefeedReadOnlyActions enumerates the activity actions that are
+// explicitly excluded from the change feed because they don't mutate
+// any client-reconciled state (download, bulk-download). Adding a new
+// read-only action here is the explicit signal that "this action was
+// considered for the change feed and deliberately skipped" — separate
+// from an action being absent because someone forgot to map it.
+var changefeedReadOnlyActions = map[string]struct{}{
+	activity.ActionFileDownload:     {},
+	activity.ActionFileBulkDownload: {},
+}
+
+// changefeedKindOpFor maps an activity action string to a
+// (kind, op) pair appropriate for the change feed, or ("", "", false)
+// when the action is in the changefeedReadOnlyActions set.
+//
+// The mapping is deliberately exhaustive over activity.AllActions — a
+// new Action* constant that is neither mapped here nor added to the
+// read-only set will be caught by
+// TestChangefeedKindOpFor_ExhaustiveOverAllActions.
+func changefeedKindOpFor(action, resourceType string) (string, string, bool) {
+	// TODO(desktop-sdk): use resourceType to split permission events
+	// into KindFilePermission / KindFolderPermission once sync
+	// clients need to distinguish them. Until then, the kind is
+	// derivable from the action string alone — every action constant
+	// encodes its resource family in the prefix (file.* vs folder.*).
+	_ = resourceType
+	switch action {
+	case activity.ActionFileCreate:
+		return changefeed.KindFile, changefeed.OpCreate, true
+	case activity.ActionFileUpload:
+		// A successful upload is a content change on an existing
+		// file row (the row was created by file.create earlier).
+		return changefeed.KindFile, changefeed.OpUpdate, true
+	case activity.ActionFileRename:
+		return changefeed.KindFile, changefeed.OpRename, true
+	case activity.ActionFileMove, activity.ActionFileBulkMove:
+		return changefeed.KindFile, changefeed.OpMove, true
+	case activity.ActionFileDelete, activity.ActionFileBulkDelete:
+		return changefeed.KindFile, changefeed.OpDelete, true
+	case activity.ActionFileTagAdd, activity.ActionFileTagRemove:
+		return changefeed.KindFile, changefeed.OpUpdate, true
+	case activity.ActionFileBulkCopy:
+		// Copy creates a new file row, mirroring file.create.
+		return changefeed.KindFile, changefeed.OpCreate, true
+	case activity.ActionFolderCreate:
+		return changefeed.KindFolder, changefeed.OpCreate, true
+	case activity.ActionFolderRename:
+		return changefeed.KindFolder, changefeed.OpRename, true
+	case activity.ActionFolderMove:
+		return changefeed.KindFolder, changefeed.OpMove, true
+	case activity.ActionFolderDelete:
+		return changefeed.KindFolder, changefeed.OpDelete, true
+	case activity.ActionPermGrant:
+		return changefeed.KindPermission, changefeed.OpCreate, true
+	case activity.ActionPermRevoke:
+		return changefeed.KindPermission, changefeed.OpDelete, true
+	}
+	return "", "", false
 }
 
 // logAudit is a nil-safe wrapper mirroring logActivity.

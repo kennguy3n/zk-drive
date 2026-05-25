@@ -567,6 +567,74 @@ the `useNotifications` hook, falls back to REST polling of
 `/api/notifications` if the upgrade fails, and surfaces unread
 badges in the top bar.
 
+### 10.4 Change Feed (desktop sync transport)
+
+The change feed is the durable, monotonically-ordered stream of
+state-mutating operations on a workspace's files / folders /
+permissions. It is the transport the desktop sync SDK (P1a) and
+future native mobile clients use to keep a local replica in sync
+with the server.
+
+The transport has two halves:
+
+- **Catch-up** — `GET /api/changes?since={cursor}&limit={N}`
+  returns mutations strictly after `cursor`, ordered ascending.
+  Clients pass the highest sequence they have processed; the
+  response advances the cursor and reports `has_more` so a client
+  can keep paging until caught up. `GET /api/changes/latest`
+  returns the workspace's current head cursor.
+- **Live push** — every new mutation is broadcast workspace-wide
+  over the existing `/api/ws` hub as a `{"type":"change", ...}`
+  envelope. The hub is extended with `BroadcastJSONWorkspace` so a
+  single mutation reaches every connected user of the workspace
+  irrespective of `clientKey.userID`.
+
+Mutations are persisted to a dedicated `change_log` table (see
+`migrations/029_change_log.up.sql`) with a `BIGSERIAL` sequence
+column that provides the cursor. The change feed is intentionally
+separate from `activity_log`: activity is async / fire-and-forget
+telemetry (the buffer drops on overflow), but the change feed must
+be synchronous so sync clients never miss an event because a
+buffer was full. The two stores share the action vocabulary —
+`internal/activity` action constants drive the change-feed
+mapping in `api/drive.changefeedKindOpFor`.
+
+Read-only actions (`file.download`, `file.bulk.download`) and any
+unmapped future action are explicitly absent from the feed.
+
+### Visibility model — metadata vs content
+
+The change feed is workspace-wide and exposes every mutation to
+every authenticated workspace member, regardless of per-resource
+ACLs. This is intentional and matches the existing semantics of
+`activity_log`: a member who lacks read access to file `foo.docx`
+can still see "Alice moved foo.docx to /Reports/" in the activity
+feed today, and the same goes for the change feed.
+
+This is a **metadata-only** exposure: the feed records names,
+parent IDs, action kinds, and small structured metadata, never
+file bytes. Sync clients apply per-resource access filtering
+locally when deciding whether to fetch content via presigned URLs
+(`api/drive/file.go` permission checks still gate every download).
+For workspaces where file existence itself must be hidden from
+some members, the product answer is a separate workspace, not
+metadata redaction.
+
+**StrictZK folders**: the zero-knowledge guarantee covers file
+*contents* — not folder/file names or structural metadata. The
+change feed records names for StrictZK resources just like
+managed-encrypted resources, because sync clients (and the activity
+log) need them. Customers who require name-level secrecy (e.g.
+filenames are themselves sensitive) should use the workspace-level
+isolation path described above, not a per-folder option.
+
+### Multi-replica fan-out
+
+In multi-replica deployments the change feed uses a separate
+Redis pub/sub channel namespace (`ws-workspace:{workspaceID}`)
+from the per-user notification channels (`ws:{workspaceID}:{userID}`)
+so the two streams can be migrated / partitioned independently.
+
 ---
 
 ## 11. Session & Rate Limiting

@@ -96,20 +96,34 @@ type clientKey struct {
 
 // Hub fans out events to every client for a (workspaceID, userID)
 // pair. Construct with NewHub and start with Run.
+//
+// Two indices are maintained side-by-side under the same mutex:
+//   - clients         keyed by (workspaceID, userID) for per-user
+//     pushes (notifications, user-targeted events).
+//   - workspaceClients keyed by workspaceID for workspace-wide
+//     pushes (change feed mutations). The change
+//     feed broadcast is O(clients_in_workspace)
+//     instead of O(total_clients_in_hub) thanks to
+//     this secondary index.
+//
+// Both indices are written under the hub's write lock during
+// addClient / removeClient so they cannot drift apart.
 type Hub struct {
-	mu         sync.RWMutex
-	clients    map[clientKey]map[*Client]struct{}
-	register   chan *Client
-	unregister chan *Client
+	mu               sync.RWMutex
+	clients          map[clientKey]map[*Client]struct{}
+	workspaceClients map[uuid.UUID]map[*Client]struct{}
+	register         chan *Client
+	unregister       chan *Client
 }
 
 // NewHub returns a Hub ready to accept registrations once Run is
 // started.
 func NewHub() *Hub {
 	return &Hub{
-		clients:    make(map[clientKey]map[*Client]struct{}),
-		register:   make(chan *Client, 64),
-		unregister: make(chan *Client, 64),
+		clients:          make(map[clientKey]map[*Client]struct{}),
+		workspaceClients: make(map[uuid.UUID]map[*Client]struct{}),
+		register:         make(chan *Client, 64),
+		unregister:       make(chan *Client, 64),
 	}
 }
 
@@ -139,6 +153,12 @@ func (h *Hub) addClient(c *Client) {
 		h.clients[key] = set
 	}
 	set[c] = struct{}{}
+	wsSet, ok := h.workspaceClients[c.workspaceID]
+	if !ok {
+		wsSet = make(map[*Client]struct{})
+		h.workspaceClients[c.workspaceID] = wsSet
+	}
+	wsSet[c] = struct{}{}
 }
 
 func (h *Hub) removeClient(c *Client) {
@@ -152,6 +172,12 @@ func (h *Hub) removeClient(c *Client) {
 	delete(set, c)
 	if len(set) == 0 {
 		delete(h.clients, key)
+	}
+	if wsSet, ok := h.workspaceClients[c.workspaceID]; ok {
+		delete(wsSet, c)
+		if len(wsSet) == 0 {
+			delete(h.workspaceClients, c.workspaceID)
+		}
 	}
 	h.mu.Unlock()
 	// shutdown is idempotent (sync.Once) so unrelated callers
@@ -170,6 +196,9 @@ func (h *Hub) closeAll() {
 			victims = append(victims, c)
 		}
 		delete(h.clients, key)
+	}
+	for k := range h.workspaceClients {
+		delete(h.workspaceClients, k)
 	}
 	h.mu.Unlock()
 	for _, c := range victims {
@@ -234,6 +263,35 @@ func (h *Hub) BroadcastJSON(workspaceID, userID uuid.UUID, payload []byte) {
 		targets = append(targets, c)
 	}
 	h.mu.RUnlock()
+	h.deliver(targets, payload)
+}
+
+// BroadcastJSONWorkspace pushes an already-encoded JSON payload to
+// every client connected for `workspaceID`, irrespective of user. Used
+// by the change feed (workspace-wide), as opposed to notifications
+// (per-user). The lookup hits the workspaceClients secondary index
+// for O(clients_in_workspace) cost rather than O(total_clients)
+// — important once a deployment has many small workspaces sharing
+// a hub.
+//
+// We snapshot the targets under the read lock and then deliver
+// outside the lock so a slow send / Unregister never blocks the hub.
+func (h *Hub) BroadcastJSONWorkspace(workspaceID uuid.UUID, payload []byte) {
+	h.mu.RLock()
+	wsSet := h.workspaceClients[workspaceID]
+	targets := make([]*Client, 0, len(wsSet))
+	for c := range wsSet {
+		targets = append(targets, c)
+	}
+	h.mu.RUnlock()
+	h.deliver(targets, payload)
+}
+
+// deliver does the bounded send / done / unregister dance for a
+// pre-snapshot list of targets. Extracted out of BroadcastJSON so
+// BroadcastJSONWorkspace can reuse the same slow-consumer policy
+// without duplicating the select.
+func (h *Hub) deliver(targets []*Client, payload []byte) {
 	for _, c := range targets {
 		select {
 		case c.send <- payload:
@@ -248,6 +306,17 @@ func (h *Hub) BroadcastJSON(workspaceID, userID uuid.UUID, payload []byte) {
 			h.Unregister(c)
 		}
 	}
+}
+
+// WorkspaceClientCount returns the number of clients currently
+// connected for `workspaceID` across all users. Primarily useful in
+// tests that need to synchronise on registration before broadcasting
+// over BroadcastJSONWorkspace. Reads the workspaceClients secondary
+// index so the cost is O(1) instead of O(total_clients).
+func (h *Hub) WorkspaceClientCount(workspaceID uuid.UUID) int {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	return len(h.workspaceClients[workspaceID])
 }
 
 // NewClient constructs a Client around an already-upgraded
@@ -267,6 +336,16 @@ func NewClient(hub *Hub, conn *websocket.Conn, workspaceID, userID uuid.UUID) *C
 		send: make(chan []byte, sendBufferSize),
 		done: make(chan struct{}),
 	}
+}
+
+// Send returns the receive-only end of the client's outbound queue.
+// Exported for tests that register a synthetic Client without a
+// live *websocket.Conn — they need to observe broadcasts via the
+// channel directly because there is no writePump to drain it.
+// Production code should not use this; payloads are pulled by
+// writePump and shipped over the wire.
+func (c *Client) Send() <-chan []byte {
+	return c.send
 }
 
 // Start registers c with the hub and launches the read and write

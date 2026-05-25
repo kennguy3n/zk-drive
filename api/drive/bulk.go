@@ -81,6 +81,7 @@ func (h *Handler) BulkMove(w http.ResponseWriter, r *http.Request) {
 	}
 
 	resp := bulkResponse{Succeeded: []string{}, Failed: []bulkFailure{}}
+	var changes []changeInput
 	for _, raw := range req.FileIDs {
 		id, err := uuid.Parse(raw)
 		if err != nil {
@@ -113,7 +114,17 @@ func (h *Handler) BulkMove(w http.ResponseWriter, r *http.Request) {
 			resp.Failed = append(resp.Failed, bulkFailure{ID: raw, Error: err.Error()})
 			continue
 		}
-		h.logActivity(r.Context(), activity.ActionFileBulkMove, permission.ResourceFile, id, map[string]any{"target": targetID})
+		// "target" is the legacy bulk-move metadata key recognised
+		// by buildChangefeedInput (see parentKeys). The single-file
+		// MoveFile path uses "folder_id" — both lift into the
+		// structured parent_id column and strip from the JSONB
+		// blob, so neither shape ends up duplicating the UUID.
+		md := map[string]any{"target": targetID}
+		h.logActivityOnly(r.Context(), activity.ActionFileBulkMove, permission.ResourceFile, id, md)
+		changes = append(changes, changeInput{
+			Action: activity.ActionFileBulkMove, ResourceType: permission.ResourceFile,
+			ResourceID: id, Metadata: md,
+		})
 		resp.Succeeded = append(resp.Succeeded, raw)
 	}
 	for _, raw := range req.FolderIDs {
@@ -130,9 +141,15 @@ func (h *Handler) BulkMove(w http.ResponseWriter, r *http.Request) {
 			resp.Failed = append(resp.Failed, bulkFailure{ID: raw, Error: err.Error()})
 			continue
 		}
-		h.logActivity(r.Context(), activity.ActionFolderMove, permission.ResourceFolder, id, map[string]any{"target": targetID})
+		md := map[string]any{"target": targetID}
+		h.logActivityOnly(r.Context(), activity.ActionFolderMove, permission.ResourceFolder, id, md)
+		changes = append(changes, changeInput{
+			Action: activity.ActionFolderMove, ResourceType: permission.ResourceFolder,
+			ResourceID: id, Metadata: md,
+		})
 		resp.Succeeded = append(resp.Succeeded, raw)
 	}
+	h.batchRecordChanges(r.Context(), changes)
 	writeJSON(w, http.StatusOK, resp)
 }
 
@@ -144,6 +161,7 @@ func (h *Handler) BulkDelete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	resp := bulkResponse{Succeeded: []string{}, Failed: []bulkFailure{}}
+	var changes []changeInput
 	for _, raw := range req.FileIDs {
 		id, err := uuid.Parse(raw)
 		if err != nil {
@@ -167,7 +185,11 @@ func (h *Handler) BulkDelete(w http.ResponseWriter, r *http.Request) {
 			resp.Failed = append(resp.Failed, bulkFailure{ID: raw, Error: err.Error()})
 			continue
 		}
-		h.logActivity(r.Context(), activity.ActionFileBulkDelete, permission.ResourceFile, id, nil)
+		h.logActivityOnly(r.Context(), activity.ActionFileBulkDelete, permission.ResourceFile, id, nil)
+		changes = append(changes, changeInput{
+			Action: activity.ActionFileBulkDelete, ResourceType: permission.ResourceFile,
+			ResourceID: id,
+		})
 		if snapshot != nil {
 			h.publishWebhookFileEvent(r.Context(), webhooks.EventFileDeleted, workspaceID, snapshot, uuid.Nil, snapshot.SizeBytes)
 		}
@@ -194,10 +216,15 @@ func (h *Handler) BulkDelete(w http.ResponseWriter, r *http.Request) {
 			resp.Failed = append(resp.Failed, bulkFailure{ID: raw, Error: err.Error()})
 			continue
 		}
-		h.logActivity(r.Context(), activity.ActionFolderDelete, permission.ResourceFolder, id, nil)
+		h.logActivityOnly(r.Context(), activity.ActionFolderDelete, permission.ResourceFolder, id, nil)
+		changes = append(changes, changeInput{
+			Action: activity.ActionFolderDelete, ResourceType: permission.ResourceFolder,
+			ResourceID: id,
+		})
 		h.emitWebhookFileDeletedBatch(r.Context(), workspaceID, snaps)
 		resp.Succeeded = append(resp.Succeeded, raw)
 	}
+	h.batchRecordChanges(r.Context(), changes)
 	writeJSON(w, http.StatusOK, resp)
 }
 
@@ -231,6 +258,7 @@ func (h *Handler) BulkCopy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	resp := bulkResponse{Succeeded: []string{}, Failed: []bulkFailure{}}
+	var changes []changeInput
 	for _, raw := range req.FileIDs {
 		id, err := uuid.Parse(raw)
 		if err != nil {
@@ -305,11 +333,19 @@ func (h *Handler) BulkCopy(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		h.billing.RecordUpload(r.Context(), workspaceID, srcVer.SizeBytes)
-		h.logActivity(r.Context(), activity.ActionFileBulkCopy, permission.ResourceFile, newFile.ID, map[string]any{
+		md := map[string]any{
 			"source_file_id": src.ID,
+			"folder_id":      newFile.FolderID,
+			"name":           newFile.Name,
+		}
+		h.logActivityOnly(r.Context(), activity.ActionFileBulkCopy, permission.ResourceFile, newFile.ID, md)
+		changes = append(changes, changeInput{
+			Action: activity.ActionFileBulkCopy, ResourceType: permission.ResourceFile,
+			ResourceID: newFile.ID, Metadata: md,
 		})
 		resp.Succeeded = append(resp.Succeeded, newFile.ID.String())
 	}
+	h.batchRecordChanges(r.Context(), changes)
 	writeJSON(w, http.StatusOK, resp)
 }
 

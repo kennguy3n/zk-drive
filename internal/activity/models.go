@@ -16,25 +16,53 @@ import (
 // are deliberately dotted ("file.create") so the frontend can group by
 // prefix without parsing two columns.
 const (
-	ActionFileCreate   = "file.create"
-	ActionFileRename   = "file.rename"
-	ActionFileMove     = "file.move"
-	ActionFileDelete   = "file.delete"
-	ActionFileUpload   = "file.upload"
-	ActionFileDownload = "file.download"
-	ActionFileTagAdd   = "file.tag.add"
-	ActionFileTagRemove = "file.tag.remove"
-	ActionFileBulkMove   = "file.bulk.move"
-	ActionFileBulkCopy   = "file.bulk.copy"
-	ActionFileBulkDelete = "file.bulk.delete"
+	ActionFileCreate       = "file.create"
+	ActionFileRename       = "file.rename"
+	ActionFileMove         = "file.move"
+	ActionFileDelete       = "file.delete"
+	ActionFileUpload       = "file.upload"
+	ActionFileDownload     = "file.download"
+	ActionFileTagAdd       = "file.tag.add"
+	ActionFileTagRemove    = "file.tag.remove"
+	ActionFileBulkMove     = "file.bulk.move"
+	ActionFileBulkCopy     = "file.bulk.copy"
+	ActionFileBulkDelete   = "file.bulk.delete"
 	ActionFileBulkDownload = "file.bulk.download"
-	ActionFolderCreate = "folder.create"
-	ActionFolderRename = "folder.rename"
-	ActionFolderMove   = "folder.move"
-	ActionFolderDelete = "folder.delete"
-	ActionPermGrant    = "permission.grant"
-	ActionPermRevoke   = "permission.revoke"
+	ActionFolderCreate     = "folder.create"
+	ActionFolderRename     = "folder.rename"
+	ActionFolderMove       = "folder.move"
+	ActionFolderDelete     = "folder.delete"
+	ActionPermGrant        = "permission.grant"
+	ActionPermRevoke       = "permission.revoke"
 )
+
+// AllActions enumerates every action constant defined above. Components
+// that need to enforce exhaustiveness over the action space (e.g. the
+// change-feed action mapper that decides whether a given action becomes
+// a change_log row) iterate this slice instead of relying on reflection
+// over the const block. Keep this in sync when adding a new Action*
+// constant — TestChangefeedKindOpFor_ExhaustiveOverAllActions will
+// fail loudly if you forget.
+var AllActions = []string{
+	ActionFileCreate,
+	ActionFileRename,
+	ActionFileMove,
+	ActionFileDelete,
+	ActionFileUpload,
+	ActionFileDownload,
+	ActionFileTagAdd,
+	ActionFileTagRemove,
+	ActionFileBulkMove,
+	ActionFileBulkCopy,
+	ActionFileBulkDelete,
+	ActionFileBulkDownload,
+	ActionFolderCreate,
+	ActionFolderRename,
+	ActionFolderMove,
+	ActionFolderDelete,
+	ActionPermGrant,
+	ActionPermRevoke,
+}
 
 // LogEntry is a single row of the activity_log table. MetadataJSON is a
 // free-form JSONB blob for action-specific context (e.g. old_name /
