@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/yuin/goldmark"
+	"github.com/yuin/goldmark/extension"
 	"github.com/yuin/goldmark/parser"
 	"github.com/yuin/goldmark/text"
 )
@@ -162,12 +163,119 @@ func TestRenderMarkdown_IsRegistered(t *testing.T) {
 	}
 }
 
+// TestWalkMarkdownAST_GFMTableEmitsTabSeparatedRows pins the GFM
+// table extension wiring. Without extension.Table enabled in the
+// goldmark constructor, the parser would never produce
+// *extast.Table nodes and the emitTable code path would be dead.
+// This regression test fails loudly if a future change removes the
+// extension or breaks the walker case.
+func TestWalkMarkdownAST_GFMTableEmitsTabSeparatedRows(t *testing.T) {
+	t.Parallel()
+	src := []byte(`# Doc
+
+| Column A | Column B | Column C |
+|----------|----------|----------|
+| cell 1a  | cell 1b  | cell 1c  |
+| cell 2a  | cell 2b  | cell 2c  |
+`)
+	_, body := walkMarkdownASTFrom(src)
+
+	mustContain := []string{
+		"Column A\tColumn B\tColumn C",
+		"cell 1a\tcell 1b\tcell 1c",
+		"cell 2a\tcell 2b\tcell 2c",
+	}
+	for _, want := range mustContain {
+		if !strings.Contains(body, want) {
+			t.Errorf("expected GFM table row %q in body, got: %q", want, body)
+		}
+	}
+}
+
+// TestWalkMarkdownAST_StrikethroughFlattensToText covers the GFM
+// strikethrough extension. Marker characters (~~text~~) must not
+// leak into the rasterised output; the inner text must survive.
+func TestWalkMarkdownAST_StrikethroughFlattensToText(t *testing.T) {
+	t.Parallel()
+	src := []byte("This is ~~deleted text~~ in a paragraph.\n")
+	_, body := walkMarkdownASTFrom(src)
+
+	if !strings.Contains(body, "deleted text") {
+		t.Errorf("strikethrough content dropped: %q", body)
+	}
+	if strings.Contains(body, "~~deleted text~~") {
+		t.Errorf("strikethrough markers leaked into body: %q", body)
+	}
+}
+
+// TestWalkMarkdownAST_TaskListCheckboxes pins the GFM task-list
+// rendering. Each list item starting with `- [ ] ` or `- [x] `
+// must surface its checkbox state as a `[ ]` / `[x]` prefix in
+// the output — without the extension and the *extast.TaskCheckBox
+// walker case, the AST replacement would silently drop the marker.
+func TestWalkMarkdownAST_TaskListCheckboxes(t *testing.T) {
+	t.Parallel()
+	src := []byte(`# Tasks
+
+- [ ] todo item one
+- [x] done item two
+- [ ] todo item three
+`)
+	_, body := walkMarkdownASTFrom(src)
+
+	// Marker presence per item:
+	if !strings.Contains(body, "[ ] todo item one") {
+		t.Errorf("unchecked task marker dropped for item one, got: %q", body)
+	}
+	if !strings.Contains(body, "[x] done item two") {
+		t.Errorf("checked task marker dropped for item two, got: %q", body)
+	}
+	if !strings.Contains(body, "[ ] todo item three") {
+		t.Errorf("unchecked task marker dropped for item three, got: %q", body)
+	}
+}
+
+// TestWalkMarkdownAST_BlockquoteBlankLineHasPrefix pins the symmetry
+// fix in emitBlank: blank separators inside a blockquote carry the
+// `> ` prefix so multi-paragraph quotes render as a visually
+// contiguous block, matching strict markdown rendering rules.
+func TestWalkMarkdownAST_BlockquoteBlankLineHasPrefix(t *testing.T) {
+	t.Parallel()
+	src := []byte("> First quoted paragraph.\n>\n> Second quoted paragraph after blank.\n\nNormal text after quote.\n")
+	_, body := walkMarkdownASTFrom(src)
+
+	// Both content lines must carry the prefix.
+	if !strings.Contains(body, "> First quoted paragraph.") {
+		t.Errorf("missing prefix on first quoted line, got: %q", body)
+	}
+	if !strings.Contains(body, "> Second quoted paragraph after blank.") {
+		t.Errorf("missing prefix on second quoted line, got: %q", body)
+	}
+	// And the blank separator between them must also carry it.
+	if !strings.Contains(body, "> \n> Second quoted paragraph") {
+		// Tolerate either single or compounded prefixes (the
+		// implementation collapses duplicates).
+		if !strings.Contains(body, "> \n> ") {
+			t.Errorf("expected '> ' on blank separator inside blockquote, got: %q", body)
+		}
+	}
+}
+
 // walkMarkdownASTFrom is a test helper that runs the AST walker
 // against a fresh goldmark parser instance — mirrors the production
 // pipeline in renderMarkdown but returns the (title, body) tuple
-// instead of rasterising.
+// instead of rasterising. Mirrors the extension set used in
+// renderMarkdown so the test parser produces the same AST shape
+// as production.
 func walkMarkdownASTFrom(src []byte) (string, string) {
-	md := goldmark.New(goldmark.WithParserOptions(parser.WithAutoHeadingID()))
+	md := goldmark.New(
+		goldmark.WithExtensions(
+			extension.Table,
+			extension.Strikethrough,
+			extension.TaskList,
+		),
+		goldmark.WithParserOptions(parser.WithAutoHeadingID()),
+	)
 	doc := md.Parser().Parse(text.NewReader(src))
 	return walkMarkdownAST(doc, src)
 }

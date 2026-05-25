@@ -36,17 +36,50 @@ const csvPreviewMaxCols = 10
 // mid-codepoint.
 const csvPreviewCellMaxRunes = 32
 
-// renderCSV is the registered handler for CSV and TSV uploads. The
-// pipeline is:
+// renderCSV is the registered handler for the comma-CSV family of
+// MIMEs (`text/csv`, `application/csv`). It calls renderCSVWithDelim
+// with autoDelim so the delimiter is sniffed from the first line of
+// the source — this is the right behaviour for `text/csv` because
+// some European exports actually use semicolons or tabs even though
+// the file is labelled CSV.
+func renderCSV(ctx context.Context, srcBytes []byte) (image.Image, error) {
+	return renderCSVWithDelim(ctx, srcBytes, autoDelim)
+}
+
+// renderTSV is the registered handler for `text/tab-separated-values`
+// / `text/tsv`. It forces the delimiter to `\t` regardless of the
+// file's first-line content. This matters because a TSV with a comma
+// in a header cell value (e.g. `Full Name\tCity, State\tAge`) would
+// otherwise be sniffed as comma-CSV by detectCSVDelimiter (which
+// prioritises comma when both `,` and `\t` are present) and would
+// produce a garbled preview — the parser would collapse the entire
+// tab-separated row into one cell.
 //
-//  1. Detect the delimiter — TSV-routed MIMEs (`text/tab-separated-
-//     values`, `text/tsv`) always use `\t`; everything else uses the
-//     stdlib's `csv.Reader` with comma default, after a quick
-//     first-line sniff to swap in `;` or `\t` for European-locale
-//     exports that occasionally mislabel as `text/csv`.
-//  2. Read up to csvPreviewMaxRows+1 rows (header + data) into
-//     memory. Beyond that we stop — the rasteriser only paints
-//     ~30 lines anyway, and reading the rest just burns memory.
+// The Renderer interface only passes (ctx, bytes), so we can't
+// inspect the MIME at call time — the dispatch happens at registry
+// level via two separate RendererFunc registrations. Both render
+// paths share renderCSVWithDelim so logic stays in one place.
+func renderTSV(ctx context.Context, srcBytes []byte) (image.Image, error) {
+	return renderCSVWithDelim(ctx, srcBytes, '\t')
+}
+
+// autoDelim is the sentinel passed to renderCSVWithDelim when the
+// caller wants delimiter sniffing. It's intentionally `utf8.RuneError`
+// (an invalid rune at the protocol level) so a future change that
+// accidentally treats the sentinel as a literal field-separator
+// would fail loudly (the csv.Reader's Comma field rejects invalid
+// runes).
+const autoDelim = '\uFFFD'
+
+// renderCSVWithDelim is the core CSV/TSV preview pipeline:
+//
+//  1. Determine the delimiter — forcedDelim==autoDelim sniffs the
+//     first line; any other value is honoured as-is.
+//  2. Read up to csvPreviewMaxRows+1 successful records into
+//     memory. Parse errors do NOT count against the row budget;
+//     the loop counts successful reads instead of iterations so
+//     a CSV with a corrupt row in the middle still renders the
+//     expected number of preview rows.
 //  3. Per-row, truncate to csvPreviewMaxCols cells, truncate each
 //     cell to csvPreviewCellMaxRunes runes, join with tab so the
 //     rasteriser expands them as columnar separators.
@@ -58,13 +91,18 @@ const csvPreviewCellMaxRunes = 32
 // `LazyQuotes = true`, so the parser is lenient. Catastrophic parse
 // errors (unrecoverable I/O) are reported through the error return
 // so the worker re-delivers (consistent with other renderers).
-func renderCSV(_ context.Context, srcBytes []byte) (image.Image, error) {
+func renderCSVWithDelim(_ context.Context, srcBytes []byte, forcedDelim rune) (image.Image, error) {
 	body := srcBytes
 	if len(body) > csvPreviewMaxBytes {
 		body = clipBytesToValidUTF8(body[:csvPreviewMaxBytes])
 	}
 
-	delim := detectCSVDelimiter(body)
+	var delim rune
+	if forcedDelim == autoDelim {
+		delim = detectCSVDelimiter(body)
+	} else {
+		delim = forcedDelim
+	}
 	r := csv.NewReader(bytes.NewReader(body))
 	r.Comma = delim
 	// LazyQuotes accepts " inside an unquoted field (e.g. height
@@ -88,7 +126,22 @@ func renderCSV(_ context.Context, srcBytes []byte) (image.Image, error) {
 		records [][]string
 		hadAny  bool
 	)
-	for i := 0; i <= csvPreviewMaxRows; i++ {
+	// Read until we have csvPreviewMaxRows+1 SUCCESSFUL records,
+	// counting successes rather than iterations. A parse-error row
+	// must not consume a slot in the budget — if it did, a CSV
+	// with one corrupt row in its first N+1 rows would silently
+	// render N visible rows instead of N+1, and a chain of
+	// corruptions early in the file would produce an effectively
+	// empty preview.
+	//
+	// To bound work on pathologically corrupt input (e.g. an
+	// adversarial blob that fails every row), we cap the total
+	// iterations at a multiple of the desired success count. A
+	// 10x multiplier comfortably tolerates the realistic worst
+	// case (a few corrupt rows scattered through a valid file)
+	// without letting a fully-corrupt input loop indefinitely.
+	const maxParseErrorBudget = (csvPreviewMaxRows + 1) * 10
+	for iter := 0; len(records) <= csvPreviewMaxRows && iter < maxParseErrorBudget; iter++ {
 		rec, err := r.Read()
 		if errors.Is(err, io.EOF) {
 			break
@@ -308,9 +361,16 @@ func looksLikeHeader(rec []string) bool {
 }
 
 func init() {
+	// Two separate registrations — one per delimiter family — so
+	// the TSV path can hard-code `\t` regardless of the first line's
+	// content. Sharing a single handler that sniffs would mis-parse
+	// any TSV whose header contains a comma (e.g. `City, State` in
+	// a tab-separated column).
 	Register(RendererFunc(renderCSV),
 		"text/csv",
 		"application/csv",
+	)
+	Register(RendererFunc(renderTSV),
 		"text/tab-separated-values",
 		"text/tsv",
 	)

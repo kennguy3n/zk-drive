@@ -8,6 +8,7 @@ import (
 
 	"github.com/yuin/goldmark"
 	"github.com/yuin/goldmark/ast"
+	"github.com/yuin/goldmark/extension"
 	extast "github.com/yuin/goldmark/extension/ast"
 	"github.com/yuin/goldmark/parser"
 	"github.com/yuin/goldmark/text"
@@ -59,22 +60,39 @@ func renderMarkdown(_ context.Context, srcBytes []byte) (image.Image, error) {
 		body = clipBytesToValidUTF8(body[:markdownPreviewMaxBytes])
 	}
 
-	// goldmark.New() without extensions = strict CommonMark. We want
-	// table / strikethrough / task-list semantics in the AST (so a
-	// `- [ ] foo` task item renders as `[ ] foo` rather than the
-	// literal `- [ ] foo` after our bullet-prefix step), but pulling
-	// in the full default extension set would also enable footnotes
-	// and definition-lists which add little to a 256 px thumbnail
-	// and inflate parse time on dense documents. The minimal set
-	// chosen below keeps parsing cheap and the AST handler simple.
+	// goldmark.New() without extensions = strict CommonMark. We
+	// explicitly opt-in to the three GFM extensions whose AST nodes
+	// the walker below handles:
 	//
-	// We DELIBERATELY do not use the default goldmark constructor
-	// that auto-bundles every extension — the AST walker below
-	// switches on a fixed set of node kinds and a surprise extension
-	// would silently drop through to the default "text content"
-	// fallback, which would just emit the marker text (e.g. an
-	// unhandled footnote definition rendering as `[^1]: …`).
+	//   - extension.Table         → *extast.Table (handled by
+	//                                emitTable, emits tab-separated
+	//                                rows for columnar structure in
+	//                                the thumbnail).
+	//   - extension.Strikethrough → AST node flattened to its inner
+	//                                text content (same as emphasis;
+	//                                marker characters add no signal
+	//                                at 256 px resolution).
+	//   - extension.TaskList      → so a `- [ ] foo` task item
+	//                                renders with the list marker
+	//                                plus a checkbox-style prefix
+	//                                rather than the literal
+	//                                `[ ] foo` body that strict
+	//                                CommonMark produces.
+	//
+	// We DELIBERATELY do NOT enable goldmark's default extension set
+	// (extension.GFM + Linkify + Footnote + DefinitionList + Typo-
+	// grapher + …) — the AST walker below switches on a fixed set
+	// of node kinds and a surprise extension would silently drop
+	// through to the default "text content" fallback, which would
+	// just emit the marker text (e.g. an unhandled footnote
+	// definition rendering as `[^1]: …`). Each extension added here
+	// must have a matching walker case below.
 	md := goldmark.New(
+		goldmark.WithExtensions(
+			extension.Table,
+			extension.Strikethrough,
+			extension.TaskList,
+		),
 		goldmark.WithParserOptions(parser.WithAutoHeadingID()),
 	)
 
@@ -140,9 +158,29 @@ func walkMarkdownAST(doc ast.Node, source []byte) (title, body string) {
 	}
 
 	emitBlank := func() {
-		// Multiple consecutive emitBlanks collapse to one — we
-		// don't want N blank lines from N stacked AST blocks
-		// each emitting a trailing blank.
+		// Inside a blockquote, blank lines carry the same `> `
+		// prefix as content lines so the quote block remains
+		// visually contiguous if the rasteriser is ever changed
+		// to preserve leading whitespace on blank lines. Without
+		// the prefix here, a multi-paragraph blockquote would
+		// have its blank separator render as a bare empty line
+		// and break the visual continuity of the quote.
+		if blockqDp > 0 {
+			// Don't compound prefixes when the last line was
+			// also a blockquote-prefixed blank — two trailing
+			// blank-prefix lines in a row are no more useful
+			// than one.
+			s := out.String()
+			trail := strings.Repeat("> ", blockqDp) + "\n"
+			if strings.HasSuffix(s, trail+trail) {
+				return
+			}
+			out.WriteString(trail)
+			return
+		}
+		// Outside a blockquote: multiple consecutive emitBlanks
+		// collapse to one — we don't want N blank lines from N
+		// stacked AST blocks each emitting a trailing blank.
 		s := out.String()
 		if len(s) >= 2 && s[len(s)-2] == '\n' && s[len(s)-1] == '\n' {
 			return
@@ -238,8 +276,21 @@ func walkMarkdownAST(doc ast.Node, source []byte) (title, body string) {
 			emitBlank()
 		case *ast.Blockquote:
 			blockqDp++
+			// Between sibling block-level children inside a
+			// blockquote, emit a blank separator so a
+			// multi-paragraph quote renders with the empty
+			// `> ` separator line between paragraphs (which
+			// emitBlank now prefixes via the blockquote
+			// handling above). Without this, sibling
+			// paragraphs in `> a\n>\n> b` would collapse
+			// onto consecutive lines.
+			first := true
 			for c := nn.FirstChild(); c != nil; c = c.NextSibling() {
+				if !first {
+					emitBlank()
+				}
 				walk(c)
+				first = false
 			}
 			blockqDp--
 		case *ast.ThematicBreak:
@@ -318,6 +369,20 @@ func nodeText(n ast.Node, source []byte) string {
 				}
 			case *ast.String:
 				sb.Write(tn.Value)
+			case *extast.TaskCheckBox:
+				// Render a GFM task-list checkbox inline.
+				// `[x] ` for checked, `[ ] ` for unchecked.
+				// Without this, the TaskList extension's
+				// AST replacement of the literal `[ ] ` /
+				// `[x] ` prefix in the source would simply
+				// drop the indicator from the rendered
+				// preview, losing a useful "what's done"
+				// signal in dev README task lists.
+				if tn.IsChecked {
+					sb.WriteString("[x] ")
+				} else {
+					sb.WriteString("[ ] ")
+				}
 			case *ast.AutoLink:
 				// Auto-links (bare URLs) emit the URL text;
 				// for a thumbnail the URL is the only
