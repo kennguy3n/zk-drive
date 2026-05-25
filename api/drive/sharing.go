@@ -411,7 +411,10 @@ func writeSharingError(w http.ResponseWriter, err error) {
 	case errors.Is(err, sharing.ErrLinkExhausted):
 		middleware.RespondError(w, http.StatusTooManyRequests, middleware.ErrCodeRateLimit, err.Error())
 	case errors.Is(err, sharing.ErrPasswordRequired):
-		middleware.RespondError(w, http.StatusUnauthorized, middleware.ErrCodeAuthMissingToken, err.Error())
+		// Distinct from AUTH_MISSING_TOKEN: the user does not need
+		// to sign in, they need to enter the share-link password.
+		// The frontend renders a different prompt for this code.
+		middleware.RespondError(w, http.StatusUnauthorized, middleware.ErrCodeSharePasswordRequired, err.Error())
 	case errors.Is(err, sharing.ErrPasswordIncorrect):
 		middleware.RespondError(w, http.StatusForbidden, middleware.ErrCodeForbidden, err.Error())
 	case errors.Is(err, sharing.ErrInviteAlreadyUsed):

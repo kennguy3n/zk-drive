@@ -37,30 +37,40 @@ const (
 	ErrCodeMFAEnrollNeeded  ErrorCode = "MFA_ENROLL_REQUIRED"
 
 	// Authorization failures (403 Forbidden).
-	ErrCodeForbidden    ErrorCode = "FORBIDDEN"
-	ErrCodeAdminOnly    ErrorCode = "ADMIN_ACCESS_REQUIRED"
-	ErrCodeReadOnly     ErrorCode = "READ_ONLY_ROLE"
-	ErrCodeWrongTenant  ErrorCode = "WRONG_TENANT"
-	ErrCodeNoWorkspace  ErrorCode = "MISSING_WORKSPACE_CONTEXT"
+	ErrCodeForbidden   ErrorCode = "FORBIDDEN"
+	ErrCodeAdminOnly   ErrorCode = "ADMIN_ACCESS_REQUIRED"
+	ErrCodeReadOnly    ErrorCode = "READ_ONLY_ROLE"
+	ErrCodeWrongTenant ErrorCode = "WRONG_TENANT"
+	ErrCodeNoWorkspace ErrorCode = "MISSING_WORKSPACE_CONTEXT"
 
 	// Rate limiting (429 Too Many Requests).
 	ErrCodeRateLimit ErrorCode = "RATE_LIMIT_EXCEEDED"
 
-	// Validation (400 Bad Request).
-	ErrCodeValidation     ErrorCode = "VALIDATION_FAILED"
-	ErrCodeBadRequest     ErrorCode = "BAD_REQUEST"
-	ErrCodeMalformedJSON  ErrorCode = "MALFORMED_JSON"
-	ErrCodeMissingField   ErrorCode = "MISSING_REQUIRED_FIELD"
-	ErrCodeUnsupportedOp  ErrorCode = "UNSUPPORTED_OPERATION"
+	// Validation (400 / 422 Bad Request / Unprocessable Entity).
+	ErrCodeValidation           ErrorCode = "VALIDATION_FAILED"
+	ErrCodeBadRequest           ErrorCode = "BAD_REQUEST"
+	ErrCodeMalformedJSON        ErrorCode = "MALFORMED_JSON"
+	ErrCodeMissingField         ErrorCode = "MISSING_REQUIRED_FIELD"
+	ErrCodeUnsupportedOp        ErrorCode = "UNSUPPORTED_OPERATION"
+	ErrCodeCollabModeNotAllowed ErrorCode = "COLLAB_MODE_NOT_ALLOWED"
 
 	// Resource state (404 / 409 / 410).
-	ErrCodeNotFound       ErrorCode = "NOT_FOUND"
-	ErrCodeConflict       ErrorCode = "CONFLICT"
-	ErrCodeGone           ErrorCode = "GONE"
-	ErrCodeFolderLocked   ErrorCode = "FOLDER_LOCKED"
-	ErrCodeQuotaExceeded  ErrorCode = "WORKSPACE_QUOTA_EXCEEDED"
-	ErrCodeFileTooLarge   ErrorCode = "FILE_TOO_LARGE"
-	ErrCodeVirusDetected  ErrorCode = "FILE_VIRUS_DETECTED"
+	ErrCodeNotFound      ErrorCode = "NOT_FOUND"
+	ErrCodeConflict      ErrorCode = "CONFLICT"
+	ErrCodeGone          ErrorCode = "GONE"
+	ErrCodeFolderLocked  ErrorCode = "FOLDER_LOCKED"
+	ErrCodeQuotaExceeded ErrorCode = "WORKSPACE_QUOTA_EXCEEDED"
+	ErrCodeFileTooLarge  ErrorCode = "FILE_TOO_LARGE"
+	ErrCodeVirusDetected ErrorCode = "FILE_VIRUS_DETECTED"
+
+	// Share-link auth (401 / 403). Distinct from session auth so the
+	// frontend can render a password prompt rather than a sign-in
+	// screen — see api/drive/sharing.go writeSharingError.
+	ErrCodeSharePasswordRequired ErrorCode = "SHARE_PASSWORD_REQUIRED"
+
+	// Billing / payments (402 / 412). Distinct from internal so the
+	// frontend can prompt for upgrade / customer-onboarding flows.
+	ErrCodeBillingNotConfigured ErrorCode = "BILLING_NOT_CONFIGURED"
 
 	// Service-level failures (5xx).
 	ErrCodeInternal       ErrorCode = "INTERNAL_ERROR"
@@ -111,6 +121,13 @@ func RespondValidationError(w http.ResponseWriter, message string, details map[s
 
 func respondErrorWithDetails(w http.ResponseWriter, status int, code ErrorCode, message string, details map[string]string) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	// Defense-in-depth: refuse content-type sniffing so a browser
+	// that receives this body in an <img>/<script>/<iframe> context
+	// (e.g. an authenticated cross-origin error page in an XSS
+	// scenario) cannot reinterpret the bytes as something other
+	// than the JSON we sent. Cheap, no downside, defends against
+	// future MIME-confusion mistakes elsewhere on the response.
+	w.Header().Set("X-Content-Type-Options", "nosniff")
 	w.WriteHeader(status)
 	// We intentionally swallow the encoding error: the response
 	// has already been committed (WriteHeader fired), so there's

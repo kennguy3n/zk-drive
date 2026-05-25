@@ -562,7 +562,10 @@ func writeDocumentError(w http.ResponseWriter, err error) {
 		errors.Is(err, document.ErrEmptyPayload):
 		middleware.RespondError(w, http.StatusBadRequest, middleware.ErrCodeBadRequest, err.Error())
 	case errors.Is(err, document.ErrCollabModeNotAllowed):
-		middleware.RespondError(w, http.StatusUnprocessableEntity, middleware.ErrCodeInternal, err.Error())
+		// 422 with a dedicated code so the frontend can render a
+		// privacy-mode-aware message ("rich-text collab requires a
+		// confidential folder", etc.) instead of "internal error".
+		middleware.RespondError(w, http.StatusUnprocessableEntity, middleware.ErrCodeCollabModeNotAllowed, err.Error())
 	case errors.Is(err, document.ErrPayloadTooLarge):
 		middleware.RespondError(w, http.StatusRequestEntityTooLarge, middleware.ErrCodeFileTooLarge, err.Error())
 	case errors.Is(err, document.ErrSeqConflict):

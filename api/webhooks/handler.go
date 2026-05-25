@@ -213,7 +213,12 @@ func toDeliveryView(d *webhooks.Delivery) deliveryView {
 func (h *Handler) requireAdmin(w http.ResponseWriter, r *http.Request) bool {
 	role, ok := middleware.RoleFromContext(r.Context())
 	if !ok {
-		middleware.RespondError(w, http.StatusUnauthorized, middleware.ErrCodeMissingField, "authentication required")
+		// No role in the request context means the auth middleware
+		// did not run / did not populate it (e.g. the route was wired
+		// without the auth chain or the token was rejected upstream).
+		// AUTH_MISSING_TOKEN is the correct semantic — the client
+		// needs to authenticate, not amend a request payload.
+		middleware.RespondError(w, http.StatusUnauthorized, middleware.ErrCodeAuthMissingToken, "authentication required")
 		return false
 	}
 	if role != user.RoleAdmin {

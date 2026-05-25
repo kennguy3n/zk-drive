@@ -54,7 +54,7 @@ export default function SearchBar() {
       }
     }, 250);
     return () => window.clearTimeout(handle);
-  }, [query]);
+  }, [query, t]);
 
   const pick = (hit: SearchHit) => {
     setOpen(false);

@@ -413,11 +413,14 @@ func (h *Handler) DownloadURL(w http.ResponseWriter, r *http.Request) {
 }
 
 // writeBillingError maps billing.ErrQuotaExceeded to 402 Payment
-// Required so the frontend can prompt the user to upgrade.
+// Required with the actionable WORKSPACE_QUOTA_EXCEEDED code so the
+// frontend can prompt the user to upgrade. Anything else falls
+// through to writeServiceError for the standard service-error
+// taxonomy (storage, upstream, internal).
 func writeBillingError(w http.ResponseWriter, err error) {
 	switch {
 	case errors.Is(err, billing.ErrQuotaExceeded):
-		middleware.RespondError(w, http.StatusPaymentRequired, middleware.ErrCodeInternal, err.Error())
+		middleware.RespondError(w, http.StatusPaymentRequired, middleware.ErrCodeQuotaExceeded, err.Error())
 	default:
 		writeServiceError(w, err)
 	}

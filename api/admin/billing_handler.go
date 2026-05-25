@@ -119,7 +119,10 @@ func (h *Handler) CreatePortalSession(w http.ResponseWriter, r *http.Request) {
 
 	customerID := h.stripe.LookupCustomerID(r.Context(), workspaceID)
 	if customerID == "" {
-		middleware.RespondError(w, http.StatusPreconditionFailed, middleware.ErrCodeInternal, "workspace has no stripe customer on file")
+		// 412 with a billing-specific code so the frontend can route
+		// the user to the "create Stripe customer" onboarding flow
+		// instead of surfacing a generic internal error.
+		middleware.RespondError(w, http.StatusPreconditionFailed, middleware.ErrCodeBillingNotConfigured, "workspace has no stripe customer on file")
 		return
 	}
 
@@ -129,7 +132,7 @@ func (h *Handler) CreatePortalSession(w http.ResponseWriter, r *http.Request) {
 		case errors.Is(err, billing.ErrStripeNotConfigured):
 			middleware.RespondError(w, http.StatusNotImplemented, middleware.ErrCodeUnsupportedOp, "stripe not configured")
 		case errors.Is(err, billing.ErrStripeNoCustomer):
-			middleware.RespondError(w, http.StatusPreconditionFailed, middleware.ErrCodeInternal, err.Error())
+			middleware.RespondError(w, http.StatusPreconditionFailed, middleware.ErrCodeBillingNotConfigured, err.Error())
 		default:
 			middleware.RespondError(w, http.StatusInternalServerError, middleware.ErrCodeInternal, "create portal session: "+err.Error())
 		}

@@ -857,11 +857,13 @@ func (h *Handler) UpdateBillingPlan(w http.ResponseWriter, r *http.Request) {
 }
 
 // writeBillingError maps billing.ErrQuotaExceeded to 402 Payment
-// Required so the frontend can prompt the user to upgrade their plan.
+// Required with the actionable WORKSPACE_QUOTA_EXCEEDED code so the
+// frontend can prompt the user to upgrade their plan. Other billing
+// errors fall through to a generic 500.
 func writeBillingError(w http.ResponseWriter, err error) {
 	switch {
 	case errors.Is(err, billing.ErrQuotaExceeded):
-		middleware.RespondError(w, http.StatusPaymentRequired, middleware.ErrCodeInternal, err.Error())
+		middleware.RespondError(w, http.StatusPaymentRequired, middleware.ErrCodeQuotaExceeded, err.Error())
 	default:
 		middleware.RespondError(w, http.StatusInternalServerError, middleware.ErrCodeInternal, err.Error())
 	}
