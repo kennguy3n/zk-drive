@@ -193,24 +193,57 @@ func (r *YjsRuntime) WithMaxInstances(n int) *YjsRuntime {
 	return r
 }
 
+// WithAcquireBackoff overrides the inter-retry sleep applied by
+// acquire() when the instance pool is at capacity. The production
+// default (defaultAcquireBackoff = 1ms) suits the typical
+// document.CompactionThreshold cadence, where instance churn is
+// rare and a tiny sleep keeps the waiting goroutine off-CPU.
+//
+// Operators running a high-concurrency deployment with many
+// long-running compactions (large managed_encrypted documents,
+// many concurrent room compactions) may benefit from a longer
+// backoff (e.g. 5ms-10ms) to reduce wake-up churn, or a shorter
+// one for latency-sensitive setups. Tests use this to set 0 and
+// force a tight retry loop without blocking on real wall-clock
+// time.
+//
+// A value <=0 selects the test-only zero-sleep path (acquire
+// still yields the scheduler via select{} on ctx.Done before
+// retrying so context cancellation is honoured). The setter is
+// safe to call concurrently with other public methods.
+func (r *YjsRuntime) WithAcquireBackoff(d time.Duration) *YjsRuntime {
+	r.mu.Lock()
+	r.acquireBackoff = d
+	r.mu.Unlock()
+	return r
+}
+
 // Close releases the compiled module and every cached instance.
 // Idempotent — safe to call multiple times from concurrent
 // shutdown paths.
 //
 // Ordering:
-//  1. Flip `closed` so future acquire calls return ErrYjsRuntimeClosed.
-//  2. Drain the idle slice — those instances have no in-flight
-//     caller, so we can close them immediately.
+//  1. Flip `closed` under r.mu so future acquire calls return
+//     ErrYjsRuntimeClosed and every release path checking r.closed
+//     under the same mutex sees the new value.
+//  2. Snapshot + clear r.idle under the same lock, and decrement
+//     `live` once per entry — those instances have no in-flight
+//     caller, so we can close them immediately and the bookkeeping
+//     stays consistent for any pool-stats consumer that might
+//     read `live` after Close returns.
 //  3. Wait on `inflight` for every currently-checked-out caller
-//     to call release / discard. release / discard see
-//     closed==true and close their own instance (decrementing
-//     live), so by the time Wait returns no wasm module is in
-//     use anywhere.
-//  4. There may be a small late-arriving batch in idle if a
-//     caller called release after step (2) but before step (3)
-//     completed — drain it.
-//  5. Close the wazero runtime last. At this point no callWithInput
+//     to call release / discard. Each release acquires r.mu, sees
+//     closed==true, decrements `live`, and closes its own instance
+//     (instead of re-pooling), so by the time Wait returns no
+//     instance is checked out and `live` is back to zero.
+//  4. Close the wazero runtime last. At this point no callWithInput
 //     can still be running because step (3) waited for it.
+//
+// We do not need a second idle drain after the Wait: release
+// inspects r.closed under r.mu before deciding the case, so once
+// r.closed=true no release can re-pool an instance to idle. The
+// idleSnapshot captured in step (2) is therefore the complete set
+// of idle instances that will ever exist for this runtime.
 //
 // This eliminates the previous design's race window where Close
 // closed in-use modules concurrently with the caller's fn.Call,
@@ -224,6 +257,14 @@ func (r *YjsRuntime) Close(ctx context.Context) error {
 		r.closed = true
 		idleSnapshot := r.idle
 		r.idle = nil
+		// Decrement live for every idle instance we are
+		// about to close. This keeps the live counter
+		// consistent across all teardown paths (release of
+		// in-flight instances also decrements live), so a
+		// future pool-stats / health endpoint that reads
+		// live after Close observes zero instead of a
+		// stale over-count.
+		r.live -= len(idleSnapshot)
 		r.mu.Unlock()
 		for _, inst := range idleSnapshot {
 			if cerr := inst.mod.Close(ctx); cerr != nil && err == nil {
@@ -231,15 +272,6 @@ func (r *YjsRuntime) Close(ctx context.Context) error {
 			}
 		}
 		r.inflight.Wait()
-		r.mu.Lock()
-		late := r.idle
-		r.idle = nil
-		r.mu.Unlock()
-		for _, inst := range late {
-			if cerr := inst.mod.Close(ctx); cerr != nil && err == nil {
-				err = cerr
-			}
-		}
 		if cerr := r.rt.Close(ctx); cerr != nil && err == nil {
 			err = cerr
 		}

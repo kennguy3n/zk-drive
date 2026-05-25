@@ -459,7 +459,7 @@ func (h *DocumentHub) Handle(ctx context.Context, c *DocumentClient, f Frame) er
 	case MessageSync:
 		return h.handleSync(ctx, c, f)
 	case MessageAwareness:
-		return h.handleAwareness(c, f)
+		return h.handleAwareness(ctx, c, f)
 	case MessageAuth:
 		// Reserved; ignore in P2b. A future re-auth flow will
 		// dispatch on the sub-type here.
@@ -578,7 +578,7 @@ func (h *DocumentHub) handleSyncUpdate(ctx context.Context, c *DocumentClient, p
 	return nil
 }
 
-func (h *DocumentHub) handleAwareness(c *DocumentClient, f Frame) error {
+func (h *DocumentHub) handleAwareness(ctx context.Context, c *DocumentClient, f Frame) error {
 	if !c.Capability.PresenceAllowed {
 		// strict_zk room — drop the awareness frame server-side.
 		// We don't close the connection; a TipTap client that
@@ -598,12 +598,17 @@ func (h *DocumentHub) handleAwareness(c *DocumentClient, f Frame) error {
 	frame := EncodeAwareness(f.Payload)
 	h.broadcastExcept(c, frame)
 	if h.relay != nil {
-		// Awareness frames are short-lived presence info. We
-		// don't have a ctx in handleAwareness's signature so
-		// we use Background; a Redis outage falls through with
-		// a warn-log (we don't want a publish failure to break
-		// the user's typing experience).
-		if err := h.relay.PublishFrame(context.Background(), c.DocumentID, frame); err != nil {
+		// Multi-replica fan-out for awareness frames. We thread
+		// the caller's ctx (same one Handle / handleSyncUpdate
+		// use) so a server shutdown that cancels readPumps also
+		// cancels any in-flight awareness publish promptly,
+		// instead of holding shutdown hostage for one Redis
+		// WriteTimeout (typically 3s) per stuck publish. A
+		// publish failure is warn-logged and dropped; awareness
+		// is best-effort presence info, not durable state, so
+		// a single dropped frame is recoverable on the client's
+		// next awareness update.
+		if err := h.relay.PublishFrame(ctx, c.DocumentID, frame); err != nil {
 			c.logger.Warn("collab: relay publish failed for awareness frame", "err", err)
 		}
 	}

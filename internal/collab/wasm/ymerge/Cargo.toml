@@ -3,7 +3,7 @@ name = "ymerge"
 version = "0.1.0"
 edition = "2021"
 publish = false
-description = "Yjs merge / state-vector helpers compiled to wasm32-unknown-unknown for use from Go via wazero."
+description = "Yjs merge / state-vector helpers compiled to wasm32-wasip1 for use from Go via wazero. (WASI preview1 is required to satisfy yrs's transitive getrandom dependency via the host's random_get import — see build.sh.)"
 
 [lib]
 crate-type = ["cdylib"]

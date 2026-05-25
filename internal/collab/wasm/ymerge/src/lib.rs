@@ -1,4 +1,6 @@
-// ymerge is a tiny Rust crate compiled to `wasm32-unknown-unknown`
+// ymerge is a tiny Rust crate compiled to `wasm32-wasip1`
+// (WASI preview1, required for yrs's transitive getrandom →
+// random_get import; see build.sh and Cargo.toml for rationale)
 // that exposes the two Yjs primitives the Go host needs:
 //
 //   - `merge_updates`: take N concatenated length-prefixed Yjs

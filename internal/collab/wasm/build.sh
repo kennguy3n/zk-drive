@@ -8,8 +8,10 @@
 # and commit the updated ymerge.wasm alongside the source change.
 #
 # Requirements:
-#   - rustup with `wasm32-unknown-unknown` target installed:
-#       rustup target add wasm32-unknown-unknown
+#   - rustup with the `wasm32-wasip1` target installed (NOT
+#     wasm32-unknown-unknown; see the comment block below the
+#     `cargo build` invocation for why):
+#       rustup target add wasm32-wasip1
 #
 # Optional (recommended for production):
 #   - wasm-opt from binaryen: shrinks the binary by ~30% via
