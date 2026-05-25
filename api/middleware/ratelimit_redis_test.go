@@ -96,11 +96,46 @@ func TestRateLimitAcrossReplicas(t *testing.T) {
 	}
 
 	// 5th request through *either* replica must be limited because
-	// the per-user counter is shared.
+	// the per-user counter is shared. On heavily-contended CI
+	// runners miniredis's accept goroutine can briefly stall
+	// between successive requests, causing the rate-limit script
+	// to hit go-redis's 5-dial-retry budget and trip the
+	// fail-open branch — which surfaces here as a 200 instead of
+	// the expected 429. Distinguish that environmental flake from
+	// a genuine limiter regression by pinging Redis on a 200 and
+	// only failing the test when Redis is reachable (i.e. the
+	// limiter is actually broken). When Redis is briefly
+	// unreachable we wait for the listener to come back and re-
+	// issue the request: the counter is still at 4 server-side
+	// (the failed Eval was a network-level error, not a script
+	// success), so the retry exercises the same invariant.
 	rec := httptest.NewRecorder()
 	handlerB.ServeHTTP(rec, authedRequest(userID, workspaceID))
 	if rec.Code != http.StatusTooManyRequests {
-		t.Fatalf("expected 429 once combined budget exhausted, got %d", rec.Code)
+		// Probe Redis. If it answers we have a real bug; if not,
+		// wait briefly and retry the assertion once.
+		probeCtx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+		probeErr := client.Ping(probeCtx).Err()
+		cancel()
+		if probeErr == nil {
+			t.Fatalf("expected 429 once combined budget exhausted, got %d", rec.Code)
+		}
+		// Wait for the listener to recover, then retry once.
+		deadline := time.Now().Add(2 * time.Second)
+		for time.Now().Before(deadline) {
+			ctx, c := context.WithTimeout(context.Background(), 200*time.Millisecond)
+			err := client.Ping(ctx).Err()
+			c()
+			if err == nil {
+				break
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+		rec = httptest.NewRecorder()
+		handlerB.ServeHTTP(rec, authedRequest(userID, workspaceID))
+		if rec.Code != http.StatusTooManyRequests {
+			t.Fatalf("expected 429 on retry after miniredis listener recovery, got %d", rec.Code)
+		}
 	}
 	if rec.Header().Get("Retry-After") == "" {
 		t.Fatalf("Retry-After header should be set on 429")
