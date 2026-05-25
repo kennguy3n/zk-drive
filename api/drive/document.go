@@ -334,13 +334,24 @@ func (h *Handler) GetDocumentSnapshot(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid id", http.StatusBadRequest)
 		return
 	}
-	snap, err := h.documents.Snapshot(r.Context(), workspaceID, id)
+	// Check access BEFORE fetching the full snapshot bundle: a
+	// snapshot pull streams y_state + y_state_vector + tail deltas,
+	// which can be MB-scale on long-lived rich documents. We resolve
+	// folder_id via GetMetadata first so an unauthorized caller is
+	// rejected with a single small row read rather than paying for
+	// the binary fetch only to receive a 403.
+	meta, _, err := h.documents.GetMetadata(r.Context(), workspaceID, id)
 	if err != nil {
 		writeDocumentError(w, err)
 		return
 	}
-	if err := h.assertResourceAccess(r.Context(), permission.ResourceFolder, snap.Document.FolderID, permission.RoleViewer); err != nil {
+	if err := h.assertResourceAccess(r.Context(), permission.ResourceFolder, meta.FolderID, permission.RoleViewer); err != nil {
 		writeServiceError(w, err)
+		return
+	}
+	snap, err := h.documents.Snapshot(r.Context(), workspaceID, id)
+	if err != nil {
+		writeDocumentError(w, err)
 		return
 	}
 	tail := make([]deltaResponse, 0, len(snap.TailDeltas))
