@@ -291,18 +291,32 @@ async fn main() -> anyhow::Result<()> {
                 });
                 println!("{}", serde_json::to_string_pretty(&envelope)?);
             } else {
+                // Human-readable line mirrors the full
+                // StatusCounts struct that `--json` emits, so an
+                // operator on a remote shell diagnosing a stuck
+                // upload queue or a tombstone-leak doesn't have
+                // to rerun with `--json | jq` to see the
+                // local_deleted / remote_deleted / in_flight
+                // counters. Any future SyncStatus variant must be
+                // added here (and to the `kv()` helper below) to
+                // preserve parity with the JSON snapshot.
+                let kv = |k: &str, v: u64| format!("{k}={v}");
                 println!(
-                    "workspace={workspace} cursor={cursor} cached_bytes={} pinned={} \
-                     up_to_date={} local_dirty={} remote_dirty={} conflict={} evicted={} \
-                     connectivity={}",
-                    snap.cached_bytes,
-                    snap.pinned_count,
-                    snap.status_counts.up_to_date,
-                    snap.status_counts.local_dirty,
-                    snap.status_counts.remote_dirty,
-                    snap.status_counts.conflict,
-                    snap.status_counts.evicted,
-                    match snap.connectivity {
+                    "workspace={workspace} cursor={cursor} \
+                     {cached} {pinned} {up_to_date} {local_dirty} {remote_dirty} \
+                     {conflict} {evicted} {local_deleted} {remote_deleted} {in_flight} \
+                     connectivity={connectivity}",
+                    cached = kv("cached_bytes", snap.cached_bytes),
+                    pinned = kv("pinned", snap.pinned_count),
+                    up_to_date = kv("up_to_date", snap.status_counts.up_to_date),
+                    local_dirty = kv("local_dirty", snap.status_counts.local_dirty),
+                    remote_dirty = kv("remote_dirty", snap.status_counts.remote_dirty),
+                    conflict = kv("conflict", snap.status_counts.conflict),
+                    evicted = kv("evicted", snap.status_counts.evicted),
+                    local_deleted = kv("local_deleted", snap.status_counts.local_deleted),
+                    remote_deleted = kv("remote_deleted", snap.status_counts.remote_deleted),
+                    in_flight = kv("in_flight", snap.status_counts.in_flight),
+                    connectivity = match snap.connectivity {
                         zk_sync_engine::ConnectivityStateOwned::Online => "online",
                         zk_sync_engine::ConnectivityStateOwned::Offline => "offline",
                         zk_sync_engine::ConnectivityStateOwned::Unknown => "unknown",
