@@ -1,10 +1,17 @@
 # ZK Drive
 
-> Privacy-conscious document management with per-folder choice of
-> confidential managed storage (default, server-readable for preview /
-> search / virus-scan) or strict zero-knowledge mode (opt-in, the
-> server never sees plaintext). Powered by zk-object-fabric. Secure
-> file collaboration for teams, clients, and partners.
+> **ZK Drive — Zero-Knowledge When You Need It, Seamless When You Don't.**
+>
+> Every workspace ships with **confidential** managed storage by
+> default — encrypted at rest, with previews, full-text search, and
+> virus scanning. Turn on **strict zero-knowledge** per folder when
+> you need the server out of the loop: your keys, your control, no
+> server access. Powered by [zk-object-fabric](https://github.com/kennguy3n/zk-object-fabric).
+> Secure file collaboration for teams, clients, and partners.
+>
+> "ZK" describes a per-folder *capability*, not a claim about every
+> file you store. See [docs/BRAND.md](docs/BRAND.md) for the phrasing
+> rules we hold ourselves to.
 
 ZK Drive is a document management and file collaboration system — a
 privacy-first alternative to Google Drive, OneDrive, and Dropbox —

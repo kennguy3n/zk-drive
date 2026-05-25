@@ -32,17 +32,45 @@ export default function PrivacyPage() {
         everywhere a folder is shown (sidebar, file list, breadcrumb)
         via a coloured badge:
         {" "}
-        <EncryptionBadge mode="managed_encrypted" />
+        <EncryptionBadge mode="managed_encrypted" linkToHelp={false} />
         {" "}or{" "}
-        <EncryptionBadge mode="strict_zk" />.
+        <EncryptionBadge mode="strict_zk" linkToHelp={false} />.
         We try to be honest about the trade-offs rather than market
         both modes as "zero-knowledge" — most providers do that and it
         is not accurate for either one.
       </p>
 
+      <section style={section} aria-labelledby="brand-heading">
+        <h2 id="brand-heading" style={h2}>
+          What does "ZK" mean in ZK Drive?
+        </h2>
+        <p>
+          "ZK" describes a <em>capability</em> the platform offers, not
+          a claim about every file you store. Every workspace ships
+          with confidential managed storage by default — that is the
+          right trade-off for most teams because it powers previews,
+          search, and virus scanning. Strict zero-knowledge is opt-in
+          at the folder level for the content where you want the
+          server out of the loop entirely.
+        </p>
+        <ul style={{ paddingLeft: 20, margin: "8px 0 0" }}>
+          <li>
+            <strong>Confidential managed</strong> is encrypted at rest
+            but server-readable in memory. It is the default. It is{" "}
+            <em>not</em> zero-knowledge and we never call it that.
+          </li>
+          <li>
+            <strong>Strict zero-knowledge</strong> is end-to-end
+            encrypted with keys the server never sees. Opt in
+            per-folder. Losing the trade-offs (previews, search, virus
+            scan) is the honest cost of the guarantee.
+          </li>
+        </ul>
+      </section>
+
       <section style={section} aria-labelledby="managed-heading">
         <h2 id="managed-heading" style={h2}>
-          <EncryptionBadge mode="managed_encrypted" size="header" /> Confidential managed
+          <EncryptionBadge mode="managed_encrypted" size="header" linkToHelp={false} /> Confidential managed
           <span style={muted}> &nbsp;&middot;&nbsp; the default</span>
         </h2>
         <p>
@@ -69,7 +97,7 @@ export default function PrivacyPage() {
 
       <section style={section} aria-labelledby="strict-heading">
         <h2 id="strict-heading" style={h2}>
-          <EncryptionBadge mode="strict_zk" size="header" /> Strict zero-knowledge
+          <EncryptionBadge mode="strict_zk" size="header" linkToHelp={false} /> Strict zero-knowledge
           <span style={muted}> &nbsp;&middot;&nbsp; opt-in, per folder</span>
         </h2>
         <p>
