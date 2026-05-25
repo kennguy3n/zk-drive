@@ -203,8 +203,27 @@ impl RemotePoller {
         if tx.is_closed() {
             return Ok(());
         }
+        // Read the cursor that catch-up just persisted. The WS handshake
+        // races against any mutation the server commits between
+        // catch-up's DB query (T0) and our connect at T1; without
+        // a `since` parameter the server has no way to replay those
+        // T0..T1 events and they'd remain undelivered until the next
+        // WS drop forced a fresh catch-up cycle. Passing the cursor
+        // here closes the gap: the server MUST replay any persisted
+        // mutation with sequence > since before transitioning to
+        // live mode.
+        //
+        // We pass Some(0) -- not None -- on a fresh sync to make the
+        // "deliver from the beginning of retained history" intent
+        // explicit on the wire. The server defaults `None` to the
+        // same thing, but being explicit means a future server-side
+        // metric like `changefeed.stream_changes.since_unset` will
+        // actually measure "buggy clients that forgot to thread the
+        // cursor" instead of conflating that with "legitimately new
+        // sync agents".
+        let since = self.catalogue.lock().await.get_cursor(self.workspace_id)?;
         let mut stream = ChangefeedClient::new(&self.client)
-            .stream_changes(self.workspace_id)
+            .stream_changes(self.workspace_id, Some(since))
             .await?;
         while let Some(item) = stream.next().await {
             match item? {

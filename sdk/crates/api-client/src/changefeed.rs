@@ -133,7 +133,7 @@ impl<'c> ChangefeedClient<'c> {
         serde_json::from_str(&body).map_err(|e| ApiError::Decode(format!("changefeed page: {e}")))
     }
 
-    /// `WS /api/v1/workspaces/{workspace_id}/changes/stream`
+    /// `WS /api/v1/workspaces/{workspace_id}/changes/stream[?since={cursor}]`
     ///
     /// Returns an async stream of [`ChangeEvent`]. The stream
     /// terminates with `Err(ApiError::WebSocket(_))` on protocol
@@ -141,15 +141,31 @@ impl<'c> ChangefeedClient<'c> {
     /// Callers reconnect with the highest observed `sequence` as
     /// `since` to resume cleanly.
     ///
+    /// `since` closes the gap between catch-up completion and the
+    /// WebSocket handshake. Any mutation with `sequence > since` that
+    /// the server has already persisted MUST be replayed on the wire
+    /// before the connection transitions to "live" mode. The server
+    /// is responsible for ordering: a client that observes a stream
+    /// of mutations all with `sequence > since`, monotonically
+    /// increasing, can persist the cursor on each frame and treat a
+    /// dropped connection as recoverable via another catch-up + this
+    /// stream call with the new highest-observed `sequence`.
+    ///
+    /// `since = None` (or `Some(0)`) requests "deliver from the
+    /// beginning of retained history". This is the right value for a
+    /// fresh sync agent that has nothing in its local catalogue;
+    /// established agents always pass `Some(catalogue.cursor)`.
+    ///
     /// The bearer token is fetched from the client's
     /// [`crate::transport::TokenProvider`] **at handshake time**, so
     /// reconnect-on-disconnect picks up freshly-refreshed tokens
     /// without callers having to thread a new string through.
-    pub async fn stream_changes(&self, workspace_id: Uuid) -> Result<ChangeEventStream> {
-        let mut url = join(
-            self.client.base(),
-            &format!("api/v1/workspaces/{workspace_id}/changes/stream",),
-        )?;
+    pub async fn stream_changes(
+        &self,
+        workspace_id: Uuid,
+        since: Option<i64>,
+    ) -> Result<ChangeEventStream> {
+        let mut url = stream_changes_url(self.client.base(), workspace_id, since)?;
         match url.scheme() {
             "http" => {
                 url.set_scheme("ws")
@@ -205,9 +221,82 @@ impl<'c> ChangefeedClient<'c> {
     }
 }
 
+/// Builds the WebSocket subscription URL with optional `since` cursor.
+/// Extracted from [`ChangefeedClient::stream_changes`] so the wire
+/// shape can be tested without standing up a real WebSocket server.
+///
+/// `since = None` omits the query parameter entirely, leaving the
+/// URL unchanged from the original PR3 contract. A server that
+/// hasn't yet implemented gap-replay sees the same URL it saw
+/// before (forward-compat) and a server that has will fall back to
+/// its own default ("from the beginning"). `since = Some(seq)`
+/// appends `?since={normalized}` where negative values clip to 0.
+///
+/// The returned URL still has its original scheme (`http`/`https`);
+/// the caller flips it to `ws`/`wss` after building.
+fn stream_changes_url(base: &url::Url, workspace_id: Uuid, since: Option<i64>) -> Result<url::Url> {
+    let mut url = join(
+        base,
+        &format!("api/v1/workspaces/{workspace_id}/changes/stream"),
+    )?;
+    if let Some(seq) = since {
+        let normalized = seq.max(0);
+        url.query_pairs_mut()
+            .append_pair("since", &normalized.to_string());
+    }
+    Ok(url)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stream_url_includes_since_when_provided() {
+        // R13 #3: closes the gap between catch-up completion and
+        // WebSocket handshake. The server contract is "replay
+        // anything with sequence > since before going live"; this
+        // test pins the wire shape we send so a future refactor of
+        // the URL builder doesn't drop the query param silently
+        // (which would reintroduce the gap and look indistinguishable
+        // from "WS endpoint is just dropping events").
+        let base = url::Url::parse("https://api.example.test/").unwrap();
+        let ws_id = uuid::uuid!("11111111-1111-1111-1111-111111111111");
+        let url = stream_changes_url(&base, ws_id, Some(4242)).unwrap();
+        assert_eq!(
+            url.as_str(),
+            "https://api.example.test/api/v1/workspaces/11111111-1111-1111-1111-111111111111/changes/stream?since=4242",
+        );
+    }
+
+    #[test]
+    fn stream_url_omits_since_when_none() {
+        // None is the "fresh agent, no cursor yet" signal. We
+        // omit the query parameter entirely rather than sending
+        // `?since=0` so an older server that hasn't picked up the
+        // gap-replay contract sees exactly the URL it saw in PR3
+        // and can't accidentally 400 on an unrecognized query key.
+        let base = url::Url::parse("https://api.example.test/").unwrap();
+        let ws_id = uuid::uuid!("22222222-2222-2222-2222-222222222222");
+        let url = stream_changes_url(&base, ws_id, None).unwrap();
+        assert_eq!(url.query(), None);
+        assert!(url.path().ends_with("/changes/stream"));
+    }
+
+    #[test]
+    fn stream_url_clips_negative_since_to_zero() {
+        // Defensive: a corrupted catalogue could conceivably surface
+        // a negative cursor (i64 ColumnType in SQLite is signed and
+        // we don't apply a CHECK constraint at write time). Rather
+        // than send `?since=-7` for a strict server to 400 on, we
+        // clip to 0 -- the contract is "deliver everything with
+        // sequence > since", and any negative value satisfies that
+        // for every real mutation.
+        let base = url::Url::parse("https://api.example.test/").unwrap();
+        let ws_id = uuid::uuid!("33333333-3333-3333-3333-333333333333");
+        let url = stream_changes_url(&base, ws_id, Some(-7)).unwrap();
+        assert!(url.as_str().ends_with("?since=0"));
+    }
 
     #[test]
     fn mutation_round_trips_through_canonical_json() {
