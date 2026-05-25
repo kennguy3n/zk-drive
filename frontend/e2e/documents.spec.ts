@@ -86,19 +86,23 @@ test.describe("documents", () => {
     await page.getByRole("link", { name: /documents/i }).click();
     await page.getByRole("button", { name: /new document/i }).click();
 
+    // Scope to the dialog so we don't accidentally match controls
+    // on the underlying documents list page or the header.
+    const dialog = page.getByRole("dialog");
+
     // Every mode is enabled in a managed_encrypted folder.
-    await expect(page.locator('input[type="radio"][value="markdown"]')).toBeEnabled();
-    await expect(page.locator('input[type="radio"][value="rich"]')).toBeEnabled();
+    await expect(dialog.locator('input[type="radio"][value="markdown"]')).toBeEnabled();
+    await expect(dialog.locator('input[type="radio"][value="rich"]')).toBeEnabled();
     await expect(
-      page.locator('input[type="radio"][value="rich_presence"]'),
+      dialog.locator('input[type="radio"][value="rich_presence"]'),
     ).toBeEnabled();
 
     // Pick rich+presence and create — should navigate into the
     // editor and show the encryption + collab-mode badges plus
     // the connection-status chip.
-    await page.locator('input[type="radio"][value="rich_presence"]').check();
-    await page.getByLabel(/name/i).first().fill("Design Doc");
-    await page.getByRole("button", { name: /^create$/i }).click();
+    await dialog.locator('input[type="radio"][value="rich_presence"]').check();
+    await dialog.getByLabel("Name", { exact: true }).fill("Design Doc");
+    await dialog.getByRole("button", { name: /^create$/i }).click();
 
     await expect(page).toHaveURL(/\/drive\/document\/[^/]+$/);
     await expect(page.getByRole("heading", { name: /design doc/i })).toBeVisible();
