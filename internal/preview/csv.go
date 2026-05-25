@@ -16,10 +16,23 @@ import (
 // need more than the first ~256 KiB to fill a 256 px thumbnail.
 const csvPreviewMaxBytes = 256 * 1024
 
-// csvPreviewMaxRows is the number of data rows the preview displays
-// (excluding the optional header row). 20 rows comfortably fills the
-// 30-line working canvas after accounting for the header separator
-// and the rasteriser's per-line cap.
+// csvPreviewMaxRows is the visible-data-row budget for the preview.
+// The exact number of rendered data rows depends on whether a header
+// is detected:
+//
+//   - Header detected:  csvPreviewMaxRows (20) data rows, plus the
+//                       header banner in the title slot. Total visible
+//                       lines: 21 (header + 20).
+//   - No header:        csvPreviewMaxRows+1 (21) data rows, no banner.
+//                       Total visible lines: 21.
+//
+// The "+1 when headerless" is intentional — without a header banner
+// consuming a visual slot, the extra data row makes full use of the
+// 21-line maxLines budget passed to the rasteriser. The read loop
+// reads csvPreviewMaxRows+1 successful records regardless, so the
+// invariant is "fill all 21 visible slots". 20 rows × ~6 chars
+// per cell comfortably fills the 30-line working canvas after
+// accounting for the rasteriser's per-line cap.
 const csvPreviewMaxRows = 20
 
 // csvPreviewMaxCols caps how many columns we render per row. Wider

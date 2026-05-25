@@ -156,6 +156,16 @@ func walkMarkdownAST(doc ast.Node, source []byte) (title, body string) {
 		// previous approach of calling out.String() and scanning
 		// the suffix, which was O(n) per call and quadratic
 		// across a deeply nested document.
+		//
+		// SCOPE: this tracks blockquote depth only, NOT list
+		// nesting depth. List items don't emit surrounding blank
+		// lines (only the list-end emitBlank does — see the
+		// *ast.List case in walk), so two adjacent list-end
+		// blanks at the same blockquote depth would legitimately
+		// dedupe to one regardless of whether the lists nested
+		// at the same depth. If a future change starts emitting
+		// blank lines inside list bodies, this state would need
+		// to be widened to (blockquoteDepth, listDepth).
 		trailingBlankDepth = -1
 	)
 
