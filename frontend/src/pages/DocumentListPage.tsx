@@ -33,23 +33,39 @@ export default function DocumentListPage() {
   const [error, setError] = useState<string | null>(null);
   const [createOpen, setCreateOpen] = useState(false);
 
-  const refresh = useCallback(async () => {
-    if (!folderId) return;
-    setError(null);
-    try {
-      const [{ folder: f }, list] = await Promise.all([
-        getFolder(folderId),
-        listFolderDocuments(folderId),
-      ]);
-      setFolder(f);
-      setDocs(list);
-    } catch (e) {
-      setError(String((e as Error)?.message ?? e));
-    }
-  }, [folderId]);
+  // refresh is also called from the mutation paths (onDelete, onCreated)
+  // so its cancellation guard is checked inline by passing an optional
+  // cancelled-flag ref. The useEffect below owns the initial-load + folder-
+  // change reload and provides a per-effect cancellation token that flips
+  // on cleanup, so a stale folder-A response can't clobber folder-B's data
+  // when the user navigates between folders quickly. Matches the
+  // DocumentEditorPage `cancelled` pattern.
+  const refresh = useCallback(
+    async (isCancelled?: () => boolean) => {
+      if (!folderId) return;
+      setError(null);
+      try {
+        const [{ folder: f }, list] = await Promise.all([
+          getFolder(folderId),
+          listFolderDocuments(folderId),
+        ]);
+        if (isCancelled?.()) return;
+        setFolder(f);
+        setDocs(list);
+      } catch (e) {
+        if (isCancelled?.()) return;
+        setError(String((e as Error)?.message ?? e));
+      }
+    },
+    [folderId],
+  );
 
   useEffect(() => {
-    void refresh();
+    let cancelled = false;
+    void refresh(() => cancelled);
+    return () => {
+      cancelled = true;
+    };
   }, [refresh]);
 
   const onDelete = useCallback(
