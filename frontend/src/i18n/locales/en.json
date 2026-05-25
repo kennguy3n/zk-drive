@@ -41,7 +41,7 @@
     "loginPageTitle": "Sign in to zk-drive",
     "signup": "Create workspace",
     "signupPageTitle": "Create a zk-drive workspace",
-    "logout": "Sign out",
+    "logout": "Log out",
     "email": "Email",
     "password": "Password",
     "name": "Your name",
@@ -82,7 +82,7 @@
   },
   "drive": {
     "newFolder": "New folder",
-    "uploadFile": "Upload",
+    "uploadFile": "Upload file",
     "folders": "Folders",
     "files": "Files",
     "noFolders": "No folders",

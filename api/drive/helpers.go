@@ -105,49 +105,6 @@ func writeServiceError(w http.ResponseWriter, err error) {
 	}
 }
 
-// apiError is the package-local helper that callers use instead
-// of http.Error so every error response carries a stable JSON
-// `{code, message}` body. The four most-common error shapes
-// (invalid-id, invalid-json, workspace-mismatch, unauthenticated)
-// have dedicated shorthands below to keep call sites terse.
-//
-// New error codes should be added to api/middleware/error_codes.go
-// alongside their English fallback in
-// frontend/src/i18n/locales/en.json. Reusing an existing code is
-// fine when the semantics match (e.g. every "invalid {x}_id" goes
-// through ErrCodeBadRequest with a specific message).
-func apiError(w http.ResponseWriter, status int, code middleware.ErrorCode, message string) {
-	middleware.RespondError(w, status, code, message)
-}
-
-func apiBadRequest(w http.ResponseWriter, message string) {
-	middleware.RespondError(w, http.StatusBadRequest, middleware.ErrCodeBadRequest, message)
-}
-
-func apiForbidden(w http.ResponseWriter, message string) {
-	middleware.RespondError(w, http.StatusForbidden, middleware.ErrCodeForbidden, message)
-}
-
-func apiUnauthorized(w http.ResponseWriter, message string) {
-	middleware.RespondError(w, http.StatusUnauthorized, middleware.ErrCodeAuthMissingToken, message)
-}
-
-func apiNotFound(w http.ResponseWriter, message string) {
-	middleware.RespondError(w, http.StatusNotFound, middleware.ErrCodeNotFound, message)
-}
-
-func apiInternal(w http.ResponseWriter, message string) {
-	middleware.RespondError(w, http.StatusInternalServerError, middleware.ErrCodeInternal, message)
-}
-
-func apiConflict(w http.ResponseWriter, message string) {
-	middleware.RespondError(w, http.StatusConflict, middleware.ErrCodeConflict, message)
-}
-
-func apiMalformedJSON(w http.ResponseWriter, message string) {
-	middleware.RespondError(w, http.StatusBadRequest, middleware.ErrCodeMalformedJSON, message)
-}
-
 func writeJSON(w http.ResponseWriter, status int, payload any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
