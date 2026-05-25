@@ -50,6 +50,20 @@ func TestSupportedSearchLanguagesReturnsCopy(t *testing.T) {
 	}
 }
 
+// TestSupportedSearchLanguagesIsSorted pins the API contract that
+// the supported-language list is alphabetically sorted, so JSON
+// responses are byte-stable across calls (clients can cache /
+// hash / diff them without false churn from Go's randomised map
+// iteration order).
+func TestSupportedSearchLanguagesIsSorted(t *testing.T) {
+	got := SupportedSearchLanguages()
+	for i := 1; i < len(got); i++ {
+		if got[i-1] >= got[i] {
+			t.Errorf("expected sorted output, got %q before %q (index %d)", got[i-1], got[i], i)
+		}
+	}
+}
+
 // fakeRepo lets us unit-test Service without a Postgres connection.
 type fakeRepo struct {
 	w                  *Workspace

@@ -1,6 +1,7 @@
 package workspace
 
 import (
+	"sort"
 	"time"
 
 	"github.com/google/uuid"
@@ -85,15 +86,18 @@ func IsSupportedSearchLanguage(lang string) bool {
 	return ok
 }
 
-// SupportedSearchLanguages returns a copy of the allow-list. Used
-// by handlers to surface the supported set in error responses so
-// frontend pickers don't have to ship a duplicate list. Returned
-// slice is freshly allocated so the caller cannot mutate the
-// underlying map.
+// SupportedSearchLanguages returns a sorted copy of the allow-list.
+// Used by handlers to surface the supported set in error responses
+// so frontend pickers don't have to ship a duplicate list. The
+// slice is freshly allocated on every call and sorted
+// alphabetically so the JSON response is byte-stable across calls
+// — clients that diff or hash the response (caching, ETags) see
+// only real changes, not Go's randomised map iteration order.
 func SupportedSearchLanguages() []string {
 	out := make([]string, 0, len(supportedSearchLanguages))
 	for k := range supportedSearchLanguages {
 		out = append(out, k)
 	}
+	sort.Strings(out)
 	return out
 }

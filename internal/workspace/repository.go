@@ -86,12 +86,21 @@ func insertWorkspace(ctx context.Context, q workspaceQuerier, w *Workspace) erro
 	if w.Tier == "" {
 		w.Tier = TierFree
 	}
+	if w.SearchLanguage == "" {
+		w.SearchLanguage = DefaultSearchLanguage
+	}
+	// We RETURN search_language (alongside created_at / updated_at)
+	// so the in-memory struct mirrors the row Postgres just wrote.
+	// Without this, callers that immediately JSON-encode the
+	// returned Workspace see "search_language": "" even though the
+	// column on disk has the DEFAULT 'simple' applied — a subtle
+	// drift that bites the admin-page-after-create path.
 	const stmt = `
-INSERT INTO workspaces (id, name, owner_user_id, storage_quota_bytes, storage_used_bytes, tier)
-VALUES ($1, $2, $3, $4, $5, $6)
-RETURNING created_at, updated_at`
-	if err := q.QueryRow(ctx, stmt, w.ID, w.Name, w.OwnerUserID, w.StorageQuotaBytes, w.StorageUsedBytes, w.Tier).
-		Scan(&w.CreatedAt, &w.UpdatedAt); err != nil {
+INSERT INTO workspaces (id, name, owner_user_id, storage_quota_bytes, storage_used_bytes, tier, search_language)
+VALUES ($1, $2, $3, $4, $5, $6, $7)
+RETURNING created_at, updated_at, search_language`
+	if err := q.QueryRow(ctx, stmt, w.ID, w.Name, w.OwnerUserID, w.StorageQuotaBytes, w.StorageUsedBytes, w.Tier, w.SearchLanguage).
+		Scan(&w.CreatedAt, &w.UpdatedAt, &w.SearchLanguage); err != nil {
 		return fmt.Errorf("insert workspace: %w", err)
 	}
 	return nil

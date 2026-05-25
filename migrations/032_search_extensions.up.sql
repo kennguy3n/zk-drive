@@ -88,6 +88,20 @@ CREATE INDEX IF NOT EXISTS idx_folders_trgm_name
   ON folders USING gin ((immutable_unaccent(name)) gin_trgm_ops)
   WHERE deleted_at IS NULL;
 
+-- Trigram index on file_tags.tag. The search service joins file_tags
+-- in a dedicated CTE that uses `<%` against immutable_unaccent(tag)
+-- so tag-only hits (e.g. a query for "invoice" surfaces a file
+-- tagged "invoice" even when its name / content_text don't match)
+-- can come back through a GIN scan instead of a seq scan over
+-- file_tags. The migration deliberately keeps tag matching OUT of
+-- the files.* FTS / trgm expressions because including tag_text
+-- there would force the planner to seq-scan files — neither the
+-- name+content FTS index nor the per-column trigram indexes can
+-- cover a concatenation with tag_text since tag_text lives in a
+-- different table.
+CREATE INDEX IF NOT EXISTS idx_file_tags_trgm_tag
+  ON file_tags USING gin ((immutable_unaccent(tag)) gin_trgm_ops);
+
 -- FTS index using the 'simple' dictionary on the same unaccented
 -- expression. The 'simple' path is the fallback used for the
 -- default search_language; language-specific dictionaries are

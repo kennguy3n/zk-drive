@@ -14,21 +14,39 @@
 //      which is fine for short queries and never misses a hit the
 //      trigram path would have caught.
 //
-//   2. Trigram path: immutable_unaccent(name || ...) <% immutable_unaccent($q)
-//      with word_similarity(...) scoring. The <% operator + GIN
-//      trgm index handles CJK substrings (no word boundaries
-//      needed) and fuzzy matches like "reportt" → "report". We use
-//      word_similarity / <% (NOT plain similarity / %) because
-//      filenames often embed the query inside longer strings
-//      ("季度报告.txt" contains "季度" but plain similarity is
-//      diluted by the .txt suffix and the rest of the filename).
-//      <% scores the BEST matching window of the longer string
-//      against the shorter query — which is exactly the semantics
-//      we want for filename / content_text search.
+//   2. Trigram path: immutable_unaccent(name) <% immutable_unaccent($q)
+//      (and the same against COALESCE(content_text, '')) with
+//      word_similarity(...) scoring. The <% operator + GIN trgm
+//      index handles CJK substrings (no word boundaries needed) and
+//      fuzzy matches like "reportt" → "report". We use word_similarity
+//      / <% (NOT plain similarity / %) because filenames often embed
+//      the query inside longer strings ("季度报告.txt" contains
+//      "季度" but plain similarity is diluted by the .txt suffix
+//      and the rest of the filename). <% scores the BEST matching
+//      window of the longer string against the shorter query — which
+//      is exactly the semantics we want for filename / content_text
+//      search.
 //
 //      pg_trgm.word_similarity_threshold is SET LOCAL inside the
 //      search transaction so the planner can use the GIN index
 //      but the threshold doesn't leak across the pool.
+//
+// # Index-matched expressions
+//
+// The file CTEs split the trigram check into TWO `<%` clauses (one
+// against immutable_unaccent(f.name), one against
+// immutable_unaccent(COALESCE(f.content_text, ''))) so each one matches
+// the corresponding GIN index expression byte-for-byte. A single `<%`
+// against the concatenation `name || ' ' || content_text` would not
+// match either index and the planner would fall back to a sequential
+// scan over the workspace's files — fine for tens of files, fatal at
+// 100k. Likewise the FTS file CTE uses the indexed expression
+// `to_tsvector('__LANG__', immutable_unaccent(name || ' ' ||
+// COALESCE(content_text, '')))` verbatim. Tag matching is handled in a
+// dedicated `tag_match_files` CTE that hits the `idx_file_tags_trgm_tag`
+// GIN index in migration 032 — it cannot be expressed in the files-
+// table FTS / trgm indexes because tag_text lives in a different
+// table.
 //
 // Each path independently scores its hits, then a SELECT DISTINCT
 // ON over the UNION'd set keeps the better-ranked hit per (type,
@@ -186,11 +204,22 @@ func (s *Service) Search(ctx context.Context, workspaceID uuid.UUID, query strin
 	defer func() { _ = tx.Rollback(ctx) }()
 
 	// SET LOCAL lives for the duration of the transaction. The
-	// % operator consults pg_trgm.similarity_threshold to decide
-	// whether two strings are "close enough" — keeping the
+	// <% operator consults pg_trgm.word_similarity_threshold to
+	// decide whether two strings are "close enough" — keeping the
 	// threshold explicit per query lets the FuzzyEnabled flag
 	// alter recall without an ALTER DATABASE or a daemon-level
 	// GUC.
+	//
+	// SAFETY: fmt.Sprintf is used here only because Postgres does
+	// not accept a `$N` bind parameter for the SET LOCAL value
+	// (it must be a literal). `threshold` is a local Go float64
+	// drawn from one of TWO package-level constants (
+	// DefaultTrigramThreshold or FuzzyTrigramThreshold) chosen
+	// based on opts.FuzzyEnabled — it is NEVER sourced from
+	// untrusted input. Any future change to widen this branch (e.g.
+	// per-tenant threshold) MUST bound the value to the same
+	// constant set or use a clamped numeric cast before reaching
+	// this Sprintf to keep this path SQL-injection-safe.
 	if _, err := tx.Exec(ctx,
 		fmt.Sprintf("SET LOCAL pg_trgm.word_similarity_threshold = %f", threshold),
 	); err != nil {
@@ -244,14 +273,27 @@ func (s *Service) Search(ctx context.Context, workspaceID uuid.UUID, query strin
 // UNION strategy.
 const searchSQL = `
 WITH file_tag_text AS (
+    -- Display-only aggregation: each hit row carries the full tag
+    -- array for the frontend. The MATCHING tags surface through the
+    -- tag_match_files CTE below, which hits idx_file_tags_trgm_tag
+    -- directly. Splitting display from match avoids forcing the
+    -- planner to seq-scan files when a query matches by tag alone.
     SELECT file_id,
-           string_agg(tag, ' ') AS tag_text,
            array_agg(DISTINCT tag ORDER BY tag) AS tags
     FROM file_tags
     WHERE workspace_id = $1
     GROUP BY file_id
 ),
 fts_files AS (
+    -- Expression matches idx_files_fts_unaccent_simple byte-for-byte
+    -- when __LANG__ is 'simple' (the default). For non-simple
+    -- languages the expression's regconfig differs from the index's
+    -- and the planner falls back to a workspace-scoped seq scan.
+    -- That trade-off is intentional: stocking 16 language-specific
+    -- GIN indexes per table would 16× the disk footprint, while the
+    -- non-simple recall is acceptable because the trigram path
+    -- (split into per-column <% clauses below) still hits an index
+    -- and surfaces stem-language results via word_similarity.
     SELECT 'file'::TEXT AS type,
            f.id,
            f.name,
@@ -260,7 +302,7 @@ fts_files AS (
            f.created_at,
            ts_rank_cd(
                to_tsvector('__LANG__'::regconfig,
-                   immutable_unaccent(f.name || ' ' || COALESCE(ft.tag_text, '') || ' ' || COALESCE(f.content_text, ''))),
+                   immutable_unaccent(f.name || ' ' || COALESCE(f.content_text, ''))),
                plainto_tsquery('__LANG__'::regconfig, immutable_unaccent($2))
            )::float4 AS rank,
            COALESCE(ft.tags, ARRAY[]::TEXT[]) AS tags
@@ -272,12 +314,14 @@ fts_files AS (
       AND parent.deleted_at IS NULL
       AND parent.encryption_mode <> 'strict_zk'
       AND to_tsvector('__LANG__'::regconfig,
-              immutable_unaccent(f.name || ' ' || COALESCE(ft.tag_text, '') || ' ' || COALESCE(f.content_text, '')))
+              immutable_unaccent(f.name || ' ' || COALESCE(f.content_text, '')))
           @@ plainto_tsquery('__LANG__'::regconfig, immutable_unaccent($2))
     ORDER BY rank DESC, f.created_at DESC
     LIMIT $3
 ),
 fts_folders AS (
+    -- Matches idx_folders_fts_unaccent_simple when __LANG__ is
+    -- 'simple'. Same per-language trade-off as fts_files.
     SELECT 'folder'::TEXT AS type,
            fo.id,
            fo.name,
@@ -299,21 +343,22 @@ fts_folders AS (
     LIMIT $3
 ),
 trgm_files AS (
-    -- word_similarity / <% finds the BEST trigram window of the
-    -- longer indexed string against the shorter query. This is
-    -- the operator we want for filename + content_text search:
-    -- "季度" should match "季度报告.txt" with a high score, even
-    -- though plain similarity() would be diluted by the .txt
-    -- suffix and the rest of the content.
+    -- Two <% clauses, ORed, so the planner can union the results
+    -- of idx_files_trgm_name and idx_files_trgm_content. A single
+    -- <% against the concatenation name || ' ' || content_text
+    -- would not match either index expression and the planner would
+    -- seq-scan the workspace's files. Splitting + GREATEST also
+    -- preserves the right rank: a name-only hit scores like a name
+    -- hit, not a name+content hit diluted by extra content.
     SELECT 'file'::TEXT AS type,
            f.id,
            f.name,
            parent.path AS path,
            f.folder_id,
            f.created_at,
-           word_similarity(
-               immutable_unaccent($2),
-               immutable_unaccent(f.name || ' ' || COALESCE(ft.tag_text, '') || ' ' || COALESCE(f.content_text, ''))
+           GREATEST(
+               word_similarity(immutable_unaccent($2), immutable_unaccent(f.name)),
+               word_similarity(immutable_unaccent($2), immutable_unaccent(COALESCE(f.content_text, '')))
            )::float4 AS rank,
            COALESCE(ft.tags, ARRAY[]::TEXT[]) AS tags
     FROM files f
@@ -323,8 +368,40 @@ trgm_files AS (
       AND f.deleted_at IS NULL
       AND parent.deleted_at IS NULL
       AND parent.encryption_mode <> 'strict_zk'
-      AND immutable_unaccent($2) <%
-          immutable_unaccent(f.name || ' ' || COALESCE(ft.tag_text, '') || ' ' || COALESCE(f.content_text, ''))
+      AND (
+          immutable_unaccent($2) <% immutable_unaccent(f.name)
+          OR immutable_unaccent($2) <% immutable_unaccent(COALESCE(f.content_text, ''))
+      )
+    ORDER BY rank DESC, f.created_at DESC
+    LIMIT $3
+),
+tag_match_files AS (
+    -- Tag matching uses idx_file_tags_trgm_tag (migration 032). We
+    -- start from file_tags so the workspace-scoped tag index leads
+    -- the join; the inner join climbs back to files + parent folder
+    -- to enforce the same soft-delete / strict_zk visibility rules
+    -- as the other CTEs. MAX() collapses multi-tag matches per file
+    -- to a single hit row, and the LEFT JOIN to file_tag_text
+    -- supplies the same display-tag array the other CTEs use.
+    SELECT 'file'::TEXT AS type,
+           f.id,
+           f.name,
+           parent.path AS path,
+           f.folder_id,
+           f.created_at,
+           MAX(word_similarity(immutable_unaccent($2), immutable_unaccent(ftg.tag)))::float4 AS rank,
+           COALESCE(ftt.tags, ARRAY[]::TEXT[]) AS tags
+    FROM file_tags ftg
+    JOIN files f ON f.id = ftg.file_id
+    JOIN folders parent ON parent.id = f.folder_id
+    LEFT JOIN file_tag_text ftt ON ftt.file_id = f.id
+    WHERE ftg.workspace_id = $1
+      AND f.workspace_id = $1
+      AND f.deleted_at IS NULL
+      AND parent.deleted_at IS NULL
+      AND parent.encryption_mode <> 'strict_zk'
+      AND immutable_unaccent($2) <% immutable_unaccent(ftg.tag)
+    GROUP BY f.id, f.name, parent.path, f.folder_id, f.created_at, ftt.tags
     ORDER BY rank DESC, f.created_at DESC
     LIMIT $3
 ),
@@ -352,13 +429,16 @@ unioned_results AS (
     UNION ALL
     SELECT * FROM trgm_files
     UNION ALL
+    SELECT * FROM tag_match_files
+    UNION ALL
     SELECT * FROM trgm_folders
 ),
 ranked AS (
-    -- DISTINCT ON keeps the higher-ranked copy when both FTS and
-    -- trigram surface the same row. Ordering by type, id, rank
-    -- DESC ensures the FIRST row per (type, id) is the best
-    -- scoring one.
+    -- DISTINCT ON keeps the higher-ranked copy when multiple CTEs
+    -- surface the same row (e.g. an FTS hit, a name-trigram hit,
+    -- and a tag hit can all reference the same file_id). Ordering
+    -- by type, id, rank DESC ensures the FIRST row per (type, id)
+    -- is the best scoring one.
     SELECT DISTINCT ON (type, id)
            type, id, name, path, folder_id, created_at, rank, tags
     FROM unioned_results
