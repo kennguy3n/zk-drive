@@ -311,11 +311,12 @@ func TestHub_CompactionScheduled_OnManagedEncrypted(t *testing.T) {
 	svc, repo := newServiceWithStubs(t, docID, folder.EncryptionManagedEncrypted)
 	repo.pendingCount = document.CompactionThreshold
 
-	var scheduled int32
-	var schedDoc uuid.UUID
+	// Channel-based synchronization avoids the data race the race
+	// detector flags when a bare uuid.UUID variable is written by
+	// the scheduler goroutine and read by the test goroutine.
+	schedCh := make(chan uuid.UUID, 1)
 	hub := NewDocumentHub(svc).WithCompactionScheduler(func(_ uuid.UUID, d uuid.UUID) {
-		atomic.AddInt32(&scheduled, 1)
-		schedDoc = d
+		schedCh <- d
 	})
 
 	origin := NewClient(uuid.New(), uuid.New(), docID, true, Capability{PresenceAllowed: true, ServerSnapshotAllowed: true})
@@ -326,18 +327,13 @@ func TestHub_CompactionScheduled_OnManagedEncrypted(t *testing.T) {
 	if err := hub.Handle(context.Background(), origin, Frame{Type: MessageSync, SubType: SyncUpdate, Payload: []byte("u")}); err != nil {
 		t.Fatalf("Handle returned error: %v", err)
 	}
-	// scheduleCompaction is called in a goroutine; give it a moment.
-	for i := 0; i < 100; i++ {
-		if atomic.LoadInt32(&scheduled) > 0 {
-			break
+	select {
+	case got := <-schedCh:
+		if got != docID {
+			t.Fatalf("scheduler invoked for wrong document: got %s want %s", got, docID)
 		}
-		time.Sleep(5 * time.Millisecond)
-	}
-	if atomic.LoadInt32(&scheduled) != 1 {
-		t.Fatalf("expected scheduler to fire exactly once, got %d", scheduled)
-	}
-	if schedDoc != docID {
-		t.Fatalf("scheduler invoked for wrong document")
+	case <-time.After(2 * time.Second):
+		t.Fatal("compaction scheduler did not fire within 2s")
 	}
 }
 
