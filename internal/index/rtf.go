@@ -60,11 +60,25 @@ func extractRTFText(body []byte) (string, error) {
 		// every character until the matching close brace returns
 		// us to the depth at which the destination started.
 		skipDepth int
-		// ucSkip counts how many ANSI fallback characters to
-		// drop after a \uN escape. The RTF spec defaults to 1
-		// but \ucN can change it for the rest of the group.
-		ucSkip      int
-		ucSkipStack []int
+		// ucDefault is the CURRENT group's "\ucN" value — i.e.
+		// how many ANSI fallback bytes the SPEC says to skip after
+		// every "\u" escape in this group. RTF 1.9.1 §1.4.7: a
+		// group inherits its parent's \uc value at open-brace and
+		// returns to the parent's value at close-brace. The
+		// default at the top level is 1, but macOS TextEdit and
+		// some LibreOffice output explicitly emit "\uc0" — under
+		// which "\u" must NOT consume any fallback byte. Tracking
+		// the default per-group is the only way to honour both
+		// dialects correctly; a hardcoded 1 silently swallows one
+		// character per Unicode escape under \uc0.
+		ucDefault int = 1
+		// ucDefaultStack mirrors the open-brace nesting so we can
+		// restore the parent group's \uc value on close-brace.
+		ucDefaultStack []int
+		// ucSkip is the COUNTER of how many fallback bytes still
+		// need to be dropped from the current position. It is
+		// repopulated to ucDefault after every \u escape.
+		ucSkip int
 	)
 
 	emitRune := func(r rune) {
@@ -85,7 +99,13 @@ func extractRTFText(body []byte) (string, error) {
 		switch c {
 		case '{':
 			depth++
-			ucSkipStack = append(ucSkipStack, ucSkip)
+			// Inherit the parent group's \uc default; close-brace
+			// will restore it. Stacking the DEFAULT (not the
+			// in-flight ucSkip counter) is the correct semantics:
+			// the spec's \uc value is per-group, the counter
+			// itself is just the running consumption tally and
+			// resets to zero on close-brace anyway.
+			ucDefaultStack = append(ucDefaultStack, ucDefault)
 			i++
 		case '}':
 			depth--
@@ -95,11 +115,16 @@ func extractRTFText(body []byte) (string, error) {
 			if skipDepth > 0 && depth < skipDepth {
 				skipDepth = 0
 			}
-			// Restore the parent group's \uc counter on close.
-			if n := len(ucSkipStack); n > 0 {
-				ucSkip = ucSkipStack[n-1]
-				ucSkipStack = ucSkipStack[:n-1]
+			// Restore the parent group's \uc default and clear
+			// any in-flight skip — close-brace ends the unicode
+			// fallback window even mid-count, mirroring how Word's
+			// RTF reader treats braces as a hard boundary for
+			// fallback consumption.
+			if n := len(ucDefaultStack); n > 0 {
+				ucDefault = ucDefaultStack[n-1]
+				ucDefaultStack = ucDefaultStack[:n-1]
 			}
+			ucSkip = 0
 			i++
 		case '\\':
 			// Parse a control word, control symbol, or hex escape.
@@ -193,25 +218,34 @@ func extractRTFText(body []byte) (string, error) {
 							emitRune(r)
 						}
 					}
-					// \u also consumes the ANSI fallback
-					// character / group that follows; bump
-					// the skip counter so the next CharData
-					// (or open-brace group) is dropped.
-					ucSkip = max(ucSkip, 1)
+					// \u consumes ucDefault ANSI fallback
+					// bytes after the escape. Under the spec
+					// default \uc1 that's one byte; under the
+					// macOS / LibreOffice \uc0 dialect it's
+					// ZERO bytes, in which case the byte
+					// following \u is real content and must
+					// NOT be eaten. Replacing the prior
+					// hardcoded max(ucSkip, 1) with ucDefault
+					// honours both dialects byte-for-byte.
+					if ucDefault > 0 {
+						ucSkip = ucDefault
+					}
 				case "uc":
 					if hasValue {
-						ucSkip = 0 // reset
-						ucSkipDefault := value
-						if ucSkipDefault < 0 {
-							ucSkipDefault = 0
+						// New \ucN sets the group's default
+						// for every subsequent \u. Negative
+						// values are clamped to zero (the
+						// spec calls them illegal, but real-
+						// world RTF emitters occasionally
+						// produce \uc-1 as a placeholder).
+						if value < 0 {
+							value = 0
 						}
-						// The \uc value sticks for the rest
-						// of the group; on close-brace we
-						// pop the previous value off
-						// ucSkipStack.
-						if len(ucSkipStack) > 0 {
-							ucSkipStack[len(ucSkipStack)-1] = ucSkipDefault
-						}
+						ucDefault = value
+						// Drop any in-flight skip — a fresh
+						// \uc value supersedes the previous
+						// default's pending counter.
+						ucSkip = 0
 					}
 				case "fonttbl", "filetbl", "colortbl", "stylesheet",
 					"latentstyles", "listtables", "rsidtbl",

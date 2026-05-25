@@ -89,7 +89,7 @@ func extractHTMLText(body []byte) (string, error) {
 
 	z := html.NewTokenizer(bytes.NewReader(body))
 	var (
-		sb        strings.Builder
+		sb strings.Builder
 		// skipStack holds the names of currently-open skip-tag
 		// ancestors. Text inside <style>…</style> is dropped
 		// because skipStack is non-empty.
@@ -98,15 +98,35 @@ func extractHTMLText(body []byte) (string, error) {
 		// inside <pre> we preserve interior whitespace because
 		// formatting matters for code-search.
 		preDepth int
+		// lastByte tracks the most recent byte written to the
+		// builder. Used by ensureNewline to make the "trailing
+		// newline already?" check O(1) instead of O(n)-per-call.
+		// A zero value means the builder is empty (no byte has
+		// been written yet), which ensureNewline treats as
+		// "no leading newline needed".
+		lastByte byte
+		writeStr = func(s string) {
+			if s == "" {
+				return
+			}
+			sb.WriteString(s)
+			lastByte = s[len(s)-1]
+		}
+		writeByte = func(b byte) {
+			sb.WriteByte(b)
+			lastByte = b
+		}
 	)
 	for {
 		tt := z.Next()
 		switch tt {
 		case html.ErrorToken:
-			err := z.Err()
-			if err.Error() == "EOF" {
-				return sb.String(), nil
-			}
+			// The tokenizer signals normal end-of-input as well as
+			// any other reader error via ErrorToken; in either case
+			// we return whatever we managed to extract — the html
+			// package is permissive by design and we don't want a
+			// half-truncated body to drop everything we already
+			// recovered.
 			return sb.String(), nil
 		case html.TextToken:
 			if len(skipStack) > 0 {
@@ -119,7 +139,7 @@ func extractHTMLText(body []byte) (string, error) {
 					continue
 				}
 			}
-			sb.WriteString(text)
+			writeStr(text)
 		case html.StartTagToken:
 			name, _ := z.TagName()
 			n := string(name)
@@ -134,26 +154,56 @@ func extractHTMLText(body []byte) (string, error) {
 				// Some block-level openings (e.g. <li>) start a
 				// new line; emit a separator iff we're not at
 				// the start of a fresh line already.
-				ensureNewline(&sb)
+				if lastByte != 0 && lastByte != '\n' {
+					writeByte('\n')
+				}
 			}
 		case html.EndTagToken:
 			name, _ := z.TagName()
 			n := string(name)
-			if len(skipStack) > 0 && skipStack[len(skipStack)-1] == n {
-				skipStack = skipStack[:len(skipStack)-1]
+			// Pop-until-match: malformed HTML can leave the stack
+			// out of order (e.g. <head><script></head></script>),
+			// where the closing tag matches a skip-tag deeper than
+			// the top. Scan down the stack and, if we find the
+			// closing tag anywhere, drop it AND every entry above
+			// it. This recovers gracefully from interleaved skip
+			// tags without falling through and letting downstream
+			// text inherit a stale skip context. If the tag is not
+			// on the stack at all (orphan close), do nothing — the
+			// tokenizer's permissive parser will continue.
+			if len(skipStack) > 0 {
+				popped := false
+				for i := len(skipStack) - 1; i >= 0; i-- {
+					if skipStack[i] == n {
+						skipStack = skipStack[:i]
+						popped = true
+						break
+					}
+				}
+				if popped {
+					continue
+				}
+				// Closing tag is not a skip tag — fall through
+				// to the standard block-tag handling, but only
+				// if we are not currently inside a skip section.
+				// (Being inside a skip section means we shouldn't
+				// emit any body whitespace either.)
 				continue
 			}
 			if n == "pre" && preDepth > 0 {
 				preDepth--
 			}
 			if _, block := htmlBlockTags[n]; block {
-				sb.WriteByte('\n')
+				writeByte('\n')
 			}
 		case html.SelfClosingTagToken:
 			name, _ := z.TagName()
 			n := string(name)
+			if len(skipStack) > 0 {
+				continue
+			}
 			if n == "br" || n == "hr" {
-				sb.WriteByte('\n')
+				writeByte('\n')
 			}
 		}
 	}
@@ -185,17 +235,4 @@ func collapseHTMLWhitespace(s string) string {
 	return strings.TrimLeft(out, " ")
 }
 
-// ensureNewline appends a newline only if the builder doesn't
-// already end with one. Used to avoid emitting double blank lines
-// when a block-level element is nested inside another (e.g. <ul>
-// containing <li>s).
-func ensureNewline(sb *strings.Builder) {
-	s := sb.String()
-	if len(s) == 0 {
-		return
-	}
-	if s[len(s)-1] == '\n' {
-		return
-	}
-	sb.WriteByte('\n')
-}
+

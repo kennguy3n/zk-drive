@@ -1,10 +1,13 @@
 package index
 
 import (
+	"bytes"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/xuri/excelize/v2"
 )
 
 // TestExtractXLSXText exercises the real excelize-based extractor
@@ -78,4 +81,78 @@ func TestExtractXLSXText_Empty(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error on empty input, got nil")
 	}
+}
+
+// TestExtractXLSXText_HiddenFirstSheetNoLeadingSeparator pins the
+// regression: when the workbook's first sheet is hidden, the
+// extractor must NOT emit a leading "\n\n" before the first
+// visible sheet's body. The pre-fix implementation used the
+// iteration index (sheetIdx > 0) to decide when to emit the
+// separator, which incorrectly stuck a separator at the head of
+// the output when sheet 0 was skipped. The fix tracks
+// sb.Len() > 0 instead.
+func TestExtractXLSXText_HiddenFirstSheetNoLeadingSeparator(t *testing.T) {
+	body := buildXLSXWithHiddenFirstSheet(t)
+
+	got, err := extractXLSXText(body)
+	if err != nil {
+		t.Fatalf("extractXLSXText: %v", err)
+	}
+
+	// Must NOT start with the sheet separator.
+	if strings.HasPrefix(got, "\n\n") {
+		t.Errorf("extracted text has leading sheet separator: %q", got)
+	}
+
+	// Visible sheet content must be present.
+	if !strings.Contains(got, "visible-sheet-content") {
+		t.Errorf("missing visible sheet content; got:\n%q", got)
+	}
+
+	// Hidden sheet content must NOT leak.
+	if strings.Contains(got, "hidden-sheet-content") {
+		t.Errorf("hidden sheet content leaked into extract; got:\n%q", got)
+	}
+}
+
+// buildXLSXWithHiddenFirstSheet returns the bytes of a workbook
+// whose first sheet is hidden and whose second sheet carries the
+// only visible content. Using excelize on the producer side is
+// acceptable here because the test is asserting on the
+// hidden-sheet skip-and-separator behaviour, not on cell-value
+// parsing — and re-using the same library lets us stand up the
+// fixture in-process instead of carrying yet another binary
+// blob in testdata/.
+func buildXLSXWithHiddenFirstSheet(t *testing.T) []byte {
+	t.Helper()
+
+	f := excelize.NewFile()
+	defer func() { _ = f.Close() }()
+
+	// Excelize forbids hiding the only sheet and the active sheet
+	// at the time of the SetSheetVisible call. So we (1) create
+	// the visible sheet first, (2) activate it, (3) populate
+	// values, and only THEN (4) hide the default "Sheet1".
+	if err := f.SetCellValue("Sheet1", "A1", "hidden-sheet-content"); err != nil {
+		t.Fatalf("set hidden cell: %v", err)
+	}
+
+	idx, err := f.NewSheet("Visible")
+	if err != nil {
+		t.Fatalf("create visible sheet: %v", err)
+	}
+	f.SetActiveSheet(idx)
+	if err := f.SetCellValue("Visible", "A1", "visible-sheet-content"); err != nil {
+		t.Fatalf("set visible cell: %v", err)
+	}
+
+	if err := f.SetSheetVisible("Sheet1", false); err != nil {
+		t.Fatalf("hide sheet1: %v", err)
+	}
+
+	var buf bytes.Buffer
+	if err := f.Write(&buf); err != nil {
+		t.Fatalf("write workbook: %v", err)
+	}
+	return buf.Bytes()
 }

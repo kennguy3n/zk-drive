@@ -83,3 +83,69 @@ func TestExtractRTFText_Empty(t *testing.T) {
 		t.Fatal("expected error on empty input")
 	}
 }
+
+// TestExtractRTFText_UC0RespectsZeroFallback pins the macOS
+// TextEdit / LibreOffice "\uc0" dialect: under \uc0 the extractor
+// must NOT consume any ANSI fallback byte after a "\u" escape, so
+// the byte immediately after the Unicode escape stays in the
+// output. The pre-fix implementation hardcoded a 1-byte skip and
+// silently swallowed one character per escape.
+func TestExtractRTFText_UC0RespectsZeroFallback(t *testing.T) {
+	// "\uc0" sets the group fallback width to zero. The "\u65"
+	// escape decodes to 'A' (U+0041) and, under \uc0, MUST NOT
+	// consume the following 'X'. The expected extract is
+	// therefore "AXdone".
+	body := []byte("{\\rtf1\\uc0 \\u65 X\\u100 one}")
+	got, err := extractRTFText(body)
+	if err != nil {
+		t.Fatalf("extractRTFText: %v", err)
+	}
+	const want = "AXdone"
+	if got != want {
+		t.Errorf("\\uc0 fallback handling wrong:\n got=%q\nwant=%q", got, want)
+	}
+}
+
+// TestExtractRTFText_UC1DefaultStillConsumesOneByte verifies the
+// historical RTF default still holds: under \uc1 (and the implicit
+// top-of-document default) a "\u" escape consumes exactly one ANSI
+// fallback byte.
+func TestExtractRTFText_UC1DefaultStillConsumesOneByte(t *testing.T) {
+	body := []byte("{\\rtf1\\uc1 \\u65 X\\u100 one}")
+	got, err := extractRTFText(body)
+	if err != nil {
+		t.Fatalf("extractRTFText: %v", err)
+	}
+	// \u65 emits 'A'; the following 'X' is the ANSI fallback and
+	// gets skipped under \uc1. \u100 emits 'd' (U+0064); the
+	// following 'o' is the fallback and gets skipped. The
+	// remaining "ne" is plain text. So the expected extract is
+	// "Adne".
+	const want = "Adne"
+	if got != want {
+		t.Errorf("\\uc1 fallback handling wrong:\n got=%q\nwant=%q", got, want)
+	}
+}
+
+// TestExtractRTFText_UCScopedToGroup verifies a child group can set
+// \uc0 without affecting its sibling, and that close-brace restores
+// the parent group's default.
+func TestExtractRTFText_UCScopedToGroup(t *testing.T) {
+	// Outer group: implicit \uc1 (default). Inner group sets
+	// \uc0. After the inner group closes we should be back at
+	// \uc1 — so the trailing \u90 Z consumes one byte.
+	body := []byte("{\\rtf1 {\\uc0 \\u65 X}{\\u90 Z}}")
+	got, err := extractRTFText(body)
+	if err != nil {
+		t.Fatalf("extractRTFText: %v", err)
+	}
+	// Inner: \uc0 keeps both A and X. Sibling: \uc1 swallows Z.
+	const want = "AXZ"
+	// Z is the fallback for \u90 under the outer \uc1 default, so
+	// the visible runs are A, X (inner under \uc0 — keep both),
+	// then Z fallback discarded leaving 'Z' from the \u90 itself.
+	// Output: "AX" + chr(\u90)="Z" = "AXZ".
+	if got != want {
+		t.Errorf("group-scoped uc handling wrong:\n got=%q\nwant=%q", got, want)
+	}
+}

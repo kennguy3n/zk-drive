@@ -1,6 +1,9 @@
 package index
 
 import (
+	"archive/zip"
+	"bytes"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -79,5 +82,102 @@ func TestExtractPPTXText_NoSlides(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "no slide entries") {
 		t.Errorf("expected 'no slide entries' error, got: %v", err)
+	}
+}
+
+// TestExtractPPTXText_SparseNotesPairedBySuffix pins the
+// architectural regression: when speaker notes are SPARSE
+// (e.g. slide 1 + slide 2 + slide 3 but only notesSlide1 +
+// notesSlide3 — no notesSlide2), the extractor must pair each
+// note to its slide by numeric suffix, not by positional index.
+// The pre-fix implementation iterated `notes[i]` which would have
+// attached notesSlide3 to slide 2 and left slide 3 noteless.
+func TestExtractPPTXText_SparseNotesPairedBySuffix(t *testing.T) {
+	const drawingMLNS = "http://schemas.openxmlformats.org/drawingml/2006/main"
+
+	// Build a synthetic .pptx with three slide parts and only the
+	// first and third notes parts populated.
+	makeSlideXML := func(body string) []byte {
+		return []byte(fmt.Sprintf(
+			`<?xml version="1.0" encoding="UTF-8"?>`+
+				`<p:sld xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"`+
+				` xmlns:a="%s">`+
+				`<p:cSld><p:spTree><p:sp><p:txBody><a:p><a:r><a:t>%s</a:t></a:r></a:p></p:txBody></p:sp></p:spTree></p:cSld>`+
+				`</p:sld>`,
+			drawingMLNS, body,
+		))
+	}
+	makeNotesXML := func(body string) []byte {
+		return []byte(fmt.Sprintf(
+			`<?xml version="1.0" encoding="UTF-8"?>`+
+				`<p:notes xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"`+
+				` xmlns:a="%s">`+
+				`<p:cSld><p:spTree><p:sp><p:txBody><a:p><a:r><a:t>%s</a:t></a:r></a:p></p:txBody></p:sp></p:spTree></p:cSld>`+
+				`</p:notes>`,
+			drawingMLNS, body,
+		))
+	}
+
+	var buf bytes.Buffer
+	zw := zip.NewWriter(&buf)
+	entries := []struct {
+		name string
+		body []byte
+	}{
+		{"ppt/slides/slide1.xml", makeSlideXML("slide-one-body")},
+		{"ppt/slides/slide2.xml", makeSlideXML("slide-two-body")},
+		{"ppt/slides/slide3.xml", makeSlideXML("slide-three-body")},
+		{"ppt/notesSlides/notesSlide1.xml", makeNotesXML("note-for-slide-one")},
+		// notesSlide2.xml intentionally omitted (sparse notes).
+		{"ppt/notesSlides/notesSlide3.xml", makeNotesXML("note-for-slide-three")},
+	}
+	for _, e := range entries {
+		w, err := zw.Create(e.name)
+		if err != nil {
+			t.Fatalf("zip.Create: %v", err)
+		}
+		if _, err := w.Write(e.body); err != nil {
+			t.Fatalf("zip write: %v", err)
+		}
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatalf("zip.Close: %v", err)
+	}
+
+	got, err := extractPPTXText(buf.Bytes())
+	if err != nil {
+		t.Fatalf("extractPPTXText: %v", err)
+	}
+
+	// Slide 1 + its note, slide 2 alone, slide 3 + its note must
+	// appear in that order with the notes attached to the correct
+	// slides.
+	mustOrder := []string{
+		"slide-one-body",
+		"note-for-slide-one",
+		"slide-two-body",
+		"slide-three-body",
+		"note-for-slide-three",
+	}
+	prev := -1
+	for _, want := range mustOrder {
+		idx := strings.Index(got, want)
+		if idx < 0 {
+			t.Fatalf("missing %q in output:\n%s", want, got)
+		}
+		if idx <= prev {
+			t.Fatalf("ordering broken at %q (idx=%d prev=%d): output:\n%s", want, idx, prev, got)
+		}
+		prev = idx
+	}
+
+	// Negative pin: notesSlide3 must NOT have been attached to
+	// slide 2 by positional pairing. The note text must appear
+	// AFTER slide-three-body, not directly after slide-two-body.
+	slide2Idx := strings.Index(got, "slide-two-body")
+	slide3Idx := strings.Index(got, "slide-three-body")
+	note3Idx := strings.Index(got, "note-for-slide-three")
+	if note3Idx < slide3Idx || note3Idx < slide2Idx {
+		t.Fatalf("note for slide 3 appears in wrong position; got:\n%s", got)
 	}
 }

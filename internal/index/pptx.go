@@ -59,6 +59,17 @@ func extractPPTXText(body []byte) (string, error) {
 		return "", fmt.Errorf("index/pptx: no slide entries in archive")
 	}
 
+	// Pair notes to slides by NUMERIC SUFFIX, not positional
+	// index. Decks frequently carry sparse notes (e.g. notesSlide1
+	// + notesSlide3 with no notesSlide2); positional pairing would
+	// attach notesSlide3 to slide 2 and leave slide 3 without notes.
+	// Building a suffix → *zip.File map preserves the spec's
+	// 1:1 link between slide N and notesSlide N.
+	notesBySuffix := make(map[int]*zip.File, len(notes))
+	for _, n := range notes {
+		notesBySuffix[pptxEntrySuffix(n.Name, pptxNotesPrefix)] = n
+	}
+
 	var sb strings.Builder
 	for i, slide := range slides {
 		if i > 0 {
@@ -70,14 +81,8 @@ func extractPPTXText(body []byte) (string, error) {
 		}
 		sb.WriteString(text)
 
-		// Speaker notes for this slide, if present. The notes
-		// file name embeds the same numeric suffix as the slide,
-		// so the i-th slide's notes are at notes[i] when the
-		// deck has notes for every slide. Decks with sparse
-		// notes are handled by walking both lists in parallel
-		// against the numeric suffix.
-		if i < len(notes) {
-			noteText, err := readPPTXEntry(notes[i])
+		if note, ok := notesBySuffix[pptxEntrySuffix(slide.Name, pptxSlidePrefix)]; ok {
+			noteText, err := readPPTXEntry(note)
 			if err != nil {
 				return "", err
 			}
@@ -142,19 +147,33 @@ func readPPTXEntry(entry *zip.File) (string, error) {
 	return parsePPTXBody(limited)
 }
 
+// pptxDrawingMLNamespace is the namespace URI for OOXML DrawingML
+// text elements (<a:t>, <a:p>, <a:br/>). Producers always declare
+// the URI, even if they prefix the elements differently — matching
+// on the URI rejects unrelated <p>/<t> elements that might appear
+// elsewhere in the slide XML (e.g. embedded SVG, math, or third-
+// party extensions) from polluting the extracted text.
+const pptxDrawingMLNamespace = "http://schemas.openxmlformats.org/drawingml/2006/main"
+
 // parsePPTXBody walks the slide XML and concatenates <a:t> text
 // runs. <a:br/> and the implicit end of <a:p> insert newlines so
 // the resulting text preserves enough structure for FTS phrase
 // queries.
 //
-// The DrawingML schema uses the "a" prefix for text-related
-// elements; encoding/xml gives us the local element name without
-// namespace prefix, so the switch matches on "t", "p", "br"
-// independent of how the document declares its namespace
-// (some producers use a:t with the "a" namespace, others alias it
-// differently — local-name dispatch handles both).
+// Matching is namespace-aware: we only treat <t>, <p>, <br> as
+// text-bearing when their xmlns is the DrawingML URI. encoding/xml
+// resolves prefixed names to {Space, Local} pairs using the in-
+// scope xmlns declarations, so this works regardless of whether
+// the producer uses the conventional "a:" prefix or a different
+// alias.
 func parsePPTXBody(r io.Reader) (string, error) {
 	dec := xml.NewDecoder(r)
+	// OOXML mandates UTF-8 (ECMA-376 Part 1 §11.3.4); the no-op
+	// CharsetReader keeps non-conformant producers from making
+	// encoding/xml refuse to decode at all. If a producer ever
+	// emits a non-UTF-8 charset we accept the bytes verbatim
+	// rather than fail the extract — the FTS dictionary
+	// tokenises on whitespace either way.
 	dec.CharsetReader = func(charset string, input io.Reader) (io.Reader, error) {
 		return input, nil
 	}
@@ -164,6 +183,10 @@ func parsePPTXBody(r io.Reader) (string, error) {
 		inText    bool
 		paraDirty bool
 	)
+
+	isDrawingML := func(name xml.Name) bool {
+		return name.Space == pptxDrawingMLNamespace
+	}
 
 	for {
 		tok, err := dec.Token()
@@ -175,6 +198,9 @@ func parsePPTXBody(r io.Reader) (string, error) {
 		}
 		switch t := tok.(type) {
 		case xml.StartElement:
+			if !isDrawingML(t.Name) {
+				continue
+			}
 			switch t.Name.Local {
 			case "t":
 				inText = true
@@ -183,6 +209,9 @@ func parsePPTXBody(r io.Reader) (string, error) {
 				paraDirty = true
 			}
 		case xml.EndElement:
+			if !isDrawingML(t.Name) {
+				continue
+			}
 			switch t.Name.Local {
 			case "t":
 				inText = false

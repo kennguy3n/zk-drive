@@ -62,6 +62,18 @@ func extractOpenDocumentText(body []byte) (string, error) {
 	return parseODFContent(limited)
 }
 
+// odfTextNamespace is the URI for the ODF "text:" namespace which
+// holds paragraph, heading, span, anchor, line-break, tab, and
+// spacer elements (OASIS OpenDocument 1.3 §3.1).
+const odfTextNamespace = "urn:oasis:names:tc:opendocument:xmlns:text:1.0"
+
+// odfTableNamespace is the URI for the ODF "table:" namespace which
+// holds spreadsheet cell and row elements (OASIS OpenDocument 1.3
+// §9). We need this separate from odfTextNamespace because <table:p>
+// vs <text:p> are different elements with different layout rules,
+// and matching by local name alone would conflate them.
+const odfTableNamespace = "urn:oasis:names:tc:opendocument:xmlns:table:1.0"
+
 // parseODFContent walks the ODF content stream and emits text from
 // the relevant elements:
 //
@@ -80,11 +92,19 @@ func extractOpenDocumentText(body []byte) (string, error) {
 // Anything else falls through unchanged — the inner CharData
 // handler emits text whenever a relevant element is open.
 //
-// Like docx, encoding/xml hands us the local element name without
-// the namespace prefix, so the switch matches on "p", "h", etc.
-// independent of how the document declares its xmlns attributes.
+// Matching is NAMESPACE-AWARE: we require the element to live in
+// the ODF text: or table: namespace before treating it as one of
+// the structural anchors above. Without this guard, a third-party
+// extension's <p>/<h> in a custom namespace would be misinterpreted
+// as a paragraph and force unrelated text into the FTS index.
+// encoding/xml resolves prefixed names to {Space, Local} pairs
+// using the in-scope xmlns declarations, so the URI check works
+// regardless of how the document aliases the prefix.
 func parseODFContent(r io.Reader) (string, error) {
 	dec := xml.NewDecoder(r)
+	// ODF mandates UTF-8 (OpenDocument 1.3 §1.3); the no-op
+	// CharsetReader keeps non-conformant producers from making
+	// encoding/xml refuse to decode at all.
 	dec.CharsetReader = func(charset string, input io.Reader) (io.Reader, error) {
 		return input, nil
 	}
@@ -112,39 +132,50 @@ func parseODFContent(r io.Reader) (string, error) {
 		}
 		switch t := tok.(type) {
 		case xml.StartElement:
-			switch t.Name.Local {
-			case "p", "h", "span", "a":
-				textDepth++
-			case "table-cell":
-				textDepth++
-			case "line-break":
-				if textDepth > 0 {
-					sb.WriteByte('\n')
+			switch t.Name.Space {
+			case odfTextNamespace:
+				switch t.Name.Local {
+				case "p", "h", "span", "a":
+					textDepth++
+				case "line-break":
+					if textDepth > 0 {
+						sb.WriteByte('\n')
+					}
+				case "tab":
+					if textDepth > 0 {
+						sb.WriteByte('\t')
+					}
+				case "s":
+					if textDepth > 0 {
+						sb.WriteByte(' ')
+					}
 				}
-			case "tab":
-				if textDepth > 0 {
-					sb.WriteByte('\t')
-				}
-			case "s":
-				if textDepth > 0 {
-					sb.WriteByte(' ')
+			case odfTableNamespace:
+				if t.Name.Local == "table-cell" {
+					textDepth++
 				}
 			}
 		case xml.EndElement:
-			switch t.Name.Local {
-			case "p", "h":
-				textDepth--
-				sb.WriteByte('\n')
-			case "span", "a":
-				textDepth--
-			case "table-cell":
-				textDepth--
-				sb.WriteByte('\t')
-				rowDirty = true
-			case "table-row":
-				if rowDirty {
+			switch t.Name.Space {
+			case odfTextNamespace:
+				switch t.Name.Local {
+				case "p", "h":
+					textDepth--
 					sb.WriteByte('\n')
-					rowDirty = false
+				case "span", "a":
+					textDepth--
+				}
+			case odfTableNamespace:
+				switch t.Name.Local {
+				case "table-cell":
+					textDepth--
+					sb.WriteByte('\t')
+					rowDirty = true
+				case "table-row":
+					if rowDirty {
+						sb.WriteByte('\n')
+						rowDirty = false
+					}
 				}
 			}
 		case xml.CharData:

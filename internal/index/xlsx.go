@@ -47,7 +47,7 @@ func extractXLSXText(body []byte) (string, error) {
 	defer func() { _ = f.Close() }()
 
 	var sb strings.Builder
-	for sheetIdx, sheet := range f.GetSheetList() {
+	for _, sheet := range f.GetSheetList() {
 		// Hidden sheets often carry pivot caches or formula
 		// scratchpads that aren't part of the user-visible
 		// document. Skipping them matches what a search-from-the-
@@ -56,7 +56,12 @@ func extractXLSXText(body []byte) (string, error) {
 			continue
 		}
 
-		if sheetIdx > 0 {
+		// Emit the sheet separator iff we've already written a
+		// visible sheet's content. Using sb.Len() instead of the
+		// raw iteration index avoids the bug where a hidden first
+		// sheet would still cause a leading "\n\n" before the
+		// first VISIBLE sheet's body.
+		if sb.Len() > 0 {
 			sb.WriteString("\n\n")
 		}
 
