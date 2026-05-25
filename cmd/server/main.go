@@ -34,6 +34,7 @@ import (
 	"github.com/kennguy3n/zk-drive/internal/audit"
 	"github.com/kennguy3n/zk-drive/internal/billing"
 	"github.com/kennguy3n/zk-drive/internal/changefeed"
+	"github.com/kennguy3n/zk-drive/internal/collab"
 	"github.com/kennguy3n/zk-drive/internal/config"
 	cryptopkg "github.com/kennguy3n/zk-drive/internal/crypto"
 	"github.com/kennguy3n/zk-drive/internal/database"
@@ -185,6 +186,40 @@ func run() error {
 
 	documentRepo := document.NewPostgresRepository(pool)
 	documentSvc := document.NewService(documentRepo, folderSvc)
+
+	// Collab hub: per-document WebSocket rooms for the Yjs editor.
+	// In-memory only; multi-replica fan-out is deferred to P2e. The
+	// compaction scheduler runs documentSvc.Compact with the
+	// folder-appropriate FoldFunc (OpaqueConcatFold today; a Yjs
+	// WASM-bridge fold lands in a follow-up). Wire AFTER documentSvc
+	// so the hub captures the live service pointer.
+	collabHub := collab.NewDocumentHub(documentSvc).
+		WithCompactionScheduler(func(workspaceID, documentID uuid.UUID) {
+			// Detached context: the WS goroutine that triggered
+			// us may close mid-fold, but compaction is independent
+			// of any single editor session. Bound to the server's
+			// lifecycle ctx so graceful shutdown cancels in-flight
+			// compactions.
+			doc, parent, err := documentSvc.GetMetadata(ctx, workspaceID, documentID)
+			if err != nil {
+				slog.Warn("collab compaction lookup failed", "err", err, "document_id", documentID)
+				return
+			}
+			fold := collab.FoldFor(collab.FromDocumentCapability(document.ResolveCapability(parent.EncryptionMode)))
+			if fold == nil {
+				// strict_zk: no server-side compaction (see
+				// collab.FoldFor doc comment). Drop the signal.
+				return
+			}
+			if _, err := documentSvc.Compact(ctx, workspaceID, documentID, fold); err != nil {
+				slog.Warn("collab compaction failed",
+					"err", err,
+					"workspace_id", workspaceID,
+					"document_id", documentID,
+					"document_name", doc.Name,
+				)
+			}
+		})
 
 	var storageClient *storage.Client
 	if cfg.S3Endpoint != "" {
@@ -517,6 +552,7 @@ func run() error {
 	driveHandler := drive.NewHandler(pool, wsSvc, folderSvc, fileSvc, userSvc, storageClient, permissionSvc, activitySvc).
 		WithStorageFactory(storageFactory).
 		WithDocuments(documentSvc).
+		WithCollab(collabHub).
 		WithSharing(sharingSvc).
 		WithSearch(searchSvc).
 		WithClientRooms(clientRoomSvc).
@@ -799,6 +835,15 @@ func run() error {
 		r.Group(func(r chi.Router) {
 			r.Use(middleware.AuthMiddleware(cfg.JWTSecret, sessionChecker))
 			r.Get("/ws", wsHandler.ServeWS)
+			// Collab WS endpoint: per-document Yjs relay. Mounted
+			// next to /ws because both are long-lived upgrade
+			// endpoints that must skip TenantGuard / rateLimiter
+			// (TenantGuard's HTTP-method assumptions trip on the
+			// upgrade handshake; rateLimiter would charge per WS
+			// frame which is the wrong cost model for a streaming
+			// editor session). The handler performs its own
+			// tenant + permission check on the upgrade path.
+			r.Get("/documents/{id}/ws", driveHandler.ServeDocumentCollab)
 		})
 
 		r.Group(func(r chi.Router) {

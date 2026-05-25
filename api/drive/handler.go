@@ -25,6 +25,7 @@ import (
 	"github.com/kennguy3n/zk-drive/internal/audit"
 	"github.com/kennguy3n/zk-drive/internal/billing"
 	"github.com/kennguy3n/zk-drive/internal/changefeed"
+	"github.com/kennguy3n/zk-drive/internal/collab"
 	"github.com/kennguy3n/zk-drive/internal/document"
 	"github.com/kennguy3n/zk-drive/internal/email"
 	"github.com/kennguy3n/zk-drive/internal/file"
@@ -69,6 +70,7 @@ type Handler struct {
 	audit          *audit.Service
 	billing        *billing.Service
 	webhooks       WebhookEventPublisher
+	collab         *collab.DocumentHub
 }
 
 // NewHandler constructs a Handler from the underlying services. The pool is
