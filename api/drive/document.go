@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
-	"strconv"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
@@ -199,7 +198,7 @@ func (h *Handler) RenameDocument(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid id", http.StatusBadRequest)
 		return
 	}
-	doc, _, err := h.documents.GetByID(r.Context(), workspaceID, id)
+	doc, parent, err := h.documents.GetByID(r.Context(), workspaceID, id)
 	if err != nil {
 		writeDocumentError(w, err)
 		return
@@ -219,11 +218,8 @@ func (h *Handler) RenameDocument(w http.ResponseWriter, r *http.Request) {
 		writeDocumentError(w, err)
 		return
 	}
-	parent, err := h.folders.GetByID(r.Context(), workspaceID, updated.FolderID)
-	if err != nil {
-		writeServiceError(w, err)
-		return
-	}
+	// Rename doesn't change parent folder; reuse the folder fetched
+	// during the permission check above.
 	h.logActivity(r.Context(), activity.ActionDocumentRename, resourceTypeDocument, updated.ID, map[string]any{
 		"folder_id": updated.FolderID,
 		"old_name":  oldName,
@@ -245,7 +241,7 @@ func (h *Handler) SetDocumentCollabMode(w http.ResponseWriter, r *http.Request) 
 		http.Error(w, "invalid id", http.StatusBadRequest)
 		return
 	}
-	doc, _, err := h.documents.GetByID(r.Context(), workspaceID, id)
+	doc, parent, err := h.documents.GetByID(r.Context(), workspaceID, id)
 	if err != nil {
 		writeDocumentError(w, err)
 		return
@@ -265,11 +261,8 @@ func (h *Handler) SetDocumentCollabMode(w http.ResponseWriter, r *http.Request) 
 		writeDocumentError(w, err)
 		return
 	}
-	parent, err := h.folders.GetByID(r.Context(), workspaceID, updated.FolderID)
-	if err != nil {
-		writeServiceError(w, err)
-		return
-	}
+	// SetCollabMode doesn't change parent folder; reuse the folder
+	// fetched during the permission check above.
 	h.logActivity(r.Context(), activity.ActionDocumentChangeCollabMode, resourceTypeDocument, updated.ID, map[string]any{
 		"folder_id":       updated.FolderID,
 		"old_collab_mode": oldMode,
@@ -372,7 +365,14 @@ func (h *Handler) ListDocumentDeltas(w http.ResponseWriter, r *http.Request) {
 		writeServiceError(w, err)
 		return
 	}
-	afterSeq, _ := strconv.ParseInt(r.URL.Query().Get("after_seq"), 10, 64)
+	// after_seq is a strict cursor — reject malformed input with 400 so
+	// clients catch fast-forward bugs instead of silently re-downloading
+	// from sequence 0. Matches the contract enforced by ListChanges.
+	afterSeq, err := parseInt64Query(r, "after_seq", 0)
+	if err != nil {
+		http.Error(w, "invalid after_seq cursor", http.StatusBadRequest)
+		return
+	}
 	if afterSeq < 0 {
 		afterSeq = 0
 	}
