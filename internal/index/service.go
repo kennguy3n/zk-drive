@@ -158,6 +158,38 @@ func ExtractTextWithContext(ctx context.Context, mimeType string, body []byte) (
 			return "", err
 		}
 		return truncateUTF8(text, MaxIndexBytes), nil
+	case mt == "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet":
+		text, err := extractXLSXText(body)
+		if err != nil {
+			return "", err
+		}
+		return truncateUTF8(text, MaxIndexBytes), nil
+	case mt == "application/vnd.openxmlformats-officedocument.presentationml.presentation":
+		text, err := extractPPTXText(body)
+		if err != nil {
+			return "", err
+		}
+		return truncateUTF8(text, MaxIndexBytes), nil
+	case mt == "application/vnd.oasis.opendocument.text",
+		mt == "application/vnd.oasis.opendocument.spreadsheet",
+		mt == "application/vnd.oasis.opendocument.presentation":
+		text, err := extractOpenDocumentText(body)
+		if err != nil {
+			return "", err
+		}
+		return truncateUTF8(text, MaxIndexBytes), nil
+	case mt == "application/rtf", mt == "text/rtf":
+		text, err := extractRTFText(body)
+		if err != nil {
+			return "", err
+		}
+		return truncateUTF8(text, MaxIndexBytes), nil
+	case mt == "text/html":
+		text, err := extractHTMLText(body)
+		if err != nil {
+			return "", err
+		}
+		return truncateUTF8(text, MaxIndexBytes), nil
 	default:
 		return "", ErrUnsupportedMimeType
 	}
