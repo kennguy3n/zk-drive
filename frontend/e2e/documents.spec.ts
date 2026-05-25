@@ -113,9 +113,20 @@ test.describe("documents", () => {
     expect(created.collab_mode).toBe("rich_presence");
 
     // After the POST resolves the page navigates client-side to the
-    // editor route. Wait for the URL to settle.
+    // editor route. Wait for the URL to settle AND for the editor
+    // page's GET /api/documents/{id} fetch to complete — without
+    // that explicit wait we can race past the "Loading…" placeholder
+    // window where the h1 hasn't mounted yet.
+    const getDocResp = page.waitForResponse(
+      (r) =>
+        r.url().endsWith(`/api/documents/${created.id}`) &&
+        r.request().method() === "GET",
+    );
     await expect(page).toHaveURL(new RegExp(`/drive/document/${created.id}$`));
-    await expect(page.getByRole("heading", { name: /design doc/i })).toBeVisible();
+    await getDocResp;
+    await expect(page.getByRole("heading", { name: /design doc/i })).toBeVisible({
+      timeout: 15_000,
+    });
     // The connection chip cycles connecting → connected; either
     // text qualifies as "the editor mounted and is talking to the
     // collab WS".

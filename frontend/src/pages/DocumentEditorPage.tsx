@@ -132,6 +132,15 @@ export default function DocumentEditorPage() {
   const presenceAllowed =
     !!doc && doc.capability.presence_allowed && collabMode === "rich_presence";
   const writable = !!doc && collabMode !== "disabled";
+  // hasDoc is the primitive form of `doc != null` and is what the
+  // extensions useMemo below depends on. We never need the full doc
+  // object inside the factory — collabMode / presenceAllowed already
+  // cover everything the extension list cares about — so guarding on
+  // the boolean keeps a rename (which produces a new doc reference
+  // but unchanged collabMode/presenceAllowed) from re-instantiating
+  // the TipTap editor (which would flash the content and lose
+  // cursor position).
+  const hasDoc = doc != null;
 
   useEffect(() => {
     if (!id) return;
@@ -204,7 +213,7 @@ export default function DocumentEditorPage() {
   // only added when presence is allowed AND the user has
   // picked rich_presence (presenceAllowed already enforces both).
   const extensions = useMemo(() => {
-    if (!doc) return [];
+    if (!hasDoc) return [];
     if (!yDoc) {
       // Editor is created lazily via useEditor below; on the
       // first render before the Y.Doc exists we return an empty
@@ -227,7 +236,10 @@ export default function DocumentEditorPage() {
       );
     }
     return base;
-  }, [doc, yDoc, awareness, collabMode, presenceAllowed]);
+    // Deliberately omit `doc` here — see the hasDoc comment above.
+    // Renames change `doc` reference but not collabMode/presenceAllowed,
+    // and depending on `doc` would re-instantiate the editor.
+  }, [hasDoc, yDoc, awareness, collabMode, presenceAllowed]);
 
   // TipTap editor instance. Keyed by document id so a route
   // change tears down the previous editor entirely; this also
