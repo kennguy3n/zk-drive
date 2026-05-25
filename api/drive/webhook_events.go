@@ -6,6 +6,8 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/kennguy3n/zk-drive/api/middleware"
+	"github.com/kennguy3n/zk-drive/internal/activity"
+	"github.com/kennguy3n/zk-drive/internal/document"
 	"github.com/kennguy3n/zk-drive/internal/file"
 	"github.com/kennguy3n/zk-drive/internal/logging"
 	"github.com/kennguy3n/zk-drive/internal/webhooks"
@@ -170,6 +172,90 @@ func (h *Handler) emitWebhookFileDeletedBatch(ctx context.Context, workspaceID u
 	for _, f := range snaps {
 		h.publishWebhookFileEvent(ctx, webhooks.EventFileDeleted, workspaceID, f, uuid.Nil, f.SizeBytes)
 	}
+}
+
+// snapshotDocumentsForFolderSubtreeDelete is the document counterpart
+// to snapshotFilesForFolderSubtreeDelete: it returns every non-deleted
+// collab document under the given folder (including descendants) so
+// the caller can later emit a document.delete activity + changefeed
+// event per snapshot AFTER folders.Delete has cascaded its
+// deleted_at update to the documents table.
+//
+// Same two-phase contract as the file path: callers MUST invoke this
+// BEFORE folders.Delete. Once the recursive folder soft-delete
+// cascades to documents.deleted_at the rows would no longer match
+// the snapshotting query's deleted_at IS NULL filter, leaving the
+// changefeed (and any subscribed desktop sync clients) unaware that
+// the documents were removed. The catalogue would then keep stale
+// 'up_to_date' rows pointing at documents that 404 on next open.
+//
+// Symmetric with the per-document ActionDocumentDelete path so
+// subscribers see document.delete events regardless of whether the
+// document was deleted individually or via folder cascade. Returns
+// nil + logs on error so a snapshot failure never blocks the parent
+// folder delete — the change feed is best-effort relative to the
+// durable activity log; a stuck snapshot must not strand the
+// folder-delete HTTP path.
+//
+// When the documents service is not wired (collab feature disabled
+// for this deployment) we short-circuit to nil. SoftDeleteSubtree
+// still cascades to the documents table for data-integrity, but no
+// events fire because there is no service to emit through.
+func (h *Handler) snapshotDocumentsForFolderSubtreeDelete(ctx context.Context, workspaceID, folderID uuid.UUID) []*document.Document {
+	if h.documents == nil {
+		return nil
+	}
+	snaps, err := h.documents.ListByFolderSubtree(ctx, workspaceID, folderID)
+	if err != nil {
+		logging.FromContext(ctx).Error("drive failed to snapshot folder subtree for document.delete cascade",
+			"folder_id", folderID,
+			"workspace_id", workspaceID,
+			"err", err,
+		)
+		return nil
+	}
+	return snaps
+}
+
+// emitFolderCascadeDocumentDeletes is the second half of the
+// two-phase document-cascade pattern. Pair with
+// snapshotDocumentsForFolderSubtreeDelete: snapshot before
+// folders.Delete, emit after. For single-handler callers
+// (DeleteFolder) it goes through logActivity so each cascaded
+// document gets its own activity + changefeed row. Bulk callers
+// (BulkDelete) instead accumulate per-doc changes into the
+// surrounding changeInput slice and call batchRecordChanges once
+// at the end — use emitFolderCascadeDocumentDeletesBatch for that
+// path.
+func (h *Handler) emitFolderCascadeDocumentDeletes(ctx context.Context, snaps []*document.Document) {
+	for _, d := range snaps {
+		h.logActivity(ctx, activity.ActionDocumentDelete, resourceTypeDocument, d.ID, map[string]any{
+			"folder_id": d.FolderID,
+			"name":      d.Name,
+		})
+	}
+}
+
+// emitFolderCascadeDocumentDeletesBatch is the bulk-handler variant.
+// Returns the per-document changeInput entries the caller appends
+// to its outer accumulator so a single batchRecordChanges flushes
+// all cascaded document deletes in one Postgres round-trip. The
+// activity log is still per-item (LogAction is buffered + async,
+// so per-item dispatch is already cheap there).
+func (h *Handler) emitFolderCascadeDocumentDeletesBatch(ctx context.Context, snaps []*document.Document) []changeInput {
+	out := make([]changeInput, 0, len(snaps))
+	for _, d := range snaps {
+		h.logActivityOnly(ctx, activity.ActionDocumentDelete, resourceTypeDocument, d.ID, map[string]any{
+			"folder_id": d.FolderID,
+			"name":      d.Name,
+		})
+		out = append(out, changeInput{
+			Action:       activity.ActionDocumentDelete,
+			ResourceType: resourceTypeDocument,
+			ResourceID:   d.ID,
+		})
+	}
+	return out
 }
 
 // NOTE: member.* webhook emission lives in api/admin (not here)

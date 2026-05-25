@@ -4,10 +4,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"strings"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -18,10 +18,32 @@ import (
 type Repository interface {
 	Create(ctx context.Context, d *Document) error
 	GetByID(ctx context.Context, workspaceID, documentID uuid.UUID) (*Document, error)
+
+	// GetMetadata is the binary-free companion to GetByID. It returns
+	// every column except y_state / y_state_vector (the potentially
+	// MB-scale Yjs blobs), so callers that only need folder_id /
+	// collab_mode / name (permission checks, activity logging, the
+	// AppendDelta hot path) don't pay the Postgres I/O + Go heap
+	// cost of streaming the binary state. The returned Document's
+	// YState / YStateVector fields are nil — call GetByID or
+	// GetSnapshotBundle when the Yjs bytes are actually needed.
+	GetMetadata(ctx context.Context, workspaceID, documentID uuid.UUID) (*Document, error)
+
 	UpdateName(ctx context.Context, workspaceID, documentID uuid.UUID, name string) (*Document, error)
 	UpdateCollabMode(ctx context.Context, workspaceID, documentID uuid.UUID, collabMode string) (*Document, error)
 	SoftDelete(ctx context.Context, workspaceID, documentID uuid.UUID) error
 	ListByFolder(ctx context.Context, workspaceID, folderID uuid.UUID) ([]*Document, error)
+
+	// ListByFolderSubtree returns every non-deleted document under the
+	// given folder, including documents in descendant folders.
+	// Mirrors the recursive CTE used by folder.SoftDeleteSubtree so the
+	// two stay in lockstep: any document the cascade would soft-delete
+	// shows up here, and only those documents. Callers snapshot the
+	// slice BEFORE folder.SoftDeleteSubtree runs so they can emit one
+	// activity / changefeed event per cascaded document AFTER the
+	// folder delete commits. Uses documentListColumns (binary blobs
+	// excluded) since callers only need metadata for the emit phase.
+	ListByFolderSubtree(ctx context.Context, workspaceID, folderID uuid.UUID) ([]*Document, error)
 
 	// AppendDelta inserts a single delta with a per-document
 	// monotonic seq. The implementation assigns seq atomically via
@@ -152,6 +174,14 @@ func (r *PostgresRepository) GetByID(ctx context.Context, workspaceID, documentI
 	return scanDocument(r.pool.QueryRow(ctx, q, workspaceID, documentID))
 }
 
+// GetMetadata fetches a non-deleted document but skips the
+// (potentially large) Yjs binary columns. Used by the permission /
+// capability-check paths that never need y_state.
+func (r *PostgresRepository) GetMetadata(ctx context.Context, workspaceID, documentID uuid.UUID) (*Document, error) {
+	q := "SELECT " + documentListColumns + " FROM documents WHERE workspace_id = $1 AND id = $2 AND deleted_at IS NULL"
+	return scanDocumentListItem(r.pool.QueryRow(ctx, q, workspaceID, documentID))
+}
+
 // UpdateName changes the document's name and bumps updated_at.
 func (r *PostgresRepository) UpdateName(ctx context.Context, workspaceID, documentID uuid.UUID, name string) (*Document, error) {
 	q := `
@@ -211,6 +241,46 @@ SELECT ` + documentListColumns + `
 	rows, err := r.pool.Query(ctx, q, workspaceID, folderID, MaxDocumentsPerFolder)
 	if err != nil {
 		return nil, fmt.Errorf("list documents by folder: %w", err)
+	}
+	defer rows.Close()
+
+	var out []*Document
+	for rows.Next() {
+		d, err := scanDocumentListItem(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, d)
+	}
+	return out, rows.Err()
+}
+
+// ListByFolderSubtree walks the folder subtree rooted at folderID
+// and returns every non-deleted document underneath. Mirrors the
+// recursive CTE used by folder.SoftDeleteSubtree so the two stay in
+// lockstep — any document the cascade would soft-delete shows up
+// here. Used by the DeleteFolder / BulkDelete handlers to snapshot
+// documents BEFORE the folder soft-delete cascades to them, so the
+// handlers can emit one ActionDocumentDelete activity + changefeed
+// event per cascaded document AFTER the folder delete commits.
+func (r *PostgresRepository) ListByFolderSubtree(ctx context.Context, workspaceID, folderID uuid.UUID) ([]*Document, error) {
+	const q = `
+WITH RECURSIVE subtree AS (
+    SELECT id FROM folders
+     WHERE workspace_id = $1 AND id = $2 AND deleted_at IS NULL
+    UNION ALL
+    SELECT f.id FROM folders f
+      JOIN subtree s ON f.parent_folder_id = s.id
+     WHERE f.workspace_id = $1 AND f.deleted_at IS NULL
+)
+SELECT ` + documentListColumns + `
+  FROM documents
+ WHERE workspace_id = $1 AND folder_id IN (SELECT id FROM subtree)
+   AND deleted_at IS NULL
+ ORDER BY folder_id, updated_at DESC`
+	rows, err := r.pool.Query(ctx, q, workspaceID, folderID)
+	if err != nil {
+		return nil, fmt.Errorf("list documents in folder subtree: %w", err)
 	}
 	defer rows.Close()
 
@@ -427,15 +497,22 @@ DELETE FROM document_deltas
 // 'could not serialize access due to concurrent update / read /
 // dependency'. Surfaced by SERIALIZABLE / REPEATABLE READ
 // transactions when a concurrent committer makes the snapshot
-// inconsistent with the lock graph. We match on the literal
-// SQLSTATE so we don't take a pgconn dependency in this file.
+// inconsistent with the lock graph. Compared via the structured
+// pgconn.PgError type (errors.As) rather than a substring match
+// so we don't false-positive on error text that happens to contain
+// the literal '40001' (numeric values in upstream error messages,
+// unrelated SQLSTATE classes that share the suffix, etc.).
 const pgSerializationFailure = "40001"
 
 func isPgSerializationFailure(err error) bool {
 	if err == nil {
 		return false
 	}
-	return strings.Contains(err.Error(), pgSerializationFailure)
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) {
+		return pgErr.Code == pgSerializationFailure
+	}
+	return false
 }
 
 // GetSnapshotBundle reads the document + tail deltas atomically.

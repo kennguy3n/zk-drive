@@ -183,7 +183,14 @@ func (h *Handler) ListFolderDocuments(w http.ResponseWriter, r *http.Request) {
 	for _, d := range docs {
 		out = append(out, newDocumentResponse(d, parent))
 	}
-	writeJSON(w, http.StatusOK, out)
+	// Wrap the array in a top-level object so every list endpoint in
+	// /api/v1 returns {"<resource>": [...]}. Returning a bare array
+	// breaks the convention enforced by ListFolderChildren / ListChanges /
+	// ListDocumentDeltas and ties our hands against ever adding
+	// pagination metadata (next_cursor, total, has_more) without a
+	// breaking change — a top-level object can grow keys; a top-level
+	// array cannot.
+	writeJSON(w, http.StatusOK, map[string]any{"documents": out})
 }
 
 // RenameDocument updates the document name.
@@ -356,7 +363,11 @@ func (h *Handler) ListDocumentDeltas(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid id", http.StatusBadRequest)
 		return
 	}
-	doc, _, err := h.documents.GetByID(r.Context(), workspaceID, id)
+	// GetMetadata, not GetByID: ListDocumentDeltas only needs
+	// folder_id for the permission check and never inspects the Yjs
+	// binary state. Avoids streaming the (potentially MB-scale)
+	// y_state column on every paginated tail fetch.
+	doc, _, err := h.documents.GetMetadata(r.Context(), workspaceID, id)
 	if err != nil {
 		writeDocumentError(w, err)
 		return
@@ -435,7 +446,15 @@ func (h *Handler) AppendDocumentDelta(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid id", http.StatusBadRequest)
 		return
 	}
-	doc, _, err := h.documents.GetByID(r.Context(), workspaceID, id)
+	// AppendDocumentDelta is the per-keystroke hot path. We only
+	// need folder_id for the permission check; never inspect
+	// y_state. GetMetadata skips the binary columns so this lookup
+	// stays cheap even on multi-MB documents. The service-level
+	// AppendDelta runs a second metadata-only lookup (collab_mode
+	// gate) and the repo's FOR UPDATE locks the row inside the
+	// insert transaction — net: three lightweight reads instead of
+	// two heavy reads + one lock.
+	doc, _, err := h.documents.GetMetadata(r.Context(), workspaceID, id)
 	if err != nil {
 		writeDocumentError(w, err)
 		return

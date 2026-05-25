@@ -84,6 +84,13 @@ func (r *fakeRepo) GetByID(_ context.Context, _, id uuid.UUID) (*Document, error
 	return nil, ErrNotFound
 }
 
+// GetMetadata in the fake mirrors GetByID — the test fake doesn't
+// model the binary-skip optimisation since it's purely an I/O
+// concern at the Postgres layer.
+func (r *fakeRepo) GetMetadata(ctx context.Context, ws, id uuid.UUID) (*Document, error) {
+	return r.GetByID(ctx, ws, id)
+}
+
 func (r *fakeRepo) UpdateName(_ context.Context, _, _ uuid.UUID, name string) (*Document, error) {
 	if r.updateNameErr != nil {
 		return nil, r.updateNameErr
@@ -109,6 +116,13 @@ func (r *fakeRepo) SoftDelete(_ context.Context, _, _ uuid.UUID) error {
 }
 
 func (r *fakeRepo) ListByFolder(_ context.Context, _, _ uuid.UUID) ([]*Document, error) {
+	return r.listByFolder, r.listByFolderErr
+}
+
+// ListByFolderSubtree in the fake reuses listByFolder — service-
+// level tests don't exercise the recursive CTE walk, only that the
+// service correctly proxies the call.
+func (r *fakeRepo) ListByFolderSubtree(_ context.Context, _, _ uuid.UUID) ([]*Document, error) {
 	return r.listByFolder, r.listByFolderErr
 }
 

@@ -124,7 +124,11 @@ func (s *Service) SetCollabMode(ctx context.Context, workspaceID, documentID uui
 	if collabMode == CollabModeDisabled {
 		return nil, ErrInvalidCollabMode
 	}
-	d, err := s.repo.GetByID(ctx, workspaceID, documentID)
+	// GetMetadata is sufficient — SetCollabMode only inspects
+	// d.FolderID + d.CollabMode, never YState. Avoids streaming the
+	// binary blob from Postgres on what is effectively a metadata
+	// flip.
+	d, err := s.repo.GetMetadata(ctx, workspaceID, documentID)
 	if err != nil {
 		return nil, err
 	}
@@ -147,6 +151,34 @@ func (s *Service) Delete(ctx context.Context, workspaceID, documentID uuid.UUID)
 // updated first.
 func (s *Service) ListByFolder(ctx context.Context, workspaceID, folderID uuid.UUID) ([]*Document, error) {
 	return s.repo.ListByFolder(ctx, workspaceID, folderID)
+}
+
+// ListByFolderSubtree returns every document under the folder
+// subtree (including descendants). Used by the DeleteFolder /
+// BulkDelete handlers to snapshot documents BEFORE the recursive
+// folder soft-delete cascades to them so the handlers can emit
+// per-document activity + changefeed events AFTER the folder
+// delete commits. Mirrors the recursive CTE used by
+// folder.SoftDeleteSubtree so the two stay in lockstep.
+func (s *Service) ListByFolderSubtree(ctx context.Context, workspaceID, folderID uuid.UUID) ([]*Document, error) {
+	return s.repo.ListByFolderSubtree(ctx, workspaceID, folderID)
+}
+
+// GetMetadata is the binary-free companion to GetByID. Use when the
+// caller needs only the document's metadata (folder_id, collab_mode,
+// name, etc.) and not the Yjs binary state — e.g. permission checks,
+// activity logging, the AppendDelta hot path. The returned
+// Document's YState / YStateVector fields are nil.
+func (s *Service) GetMetadata(ctx context.Context, workspaceID, documentID uuid.UUID) (*Document, *folder.Folder, error) {
+	d, err := s.repo.GetMetadata(ctx, workspaceID, documentID)
+	if err != nil {
+		return nil, nil, err
+	}
+	parent, err := s.folders.GetByID(ctx, workspaceID, d.FolderID)
+	if err != nil {
+		return nil, nil, fmt.Errorf("lookup document folder: %w", err)
+	}
+	return d, parent, nil
 }
 
 // AppendDeltaInput is the validated user request for appending a
@@ -182,8 +214,10 @@ func (s *Service) AppendDelta(ctx context.Context, in AppendDeltaInput) (*Append
 	// We refuse to append to a 'disabled' document — the user has
 	// to flip it back to a real collab mode first. This is also a
 	// nice early-cut for the case where the WebSocket provider is
-	// out of sync with a recent SetCollabMode change.
-	d, err := s.repo.GetByID(ctx, in.WorkspaceID, in.DocumentID)
+	// out of sync with a recent SetCollabMode change. Use
+	// GetMetadata not GetByID — the AppendDelta hot path never
+	// inspects YState and the binary fetch would be wasted I/O.
+	d, err := s.repo.GetMetadata(ctx, in.WorkspaceID, in.DocumentID)
 	if err != nil {
 		return nil, err
 	}

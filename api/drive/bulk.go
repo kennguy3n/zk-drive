@@ -205,13 +205,14 @@ func (h *Handler) BulkDelete(w http.ResponseWriter, r *http.Request) {
 			resp.Failed = append(resp.Failed, bulkFailure{ID: raw, Error: err.Error()})
 			continue
 		}
-		// Snapshot every file in the subtree BEFORE folders.Delete
-		// cascades them — same rationale as the single-folder
-		// DeleteFolder handler. Emitting only after the delete
-		// succeeds keeps the webhook stream consistent with the
-		// persisted soft-delete (no phantom emits for a folder
-		// that failed to delete).
-		snaps := h.snapshotFilesForFolderSubtreeDelete(r.Context(), workspaceID, id)
+		// Snapshot every file AND collab document in the subtree
+		// BEFORE folders.Delete cascades them — same rationale as
+		// the single-folder DeleteFolder handler. Emitting only
+		// after the delete succeeds keeps the webhook + changefeed
+		// stream consistent with the persisted soft-delete (no
+		// phantom emits for a folder that failed to delete).
+		fileSnaps := h.snapshotFilesForFolderSubtreeDelete(r.Context(), workspaceID, id)
+		docSnaps := h.snapshotDocumentsForFolderSubtreeDelete(r.Context(), workspaceID, id)
 		if err := h.folders.Delete(r.Context(), workspaceID, id); err != nil {
 			resp.Failed = append(resp.Failed, bulkFailure{ID: raw, Error: err.Error()})
 			continue
@@ -221,7 +222,13 @@ func (h *Handler) BulkDelete(w http.ResponseWriter, r *http.Request) {
 			Action: activity.ActionFolderDelete, ResourceType: permission.ResourceFolder,
 			ResourceID: id,
 		})
-		h.emitWebhookFileDeletedBatch(r.Context(), workspaceID, snaps)
+		// Per cascaded document, append a document.delete to the
+		// outer changes accumulator so a single batchRecordChanges
+		// flushes them all at the end of the bulk loop. Same
+		// pattern as the file path emits one file.deleted webhook
+		// per snapshot via emitWebhookFileDeletedBatch.
+		changes = append(changes, h.emitFolderCascadeDocumentDeletesBatch(r.Context(), docSnaps)...)
+		h.emitWebhookFileDeletedBatch(r.Context(), workspaceID, fileSnaps)
 		resp.Succeeded = append(resp.Succeeded, raw)
 	}
 	h.batchRecordChanges(r.Context(), changes)
