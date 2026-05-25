@@ -87,11 +87,33 @@ func renderTextToImage(body string, opts textPreviewOpts) image.Image {
 	maxY := opts.height - lineHeight/2
 
 	if opts.header != "" {
+		// Truncate the header to the canvas column budget so a
+		// long header (e.g. a CSV banner row with 10 columns ×
+		// 32 runes joined by tabs, ~340 chars total) doesn't
+		// run off the right edge of the canvas without any
+		// visible indicator that it was cut. We reserve one
+		// rune in the budget for the ellipsis suffix so the
+		// total width never exceeds colsPerLine cells. This
+		// applies to every renderer (archive, email, CSV,
+		// markdown banner) — historically only short banners
+		// (file name, subject) reached this path, but the CSV
+		// renderer can produce a banner approaching the upper
+		// bound and the markdown renderer can produce a
+		// banner from the first H1 heading, both of which
+		// overflow on narrow canvases without truncation.
+		header := opts.header
+		if utf8.RuneCountInString(header) > colsPerLine {
+			trimTo := colsPerLine - 1
+			if trimTo < 1 {
+				trimTo = 1
+			}
+			header = truncateRunes(header, trimTo, "…")
+		}
 		drawer.Dot = fixed.P(x0, y)
-		drawer.DrawString(opts.header)
+		drawer.DrawString(header)
 		// fake-bold by re-drawing 1 px to the right
 		drawer.Dot = fixed.P(x0+1, y)
-		drawer.DrawString(opts.header)
+		drawer.DrawString(header)
 		// rule
 		ruleY := y + 4
 		if ruleY < dst.Bounds().Max.Y {

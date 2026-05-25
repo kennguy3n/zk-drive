@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"image"
+	"strconv"
 	"strings"
 
 	"github.com/yuin/goldmark"
@@ -549,23 +550,21 @@ func emitTable(t *extast.Table, source []byte, emit func(string)) {
 // trivially `Itoa` today but lives in its own helper so a future
 // change (e.g. localised ordinals, or 'a / b / c' lettering for nested
 // ordered lists) has a single edit point.
+//
+// We use strconv.Itoa rather than a hand-rolled fixed-size buffer
+// even though list-item counts are bounded in practice (CommonMark
+// caps list start at 9 digits, and the source is capped at
+// markdownPreviewMaxBytes so the walker can't encounter enough items
+// to overflow even with a 9-digit start). A fixed-size buffer makes
+// correctness depend on caller-side invariants that are easy to
+// regress; strconv.Itoa is unconditionally correct for any int and
+// is already linked into every Go binary so there's no extra import
+// cost.
 func formatOrdinal(n int) string {
 	if n <= 0 {
 		n = 1
 	}
-	// Avoid pulling in strconv just for this; keep allocations
-	// bounded — these are list-item counts, not free-form ints.
-	if n < 10 {
-		return string(rune('0' + n))
-	}
-	var buf [16]byte
-	i := len(buf)
-	for n > 0 {
-		i--
-		buf[i] = byte('0' + n%10)
-		n /= 10
-	}
-	return string(buf[i:])
+	return strconv.Itoa(n)
 }
 
 func init() {
