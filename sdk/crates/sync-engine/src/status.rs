@@ -15,7 +15,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::catalogue::{Catalogue, SyncStatus};
+use crate::catalogue::Catalogue;
 use crate::connectivity::ConnectivityState;
 use crate::Result;
 
@@ -127,18 +127,12 @@ impl Snapshot {
         disk_quota_bytes: Option<u64>,
         connectivity: ConnectivityState,
     ) -> Result<Self> {
-        let cached_bytes = cat.total_cached_bytes()?;
-        let pinned_count = cat.count_pinned()?;
-        let status_counts = SyncStatusCounts {
-            up_to_date: cat.count_by_status(SyncStatus::UpToDate)?,
-            local_dirty: cat.count_by_status(SyncStatus::LocalDirty)?,
-            local_deleted: cat.count_by_status(SyncStatus::LocalDeleted)?,
-            remote_dirty: cat.count_by_status(SyncStatus::RemoteDirty)?,
-            remote_deleted: cat.count_by_status(SyncStatus::RemoteDeleted)?,
-            conflict: cat.count_by_status(SyncStatus::Conflict)?,
-            in_flight: cat.count_by_status(SyncStatus::InFlight)?,
-            evicted: cat.count_by_status(SyncStatus::Evicted)?,
-        };
+        // Single SQL aggregate -- not 10 separate counts. See
+        // [`Catalogue::status_aggregate`] for the rationale (atomic
+        // snapshot of counts + bytes + pinned in one read instead
+        // of a sequence of independent queries that could observe a
+        // row moving between statuses).
+        let (cached_bytes, pinned_count, status_counts) = cat.status_aggregate()?;
         let over_quota = disk_quota_bytes.map(|q| cached_bytes > q).unwrap_or(false);
         Ok(Snapshot {
             workspace_id: cat.workspace_id(),
@@ -155,7 +149,7 @@ impl Snapshot {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::catalogue::FileRecord;
+    use crate::catalogue::{FileRecord, SyncStatus};
     use std::path::PathBuf;
     use uuid::Uuid;
 

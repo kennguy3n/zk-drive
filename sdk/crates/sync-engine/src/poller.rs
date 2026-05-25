@@ -247,6 +247,19 @@ impl RemotePoller {
         self.online.record_api_result(&stream_result);
         let mut stream = stream_result?;
         while let Some(item) = stream.next().await {
+            // Each frame off the WS is itself a `Result<ChangeEvent,
+            // ApiError>`; a protocol error, an unexpected close, or
+            // a deserialisation failure mid-stream signals the same
+            // condition as a handshake failure -- the engine has
+            // lost its live view of the server. Route through
+            // `record_api_result` BEFORE propagating so the shared
+            // `OnlineState` flips to Offline immediately, instead
+            // of waiting for the next reconnect attempt (which is
+            // up to 30s away under backoff). Without this, status
+            // snapshots and tray UIs would report the engine as
+            // Online for the full backoff window even though no
+            // frames are arriving.
+            self.online.record_api_result(&item);
             match item? {
                 zk_sync_api::ChangeEvent::Change(m) => {
                     let seq = m.sequence;

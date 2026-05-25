@@ -297,7 +297,7 @@ impl Catalogue {
     /// the existing data out-of-band; we never silently overwrite the
     /// stored binding.
     pub fn open(path: impl AsRef<Path>, workspace_id: Uuid) -> Result<Self> {
-        let conn = rusqlite::Connection::open(path)?;
+        let mut conn = rusqlite::Connection::open(path)?;
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.pragma_update(None, "synchronous", "NORMAL")?;
         conn.pragma_update(None, "foreign_keys", "ON")?;
@@ -307,20 +307,53 @@ impl Catalogue {
         // ALTER on miss. New columns must declare DEFAULT values so
         // existing rows are reachable through the new query path on
         // first open after an SDK upgrade.
+        //
+        // The ALTER + the backfill UPDATE run inside one transaction
+        // so a crash between the structural change and the backfill
+        // can never leave the catalogue with a column full of empty
+        // strings that `parse_dt("")` would later reject. The
+        // backfill is ALSO run unconditionally outside the
+        // `has_column` guard: if the column already exists from an
+        // earlier open of the same SDK version we still want to
+        // sweep up any `''` rows left behind by a pre-transaction
+        // build of this code. That second sweep is a one-row UPDATE
+        // hitting zero rows in the happy case (every row has a
+        // valid RFC3339 timestamp), so the cost is a single index
+        // probe per open.
         if !has_column(&conn, "files", "last_accessed_at")? {
+            let tx = conn.transaction()?;
             // ALTER TABLE ... ADD COLUMN can't use non-constant
             // DEFAULTs (e.g. CURRENT_TIMESTAMP) in older SQLite
             // versions and the literal default makes the column
             // useless for LRU on existing rows. Backfill from
             // updated_at after the structural add so every existing
             // row starts with a non-degenerate LRU position.
-            conn.execute_batch(
+            tx.execute_batch(
                 "ALTER TABLE files ADD COLUMN last_accessed_at TEXT NOT NULL DEFAULT '';",
             )?;
+            tx.execute(
+                "UPDATE files SET last_accessed_at = updated_at WHERE last_accessed_at = ''",
+                [],
+            )?;
+            tx.execute_batch(
+                "CREATE INDEX IF NOT EXISTS idx_files_last_accessed_at ON files(last_accessed_at);",
+            )?;
+            tx.commit()?;
+        } else {
+            // Crash-recovery sweep: if a prior open ran the
+            // pre-transactional migration code and was killed
+            // between the ALTER and the UPDATE, every row touched
+            // since carries `last_accessed_at = ''`. Empty strings
+            // would later fail `parse_dt` and break every catalogue
+            // query. This UPDATE is a no-op when the column is
+            // populated and self-heals when it isn't.
             conn.execute(
                 "UPDATE files SET last_accessed_at = updated_at WHERE last_accessed_at = ''",
                 [],
             )?;
+            // The index may also be missing if a *very* old build
+            // shipped without it. CREATE INDEX IF NOT EXISTS is
+            // idempotent so calling it unconditionally is free.
             conn.execute_batch(
                 "CREATE INDEX IF NOT EXISTS idx_files_last_accessed_at ON files(last_accessed_at);",
             )?;
@@ -426,7 +459,7 @@ impl Catalogue {
     /// way the right behaviour is to skip silently rather than
     /// resurrecting a tombstoned row by side effect.
     pub fn touch_access(&mut self, remote_file_id: Uuid) -> Result<bool> {
-        let now = chrono::Utc::now().to_rfc3339();
+        let now = rfc3339_now();
         let n = self.conn.execute(
             "UPDATE files SET last_accessed_at = ?1 WHERE remote_file_id = ?2",
             params![now, remote_file_id.to_string()],
@@ -473,16 +506,64 @@ impl Catalogue {
     /// catalogue into memory on a single pass; callers iterate
     /// pages until quota is met.
     pub fn eviction_candidates(&self, limit: usize) -> Result<Vec<FileRecord>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT remote_file_id, remote_version_id, local_path, size_bytes, content_hash, status, pinned, updated_at, last_accessed_at
-             FROM files
-             WHERE pinned = 0
-               AND status = 'up_to_date'
-               AND size_bytes > 0
-             ORDER BY last_accessed_at ASC
-             LIMIT ?1",
-        )?;
-        let rows = stmt.query_map(params![limit as i64], row_to_record)?;
+        self.eviction_candidates_after(None, limit)
+    }
+
+    /// Variant of [`Self::eviction_candidates`] that paginates by
+    /// `last_accessed_at` cursor. Returns rows whose
+    /// `last_accessed_at` is **strictly greater than** `cursor`, in
+    /// the same order. The cursor is the RFC3339 string of the last
+    /// row returned by the previous page; pass `None` for the first
+    /// page.
+    ///
+    /// Why a separate method: with plain `LIMIT N`, if every row in
+    /// a page is stuck (unlink failed -- e.g. EBUSY on an mmap'd
+    /// file, EPERM on a read-only fs) the next iteration of the
+    /// outer loop re-queries the SAME stuck rows because they still
+    /// have the oldest `last_accessed_at` (no rows were transitioned
+    /// to Evicted). Without the cursor the evictor stalls even when
+    /// the workspace has plenty of fresher rows we *could* evict.
+    /// With keyset pagination on `last_accessed_at`, every iteration
+    /// moves strictly forward in time, so stuck rows can't block
+    /// progress.
+    ///
+    /// Strict-greater-than (`>`) is intentional: ties on
+    /// `last_accessed_at` are possible (the test fixture's bulk
+    /// loader writes microseconds-apart, and `chrono` rounds to
+    /// nanoseconds via RFC3339) but are not load-bearing for LRU
+    /// correctness. Skipping ties costs at most a handful of rows
+    /// per pass and prevents an infinite loop where the cursor
+    /// never advances.
+    pub fn eviction_candidates_after(
+        &self,
+        cursor: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<FileRecord>> {
+        let mut stmt;
+        let rows = if let Some(c) = cursor {
+            stmt = self.conn.prepare(
+                "SELECT remote_file_id, remote_version_id, local_path, size_bytes, content_hash, status, pinned, updated_at, last_accessed_at
+                 FROM files
+                 WHERE pinned = 0
+                   AND status = 'up_to_date'
+                   AND size_bytes > 0
+                   AND last_accessed_at > ?1
+                 ORDER BY last_accessed_at ASC
+                 LIMIT ?2",
+            )?;
+            stmt.query_map(params![c, limit as i64], row_to_record)?
+        } else {
+            stmt = self.conn.prepare(
+                "SELECT remote_file_id, remote_version_id, local_path, size_bytes, content_hash, status, pinned, updated_at, last_accessed_at
+                 FROM files
+                 WHERE pinned = 0
+                   AND status = 'up_to_date'
+                   AND size_bytes > 0
+                 ORDER BY last_accessed_at ASC
+                 LIMIT ?1",
+            )?;
+            stmt.query_map(params![limit as i64], row_to_record)?
+        };
         let mut out = Vec::new();
         for r in rows {
             out.push(r?);
@@ -515,13 +596,96 @@ impl Catalogue {
         Ok(n.max(0) as u64)
     }
 
+    /// Single-query aggregate used by the status snapshot. Returns
+    /// `(total_cached_bytes, pinned_count, per_status_counts)`.
+    ///
+    /// Why a dedicated method rather than calling
+    /// [`Self::total_cached_bytes`] + [`Self::count_pinned`] +
+    /// `count_by_status` * 8: that previous shape issued 10
+    /// independent `SELECT` statements with 10 separate index probes
+    /// and 10 round-trips through rusqlite's prepared-statement
+    /// cache. With this aggregate, SQLite scans the table (or the
+    /// `idx_files_status` index) exactly once and returns one row
+    /// per distinct status. For a catalogue with ~10k files this
+    /// drops the snapshot path from milliseconds to tens of
+    /// microseconds; for the Tauri tray that polls this every few
+    /// seconds the savings compound.
+    ///
+    /// Atomicity: a single SQLite statement runs inside a transient
+    /// read transaction, so the returned counts are mutually
+    /// consistent. The 10-statement implementation could in
+    /// principle observe a row moving between statuses between
+    /// queries (the catalogue mutex prevents writes from another
+    /// thread of the same SDK process, but a separate process
+    /// holding its own connection -- like the CLI status command
+    /// running alongside a live agent -- could mutate between
+    /// queries). This aggregate eliminates that window entirely.
+    ///
+    /// The `CASE WHEN status IN (...)` filter for `cached_bytes`
+    /// must stay in sync with the equivalent filter in
+    /// [`Self::total_cached_bytes`]; both definitions exclude
+    /// `LocalDeleted`, `RemoteDeleted`, `Evicted`, and `InFlight`
+    /// because those rows either have no content on disk or are
+    /// mid-transfer with a reserved-but-not-yet-occupied size.
+    pub fn status_aggregate(&self) -> Result<(u64, u64, crate::status::SyncStatusCounts)> {
+        use crate::status::SyncStatusCounts;
+        let mut stmt = self.conn.prepare(
+            "SELECT
+                status,
+                COUNT(*) AS cnt,
+                COALESCE(SUM(CASE WHEN pinned = 1 THEN 1 ELSE 0 END), 0) AS pinned_cnt,
+                COALESCE(SUM(
+                    CASE WHEN status IN ('up_to_date', 'local_dirty', 'remote_dirty', 'conflict')
+                         THEN size_bytes ELSE 0 END
+                ), 0) AS sum_size
+             FROM files
+             GROUP BY status",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            let status: String = r.get(0)?;
+            let cnt: i64 = r.get(1)?;
+            let pinned_cnt: i64 = r.get(2)?;
+            let sum_size: i64 = r.get(3)?;
+            Ok((status, cnt, pinned_cnt, sum_size))
+        })?;
+        let mut cached: u64 = 0;
+        let mut pinned: u64 = 0;
+        let mut counts = SyncStatusCounts::default();
+        for row in rows {
+            let (status_s, cnt, pinned_cnt, sum_size) = row?;
+            let cnt = cnt.max(0) as u64;
+            pinned = pinned.saturating_add(pinned_cnt.max(0) as u64);
+            cached = cached.saturating_add(sum_size.max(0) as u64);
+            match status_s.as_str() {
+                "up_to_date" => counts.up_to_date = cnt,
+                "local_dirty" => counts.local_dirty = cnt,
+                "local_deleted" => counts.local_deleted = cnt,
+                "remote_dirty" => counts.remote_dirty = cnt,
+                "remote_deleted" => counts.remote_deleted = cnt,
+                "conflict" => counts.conflict = cnt,
+                "in_flight" => counts.in_flight = cnt,
+                "evicted" => counts.evicted = cnt,
+                // An unknown status string means the catalogue was
+                // written by a newer SDK version that knows a status
+                // this build doesn't. The aggregate quietly drops it
+                // from the per-variant counters but still includes
+                // its rows in `cached` / `pinned` because the SQL
+                // already classified those at the row level. Logging
+                // here would be too noisy for what is fundamentally
+                // a forward-compat scenario.
+                _ => {}
+            }
+        }
+        Ok((cached, pinned, counts))
+    }
+
     /// Repoint a record's `local_path`. Used by the engine to move a
     /// row out of the way when a rename arrives at a path that is
     /// already tracked by a different file -- without this the
     /// downstream upsert would violate the schema's UNIQUE(local_path)
     /// constraint.
     pub fn set_local_path(&mut self, remote_file_id: Uuid, new_path: &Path) -> Result<()> {
-        let now = chrono::Utc::now().to_rfc3339();
+        let now = rfc3339_now();
         self.conn.execute(
             "UPDATE files SET local_path = ?1, updated_at = ?2 WHERE remote_file_id = ?3",
             params![
@@ -536,7 +700,7 @@ impl Catalogue {
     /// Mark a record's [`SyncStatus`]. Cheap path used by the engine
     /// loop when transitioning a file in-flight / back to up_to_date.
     pub fn set_status(&mut self, remote_file_id: Uuid, status: SyncStatus) -> Result<()> {
-        let now = chrono::Utc::now().to_rfc3339();
+        let now = rfc3339_now();
         self.conn.execute(
             "UPDATE files SET status = ?1, updated_at = ?2 WHERE remote_file_id = ?3",
             params![status.as_str(), now, remote_file_id.to_string()],
@@ -723,6 +887,21 @@ impl Catalogue {
 /// `PRAGMA table_info` instead. The query is intentionally lossy
 /// (it ignores type / nullability / default) -- we only need to
 /// know whether to issue the `ALTER TABLE`.
+/// All timestamp columns in the catalogue are TEXT in RFC 3339
+/// representation. SQLite compares TEXT lexicographically, which
+/// produces correct chronological ordering ONLY if every stored
+/// value uses the same timezone suffix format -- `chrono`'s
+/// `to_rfc3339` formats with `+00:00` in UTC, whereas other tools
+/// might write the same instant as `Z`. Because `Z` (0x5A) sorts
+/// AFTER `+` (0x2B) in ASCII but BEFORE every digit, mixing the
+/// two formats would silently corrupt the LRU ordering in
+/// `eviction_candidates`. Every write path routes through this
+/// helper so the invariant is enforced at the single point of
+/// truth.
+fn rfc3339_now() -> String {
+    chrono::Utc::now().to_rfc3339()
+}
+
 fn has_column(conn: &rusqlite::Connection, table: &str, column: &str) -> Result<bool> {
     let sql = format!("PRAGMA table_info({table})");
     let mut stmt = conn.prepare(&sql)?;
@@ -1101,5 +1280,159 @@ mod tests {
         assert_eq!(cat.count_by_status(SyncStatus::LocalDirty).unwrap(), 1);
         assert_eq!(cat.count_by_status(SyncStatus::Evicted).unwrap(), 1);
         assert_eq!(cat.count_by_status(SyncStatus::Conflict).unwrap(), 0);
+    }
+
+    #[test]
+    fn status_aggregate_matches_individual_counts() {
+        // Cross-check: the single-query aggregate MUST produce the
+        // same numbers as the legacy 10-query path. If a future
+        // refactor changes the CASE filter for `cached_bytes` here
+        // but not in `total_cached_bytes` (or vice versa), this
+        // test will flag the drift before it ships.
+        let tmp = tempfile::tempdir().unwrap();
+        let mut cat = Catalogue::open(tmp.path().join("c.db"), Uuid::new_v4()).unwrap();
+        // Mix every status and a couple of pinned rows; sizes
+        // chosen so the cached_bytes filter is exercised non-trivially.
+        let mut up = rec("u");
+        up.status = SyncStatus::UpToDate;
+        up.size_bytes = 100;
+        up.pinned = true;
+        let mut ld = rec("ld");
+        ld.status = SyncStatus::LocalDirty;
+        ld.size_bytes = 50;
+        let mut rd = rec("rd");
+        rd.status = SyncStatus::RemoteDirty;
+        rd.size_bytes = 75;
+        let mut cf = rec("cf");
+        cf.status = SyncStatus::Conflict;
+        cf.size_bytes = 25;
+        let mut ev = rec("ev");
+        ev.status = SyncStatus::Evicted;
+        ev.size_bytes = 999; // excluded from cached_bytes
+        let mut deld = rec("dl");
+        deld.status = SyncStatus::LocalDeleted;
+        deld.size_bytes = 999; // excluded
+        let mut delr = rec("dr");
+        delr.status = SyncStatus::RemoteDeleted;
+        delr.size_bytes = 999; // excluded
+        let mut inf = rec("in");
+        inf.status = SyncStatus::InFlight;
+        inf.size_bytes = 999; // excluded
+        inf.pinned = true;
+        for r in [&up, &ld, &rd, &cf, &ev, &deld, &delr, &inf] {
+            cat.upsert(r).unwrap();
+        }
+        let (cached, pinned, counts) = cat.status_aggregate().unwrap();
+        // Cross-check against the per-query helpers.
+        assert_eq!(cached, cat.total_cached_bytes().unwrap());
+        assert_eq!(pinned, cat.count_pinned().unwrap());
+        assert_eq!(
+            counts.up_to_date,
+            cat.count_by_status(SyncStatus::UpToDate).unwrap()
+        );
+        assert_eq!(
+            counts.local_dirty,
+            cat.count_by_status(SyncStatus::LocalDirty).unwrap()
+        );
+        assert_eq!(
+            counts.local_deleted,
+            cat.count_by_status(SyncStatus::LocalDeleted).unwrap()
+        );
+        assert_eq!(
+            counts.remote_dirty,
+            cat.count_by_status(SyncStatus::RemoteDirty).unwrap()
+        );
+        assert_eq!(
+            counts.remote_deleted,
+            cat.count_by_status(SyncStatus::RemoteDeleted).unwrap()
+        );
+        assert_eq!(
+            counts.conflict,
+            cat.count_by_status(SyncStatus::Conflict).unwrap()
+        );
+        assert_eq!(
+            counts.in_flight,
+            cat.count_by_status(SyncStatus::InFlight).unwrap()
+        );
+        assert_eq!(
+            counts.evicted,
+            cat.count_by_status(SyncStatus::Evicted).unwrap()
+        );
+        // Explicit numeric check so a regression in EITHER side
+        // doesn't silently pass (both could drift in lockstep
+        // otherwise).
+        assert_eq!(cached, 100 + 50 + 75 + 25);
+        assert_eq!(pinned, 2);
+        assert_eq!(counts.total(), 8);
+    }
+
+    #[test]
+    fn migration_heals_empty_last_accessed_at_rows() {
+        // Regression for the non-atomic-migration crash hole. Even
+        // though the current ALTER + UPDATE run inside one
+        // transaction (so SQLite gives us atomicity going forward),
+        // a previous build that shipped the un-transacted code
+        // could have left rows with `last_accessed_at = ''` on
+        // disk. The crash-recovery sweep in `Catalogue::open` MUST
+        // backfill those rows from `updated_at` on every open, not
+        // just on the open that performs the ALTER.
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("c.db");
+        let ws = Uuid::new_v4();
+        // First open: runs the migration cleanly. Insert one
+        // healthy row.
+        {
+            let mut cat = Catalogue::open(&path, ws).unwrap();
+            let r = rec("healthy");
+            cat.upsert(&r).unwrap();
+        }
+        // Simulate a row left over from a pre-transaction build
+        // by directly setting `last_accessed_at = ''` on the
+        // healthy row. This is exactly the state a crashed
+        // migration would leave behind.
+        {
+            let conn = rusqlite::Connection::open(&path).unwrap();
+            let n = conn
+                .execute("UPDATE files SET last_accessed_at = ''", [])
+                .unwrap();
+            assert!(n > 0);
+            // Verify the corruption is real before testing the
+            // self-heal: a SELECT must fail to parse the row.
+            let mut stmt = conn
+                .prepare("SELECT last_accessed_at FROM files LIMIT 1")
+                .unwrap();
+            let s: String = stmt.query_row([], |r| r.get(0)).unwrap();
+            assert_eq!(s, "");
+        }
+        // Re-open: the crash-recovery sweep must populate the
+        // empty column from `updated_at`. After re-open, every
+        // get() call must succeed (RFC3339 parsing of `''` would
+        // fail otherwise).
+        {
+            let cat = Catalogue::open(&path, ws).unwrap();
+            let conn = rusqlite::Connection::open(&path).unwrap();
+            let mut stmt = conn.prepare("SELECT last_accessed_at FROM files").unwrap();
+            let rows: Vec<String> = stmt
+                .query_map([], |r| r.get::<_, String>(0))
+                .unwrap()
+                .map(|x| x.unwrap())
+                .collect();
+            assert!(!rows.is_empty());
+            for s in &rows {
+                assert!(
+                    !s.is_empty(),
+                    "every row must have a non-empty last_accessed_at after re-open"
+                );
+                // Parse must succeed; the sweep populates with a
+                // value from `updated_at` which itself is RFC3339.
+                chrono::DateTime::parse_from_rfc3339(s)
+                    .expect("backfilled last_accessed_at must be valid RFC3339");
+            }
+            // And the high-level catalogue API still returns rows
+            // (the corruption case used to make row_to_record
+            // return an error).
+            let total = cat.total_cached_bytes().unwrap();
+            assert!(total > 0);
+        }
     }
 }

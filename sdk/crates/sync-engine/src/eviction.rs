@@ -145,17 +145,36 @@ pub fn evict_to_quota(
         return Ok(report);
     }
 
+    // Keyset cursor on `last_accessed_at`. After each page we
+    // advance the cursor past the last row we inspected -- whether
+    // we actually evicted it or not. This is the key correctness
+    // property versus a plain `LIMIT N` scan: if every row in a
+    // page is stuck (unlink failed with e.g. EBUSY on an mmap'd
+    // file or EPERM on a read-only fs), `evicted_any` would be
+    // false and a non-cursored implementation would re-query the
+    // same stuck rows forever -- they still have the oldest
+    // `last_accessed_at`, so they keep coming back at the head of
+    // the next page. With the cursor, every iteration moves
+    // strictly forward in time so stuck rows can't block progress
+    // past them.
+    let mut cursor: Option<String> = None;
     loop {
-        let candidates = cat.eviction_candidates(CANDIDATE_PAGE_SIZE)?;
+        let candidates = cat.eviction_candidates_after(cursor.as_deref(), CANDIDATE_PAGE_SIZE)?;
         if candidates.is_empty() {
-            // Every non-pinned UpToDate row was already considered
-            // (and skipped or evicted on prior iterations of this
-            // outer loop); if we're still over quota the workspace
-            // is pinned-heavy.
+            // No more eligible rows past the cursor. If we're still
+            // over quota the workspace is pinned-heavy OR the
+            // remaining footprint sits behind stuck rows we
+            // couldn't unlink this pass; either way the operator
+            // needs to know.
             report.quota_unreachable = current > quota_bytes;
             break;
         }
-        let mut evicted_any = false;
+        // Remember the cursor for the next page BEFORE we start
+        // mutating the catalogue. The last row's
+        // `last_accessed_at` is monotonically the largest in the
+        // page (the query sorts ASC), and that's exactly what we
+        // want to compare against on the next iteration.
+        let next_cursor = candidates.last().map(|r| r.last_accessed_at.to_rfc3339());
         for rec in candidates {
             if current <= quota_bytes {
                 break;
@@ -182,12 +201,11 @@ pub fn evict_to_quota(
                     // ENOSPC at unlink (unlikely but possible on
                     // some filesystems), EPERM, EBUSY (mmap),
                     // EIO -- anything other than NotFound. Skip
-                    // this row and let the next pass try again. We
-                    // do NOT propagate the error because evicting
-                    // is a best-effort cache hint, not a sync
-                    // correctness operation: the catalogue stays
-                    // correct (row still UpToDate), the file stays
-                    // on disk, and the next pass might succeed.
+                    // this row; the cursor advance below ensures
+                    // a future page can still surface fresher
+                    // evictable rows. We do NOT propagate the
+                    // error because evicting is a best-effort
+                    // cache hint, not a sync correctness operation.
                     warn!(
                         path = %rec.local_path.display(),
                         file_id = %rec.remote_file_id,
@@ -204,9 +222,16 @@ pub fn evict_to_quota(
             // row removes its size_bytes from `total_cached_bytes`
             // (Evicted is excluded from the sum at the SQL layer).
             current = current.saturating_sub(rec.size_bytes);
-            evicted_any = true;
         }
-        if !evicted_any || current <= quota_bytes {
+        if current <= quota_bytes {
+            break;
+        }
+        cursor = next_cursor;
+        // Defensive break: if the cursor didn't advance (would only
+        // happen if a page came back empty after the empty-check
+        // above, which can't happen), bail out instead of looping.
+        if cursor.is_none() {
+            report.quota_unreachable = current > quota_bytes;
             break;
         }
     }
@@ -533,6 +558,74 @@ mod tests {
             evict_to_quota(&mut cat, tmp.path(), 1024, EvictionTrigger::QuotaExceeded).unwrap();
         assert_eq!(report.evicted_count, 0);
         assert!(r.local_path.exists());
+    }
+
+    #[test]
+    fn cursor_pagination_steps_past_stuck_rows() {
+        // Regression test for the "stuck-row stall" bug: if every
+        // row in the first page fails to unlink and the loop falls
+        // back to `LIMIT N`, the same rows come back as the head
+        // of the next page and the evictor stalls. With cursor
+        // pagination on `last_accessed_at`, the second iteration
+        // moves strictly past the stuck page so a fresher
+        // evictable row can be considered.
+        //
+        // We can't easily make `remove_file` fail in a portable
+        // way (chmod a parent to read-only works on POSIX, fails
+        // on Windows, and is wired through `nix` on macOS), so
+        // this test exercises the underlying SQL helper directly:
+        // we ask for a small page, advance the cursor to the last
+        // returned row's `last_accessed_at`, and assert that the
+        // next page returns the rest of the workspace -- not the
+        // same rows again.
+        let tmp = tempfile::tempdir().unwrap();
+        let mut cat = open(&tmp);
+        let base = chrono::Utc::now();
+        // Five rows with strictly-increasing last_accessed_at,
+        // each 100 bytes. The query orders ASC, so the first page
+        // returns the two oldest, the second page (with cursor)
+        // returns the next two, etc.
+        for i in 0..5 {
+            let r = make_file(
+                tmp.path(),
+                &format!("f{i}.bin"),
+                100,
+                // age_seconds is subtracted from `now`, so larger
+                // values produce older timestamps -> appear first
+                // in ASC order.
+                (10 - i) as i64,
+                false,
+                SyncStatus::UpToDate,
+                base,
+            );
+            cat.upsert(&r).unwrap();
+        }
+        // Page 1: 2 rows starting from the oldest.
+        let page1 = cat.eviction_candidates_after(None, 2).unwrap();
+        assert_eq!(page1.len(), 2);
+        let cursor1 = page1.last().unwrap().last_accessed_at.to_rfc3339();
+        // Page 2: cursor advances PAST page1's last row. We must
+        // not see those rows again (proving the cursor advances
+        // even if no Eviction status transition occurred).
+        let page2 = cat.eviction_candidates_after(Some(&cursor1), 2).unwrap();
+        assert_eq!(page2.len(), 2);
+        let page1_ids: std::collections::HashSet<_> =
+            page1.iter().map(|r| r.remote_file_id).collect();
+        for r in &page2 {
+            assert!(
+                !page1_ids.contains(&r.remote_file_id),
+                "cursor must skip page1 row {}",
+                r.remote_file_id
+            );
+        }
+        // Page 3: only one row left after pages 1+2 (5 - 2 - 2 = 1).
+        let cursor2 = page2.last().unwrap().last_accessed_at.to_rfc3339();
+        let page3 = cat.eviction_candidates_after(Some(&cursor2), 2).unwrap();
+        assert_eq!(page3.len(), 1);
+        // Page 4: cursor past the last row -> empty.
+        let cursor3 = page3.last().unwrap().last_accessed_at.to_rfc3339();
+        let page4 = cat.eviction_candidates_after(Some(&cursor3), 2).unwrap();
+        assert!(page4.is_empty());
     }
 
     #[test]
