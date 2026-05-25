@@ -1044,7 +1044,23 @@ func run() error {
 
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer shutdownCancel()
-	return srv.Shutdown(shutdownCtx)
+	// Shutdown order is load-bearing:
+	//   1. srv.Shutdown drains in-flight HTTP requests and stops
+	//      accepting new connections, but does NOT close hijacked
+	//      WebSocket connections (gorilla/websocket Upgrade hijacks
+	//      the underlying TCP conn, removing it from net/http's
+	//      bookkeeping). We need step 2 to drain those.
+	//   2. collabHub.Shutdown closes every active collab WS client
+	//      (so the write pumps send a clean 1000 Normal Closure
+	//      frame) and waits for in-flight compaction goroutines to
+	//      return. Without this, a deploy/restart would RST the WS
+	//      conns and clients would mis-classify a graceful restart
+	//      as a network failure.
+	//   3. The deferred bgGoroutines.Wait + pool.Close at the top of
+	//      run() finish the shutdown after we return.
+	shutdownErr := srv.Shutdown(shutdownCtx)
+	collabHub.Shutdown()
+	return shutdownErr
 }
 
 // spaHandler serves a Vite-built single-page app from `dir`. Concrete

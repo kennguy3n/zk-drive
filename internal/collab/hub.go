@@ -183,6 +183,14 @@ type DocumentHub struct {
 	// when unset, compaction-due signals are dropped silently and
 	// the next caller will retry.
 	scheduleCompaction func(workspaceID, documentID uuid.UUID)
+
+	// compactWG tracks in-flight compaction goroutines so
+	// Shutdown can drain them before the server returns and the
+	// underlying pool is closed. Without this WaitGroup, a
+	// compaction goroutine could be mid-Compact (holding a pool
+	// connection) when pool.Close() runs, producing a noisy
+	// "acquire on closed pool" error and a lost compaction.
+	compactWG sync.WaitGroup
 }
 
 // NewDocumentHub constructs a hub. The documents service must be
@@ -409,7 +417,11 @@ func (h *DocumentHub) handleSyncUpdate(ctx context.Context, c *DocumentClient, p
 	// when an admin / future "migrate folder" path triggers a
 	// flush.
 	if result.CompactionDue && c.Capability.ServerSnapshotAllowed && h.scheduleCompaction != nil {
-		go h.scheduleCompaction(c.WorkspaceID, c.DocumentID)
+		h.compactWG.Add(1)
+		go func(ws, doc uuid.UUID) {
+			defer h.compactWG.Done()
+			h.scheduleCompaction(ws, doc)
+		}(c.WorkspaceID, c.DocumentID)
 	}
 	return nil
 }
@@ -480,9 +492,22 @@ func (h *DocumentHub) deliverTo(c *DocumentClient, payload []byte) {
 	}
 }
 
-// Shutdown closes every active client and clears the rooms map.
-// Called from cmd/server's graceful-shutdown path so collab
-// connections drain before the process exits.
+// Shutdown closes every active client, clears the rooms map, and
+// blocks until in-flight compaction goroutines return. Called from
+// cmd/server's graceful-shutdown path so collab connections drain
+// (and any compaction job in progress finishes) before the process
+// closes the database pool.
+//
+// The caller is responsible for first cancelling the context the
+// compaction scheduler captured — Shutdown does not cancel that
+// context itself because the hub does not own it. The typical
+// shutdown sequence in cmd/server is:
+//
+//  1. srv.Shutdown(ctx)       — stops accepting new HTTP/WS connections
+//  2. collabHub.Shutdown()    — closes existing WS clients, drains compactions
+//  3. cancel()                — fires the global ctx.Done()
+//  4. bgGoroutines.Wait()     — drains other background goroutines
+//  5. pool.Close()            — closes the DB pool against quiescent consumers
 func (h *DocumentHub) Shutdown() {
 	h.mu.Lock()
 	victims := make([]*DocumentClient, 0)
@@ -499,4 +524,8 @@ func (h *DocumentHub) Shutdown() {
 	for _, c := range victims {
 		c.shutdown()
 	}
+	// Wait for any in-flight compaction goroutines to finish so
+	// the caller can safely close the document.Service and the
+	// underlying pgx pool.
+	h.compactWG.Wait()
 }

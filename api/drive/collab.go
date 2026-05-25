@@ -187,10 +187,15 @@ func (h *Handler) ServeDocumentCollab(w http.ResponseWriter, r *http.Request) {
 	logger.Info("collab client connected", "tail_deltas", len(snap.TailDeltas))
 
 	// Read + write pumps run on separate goroutines. The write
-	// pump owns the conn for writes (gorilla/websocket requires
-	// single-writer serialization); the read pump owns reads.
-	// Both exit when the connection closes or the hub
-	// unregisters the client.
+	// pump owns the conn for data writes (gorilla/websocket
+	// requires single-writer serialization for WriteMessage /
+	// NextWriter). The read pump owns reads and is permitted to
+	// call WriteControl concurrently — gorilla/websocket
+	// documents WriteControl + Close as safe to invoke
+	// concurrently with any other method, which we rely on for
+	// the close-frame paths in collabReadPump. Both pumps exit
+	// when the connection closes or the hub unregisters the
+	// client.
 	go collabWritePump(client, conn, logger)
 	go collabReadPump(h.collab, client, conn, logger)
 }
