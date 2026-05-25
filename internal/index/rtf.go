@@ -71,7 +71,7 @@ func extractRTFText(body []byte) (string, error) {
 		// the default per-group is the only way to honour both
 		// dialects correctly; a hardcoded 1 silently swallows one
 		// character per Unicode escape under \uc0.
-		ucDefault int = 1
+		ucDefault = 1
 		// ucDefaultStack mirrors the open-brace nesting so we can
 		// restore the parent group's \uc value on close-brace.
 		ucDefaultStack []int
