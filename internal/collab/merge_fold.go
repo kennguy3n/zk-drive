@@ -3,6 +3,7 @@ package collab
 import (
 	"context"
 	"errors"
+	"log/slog"
 
 	"github.com/kennguy3n/zk-drive/internal/document"
 )
@@ -86,14 +87,28 @@ func YjsMergeFold(rt *YjsRuntime) document.FoldFunc {
 
 		sv, err := rt.EncodeStateVector(ctx, merged)
 		if err != nil {
-			// Merge succeeded but SV encode failed — return
-			// the merged state with a nil SV. Callers that
-			// need an SV (the snapshot endpoint) treat nil
-			// the same way they treated OpaqueConcatFold's
-			// nil SV: clients reconstruct locally. Logging
-			// is the caller's responsibility (we don't have
-			// a logger here without expanding the FoldFunc
-			// signature).
+			// Merge succeeded but SV encode failed. Surfacing
+			// the failure as a fold error would force the
+			// caller to discard the merged update too —
+			// regressing both compaction (the tail stays
+			// uncompacted) and snapshot delivery on every
+			// subsequent attempt as long as the same input
+			// keeps tripping the SV encoder. The merged
+			// payload is still useful: clients can apply it
+			// and derive their own state vector locally
+			// (Yjs's client-side library exposes
+			// encodeStateVector), so we proceed with sv=nil
+			// and log a warn so operators see the
+			// degradation in observability (matches the
+			// log surface for the compaction-scheduler's
+			// other partial-failure paths in
+			// internal/collab/hub.go).
+			slog.Default().Warn("collab: ymerge encode_state_vector failed; returning merged update with nil state vector",
+				"error", err,
+				"merged_bytes", len(merged),
+				"tail_len", len(tail),
+				"up_to_seq", tail[len(tail)-1].Seq,
+			)
 			sv = nil
 		}
 

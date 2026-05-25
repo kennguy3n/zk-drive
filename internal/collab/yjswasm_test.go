@@ -3,8 +3,10 @@ package collab
 import (
 	"bytes"
 	"context"
+	"errors"
 	"sync"
 	"testing"
+	"time"
 )
 
 // yjsTestRuntime is a process-wide singleton lazy-initialised on
@@ -301,5 +303,143 @@ func TestYjsRuntime_MergeIsAssociative(t *testing.T) {
 	}
 	if !bytes.Equal(leftText, rightText) {
 		t.Errorf("merge associativity violation: left=%q right=%q", leftText, rightText)
+	}
+}
+
+// TestYjsRuntime_BrokenInstanceIsDiscarded verifies the
+// poison-prevention guarantee: when callWithInput flags an
+// instance as broken (e.g. on a wasm trap), the next release
+// closes the instance rather than returning it to the idle pool,
+// so a subsequent acquire instantiates a fresh module instead of
+// reusing memory in an indeterminate state.
+//
+// We construct a dedicated YjsRuntime (rather than reusing the
+// package singleton) so we can inspect / assert on the pool's
+// private bookkeeping without race-affecting other tests.
+func TestYjsRuntime_BrokenInstanceIsDiscarded(t *testing.T) {
+	t.Parallel()
+	rt, err := NewYjsRuntime(context.Background())
+	if err != nil {
+		t.Fatalf("NewYjsRuntime: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = rt.Close(context.Background())
+	})
+
+	inst, err := rt.acquire(context.Background())
+	if err != nil {
+		t.Fatalf("acquire: %v", err)
+	}
+	rt.mu.Lock()
+	if rt.live != 1 {
+		t.Fatalf("after first acquire: live=%d want 1", rt.live)
+	}
+	rt.mu.Unlock()
+
+	// Simulate callWithInput's broken-instance flagging.
+	// In production this happens on fn.Call error or memory
+	// Write OOB; here we set it directly because the
+	// externally-observable failure modes are hard to trigger
+	// deterministically without injecting allocator pressure
+	// the test environment doesn't guarantee.
+	inst.broken = true
+	rt.release(inst)
+
+	rt.mu.Lock()
+	live := rt.live
+	idleLen := len(rt.idle)
+	rt.mu.Unlock()
+	if live != 0 {
+		t.Errorf("after broken release: live=%d want 0", live)
+	}
+	if idleLen != 0 {
+		t.Errorf("after broken release: idle has %d entries, want 0", idleLen)
+	}
+
+	// The next acquire must produce a fresh instance \u2014
+	// asserted by both the pool count rolling forward and
+	// the returned pointer differing from the discarded one
+	// (the discarded instance's wasm module is closed, so the
+	// pool cannot have re-pooled it under any code path).
+	fresh, err := rt.acquire(context.Background())
+	if err != nil {
+		t.Fatalf("second acquire: %v", err)
+	}
+	if fresh == inst {
+		t.Errorf("acquire returned the discarded broken instance")
+	}
+	rt.release(fresh)
+}
+
+// TestYjsRuntime_CloseWaitsForInflight verifies that Close blocks
+// on in-flight callers via the inflight WaitGroup. Without this,
+// Close could close the wazero runtime while a callWithInput
+// goroutine was mid fn.Call, yielding a misleading "module
+// closed" error and (worse) racing on the wasm memory pages the
+// caller was still reading.
+//
+// The test acquires an instance and intentionally holds it past
+// the Close call, then verifies Close did not complete until the
+// caller released the instance. We use a goroutine + timeout
+// pattern rather than a deterministic sync.Cond because the
+// guarantee we are testing is "Close blocks", which is observed
+// over time.
+func TestYjsRuntime_CloseWaitsForInflight(t *testing.T) {
+	t.Parallel()
+	rt, err := NewYjsRuntime(context.Background())
+	if err != nil {
+		t.Fatalf("NewYjsRuntime: %v", err)
+	}
+
+	inst, err := rt.acquire(context.Background())
+	if err != nil {
+		t.Fatalf("acquire: %v", err)
+	}
+
+	closeDone := make(chan struct{})
+	go func() {
+		_ = rt.Close(context.Background())
+		close(closeDone)
+	}()
+
+	// Close should observe inflight > 0 and block on Wait.
+	// Sleep a short interval and assert closeDone is still
+	// open \u2014 the goroutine must not have completed yet.
+	select {
+	case <-closeDone:
+		t.Fatal("Close completed before the inflight caller released; inflight WaitGroup did not block")
+	case <-time.After(50 * time.Millisecond):
+		// expected: Close is waiting for release
+	}
+
+	// Now release the in-flight instance \u2014 release sees
+	// closed==true, decrements live and closes the instance,
+	// then calls inflight.Done(), unblocking Close.
+	rt.release(inst)
+
+	select {
+	case <-closeDone:
+		// expected
+	case <-time.After(2 * time.Second):
+		t.Fatal("Close did not complete within 2s after release()")
+	}
+}
+
+// TestYjsRuntime_AcquireAfterCloseReturnsError verifies the
+// shutdown gate: once Close starts, acquire must return the
+// closed sentinel so callers fail fast instead of blocking on
+// the (now-torn-down) instance pool.
+func TestYjsRuntime_AcquireAfterCloseReturnsError(t *testing.T) {
+	t.Parallel()
+	rt, err := NewYjsRuntime(context.Background())
+	if err != nil {
+		t.Fatalf("NewYjsRuntime: %v", err)
+	}
+	if cerr := rt.Close(context.Background()); cerr != nil {
+		t.Fatalf("Close: %v", cerr)
+	}
+	_, err = rt.acquire(context.Background())
+	if !errors.Is(err, ErrYjsRuntimeClosed) {
+		t.Errorf("acquire after Close: got %v want %v", err, ErrYjsRuntimeClosed)
 	}
 }

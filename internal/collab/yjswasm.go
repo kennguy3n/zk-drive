@@ -49,26 +49,33 @@ type YjsRuntime struct {
 	maxInstances int
 
 	mu sync.Mutex
-	// all tracks every live instance — idle and in-use — so
-	// Close can drain BOTH cohorts. Without this, instances that
-	// happen to be checked out during a graceful shutdown leak
-	// their linear memory until the wazero runtime itself is
-	// closed (which only happens after Close returns, by which
-	// point the leak has already been observed by metrics).
-	all []*yjsInstance
 	// idle is a LIFO stack of returned instances available for
-	// the next acquire. Every entry in idle is also present in
-	// all.
+	// the next acquire. An instance is in exactly one of two
+	// states: idle (sitting in this slice) or in-use (handed
+	// out to a caller, will be returned via release / discard).
+	// We deliberately do NOT keep a parallel "all" slice that
+	// Close iterates because closing an in-use instance from
+	// Close while the caller is mid-fn.Call would race the
+	// wazero memory and trap the wasm. Close instead waits for
+	// in-flight callers to drain via `inflight` and then closes
+	// what remains in idle.
 	idle []*yjsInstance
-	// live counts instances that have been instantiated and not
-	// yet closed. Used to gate further instantiation against
-	// maxInstances. Equals len(all) outside of acquire's
-	// instantiate window.
+	// live counts instances that have been instantiated and
+	// not yet permanently closed (i.e. not yet discarded by a
+	// caller and not yet drained by Close). Used to gate
+	// further instantiation against maxInstances. Decremented
+	// when release closes a broken instance, when discard
+	// closes a known-broken instance, and when Close drains
+	// the idle slice.
 	live int
+	// inflight tracks every instance currently checked out via
+	// acquire and not yet returned via release or discard. Close
+	// waits on this WaitGroup so the wazero runtime is never
+	// torn down while a caller is mid fn.Call.
+	inflight sync.WaitGroup
 	// closed flips to true once Close starts. acquire refuses
-	// to hand out instances after closed, release closes the
-	// instance instead of re-pooling it, and Close drains every
-	// remaining entry in `all`.
+	// to hand out instances after closed; release / discard
+	// close their instance directly instead of re-pooling.
 	closed    bool
 	closeOnce sync.Once
 	// acquireBackoff is the sleep applied between acquire
@@ -92,6 +99,15 @@ const defaultAcquireBackoff = time.Millisecond
 // yjsInstance wraps a single instantiated wasm module along with
 // the function handles we call repeatedly. Cached so each
 // merge/encode op only pays one map-lookup per export.
+//
+// The `broken` flag is set by callWithInput when a wasm-level
+// trap (fn.Call returning a non-nil error) makes this instance's
+// memory state untrustworthy. release inspects the flag and
+// closes the instance instead of re-pooling so a single OOM trap
+// or yrs panic cannot poison subsequent compactions on the same
+// process. The flag is only ever written / read by the goroutine
+// that holds the instance via acquire, so no synchronisation is
+// needed.
 type yjsInstance struct {
 	mod                 api.Module
 	mem                 api.Memory
@@ -101,6 +117,7 @@ type yjsInstance struct {
 	encodeStateVec      api.Function
 	applyAndExtractText api.Function
 	makeTextUpdate      api.Function
+	broken              bool
 }
 
 // DefaultYjsRuntimeMaxInstances caps how many wasm instances live
@@ -180,30 +197,45 @@ func (r *YjsRuntime) WithMaxInstances(n int) *YjsRuntime {
 // Idempotent — safe to call multiple times from concurrent
 // shutdown paths.
 //
-// Both idle and in-use instances are drained: idle ones are
-// closed immediately, and in-use ones are tracked via r.all so a
-// concurrent caller's release path sees closed==true and closes
-// the instance instead of re-pooling it. The acquire loop also
-// returns ErrYjsRuntimeClosed once closed flips, so any goroutine
-// blocked waiting for an instance unblocks cleanly during
-// shutdown.
+// Ordering:
+//  1. Flip `closed` so future acquire calls return ErrYjsRuntimeClosed.
+//  2. Drain the idle slice — those instances have no in-flight
+//     caller, so we can close them immediately.
+//  3. Wait on `inflight` for every currently-checked-out caller
+//     to call release / discard. release / discard see
+//     closed==true and close their own instance (decrementing
+//     live), so by the time Wait returns no wasm module is in
+//     use anywhere.
+//  4. There may be a small late-arriving batch in idle if a
+//     caller called release after step (2) but before step (3)
+//     completed — drain it.
+//  5. Close the wazero runtime last. At this point no callWithInput
+//     can still be running because step (3) waited for it.
 //
-// The underlying wazero runtime is closed last so the in-flight
-// callers complete their per-instance close before the shared
-// JIT cache is torn down. Order matters: closing the runtime
-// while a callWithInput is mid-flight would yank the host
-// memory out from under it and produce a misleading panic on
-// shutdown.
+// This eliminates the previous design's race window where Close
+// closed in-use modules concurrently with the caller's fn.Call,
+// which only worked because wazero's Module.Close is idempotent
+// (the wasm call would have raced into a closed runtime and
+// returned a misleading error).
 func (r *YjsRuntime) Close(ctx context.Context) error {
 	var err error
 	r.closeOnce.Do(func() {
 		r.mu.Lock()
 		r.closed = true
-		instances := r.all
-		r.all = nil
+		idleSnapshot := r.idle
 		r.idle = nil
 		r.mu.Unlock()
-		for _, inst := range instances {
+		for _, inst := range idleSnapshot {
+			if cerr := inst.mod.Close(ctx); cerr != nil && err == nil {
+				err = cerr
+			}
+		}
+		r.inflight.Wait()
+		r.mu.Lock()
+		late := r.idle
+		r.idle = nil
+		r.mu.Unlock()
+		for _, inst := range late {
 			if cerr := inst.mod.Close(ctx); cerr != nil && err == nil {
 				err = cerr
 			}
@@ -244,6 +276,7 @@ func (r *YjsRuntime) acquire(ctx context.Context) (*yjsInstance, error) {
 		if len(r.idle) > 0 {
 			inst := r.idle[len(r.idle)-1]
 			r.idle = r.idle[:len(r.idle)-1]
+			r.inflight.Add(1)
 			r.mu.Unlock()
 			return inst, nil
 		}
@@ -262,13 +295,15 @@ func (r *YjsRuntime) acquire(ctx context.Context) (*yjsInstance, error) {
 				// Close ran while we were instantiating;
 				// close this instance directly so it is
 				// not leaked, and surface the closed error
-				// to the caller.
+				// to the caller. We do NOT increment
+				// inflight on this path because we never
+				// hand the instance out.
 				r.live--
 				r.mu.Unlock()
 				_ = inst.mod.Close(ctx)
 				return nil, ErrYjsRuntimeClosed
 			}
-			r.all = append(r.all, inst)
+			r.inflight.Add(1)
 			r.mu.Unlock()
 			return inst, nil
 		}
@@ -300,22 +335,42 @@ func (r *YjsRuntime) acquire(ctx context.Context) (*yjsInstance, error) {
 	}
 }
 
+// release returns an instance to the pool, or closes it if the
+// runtime is shutting down or the instance is flagged broken.
+// Every successful acquire must be paired with exactly one
+// release (or discard) so the inflight WaitGroup balances; the
+// public entry points (MergeUpdates / EncodeStateVector / etc.)
+// pair them via `defer r.release(inst)`.
 func (r *YjsRuntime) release(inst *yjsInstance) {
 	r.mu.Lock()
-	if r.closed {
-		// Close ran while this instance was checked out; do
-		// not re-pool it. We use context.Background here
-		// because the release path is best-effort cleanup
-		// invoked from a `defer` whose ctx has typically
-		// been cancelled already; the wasm module's Close
-		// is a pure-Go memory release that does not need a
-		// live ctx.
+	switch {
+	case r.closed:
+		// Close ran while this instance was checked out;
+		// do not re-pool it. We use context.Background
+		// here because the release path is best-effort
+		// cleanup invoked from a `defer` whose ctx has
+		// typically been cancelled already; the wasm
+		// module's Close is a pure-Go memory release that
+		// does not need a live ctx.
+		r.live--
 		r.mu.Unlock()
 		_ = inst.mod.Close(context.Background())
-		return
+	case inst.broken:
+		// The caller's fn.Call trapped (likely yrs OOM /
+		// allocator panic) and left wasm memory in an
+		// untrusted state. Closing the instance and
+		// decrementing live frees the slot for a fresh
+		// instantiation on the next acquire — one bad
+		// input cannot poison subsequent compactions on
+		// the same process.
+		r.live--
+		r.mu.Unlock()
+		_ = inst.mod.Close(context.Background())
+	default:
+		r.idle = append(r.idle, inst)
+		r.mu.Unlock()
 	}
-	r.idle = append(r.idle, inst)
-	r.mu.Unlock()
+	r.inflight.Done()
 }
 
 func (r *YjsRuntime) instantiate(ctx context.Context) (*yjsInstance, error) {
@@ -405,19 +460,35 @@ func (r *YjsRuntime) instantiate(ctx context.Context) (*yjsInstance, error) {
 //
 // A zero (ptr, len) result from the wasm function is treated as
 // an error — the Rust side returns this on parse / decode
-// failures.
+// failures. Such a sentinel error leaves the instance in a clean
+// state (every alloc the Rust function performed before returning
+// the sentinel was matched by a dealloc inside the same function),
+// so the caller's release path can safely re-pool the instance.
+//
+// A non-nil err from fn.Call OR alloc.Call OR a memory Write OOB
+// indicates a wasm-level trap, an aborted allocation, or a host
+// memory access into an invalid range — any of which leaves the
+// instance's linear memory in an indeterminate state (the wasm
+// allocator's internal book-keeping may be inconsistent with the
+// pointers it has handed out). callWithInput flags such cases on
+// the instance so release closes it instead of re-pooling, and
+// the next acquire instantiates a fresh wasm module from the
+// shared compiled cache.
 func (r *YjsRuntime) callWithInput(ctx context.Context, inst *yjsInstance, fn api.Function, input []byte) ([]byte, error) {
 	inputPtr, err := r.writeToWasm(ctx, inst, input)
 	if err != nil {
+		inst.broken = true
 		return nil, err
 	}
 	defer r.deallocWasm(ctx, inst, inputPtr, uint32(len(input)))
 
 	results, err := fn.Call(ctx, uint64(inputPtr), uint64(len(input)))
 	if err != nil {
+		inst.broken = true
 		return nil, fmt.Errorf("collab: ymerge call: %w", err)
 	}
 	if len(results) != 1 {
+		inst.broken = true
 		return nil, fmt.Errorf("collab: ymerge call returned %d results, expected 1", len(results))
 	}
 	resultPtr := uint32(results[0] >> 32)
@@ -436,6 +507,12 @@ func (r *YjsRuntime) callWithInput(ctx context.Context, inst *yjsInstance, fn ap
 	}
 	out, ok := inst.mem.Read(resultPtr, resultLen)
 	if !ok {
+		// A failed Read means the wasm function returned a
+		// pointer/length pair that did not lie inside the
+		// instance's linear memory — either a buggy Rust
+		// export or memory corruption. Flag the instance
+		// broken so we re-instantiate on the next acquire.
+		inst.broken = true
 		return nil, fmt.Errorf("collab: ymerge result OOB ptr=%d len=%d mem=%d", resultPtr, resultLen, inst.mem.Size())
 	}
 	// Copy out of wasm memory because the underlying buffer

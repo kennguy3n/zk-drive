@@ -41,10 +41,39 @@
 // pre-framed buffer rather than re-encoding to a wasm-specific
 // shape.
 
+use std::alloc::{alloc as raw_alloc, dealloc as raw_dealloc, Layout};
 use std::slice;
 use yrs::updates::decoder::Decode;
 use yrs::updates::encoder::Encode;
 use yrs::{Doc, GetString, ReadTxn, StateVector, Text, Transact, Update};
+
+/// layout_for returns the exact `std::alloc::Layout` we use for
+/// every host-visible buffer. Going through Layout::array::<u8>
+/// (rather than the previous `Vec::with_capacity` + `Vec::from_raw_parts`
+/// pattern) guarantees the (size) the host remembers matches the
+/// (size) the global allocator was asked to allocate.
+///
+/// The previous Vec-based pattern was technically UB: Vec is
+/// allowed to allocate strictly more than the requested capacity
+/// (the standard library makes no shrink-to-fit guarantee in
+/// `with_capacity`), and reconstructing the Vec with a capacity
+/// smaller than the actual allocation would make the destructor
+/// pass the wrong Layout to `Global::deallocate`. In practice the
+/// stable Rust allocator for `Vec<u8>` returns exactly the
+/// requested capacity for non-ZST element types, but relying on
+/// that is documented as a non-guarantee. Allocating directly
+/// via `Layout::array::<u8>(size)` and freeing with the same
+/// Layout removes the dependency on Vec's capacity behaviour.
+#[inline]
+fn layout_for(size: usize) -> Layout {
+    // SAFETY: u8 has alignment 1, so Layout::array overflow can
+    // only trip on `size > isize::MAX`, which `raw_alloc`
+    // would also reject. We propagate the panic from `expect`
+    // because in wasm32 with no panic handler this turns into
+    // an unreachable trap, which the Go host already handles
+    // as a broken-instance signal.
+    Layout::array::<u8>(size).expect("ymerge: layout overflow")
+}
 
 /// Allocate `size` bytes inside the wasm linear memory. Returns a
 /// pointer the Go host can write into. The allocation is owned by
@@ -58,31 +87,30 @@ pub extern "C" fn alloc(size: usize) -> *mut u8 {
         // Returning a non-null sentinel for zero-byte allocations
         // keeps the host's "ptr == 0 means failure" convention
         // intact for genuine OOM cases. We never read from the
-        // returned pointer so any non-null is fine.
+        // returned pointer so any non-null is fine, and `dealloc`
+        // special-cases size == 0 so the sentinel is never freed.
         return 1 as *mut u8;
     }
-    let mut buf = Vec::<u8>::with_capacity(size);
-    let ptr = buf.as_mut_ptr();
-    std::mem::forget(buf);
-    ptr
+    // SAFETY: layout_for guarantees a non-zero-sized Layout
+    // (we return early on size == 0 above), which is the only
+    // documented precondition for `std::alloc::alloc`.
+    unsafe { raw_alloc(layout_for(size)) }
 }
 
 /// Free a previously-`alloc`'d buffer. `size` must match the size
-/// passed to alloc — Rust's Vec layout depends on the original
-/// capacity, so a mismatched dealloc is UB. The Go host always
-/// remembers the size when it remembers the pointer.
+/// passed to alloc — the global allocator expects the same
+/// Layout that was used at allocation time, so a mismatched
+/// dealloc is UB. The Go host always remembers the size when it
+/// remembers the pointer.
 ///
-/// Safety: the (ptr, size) pair must come from a prior `alloc`
-/// call on this same wasm instance.
+/// Safety: the (ptr, size) pair must come from a prior `alloc` or
+/// `return_bytes` call on this same wasm instance.
 #[no_mangle]
 pub unsafe extern "C" fn dealloc(ptr: *mut u8, size: usize) {
     if size == 0 || ptr.is_null() {
         return;
     }
-    // SAFETY: ptr came from alloc above, size matches the
-    // original capacity, len=0 is safe because we never wrote
-    // through the Vec's len cursor.
-    let _ = Vec::from_raw_parts(ptr, 0, size);
+    raw_dealloc(ptr, layout_for(size));
 }
 
 /// Pack a (ptr, len) pair into a single u64 return value. The Go
@@ -96,6 +124,15 @@ fn pack_result(ptr: *const u8, len: usize) -> u64 {
 /// return its (ptr, len) packed for return to the host. Caller
 /// must remember to `dealloc` the buffer once it has copied the
 /// payload out.
+///
+/// The allocation goes through the same `Layout::array::<u8>(len)`
+/// the host's `dealloc` will use, so the (ptr, len) pair is
+/// guaranteed to round-trip cleanly back to the global allocator.
+/// We deliberately do NOT use `Vec::into_boxed_slice` + `forget`
+/// here even though boxed slices have len-equal-to-capacity, so
+/// the alloc / dealloc pair share a single explicit Layout path
+/// and the dealloc side does not need to special-case which API
+/// produced the buffer.
 fn return_bytes(bytes: Vec<u8>) -> u64 {
     if bytes.is_empty() {
         // An empty result is legal — e.g. a no-op merge of one
@@ -112,10 +149,21 @@ fn return_bytes(bytes: Vec<u8>) -> u64 {
         return pack_result(1 as *const u8, 0);
     }
     let len = bytes.len();
-    let mut boxed = bytes.into_boxed_slice();
-    let ptr = boxed.as_mut_ptr();
-    std::mem::forget(boxed);
-    pack_result(ptr, len)
+    let layout = layout_for(len);
+    // SAFETY: layout has non-zero size (len > 0 above) and the
+    // copy_nonoverlapping below initialises all `len` bytes
+    // before the host can read them.
+    let dst = unsafe { raw_alloc(layout) };
+    if dst.is_null() {
+        // OOM — surface the host's zero-pointer error sentinel.
+        return 0;
+    }
+    // SAFETY: src and dst do not overlap (dst is freshly
+    // allocated), and both are valid for `len` bytes.
+    unsafe {
+        std::ptr::copy_nonoverlapping(bytes.as_ptr(), dst, len);
+    }
+    pack_result(dst, len)
 }
 
 /// Parse a length-prefixed segment stream into individual updates.
