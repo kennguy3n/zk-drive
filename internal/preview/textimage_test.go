@@ -95,3 +95,30 @@ func TestRenderTextToImage_ShortHeaderUnchanged(t *testing.T) {
 		t.Fatal("nil image for short-header preview")
 	}
 }
+
+// TestTruncateRunes_HeaderSuffixBudgetMath pins the contract
+// renderTextToImage relies on: passing maxRunes = N with a non-
+// empty suffix yields a string of exactly N runes (the suffix's
+// rune count is internally subtracted from the cut point). This
+// is the invariant the header-truncation comment in
+// renderTextToImage refers to — if it ever regresses, the header
+// will be one cell short of the canvas budget (the off-by-one
+// originally caught on PR #84). The body-truncation path in the
+// same function uses an empty suffix and appends "…" manually,
+// which is a different code path covered by the existing tests.
+func TestTruncateRunes_HeaderSuffixBudgetMath(t *testing.T) {
+	t.Parallel()
+	// 32 ASCII runes — well over any plausible canvas budget for
+	// the smallest test target.
+	src := strings.Repeat("X", 32)
+	for _, budget := range []int{8, 16, 24} {
+		out := truncateRunes(src, budget, "…")
+		if utf8.RuneCountInString(out) != budget {
+			t.Errorf("truncateRunes budget=%d: got %d runes (%q), want %d",
+				budget, utf8.RuneCountInString(out), out, budget)
+		}
+		if !strings.HasSuffix(out, "…") {
+			t.Errorf("truncateRunes budget=%d: missing ellipsis suffix in %q", budget, out)
+		}
+	}
+}
