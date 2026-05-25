@@ -1,9 +1,18 @@
-import { defineConfig } from "vite";
+import { defineConfig } from "vitest/config";
 import react from "@vitejs/plugin-react";
 import { VitePWA } from "vite-plugin-pwa";
 
 // https://vitejs.dev/config/
 export default defineConfig({
+  test: {
+    // jsdom gives us DOM globals (window, document, WebSocket) for
+    // the React + provider unit tests. Excludes the Playwright
+    // suite so `npm run test` doesn't try to drive a real browser.
+    environment: "jsdom",
+    globals: false,
+    include: ["src/**/*.test.{ts,tsx}"],
+    exclude: ["tests/e2e/**", "node_modules/**"],
+  },
   plugins: [
     react(),
     VitePWA({

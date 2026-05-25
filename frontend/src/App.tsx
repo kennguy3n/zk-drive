@@ -18,6 +18,12 @@ const KChatRoomsPage = lazy(() => import("./pages/KChatRoomsPage"));
 // header and CreateFolderDialog, so it sits behind RequireAuth like
 // the rest of the /drive surface.
 const PrivacyPage = lazy(() => import("./pages/PrivacyPage"));
+// Collab editor pages are off the critical path — TipTap + Yjs
+// pull in ~300KB of editor JS that the file-browser flow doesn't
+// need. Lazy-loading keeps the initial bundle small for users who
+// never open a document.
+const DocumentListPage = lazy(() => import("./pages/DocumentListPage"));
+const DocumentEditorPage = lazy(() => import("./pages/DocumentEditorPage"));
 // MFA pages are also off the critical path so the initial bundle
 // keeps shipping only the login + drive flow.
 const MfaChallengePage = lazy(() => import("./pages/MfaChallengePage"));
@@ -77,6 +83,22 @@ export default function App() {
             element={
               <RequireAuth>
                 <PrivacyPage />
+              </RequireAuth>
+            }
+          />
+          <Route
+            path="/drive/folder/:folderId/documents"
+            element={
+              <RequireAuth>
+                <DocumentListPage />
+              </RequireAuth>
+            }
+          />
+          <Route
+            path="/drive/document/:id"
+            element={
+              <RequireAuth>
+                <DocumentEditorPage />
               </RequireAuth>
             }
           />

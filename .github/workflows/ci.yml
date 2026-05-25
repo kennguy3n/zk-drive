@@ -99,6 +99,15 @@ jobs:
       - name: Lint
         run: npm run lint
 
+      - name: Test
+        # vitest run executes the unit suite under jsdom — the
+        # CollabProvider codec tests + capability-matrix mirror
+        # tests + component tests for the editor header bits.
+        # Playwright e2e tests are intentionally NOT triggered
+        # here; they live behind `npm run test:e2e` and need a
+        # running backend.
+        run: npm test
+
       - name: Build
         run: npm run build
 

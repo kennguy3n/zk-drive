@@ -10,6 +10,7 @@ const client: AxiosInstance = axios.create({
 const TOKEN_STORAGE_KEY = "zkdrive.token";
 const WORKSPACE_STORAGE_KEY = "zkdrive.workspace_id";
 const ROLE_STORAGE_KEY = "zkdrive.role";
+const USER_STORAGE_KEY = "zkdrive.user_id";
 
 // Attach the JWT to every outgoing request. Kept as a single interceptor
 // so the token is always fresh (e.g. after login, the next request picks
@@ -137,6 +138,7 @@ export function logout(): void {
   localStorage.removeItem(TOKEN_STORAGE_KEY);
   localStorage.removeItem(WORKSPACE_STORAGE_KEY);
   localStorage.removeItem(ROLE_STORAGE_KEY);
+  localStorage.removeItem(USER_STORAGE_KEY);
 }
 
 // --- TOTP / 2FA ----------------------------------------------------------
@@ -259,9 +261,21 @@ export function currentRole(): string | null {
   return localStorage.getItem(ROLE_STORAGE_KEY);
 }
 
+// currentUserID returns the authenticated user's UUID as stored
+// at login. Used by features that need to compare the local user
+// against IDs surfaced by the server (e.g. the document collab
+// presence chip filters out the local user by ID rather than by
+// name to avoid collisions when two users share a display name).
+export function currentUserID(): string | null {
+  return localStorage.getItem(USER_STORAGE_KEY);
+}
+
 function storeAuth(r: AuthResponse): void {
   localStorage.setItem(TOKEN_STORAGE_KEY, r.token);
   localStorage.setItem(WORKSPACE_STORAGE_KEY, r.workspace_id);
+  if (r.user_id) {
+    localStorage.setItem(USER_STORAGE_KEY, r.user_id);
+  }
   if (r.role) {
     localStorage.setItem(ROLE_STORAGE_KEY, r.role);
   }
@@ -296,6 +310,109 @@ export async function renameFolder(id: string, name: string): Promise<Folder> {
 
 export async function deleteFolder(id: string): Promise<void> {
   await client.delete(`/folders/${id}`);
+}
+
+// --- Documents (collab editor) ------------------------------------------
+
+// CollabMode is the per-document feature richness knob. The folder's
+// encryption_mode constrains which modes are allowed (the resolver
+// lives in internal/document/capability.go and is reflected back on
+// every documentResponse via the `allowed_collab_modes` field):
+//
+//   - "markdown"      → text + lists + headings only. Allowed in every
+//                       encryption_mode (incl. strict_zk).
+//   - "rich"          → tables, images, embeds. Requires the server to
+//                       merge updates server-side, so managed_encrypted
+//                       only.
+//   - "rich_presence" → rich + Yjs awareness (live cursors / selection
+//                       / online users). Same constraints as "rich".
+//   - "disabled"      → tombstone state; the document exists but the
+//                       WS endpoint refuses upgrades with 409. Never
+//                       set by clients; surfaced as a current value
+//                       when the server downgrades a doc.
+export type CollabMode = "markdown" | "rich" | "rich_presence" | "disabled";
+
+// Capability matrix is computed server-side from the folder's
+// encryption_mode. Frontend uses these flags directly to gate the
+// extension list and the presence chips.
+export interface Capability {
+  server_snapshot_allowed: boolean;
+  rich_extensions_allowed: boolean;
+  presence_allowed: boolean;
+}
+
+export interface Document {
+  id: string;
+  workspace_id: string;
+  folder_id: string;
+  name: string;
+  collab_mode: CollabMode;
+  y_state_seq_floor: number;
+  snapshot_version: number;
+  created_by: string;
+  created_at: string;
+  updated_at: string;
+  deleted_at?: string | null;
+  // encryption_mode is the parent folder's mode at the time of the
+  // request — documents live-inherit it (see docs/PRODUCT.md §P2a).
+  encryption_mode: EncryptionMode;
+  // capability and allowed_collab_modes are derived from
+  // encryption_mode; surfacing them on every response keeps the
+  // frontend from re-implementing the resolver.
+  capability: Capability;
+  allowed_collab_modes: CollabMode[];
+}
+
+export async function listFolderDocuments(folderID: string): Promise<Document[]> {
+  const { data } = await client.get<{ documents: Document[] }>(`/folders/${folderID}/documents`);
+  return data.documents ?? [];
+}
+
+export async function createDocument(input: {
+  folder_id: string;
+  name: string;
+  collab_mode?: CollabMode;
+}): Promise<Document> {
+  const { data } = await client.post<Document>("/documents", input);
+  return data;
+}
+
+export async function getDocument(id: string): Promise<Document> {
+  const { data } = await client.get<Document>(`/documents/${id}`);
+  return data;
+}
+
+export async function renameDocument(id: string, name: string): Promise<Document> {
+  const { data } = await client.put<Document>(`/documents/${id}`, { name });
+  return data;
+}
+
+export async function setDocumentCollabMode(
+  id: string,
+  collab_mode: CollabMode,
+): Promise<Document> {
+  const { data } = await client.patch<Document>(`/documents/${id}/collab-mode`, { collab_mode });
+  return data;
+}
+
+export async function deleteDocument(id: string): Promise<void> {
+  await client.delete(`/documents/${id}`);
+}
+
+// documentCollabURL returns the absolute WebSocket URL for the
+// collab endpoint of `documentID`. We resolve it against the
+// browser's current location so dev (vite proxy → :8080) and prod
+// (same-origin reverse proxy) both work without explicit config.
+//
+// Authentication on the WS surface uses the Sec-WebSocket-Protocol
+// "bearer" fallback (see api/middleware/auth.go's
+// WebSocketBearerSubprotocol const) because browsers cannot attach
+// custom headers to a WebSocket upgrade. The caller is responsible
+// for passing ["bearer", currentToken()] as the subprotocols
+// argument to `new WebSocket()`.
+export function documentCollabURL(documentID: string): string {
+  const proto = window.location.protocol === "https:" ? "wss:" : "ws:";
+  return `${proto}//${window.location.host}/api/documents/${documentID}/ws`;
 }
 
 // --- Files ---------------------------------------------------------------
