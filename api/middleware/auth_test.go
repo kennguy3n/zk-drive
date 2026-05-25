@@ -557,3 +557,43 @@ func TestAuthMiddlewareWebSocketSubprotocol_MultipleHeaders(t *testing.T) {
 		t.Error("next not called; multi-line subprotocol auth failed to extract token")
 	}
 }
+
+// TestAuthMiddlewareWebSocketSubprotocol_MultiLineConnection pins the
+// behavior where Connection is sent as multiple header lines (RFC 7230
+// allows this for list-valued headers). r.Header.Get would only see
+// the first line ("keep-alive"), missing "Upgrade" on the second;
+// without the multi-line walk the WS auth fallback would silently
+// fail and the client would see a 401.
+func TestAuthMiddlewareWebSocketSubprotocol_MultiLineConnection(t *testing.T) {
+	t.Parallel()
+	const secret = "multi-line-conn-secret"
+	workspaceID := uuid.New()
+	userID := uuid.New()
+	token, _, err := IssueToken(secret, userID, workspaceID, "admin", time.Hour)
+	if err != nil {
+		t.Fatalf("issue token: %v", err)
+	}
+
+	var nextCalled bool
+	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		nextCalled = true
+		w.WriteHeader(http.StatusOK)
+	})
+
+	h := AuthMiddleware(secret, nil)(next)
+	req := httptest.NewRequest(http.MethodGet, "/api/documents/x/ws", nil)
+	req.Header.Set("Upgrade", "websocket")
+	req.Header.Add("Connection", "keep-alive")
+	req.Header.Add("Connection", "Upgrade")
+	req.Header.Set("Sec-WebSocket-Protocol", "bearer, "+token)
+
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Errorf("status: got %d, want %d (body=%q)", rr.Code, http.StatusOK, rr.Body.String())
+	}
+	if !nextCalled {
+		t.Error("next not called; multi-line Connection header failed isWebSocketUpgrade")
+	}
+}

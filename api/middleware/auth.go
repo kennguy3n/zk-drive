@@ -389,13 +389,32 @@ func extractBearerToken(r *http.Request) (string, bool) {
 // AND Connection: Upgrade; we check both, case-insensitively, so
 // a stray header on a normal API request cannot trip the
 // subprotocol auth fallback.
+//
+// Both Upgrade and Connection are list-valued per RFC 7230 §3.2.2 and
+// MAY be sent across multiple header lines. r.Header.Get returns
+// only the first; we use r.Header.Values + a comma-split walk so the
+// shape "Connection: keep-alive\r\nConnection: Upgrade" still trips
+// the upgrade path. This matches gorilla/websocket's internal
+// tokenListContainsValue helper. Without it a proxy that rewrote
+// the headers into separate lines (e.g. AWS ALB, some k8s ingress
+// implementations) would fall back to requiring an Authorization
+// header that browsers cannot attach.
 func isWebSocketUpgrade(r *http.Request) bool {
-	if !strings.EqualFold(r.Header.Get("Upgrade"), "websocket") {
+	if !headerValuesContainToken(r.Header.Values("Upgrade"), "websocket") {
 		return false
 	}
-	for _, token := range strings.Split(r.Header.Get("Connection"), ",") {
-		if strings.EqualFold(strings.TrimSpace(token), "upgrade") {
-			return true
+	return headerValuesContainToken(r.Header.Values("Connection"), "upgrade")
+}
+
+// headerValuesContainToken reports whether any of the given header
+// lines contains the named token (case-insensitively) as one of its
+// comma-separated entries.
+func headerValuesContainToken(values []string, token string) bool {
+	for _, v := range values {
+		for _, part := range strings.Split(v, ",") {
+			if strings.EqualFold(strings.TrimSpace(part), token) {
+				return true
+			}
 		}
 	}
 	return false

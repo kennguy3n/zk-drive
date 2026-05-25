@@ -132,7 +132,15 @@ export class CollabProvider {
     this.token = opts.token;
     this.doc = opts.doc;
     this.awareness = opts.awareness;
-    this.presenceAllowed = opts.presenceAllowed ?? true;
+    // Fail-closed: presence broadcasts ONLY when the caller has
+    // explicitly affirmed the capability allows it. Strict-ZK folders
+    // would leak cursor positions if we defaulted to true and a
+    // future caller forgot to pass the flag; the matching server
+    // policy (api/drive/collab.go drops awareness frames on
+    // capability.PresenceAllowed=false) is the second line of
+    // defense, but the client should not require the server to
+    // catch its mistakes.
+    this.presenceAllowed = opts.presenceAllowed ?? false;
     this.onStatus = opts.onStatus ?? (() => undefined);
     this.onError = opts.onError ?? (() => undefined);
     this.initialReconnectMs = opts.initialReconnectMs ?? 500;
