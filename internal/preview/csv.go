@@ -242,7 +242,7 @@ func formatRow(rec []string) string {
 		visible = rec[:csvPreviewMaxCols]
 	}
 	cells := make([]string, 0, len(visible)+1)
-	for i, c := range visible {
+	for _, c := range visible {
 		// Collapse interior newlines / tabs in a cell to spaces
 		// — a multi-line cell (very common in CSV exports of
 		// rich-text fields) would otherwise break our one-row-
@@ -256,7 +256,6 @@ func formatRow(rec []string) string {
 			c = truncateRunes(c, csvPreviewCellMaxRunes, "…")
 		}
 		cells = append(cells, c)
-		_ = i
 	}
 	if overflow {
 		cells = append(cells, "…")
