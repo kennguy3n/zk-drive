@@ -29,9 +29,9 @@ import "github.com/kennguy3n/zk-drive/internal/folder"
 //     structure (paragraph counts, section lengths) to a server that
 //     can't read the document content.
 type Capability struct {
-	ServerSnapshotAllowed bool
-	RichExtensionsAllowed bool
-	PresenceAllowed       bool
+	ServerSnapshotAllowed bool `json:"server_snapshot_allowed"`
+	RichExtensionsAllowed bool `json:"rich_extensions_allowed"`
+	PresenceAllowed       bool `json:"presence_allowed"`
 }
 
 // ResolveCapability returns the maximum capability set for a folder

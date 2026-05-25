@@ -114,6 +114,16 @@ func (s *Service) SetCollabMode(ctx context.Context, workspaceID, documentID uui
 	if !IsValidCollabMode(collabMode) {
 		return nil, ErrInvalidCollabMode
 	}
+	// 'disabled' is the only mode a user is never allowed to pick
+	// directly. It is set by the service when a folder is migrated
+	// to a mode that doesn't allow the document's current collab
+	// mode (currently unreachable since folder mode is immutable,
+	// but kept defensive against the future "migrate folder" admin
+	// path). Reject before any DB read so a malformed request
+	// doesn't waste two SELECTs to arrive at the same answer.
+	if collabMode == CollabModeDisabled {
+		return nil, ErrInvalidCollabMode
+	}
 	d, err := s.repo.GetByID(ctx, workspaceID, documentID)
 	if err != nil {
 		return nil, err
@@ -121,15 +131,6 @@ func (s *Service) SetCollabMode(ctx context.Context, workspaceID, documentID uui
 	parent, err := s.folders.GetByID(ctx, workspaceID, d.FolderID)
 	if err != nil {
 		return nil, fmt.Errorf("lookup folder for collab mode change: %w", err)
-	}
-	// 'disabled' is the only mode a user is never allowed to pick
-	// directly. It is set by the service when a folder is migrated
-	// to a mode that doesn't allow the document's current collab
-	// mode (currently unreachable since folder mode is immutable,
-	// but kept defensive against the future "migrate folder" admin
-	// path).
-	if collabMode == CollabModeDisabled {
-		return nil, ErrInvalidCollabMode
 	}
 	if !IsCollabModeAllowed(parent.EncryptionMode, collabMode) {
 		return nil, ErrCollabModeNotAllowed
