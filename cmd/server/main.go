@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -479,7 +480,7 @@ func run() error {
 		bgGoroutines.Add(1)
 		go func() {
 			defer bgGoroutines.Done()
-			if err := rp.Subscribe(ctx, hub); err != nil && err != context.Canceled {
+			if err := rp.Subscribe(ctx, hub); err != nil && !errors.Is(err, context.Canceled) {
 				slog.Error("redis ws subscribe loop exited", "err", err)
 			}
 		}()
@@ -501,7 +502,7 @@ func run() error {
 		bgGoroutines.Add(1)
 		go func() {
 			defer bgGoroutines.Done()
-			if err := cfRP.Subscribe(ctx, hub); err != nil && err != context.Canceled {
+			if err := cfRP.Subscribe(ctx, hub); err != nil && !errors.Is(err, context.Canceled) {
 				slog.Error("redis changefeed subscribe loop exited", "err", err)
 			}
 		}()
@@ -531,7 +532,7 @@ func run() error {
 		bgGoroutines.Add(1)
 		go func() {
 			defer bgGoroutines.Done()
-			if err := collabRelay.Subscribe(ctx, collabHub); err != nil && err != context.Canceled {
+			if err := collabRelay.Subscribe(ctx, collabHub); err != nil && !errors.Is(err, context.Canceled) {
 				slog.Error("redis collab relay subscribe loop exited", "err", err)
 			}
 		}()
@@ -1122,7 +1123,7 @@ func run() error {
 	//   3. The deferred bgGoroutines.Wait + pool.Close at the top of
 	//      run() finish the shutdown after we return.
 	shutdownErr := srv.Shutdown(shutdownCtx)
-	collabHub.Shutdown()
+	collabHub.Shutdown(shutdownCtx)
 	return shutdownErr
 }
 

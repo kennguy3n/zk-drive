@@ -716,32 +716,39 @@ func (h *DocumentHub) deliverTo(c *DocumentClient, payload []byte) {
 }
 
 // Shutdown closes every active client, clears the rooms map, and
-// blocks until in-flight compaction goroutines return. Called from
-// cmd/server's graceful-shutdown path so collab connections drain
-// (and any compaction job in progress finishes) before the process
-// closes the database pool.
+// blocks until in-flight compaction goroutines return or the
+// caller-supplied ctx deadline elapses. Called from cmd/server's
+// graceful-shutdown path so collab connections drain (and any
+// compaction job in progress finishes) before the process closes
+// the database pool.
 //
 // The hub does not own the context the compaction scheduler
-// captured, so Shutdown does not cancel that context — it relies
-// on compactWG.Wait to drain in-flight jobs synchronously. The
-// typical shutdown sequence in cmd/server is:
+// captured — ctx here is the shutdown grace window, not the
+// per-compaction request ctx. Shutdown bounds the wait so a stuck
+// compaction (DB unresponsive, wasm trap mid-fn.Call) cannot hold
+// the entire process exit hostage. If ctx fires first, the
+// background compaction goroutines keep running until the process
+// terminates — the caller's subsequent cancel() will then cancel
+// their per-job ctx via the inherited tree, and the OS reaps them
+// on os.Exit. A warning is logged so operators can investigate
+// what wedged. The typical shutdown sequence in cmd/server is:
 //
 //  1. srv.Shutdown(ctx)       — stops accepting new HTTP/WS connections
-//  2. collabHub.Shutdown()    — flips shuttingDown, closes existing WS clients,
-//                              drains in-flight compactions
+//  2. collabHub.Shutdown(ctx) — flips shuttingDown, closes existing WS clients,
+//                              drains in-flight compactions up to ctx deadline
 //  3. cancel()                — fires the global ctx.Done() (caller's responsibility,
 //                              after Shutdown returns; not required for hub
 //                              correctness)
 //  4. bgGoroutines.Wait()     — drains other background goroutines
 //  5. pool.Close()            — closes the DB pool against quiescent consumers
 //
-// Shutdown sets shuttingDown=true under h.mu.Lock BEFORE calling
-// compactWG.Wait so any concurrent handleSyncUpdate that wants to
+// Shutdown sets shuttingDown=true under h.mu.Lock BEFORE waiting
+// on compactWG so any concurrent handleSyncUpdate that wants to
 // schedule a new compaction sees the flag and skips the Add. The
 // RWMutex serves both as the publication barrier for the flag and
 // as the happens-before edge that orders any in-flight Add against
 // Wait.
-func (h *DocumentHub) Shutdown() {
+func (h *DocumentHub) Shutdown(ctx context.Context) {
 	h.mu.Lock()
 	h.shuttingDown.Store(true)
 	victims := make([]*DocumentClient, 0)
@@ -763,5 +770,24 @@ func (h *DocumentHub) Shutdown() {
 	// underlying pgx pool. Add(1) calls that win the race against
 	// the shuttingDown flip are accounted for by compactWG; calls
 	// that lose the race never executed Add.
-	h.compactWG.Wait()
+	//
+	// We bound the wait on ctx so a stuck compaction cannot wedge
+	// the whole shutdown. Pattern: spawn a goroutine to call Wait
+	// and close a sentinel channel; select against ctx.Done(). On
+	// ctx-fired we log a warning and return; the caller's outer
+	// cancel() will then cancel the compaction ctx (inherited from
+	// the same parent), giving stuck compactions one more chance
+	// to observe cancellation before the process exits.
+	done := make(chan struct{})
+	go func() {
+		h.compactWG.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-ctx.Done():
+		slog.Default().Warn("collab: hub shutdown ctx fired before all compactions drained",
+			"err", ctx.Err(),
+		)
+	}
 }

@@ -6,6 +6,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"log/slog"
 	"sync"
 	"time"
 
@@ -590,12 +591,30 @@ func (r *YjsRuntime) deallocWasm(ctx context.Context, inst *yjsInstance, ptr, si
 	}
 	_, err := inst.dealloc.Call(ctx, uint64(ptr), uint64(size))
 	if err != nil {
-		// Best-effort: a failed dealloc leaks pages inside
-		// the instance, which is bounded by the wasm max
-		// memory pages. Log via the package's standard
-		// channel — we don't surface this to the caller
-		// because the caller's main path already succeeded.
-		_ = err
+		// A failed dealloc means the wasm allocator's
+		// book-keeping is now out of sync with the pointers it
+		// has handed out — a subsequent alloc on the same
+		// instance may reuse a region we believed freed, or hit
+		// a corrupted free-list and trap. Same indeterminate-
+		// memory argument as a fn.Call trap: do NOT silently
+		// swallow the error and re-pool the instance.
+		//
+		// Flag the instance broken so release closes it instead
+		// of re-pooling, and the next acquire instantiates a
+		// fresh module from the shared compiled cache. We log
+		// at Warn level so operators can correlate a spike in
+		// instance-replace churn with whatever upstream cause
+		// produced the dealloc failure (typically a yrs OOM
+		// inside the Rust call that already trapped fn.Call,
+		// in which case `broken` was already set — the dealloc
+		// path here covers the secondary case where alloc/Call
+		// succeeded but dealloc fails alone).
+		inst.broken = true
+		slog.Default().Warn("collab: ymerge dealloc failed; instance flagged broken",
+			"err", err,
+			"ptr", ptr,
+			"size", size,
+		)
 	}
 }
 
