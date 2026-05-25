@@ -116,6 +116,18 @@ func parseODFContent(r io.Reader) (string, error) {
 		// metadata buried under text:style-region-element does
 		// NOT leak into the extracted output.
 		textDepth int
+		// cellDepth counts how many table-cell elements are open.
+		// When > 0 we are inside a spreadsheet cell and the
+		// closing </text:p> / </text:h> emits a space instead of
+		// a newline — the cell's own '\t' terminator is the
+		// authoritative row-layout separator, so a paragraph
+		// break inside a cell should NOT lay down a newline that
+		// would then sit awkwardly between the cell's value and
+		// the next cell's tab. Multi-paragraph cells are rare;
+		// emitting a single space keeps FTS phrase boundaries
+		// honoured without producing the cosmetically odd
+		// "value\n\t" sequence Devin Review flagged.
+		cellDepth int
 		// rowDirty tracks whether the in-progress table row has
 		// emitted any cell content. Empty rows are dropped to
 		// avoid runs of blank lines polluting the FTS corpus.
@@ -153,6 +165,7 @@ func parseODFContent(r io.Reader) (string, error) {
 			case odfTableNamespace:
 				if t.Name.Local == "table-cell" {
 					textDepth++
+					cellDepth++
 				}
 			}
 		case xml.EndElement:
@@ -161,7 +174,18 @@ func parseODFContent(r io.Reader) (string, error) {
 				switch t.Name.Local {
 				case "p", "h":
 					textDepth--
-					sb.WriteByte('\n')
+					if cellDepth > 0 {
+						// Inside a spreadsheet cell: separate
+						// paragraphs with a single space so
+						// the cell's own '\t' terminator is
+						// the only row-layout marker we emit.
+						// Avoids the awkward "value\n\t"
+						// sequence on the common single-
+						// paragraph cell case.
+						sb.WriteByte(' ')
+					} else {
+						sb.WriteByte('\n')
+					}
 				case "span", "a":
 					textDepth--
 				}
@@ -169,6 +193,19 @@ func parseODFContent(r io.Reader) (string, error) {
 				switch t.Name.Local {
 				case "table-cell":
 					textDepth--
+					cellDepth--
+					// Strip the trailing intra-cell space we
+					// just emitted on </text:p> so the '\t'
+					// terminator sits immediately after the
+					// cell's value. The buffered builder
+					// gives us no Bytes() handle, so we
+					// dump-and-rebuild via String() — only
+					// runs on cell close (cheap relative to
+					// the cell's content).
+					if s := sb.String(); strings.HasSuffix(s, " ") {
+						sb.Reset()
+						sb.WriteString(strings.TrimRight(s, " "))
+					}
 					sb.WriteByte('\t')
 					rowDirty = true
 				case "table-row":

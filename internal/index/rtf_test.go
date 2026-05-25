@@ -149,3 +149,52 @@ func TestExtractRTFText_UCScopedToGroup(t *testing.T) {
 		t.Errorf("group-scoped uc handling wrong:\n got=%q\nwant=%q", got, want)
 	}
 }
+
+// TestExtractRTFText_SurrogatePairsDecodeNonBMP pins the bug
+// surfaced by Devin Review: Word and other RTF writers emit
+// non-BMP code points as a UTF-16 surrogate pair, e.g. an emoji
+// U+1F600 is written as `\u55357?\u56832?` under the implicit
+// \uc1 default. The high-surrogate \u escape consumes one ANSI
+// fallback byte (the '?'), then the low-surrogate \u escape sits
+// immediately after that fallback. A previous implementation
+// passed the residual ucSkip counter (=0 at that point) into the
+// surrogate look-ahead, so the look-ahead saw '?' instead of '\'
+// and bailed — both surrogates were silently dropped and the
+// emoji never made it into the FTS corpus. The fix passes
+// ucDefault, which is the spec-defined number of fallback bytes
+// the high surrogate just consumed.
+func TestExtractRTFText_SurrogatePairsDecodeNonBMP(t *testing.T) {
+	// U+1F600 (😀) decomposes to high=0xD83D=55357, low=0xDE00=56832
+	// in UTF-16. Each \u carries a single ANSI fallback '?' under
+	// the implicit \uc1 default.
+	body := []byte("{\\rtf1 hello \\u55357?\\u56832? world}")
+	got, err := extractRTFText(body)
+	if err != nil {
+		t.Fatalf("extractRTFText: %v", err)
+	}
+	if !strings.ContainsRune(got, 0x1F600) {
+		t.Errorf("expected U+1F600 emoji in extracted text, got: %q", got)
+	}
+	if !strings.Contains(got, "hello") || !strings.Contains(got, "world") {
+		t.Errorf("expected surrounding text to survive surrogate decode, got: %q", got)
+	}
+}
+
+// TestExtractRTFText_OrphanHighSurrogateDoesNotBleed verifies a
+// stray high surrogate that ISN'T followed by a paired low
+// surrogate gets dropped cleanly without consuming surrounding
+// content. RTF in the wild occasionally drops the low half (e.g.
+// a truncated paste); the extractor must not emit invalid UTF-8
+// or eat the following plaintext.
+func TestExtractRTFText_OrphanHighSurrogateDoesNotBleed(t *testing.T) {
+	// \u55357 = high surrogate, fallback '?', then plain "ok}".
+	// Expected: 'hello ' + (orphan dropped) + 'ok' = "hello ok".
+	body := []byte("{\\rtf1 hello \\u55357? ok}")
+	got, err := extractRTFText(body)
+	if err != nil {
+		t.Fatalf("extractRTFText: %v", err)
+	}
+	if !strings.Contains(got, "hello") || !strings.Contains(got, "ok") {
+		t.Errorf("orphan high surrogate ate surrounding text: %q", got)
+	}
+}

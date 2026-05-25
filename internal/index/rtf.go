@@ -153,17 +153,23 @@ func extractRTFText(body []byte) (string, error) {
 				// nothing here.
 				i += 4
 			case next == '*':
-				// \*\destination — an optional destination
-				// the reader can skip if unknown. Always treat
-				// the next control word as a metadata
-				// destination so its content is dropped.
+				// \*\destination — an optional destination the
+				// reader can skip if unknown. The destination
+				// control word itself (the \destination that
+				// FOLLOWS \*) is left for the main loop's '\\'
+				// branch to consume on the next iteration; we just
+				// set skipDepth here so its body is dropped until
+				// the matching close brace returns us to this
+				// depth. (Previously we called parseControlWord(body, i)
+				// here, but at this point body[i] is the next
+				// '\\' char — not a letter — so parseControlWord
+				// returned an empty name and didn't advance i. The
+				// call was dead code and confused readers about
+				// who consumes the destination name.)
 				i += 2
-				name, end := parseControlWord(body, i)
-				_ = name // name is consumed; behaviour is unconditional skip.
 				if skipDepth == 0 {
 					skipDepth = depth
 				}
-				i = end
 			case isLetter(next):
 				name, value, hasValue, end := parseControlWordWithValue(body, i+1)
 				switch name {
@@ -189,34 +195,46 @@ func extractRTFText(body []byte) (string, error) {
 					if code < 0 {
 						code += 0x10000
 					}
-					if code >= 0 && code <= 0xFFFF {
-						r := rune(code)
-						if utf16.IsSurrogate(r) {
-							// High surrogate; if the next
-							// control word is also \u, pair
-							// them. Otherwise we drop the
-							// orphan since we can't form a
-							// valid code point.
-							//
-							// In real-world RTF, surrogate
-							// pairs are rare (most BMP code
-							// points fit in a single \u),
-							// and Word's RTF writer always
-							// emits them as a pair we can
-							// merge on the fly.
-							if hi := r; utf16.IsSurrogate(hi) {
-								// Look ahead for low surrogate.
-								if loRune, loEnd, ok := tryReadUnicodeEscape(body, end, ucSkip); ok {
-									combined := utf16.DecodeRune(hi, loRune)
-									if combined != utf8.RuneError {
-										emitRune(combined)
-										end = loEnd
-									}
-								}
+					// After the two's-complement conversion above,
+					// `code` is always in [0, 0xFFFF] — the RTF spec
+					// defines \u as a 16-bit signed integer (-32768..32767)
+					// and we just mapped the negative half into 0x8000..0xFFFF.
+					// No range guard is needed.
+					hi := rune(code)
+					if utf16.IsSurrogate(hi) {
+						// High surrogate; if the next escape
+						// is also a \u (after consuming the
+						// high surrogate's ANSI fallback bytes),
+						// pair them. Otherwise drop the orphan
+						// since we can't form a valid code point.
+						//
+						// CRITICAL: we pass ucDefault here, not
+						// the in-flight ucSkip counter. At this
+						// point ucSkip is whatever was left over
+						// from the PREVIOUS \u (typically 0
+						// since we drained it already), so passing
+						// ucSkip would tell tryReadUnicodeEscape
+						// to skip 0 fallback bytes — and the
+						// fallback byte sitting immediately after
+						// the high surrogate would be misread
+						// as content, so the pair lookup would
+						// fail and the surrogate pair (e.g. an
+						// emoji or any non-BMP char) would be
+						// silently dropped from the FTS index.
+						// ucDefault is the spec-defined number
+						// of fallback bytes the high surrogate
+						// consumed — which is exactly what we
+						// need to skip past to find the low
+						// surrogate's '\\u'.
+						if loRune, loEnd, ok := tryReadUnicodeEscape(body, end, ucDefault); ok {
+							combined := utf16.DecodeRune(hi, loRune)
+							if combined != utf8.RuneError {
+								emitRune(combined)
+								end = loEnd
 							}
-						} else {
-							emitRune(r)
 						}
+					} else {
+						emitRune(hi)
 					}
 					// \u consumes ucDefault ANSI fallback
 					// bytes after the escape. Under the spec
@@ -290,25 +308,6 @@ func extractRTFText(body []byte) (string, error) {
 		return "", fmt.Errorf("index/rtf: unbalanced braces (depth %d at EOF)", depth)
 	}
 	return sb.String(), nil
-}
-
-// parseControlWord returns the alphabetic name of an RTF control
-// word starting at offset i (which must point at the first letter
-// after the backslash). It returns the name and the offset of the
-// first byte after the word's optional delimiter (space).
-func parseControlWord(body []byte, i int) (string, int) {
-	start := i
-	for i < len(body) && isLetter(body[i]) {
-		i++
-	}
-	name := string(body[start:i])
-	// A single trailing space delimiter is consumed; otherwise
-	// the byte that terminated the word is part of the next
-	// token.
-	if i < len(body) && body[i] == ' ' {
-		i++
-	}
-	return name, i
 }
 
 // parseControlWordWithValue parses an RTF control word starting at
