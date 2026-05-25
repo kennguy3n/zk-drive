@@ -31,14 +31,22 @@ const (
 // collabUpgrader mirrors api/ws/handler.go's DefaultUpgrader. Auth
 // already happened upstream so CheckOrigin is permissive; the JWT
 // claim binds the connection to (workspace, user).
+//
+// Subprotocols advertises the "bearer" marker — when the browser
+// client offers ["bearer", "<jwt>"] (see WebSocketBearerSubprotocol
+// in api/middleware), the Upgrader echoes back "bearer" so the
+// RFC 6455 handshake completes cleanly. AuthMiddleware has already
+// validated the JWT at this point; the subprotocol echo is purely
+// the protocol-negotiation half of the same flow.
 var collabUpgrader = websocket.Upgrader{
 	ReadBufferSize:  4096,
 	WriteBufferSize: 4096,
 	CheckOrigin:     func(*http.Request) bool { return true },
+	Subprotocols:    []string{middleware.WebSocketBearerSubprotocol},
 }
 
 // WithCollab wires the collaborative editor WS hub so the
-// /api/v1/documents/{id}/ws endpoint becomes available. When nil
+// /api/documents/{id}/ws endpoint becomes available. When nil
 // the endpoint responds 503 Service Unavailable, matching the
 // nil-safe pattern of WithDocuments / WithSharing.
 //

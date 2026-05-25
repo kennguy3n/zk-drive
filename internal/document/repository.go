@@ -155,6 +155,19 @@ func (r *PostgresRepository) Create(ctx context.Context, d *Document) error {
 	if d.CollabMode == "" {
 		d.CollabMode = CollabModeMarkdown
 	}
+	// y_state / y_state_vector are NOT NULL BYTEA columns with a
+	// '\x' default; pgx encodes a nil []byte as SQL NULL (not as
+	// the empty bytea), which would violate the constraint. New
+	// documents start with no Yjs state, so we substitute an empty
+	// byte slice here. Existing callers that supply a real snapshot
+	// (e.g. import / restore paths in the future) pass through
+	// unchanged.
+	if d.YState == nil {
+		d.YState = []byte{}
+	}
+	if d.YStateVector == nil {
+		d.YStateVector = []byte{}
+	}
 	const q = `
 INSERT INTO documents (id, workspace_id, folder_id, name, collab_mode, y_state, y_state_vector, created_by)
 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)

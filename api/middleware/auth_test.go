@@ -388,3 +388,212 @@ func TestPurposeMiddleware(t *testing.T) {
 		})
 	}
 }
+
+// TestAuthMiddleware_WebSocketSubprotocolBearer pins the browser
+// WebSocket auth path: clients that cannot attach an Authorization
+// header instead carry the JWT in the Sec-WebSocket-Protocol list
+// alongside the "bearer" marker. The middleware accepts that
+// fallback ONLY when the request is a real WS upgrade (Upgrade +
+// Connection both set); a plain HTTP request with the same header
+// is rejected so the subprotocol path cannot bypass the canonical
+// Authorization header check from a non-upgrade context.
+func TestAuthMiddleware_WebSocketSubprotocolBearer(t *testing.T) {
+	const secret = "test-secret"
+	workspaceID := uuid.New()
+	userID := uuid.New()
+	token, _, err := IssueToken(secret, userID, workspaceID, "admin", time.Hour)
+	if err != nil {
+		t.Fatalf("issue token: %v", err)
+	}
+
+	tests := []struct {
+		name        string
+		upgrade     bool
+		connection  string
+		subprotocol string
+		header      string // Authorization, if any
+		wantStatus  int
+		wantNext    bool
+	}{
+		{
+			name:        "valid bearer subprotocol on WS upgrade",
+			upgrade:     true,
+			connection:  "Upgrade",
+			subprotocol: "bearer, " + token,
+			wantStatus:  http.StatusOK,
+			wantNext:    true,
+		},
+		{
+			name:        "case-insensitive Upgrade header",
+			upgrade:     true,
+			connection:  "keep-alive, upgrade",
+			subprotocol: "bearer," + token, // no space after comma
+			wantStatus:  http.StatusOK,
+			wantNext:    true,
+		},
+		{
+			name:        "subprotocol without bearer marker rejected",
+			upgrade:     true,
+			connection:  "Upgrade",
+			subprotocol: token,
+			wantStatus:  http.StatusUnauthorized,
+			wantNext:    false,
+		},
+		{
+			name:        "bearer marker with no token rejected",
+			upgrade:     true,
+			connection:  "Upgrade",
+			subprotocol: "bearer",
+			wantStatus:  http.StatusUnauthorized,
+			wantNext:    false,
+		},
+		{
+			name:        "subprotocol on non-WS request rejected",
+			upgrade:     false,
+			subprotocol: "bearer, " + token,
+			wantStatus:  http.StatusUnauthorized,
+			wantNext:    false,
+		},
+		{
+			name:        "Upgrade present but Connection missing rejected",
+			upgrade:     true,
+			connection:  "",
+			subprotocol: "bearer, " + token,
+			wantStatus:  http.StatusUnauthorized,
+			wantNext:    false,
+		},
+		{
+			name:        "Authorization header beats subprotocol when both present",
+			upgrade:     true,
+			connection:  "Upgrade",
+			subprotocol: "bearer, invalid",
+			header:      "Bearer " + token,
+			wantStatus:  http.StatusOK,
+			wantNext:    true,
+		},
+	}
+
+	for _, tc := range tests {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var nextCalled bool
+			next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				nextCalled = true
+				if uid, ok := UserIDFromContext(r.Context()); !ok || uid != userID {
+					t.Errorf("UserIDFromContext: got (%v, %v), want (%v, true)", uid, ok, userID)
+				}
+				w.WriteHeader(http.StatusOK)
+			})
+
+			h := AuthMiddleware(secret, nil)(next)
+			req := httptest.NewRequest(http.MethodGet, "/api/documents/x/ws", nil)
+			if tc.upgrade {
+				req.Header.Set("Upgrade", "websocket")
+			}
+			if tc.connection != "" {
+				req.Header.Set("Connection", tc.connection)
+			}
+			if tc.subprotocol != "" {
+				req.Header.Set("Sec-WebSocket-Protocol", tc.subprotocol)
+			}
+			if tc.header != "" {
+				req.Header.Set("Authorization", tc.header)
+			}
+			rr := httptest.NewRecorder()
+			h.ServeHTTP(rr, req)
+
+			if rr.Code != tc.wantStatus {
+				t.Errorf("status: got %d, want %d", rr.Code, tc.wantStatus)
+			}
+			if nextCalled != tc.wantNext {
+				t.Errorf("next called: got %v, want %v", nextCalled, tc.wantNext)
+			}
+		})
+	}
+}
+
+// TestAuthMiddlewareWebSocketSubprotocol_MultipleHeaders pins the
+// "Sec-WebSocket-Protocol sent as multiple header lines" case. RFC
+// 6455 permits clients to split the subprotocol list across repeated
+// headers; r.Header.Get returns only the first line, so the original
+// implementation would miss the JWT carried on a second line. We must
+// use r.Header.Values (joined with comma) to honor both shapes.
+func TestAuthMiddlewareWebSocketSubprotocol_MultipleHeaders(t *testing.T) {
+	t.Parallel()
+	const secret = "multi-header-secret"
+	workspaceID := uuid.New()
+	userID := uuid.New()
+	token, _, err := IssueToken(secret, userID, workspaceID, "admin", time.Hour)
+	if err != nil {
+		t.Fatalf("issue token: %v", err)
+	}
+
+	var nextCalled bool
+	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		nextCalled = true
+		if uid, ok := UserIDFromContext(r.Context()); !ok || uid != userID {
+			t.Errorf("UserIDFromContext: got (%v, %v), want (%v, true)", uid, ok, userID)
+		}
+		w.WriteHeader(http.StatusOK)
+	})
+
+	h := AuthMiddleware(secret, nil)(next)
+	req := httptest.NewRequest(http.MethodGet, "/api/documents/x/ws", nil)
+	req.Header.Set("Upgrade", "websocket")
+	req.Header.Set("Connection", "Upgrade")
+	// Split the subprotocol across two header lines. r.Header.Get
+	// would only see "bearer"; r.Header.Values + Join sees both.
+	req.Header.Add("Sec-WebSocket-Protocol", "bearer")
+	req.Header.Add("Sec-WebSocket-Protocol", token)
+
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Errorf("status: got %d, want %d (body=%q)", rr.Code, http.StatusOK, rr.Body.String())
+	}
+	if !nextCalled {
+		t.Error("next not called; multi-line subprotocol auth failed to extract token")
+	}
+}
+
+// TestAuthMiddlewareWebSocketSubprotocol_MultiLineConnection pins the
+// behavior where Connection is sent as multiple header lines (RFC 7230
+// allows this for list-valued headers). r.Header.Get would only see
+// the first line ("keep-alive"), missing "Upgrade" on the second;
+// without the multi-line walk the WS auth fallback would silently
+// fail and the client would see a 401.
+func TestAuthMiddlewareWebSocketSubprotocol_MultiLineConnection(t *testing.T) {
+	t.Parallel()
+	const secret = "multi-line-conn-secret"
+	workspaceID := uuid.New()
+	userID := uuid.New()
+	token, _, err := IssueToken(secret, userID, workspaceID, "admin", time.Hour)
+	if err != nil {
+		t.Fatalf("issue token: %v", err)
+	}
+
+	var nextCalled bool
+	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		nextCalled = true
+		w.WriteHeader(http.StatusOK)
+	})
+
+	h := AuthMiddleware(secret, nil)(next)
+	req := httptest.NewRequest(http.MethodGet, "/api/documents/x/ws", nil)
+	req.Header.Set("Upgrade", "websocket")
+	req.Header.Add("Connection", "keep-alive")
+	req.Header.Add("Connection", "Upgrade")
+	req.Header.Set("Sec-WebSocket-Protocol", "bearer, "+token)
+
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Errorf("status: got %d, want %d (body=%q)", rr.Code, http.StatusOK, rr.Body.String())
+	}
+	if !nextCalled {
+		t.Error("next not called; multi-line Connection header failed isWebSocketUpgrade")
+	}
+}

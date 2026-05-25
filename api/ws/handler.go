@@ -415,10 +415,25 @@ func (c *Client) writePump() {
 // DefaultUpgrader is the upgrader used by ServeWS. CheckOrigin is
 // permissive because auth is already enforced by the middleware and
 // the JWT itself binds the connection to a workspace + user.
+//
+// Subprotocols advertises the "bearer" marker so a browser client
+// that authenticates via Sec-WebSocket-Protocol (the only auth
+// transport available from the Browser WebSocket API, which forbids
+// custom headers — see api/drive/collab.go and the collab provider
+// in frontend/src/collab/provider.ts) gets a clean RFC 6455
+// handshake. Without this, gorilla would refuse to select any
+// subprotocol the client offered, and per the WHATWG HTML Living
+// Standard the browser MUST fail the connection. Today the
+// notification endpoint is only dialed with Authorization headers
+// (server-to-server tests and the integration suite), so this is
+// future-proofing for when the SPA opens its own /api/ws — keeping
+// the two upgraders symmetric (collab + notifications) so the
+// pattern doesn't bit-rot across one of them.
 var DefaultUpgrader = websocket.Upgrader{
 	ReadBufferSize:  1024,
 	WriteBufferSize: 1024,
 	CheckOrigin:     func(*http.Request) bool { return true },
+	Subprotocols:    []string{middleware.WebSocketBearerSubprotocol},
 }
 
 // Handler exposes ServeWS as an http.Handler. It is constructed with

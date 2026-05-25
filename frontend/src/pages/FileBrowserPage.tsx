@@ -122,6 +122,15 @@ export default function FileBrowserPage() {
               </button>
             ) : null}
             <UploadButton folderID={currentFolderID} onUploaded={() => refresh()} />
+            {currentFolderID ? (
+              <Link
+                to={`/drive/folder/${currentFolderID}/documents`}
+                style={{ ...btn, textDecoration: "none", color: "#111827" }}
+                title="Collaborative documents in this folder"
+              >
+                Documents
+              </Link>
+            ) : null}
             <Link
               to="/drive/privacy"
               style={{ ...btn, textDecoration: "none", color: "#111827" }}

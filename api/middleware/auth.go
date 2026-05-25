@@ -190,12 +190,11 @@ const SessionCheckTimeout = 1 * time.Second
 func AuthMiddleware(secret string, checker SessionChecker) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			header := r.Header.Get("Authorization")
-			if header == "" || !strings.HasPrefix(header, "Bearer ") {
+			raw, ok := extractBearerToken(r)
+			if !ok {
 				http.Error(w, "missing bearer token", http.StatusUnauthorized)
 				return
 			}
-			raw := strings.TrimPrefix(header, "Bearer ")
 			claims, err := ParseToken(secret, raw)
 			if err != nil {
 				http.Error(w, "invalid token", http.StatusUnauthorized)
@@ -340,6 +339,112 @@ func WithUserID(ctx context.Context, userID uuid.UUID) context.Context {
 // without going through the full JWT path.
 func WithRole(ctx context.Context, role string) context.Context {
 	return context.WithValue(ctx, roleContextKey, role)
+}
+
+// WebSocketBearerSubprotocol is the Sec-WebSocket-Protocol token
+// the client uses to signal that the next subprotocol entry is a
+// bearer JWT. Browsers cannot attach custom headers to a WebSocket
+// upgrade, so the conventional workaround is to pack the token
+// into the subprotocol list:
+//
+//	new WebSocket(url, ["bearer", "<jwt>"])
+//
+// The server reads the JWT out of that list and, separately, the
+// Upgrader echoes back "bearer" in its Sec-WebSocket-Protocol
+// response so the handshake completes. The JWT itself is NOT
+// echoed back — only the marker. Both halves are required: a
+// client offering only a token without the "bearer" marker would
+// not negotiate a subprotocol and Upgrade would fail.
+const WebSocketBearerSubprotocol = "bearer"
+
+// extractBearerToken returns the JWT carried by an authenticated
+// request. The Authorization header is the canonical transport,
+// but on WebSocket upgrade requests browsers cannot set custom
+// headers — for those, we fall back to the Sec-WebSocket-Protocol
+// list (see WebSocketBearerSubprotocol). The fallback is gated on
+// a real WS upgrade (Upgrade: websocket + Connection contains
+// upgrade) so a normal HTTP request cannot smuggle a token via a
+// subprotocol header.
+func extractBearerToken(r *http.Request) (string, bool) {
+	if header := r.Header.Get("Authorization"); strings.HasPrefix(header, "Bearer ") {
+		return strings.TrimPrefix(header, "Bearer "), true
+	}
+	if isWebSocketUpgrade(r) {
+		// RFC 6455 allows Sec-WebSocket-Protocol to be sent as either
+		// a single comma-separated header or multiple repeated
+		// headers (browsers always send the single-line form, but
+		// non-browser clients sometimes split). r.Header.Get returns
+		// only the first line; join all values so we honor both
+		// shapes. gorilla's own Subprotocols() helper does the same.
+		joined := strings.Join(r.Header.Values("Sec-WebSocket-Protocol"), ",")
+		if token, ok := tokenFromSubprotocols(joined); ok {
+			return token, true
+		}
+	}
+	return "", false
+}
+
+// isWebSocketUpgrade reports whether the request is a WebSocket
+// upgrade handshake. RFC 6455 requires both Upgrade: websocket
+// AND Connection: Upgrade; we check both, case-insensitively, so
+// a stray header on a normal API request cannot trip the
+// subprotocol auth fallback.
+//
+// Both Upgrade and Connection are list-valued per RFC 7230 §3.2.2 and
+// MAY be sent across multiple header lines. r.Header.Get returns
+// only the first; we use r.Header.Values + a comma-split walk so the
+// shape "Connection: keep-alive\r\nConnection: Upgrade" still trips
+// the upgrade path. This matches gorilla/websocket's internal
+// tokenListContainsValue helper. Without it a proxy that rewrote
+// the headers into separate lines (e.g. AWS ALB, some k8s ingress
+// implementations) would fall back to requiring an Authorization
+// header that browsers cannot attach.
+func isWebSocketUpgrade(r *http.Request) bool {
+	if !headerValuesContainToken(r.Header.Values("Upgrade"), "websocket") {
+		return false
+	}
+	return headerValuesContainToken(r.Header.Values("Connection"), "upgrade")
+}
+
+// headerValuesContainToken reports whether any of the given header
+// lines contains the named token (case-insensitively) as one of its
+// comma-separated entries.
+func headerValuesContainToken(values []string, token string) bool {
+	for _, v := range values {
+		for _, part := range strings.Split(v, ",") {
+			if strings.EqualFold(strings.TrimSpace(part), token) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// tokenFromSubprotocols extracts a JWT carried alongside the
+// "bearer" marker in a Sec-WebSocket-Protocol header. The header
+// value is a comma-separated list; we look for the "bearer"
+// marker and return the next non-empty entry as the token. Any
+// other interleaving is rejected so we don't accidentally treat
+// an unrelated subprotocol token as the JWT.
+func tokenFromSubprotocols(raw string) (string, bool) {
+	if raw == "" {
+		return "", false
+	}
+	parts := strings.Split(raw, ",")
+	for i, p := range parts {
+		if !strings.EqualFold(strings.TrimSpace(p), WebSocketBearerSubprotocol) {
+			continue
+		}
+		if i+1 >= len(parts) {
+			return "", false
+		}
+		token := strings.TrimSpace(parts[i+1])
+		if token == "" {
+			return "", false
+		}
+		return token, true
+	}
+	return "", false
 }
 
 // PurposeMiddleware returns a middleware that accepts ONLY tokens

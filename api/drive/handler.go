@@ -138,7 +138,7 @@ func (h *Handler) WithWebhooks(p WebhookEventPublisher) *Handler {
 }
 
 // WithDocuments wires the collaborative document service. When non-
-// nil the /api/v1/documents endpoints accept create / get / delta
+// nil the /api/documents endpoints accept create / get / delta
 // requests; when nil the endpoints respond 503 Service Unavailable
 // so the metadata plane keeps working in deployments without the
 // collab feature provisioned. Mirrors the WithSharing / WithBilling

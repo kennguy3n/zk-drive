@@ -113,3 +113,19 @@ jobs:
           name: playwright-report
           path: frontend/playwright-report
           if-no-files-found: ignore
+
+      - name: Upload Playwright failure artifacts (screenshots/videos)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-test-results
+          path: frontend/test-results
+          if-no-files-found: ignore
+
+      - name: Upload server log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: server-log
+          path: server.log
+          if-no-files-found: ignore
