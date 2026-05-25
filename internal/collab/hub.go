@@ -5,6 +5,7 @@ import (
 	"errors"
 	"log/slog"
 	"sync"
+	"sync/atomic"
 
 	"github.com/google/uuid"
 
@@ -191,6 +192,17 @@ type DocumentHub struct {
 	// connection) when pool.Close() runs, producing a noisy
 	// "acquire on closed pool" error and a lost compaction.
 	compactWG sync.WaitGroup
+
+	// shuttingDown is flipped to true by Shutdown under h.mu.Lock
+	// before it calls compactWG.Wait. handleSyncUpdate must check
+	// it under h.mu.RLock before calling compactWG.Add — otherwise
+	// a readPump that races past AppendDelta could call Add(1)
+	// after Wait has already observed counter==0, violating the
+	// sync.WaitGroup contract and leaking a compaction goroutine
+	// past pool.Close. The RWMutex acts as both the publication
+	// barrier for the flag and the happens-before edge that
+	// orders Add(1) before Wait.
+	shuttingDown atomic.Bool
 }
 
 // NewDocumentHub constructs a hub. The documents service must be
@@ -217,15 +229,26 @@ func (h *DocumentHub) WithCompactionScheduler(fn func(workspaceID, documentID uu
 // Register adds c to its document's room. Idempotent: re-registering
 // an already-registered client is a no-op (set semantics). Called
 // by the HTTP upgrade path after authentication + permission check.
+//
+// Holds h.mu.Lock across the entire "lookup-or-create room AND
+// insert client" sequence. Earlier revisions split this into two
+// critical sections (h.mu around the map, r.mu around the insert)
+// to keep h.mu short, but that introduced a phantom-room TOCTOU:
+// a concurrent Unregister of the last client could observe an
+// empty room between our h.mu.Unlock and our r.mu.Lock and delete
+// the room from h.rooms, leaving our newly-inserted client in a
+// room that no other goroutine can find. Since Register only runs
+// once per WS upgrade (not per frame), holding h.mu for both steps
+// has negligible cost.
 func (h *DocumentHub) Register(c *DocumentClient) {
 	c.hub = h
 	h.mu.Lock()
+	defer h.mu.Unlock()
 	r, ok := h.rooms[c.DocumentID]
 	if !ok {
 		r = newRoom()
 		h.rooms[c.DocumentID] = r
 	}
-	h.mu.Unlock()
 	r.mu.Lock()
 	r.clients[c] = struct{}{}
 	r.mu.Unlock()
@@ -236,33 +259,23 @@ func (h *DocumentHub) Register(c *DocumentClient) {
 // races (closeOnce gates the channel close). Trailing empty rooms
 // are garbage-collected so a workspace with millions of documents
 // doesn't leak room maps after every editor disconnects.
+//
+// Holds h.mu.Lock across the "remove client, check empty, maybe
+// delete room" sequence so the phantom-room race with Register
+// (see Register's comment) cannot manifest. The cost is acceptable
+// — Unregister fires once per WS disconnect.
 func (h *DocumentHub) Unregister(c *DocumentClient) {
-	h.mu.RLock()
-	r := h.rooms[c.DocumentID]
-	h.mu.RUnlock()
-	if r != nil {
+	h.mu.Lock()
+	if r, ok := h.rooms[c.DocumentID]; ok && r != nil {
 		r.mu.Lock()
 		delete(r.clients, c)
 		empty := len(r.clients) == 0
 		r.mu.Unlock()
 		if empty {
-			// Race-safe room cleanup: re-acquire the hub write
-			// lock, re-check emptiness (a concurrent Register
-			// for the same doc could have repopulated the room
-			// between our check and the delete), and only then
-			// delete the map entry.
-			h.mu.Lock()
-			if rr, ok := h.rooms[c.DocumentID]; ok && rr == r {
-				rr.mu.RLock()
-				stillEmpty := len(rr.clients) == 0
-				rr.mu.RUnlock()
-				if stillEmpty {
-					delete(h.rooms, c.DocumentID)
-				}
-			}
-			h.mu.Unlock()
+			delete(h.rooms, c.DocumentID)
 		}
 	}
+	h.mu.Unlock()
 	c.shutdown()
 }
 
@@ -417,11 +430,28 @@ func (h *DocumentHub) handleSyncUpdate(ctx context.Context, c *DocumentClient, p
 	// when an admin / future "migrate folder" path triggers a
 	// flush.
 	if result.CompactionDue && c.Capability.ServerSnapshotAllowed && h.scheduleCompaction != nil {
-		h.compactWG.Add(1)
-		go func(ws, doc uuid.UUID) {
-			defer h.compactWG.Done()
-			h.scheduleCompaction(ws, doc)
-		}(c.WorkspaceID, c.DocumentID)
+		// Acquire h.mu.RLock as the publication barrier for
+		// shuttingDown. If Shutdown has already flipped the
+		// flag to true and called compactWG.Wait, we must NOT
+		// call compactWG.Add(1) — that would violate the
+		// sync.WaitGroup contract ("a positive delta when the
+		// counter is zero must happen-before any Wait") and
+		// leak a compaction goroutine past pool.Close.
+		//
+		// Holding the RLock for the Add(1) itself (not just the
+		// flag read) is what gives us the happens-before edge:
+		// Shutdown can only acquire h.mu.Lock once every RLock
+		// holder has released, so its subsequent compactWG.Wait
+		// is guaranteed to observe our Add.
+		h.mu.RLock()
+		if !h.shuttingDown.Load() {
+			h.compactWG.Add(1)
+			go func(ws, doc uuid.UUID) {
+				defer h.compactWG.Done()
+				h.scheduleCompaction(ws, doc)
+			}(c.WorkspaceID, c.DocumentID)
+		}
+		h.mu.RUnlock()
 	}
 	return nil
 }
@@ -498,18 +528,29 @@ func (h *DocumentHub) deliverTo(c *DocumentClient, payload []byte) {
 // (and any compaction job in progress finishes) before the process
 // closes the database pool.
 //
-// The caller is responsible for first cancelling the context the
-// compaction scheduler captured — Shutdown does not cancel that
-// context itself because the hub does not own it. The typical
-// shutdown sequence in cmd/server is:
+// The hub does not own the context the compaction scheduler
+// captured, so Shutdown does not cancel that context — it relies
+// on compactWG.Wait to drain in-flight jobs synchronously. The
+// typical shutdown sequence in cmd/server is:
 //
 //  1. srv.Shutdown(ctx)       — stops accepting new HTTP/WS connections
-//  2. collabHub.Shutdown()    — closes existing WS clients, drains compactions
-//  3. cancel()                — fires the global ctx.Done()
+//  2. collabHub.Shutdown()    — flips shuttingDown, closes existing WS clients,
+//                              drains in-flight compactions
+//  3. cancel()                — fires the global ctx.Done() (caller's responsibility,
+//                              after Shutdown returns; not required for hub
+//                              correctness)
 //  4. bgGoroutines.Wait()     — drains other background goroutines
 //  5. pool.Close()            — closes the DB pool against quiescent consumers
+//
+// Shutdown sets shuttingDown=true under h.mu.Lock BEFORE calling
+// compactWG.Wait so any concurrent handleSyncUpdate that wants to
+// schedule a new compaction sees the flag and skips the Add. The
+// RWMutex serves both as the publication barrier for the flag and
+// as the happens-before edge that orders any in-flight Add against
+// Wait.
 func (h *DocumentHub) Shutdown() {
 	h.mu.Lock()
+	h.shuttingDown.Store(true)
 	victims := make([]*DocumentClient, 0)
 	for docID, r := range h.rooms {
 		r.mu.Lock()
@@ -526,6 +567,8 @@ func (h *DocumentHub) Shutdown() {
 	}
 	// Wait for any in-flight compaction goroutines to finish so
 	// the caller can safely close the document.Service and the
-	// underlying pgx pool.
+	// underlying pgx pool. Add(1) calls that win the race against
+	// the shuttingDown flip are accounted for by compactWG; calls
+	// that lose the race never executed Add.
 	h.compactWG.Wait()
 }
