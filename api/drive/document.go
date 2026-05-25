@@ -205,7 +205,10 @@ func (h *Handler) RenameDocument(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid id", http.StatusBadRequest)
 		return
 	}
-	doc, parent, err := h.documents.GetByID(r.Context(), workspaceID, id)
+	// GetMetadata, not GetByID: Rename only needs folder_id (for the
+	// permission check) + name (for the activity log's old_name). It
+	// never inspects y_state, so the binary fetch would be wasted I/O.
+	doc, parent, err := h.documents.GetMetadata(r.Context(), workspaceID, id)
 	if err != nil {
 		writeDocumentError(w, err)
 		return
@@ -248,7 +251,12 @@ func (h *Handler) SetDocumentCollabMode(w http.ResponseWriter, r *http.Request) 
 		http.Error(w, "invalid id", http.StatusBadRequest)
 		return
 	}
-	doc, parent, err := h.documents.GetByID(r.Context(), workspaceID, id)
+	// GetMetadata, not GetByID: SetCollabMode only needs folder_id
+	// (permission check) + collab_mode (old_mode for the activity
+	// log). Service.SetCollabMode also runs a metadata-only lookup
+	// (via GetMetadata) so the policy gate has the folder; the
+	// binary state is never touched on this path.
+	doc, parent, err := h.documents.GetMetadata(r.Context(), workspaceID, id)
 	if err != nil {
 		writeDocumentError(w, err)
 		return
@@ -290,7 +298,10 @@ func (h *Handler) DeleteDocument(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid id", http.StatusBadRequest)
 		return
 	}
-	doc, _, err := h.documents.GetByID(r.Context(), workspaceID, id)
+	// GetMetadata, not GetByID: Delete only needs folder_id
+	// (permission check) + name (activity-log payload). The Y.Doc
+	// binary state is irrelevant to a soft-delete.
+	doc, _, err := h.documents.GetMetadata(r.Context(), workspaceID, id)
 	if err != nil {
 		writeDocumentError(w, err)
 		return

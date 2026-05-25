@@ -242,17 +242,29 @@ func (h *Handler) emitFolderCascadeDocumentDeletes(ctx context.Context, snaps []
 // all cascaded document deletes in one Postgres round-trip. The
 // activity log is still per-item (LogAction is buffered + async,
 // so per-item dispatch is already cheap there).
+//
+// The same metadata map (folder_id, name) is supplied to BOTH the
+// activity-log entry and the changeInput so sync clients see the
+// same payload regardless of whether the document was cascade-
+// deleted via /folders/{id} (single-handler path, logActivity →
+// recordChange mirrors metadata into the changefeed) or
+// /bulk/delete (this path). A subscriber filtering on
+// kind=document op=delete must receive parent_id + name in either
+// case so it can drop the local catalogue entry from its UI
+// without a follow-up GET that would 404.
 func (h *Handler) emitFolderCascadeDocumentDeletesBatch(ctx context.Context, snaps []*document.Document) []changeInput {
 	out := make([]changeInput, 0, len(snaps))
 	for _, d := range snaps {
-		h.logActivityOnly(ctx, activity.ActionDocumentDelete, resourceTypeDocument, d.ID, map[string]any{
+		md := map[string]any{
 			"folder_id": d.FolderID,
 			"name":      d.Name,
-		})
+		}
+		h.logActivityOnly(ctx, activity.ActionDocumentDelete, resourceTypeDocument, d.ID, md)
 		out = append(out, changeInput{
 			Action:       activity.ActionDocumentDelete,
 			ResourceType: resourceTypeDocument,
 			ResourceID:   d.ID,
+			Metadata:     md,
 		})
 	}
 	return out
