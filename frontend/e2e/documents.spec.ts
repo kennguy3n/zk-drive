@@ -97,14 +97,23 @@ test.describe("documents", () => {
       dialog.locator('input[type="radio"][value="rich_presence"]'),
     ).toBeEnabled();
 
-    // Pick rich+presence and create — should navigate into the
-    // editor and show the encryption + collab-mode badges plus
-    // the connection-status chip.
+    // Pick rich+presence and create — wait for the POST /documents
+    // response explicitly so we can both prove the API succeeded AND
+    // grab the new document id without racing the SPA navigation.
     await dialog.locator('input[type="radio"][value="rich_presence"]').check();
     await dialog.getByLabel("Name", { exact: true }).fill("Design Doc");
+    const createResp = page.waitForResponse(
+      (r) => r.url().endsWith("/api/documents") && r.request().method() === "POST",
+    );
     await dialog.getByRole("button", { name: /^create$/i }).click();
+    const resp = await createResp;
+    expect(resp.status(), `create failed: ${await resp.text()}`).toBe(200);
+    const created = (await resp.json()) as { id: string; collab_mode: string };
+    expect(created.collab_mode).toBe("rich_presence");
 
-    await expect(page).toHaveURL(/\/drive\/document\/[^/]+$/);
+    // After the POST resolves the page navigates client-side to the
+    // editor route. Wait for the URL to settle.
+    await expect(page).toHaveURL(new RegExp(`/drive/document/${created.id}$`));
     await expect(page.getByRole("heading", { name: /design doc/i })).toBeVisible();
     // The connection chip cycles connecting → connected; either
     // text qualifies as "the editor mounted and is talking to the
