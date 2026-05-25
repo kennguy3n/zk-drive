@@ -213,6 +213,17 @@ func extractHTMLText(body []byte) (string, error) {
 // space, mirroring how the browser renders inline text. Without
 // this step every newline / indentation in the source HTML would
 // leak into content_text and bloat the FTS index.
+//
+// The trim is asymmetric on purpose: leading spaces are stripped
+// (the previous emission's trailing whitespace + this run's leading
+// whitespace would otherwise coalesce into a duplicate) but
+// trailing spaces are PRESERVED. The trailing space is what
+// separates this text run from the next inline element's text run
+// (`<b>hello </b><i>world</i>` must render as `hello world`, not
+// `helloworld`). Block-element boundaries are handled separately
+// by the caller's `ensureNewline` chain using its `lastByte`
+// tracking, so collapseHTMLWhitespace only needs to manage the
+// intra-run whitespace.
 func collapseHTMLWhitespace(s string) string {
 	var sb strings.Builder
 	prevSpace := true
