@@ -164,16 +164,33 @@ impl Engine {
     /// background eviction sweep every [`EVICTION_INTERVAL`].
     ///
     /// Shutdown semantics: the engine returns `Ok(())` as soon as
-    /// EITHER channel is closed (matching the historical
-    /// half-open-channel contract that the desktop shell relies
-    /// on: the shell closes the watcher first to drain in-flight
-    /// uploads via the remote channel, or closes the remote first
-    /// during a controlled disconnect). With
-    /// `disk_quota_bytes = Some`, this is enforced explicitly
-    /// (rather than via the `select!` `else` arm) because the
-    /// always-ready eviction tick would otherwise mask the
-    /// channel-closed condition and the engine would loop
-    /// forever; see Devin Review R3 #1.
+    /// EITHER channel is closed. This is a deliberate departure
+    /// from the pre-PR5 contract -- the original `Some(ev) =
+    /// recv() => ...` / `else => return Ok(())` pattern only
+    /// exited when BOTH channels closed, because the `select!`
+    /// `else` arm only fires when every enabled arm produces
+    /// `None`. Two reasons motivated the change:
+    ///
+    ///   1. With `disk_quota_bytes = Some`, the eviction tick arm
+    ///      is permanently ready, so the `else` branch is
+    ///      unreachable and the engine would loop forever on
+    ///      shutdown (Devin Review R3 #1). The bug is silent and
+    ///      unbounded -- no caller is going to wait for the dead
+    ///      branch to fire.
+    ///
+    ///   2. For the production CLI flow there is no caller that
+    ///      benefits from "drain one side after the other has
+    ///      already closed". Ctrl-C closes the watcher and the
+    ///      poller together (both abort on `tokio::signal::ctrl_c`
+    ///      in `cli/src/main.rs`), and during a controlled
+    ///      disconnect the desktop shell closes both senders
+    ///      before awaiting the engine handle. The historical
+    ///      drain-then-exit path was effectively dead code.
+    ///
+    /// Result: `either-closed` is the new shutdown contract,
+    /// applied uniformly whether or not a disk quota is
+    /// configured. Tests in this file (`run_terminates_when_*`)
+    /// pin it.
     pub async fn run(
         self,
         mut local_rx: mpsc::Receiver<LocalEvent>,
