@@ -162,6 +162,18 @@ impl Engine {
     /// Drive both event channels until either is closed. When
     /// [`EngineConfig::disk_quota_bytes`] is set, also runs a
     /// background eviction sweep every [`EVICTION_INTERVAL`].
+    ///
+    /// Shutdown semantics: the engine returns `Ok(())` as soon as
+    /// EITHER channel is closed (matching the historical
+    /// half-open-channel contract that the desktop shell relies
+    /// on: the shell closes the watcher first to drain in-flight
+    /// uploads via the remote channel, or closes the remote first
+    /// during a controlled disconnect). With
+    /// `disk_quota_bytes = Some`, this is enforced explicitly
+    /// (rather than via the `select!` `else` arm) because the
+    /// always-ready eviction tick would otherwise mask the
+    /// channel-closed condition and the engine would loop
+    /// forever; see Devin Review R3 #1.
     pub async fn run(
         self,
         mut local_rx: mpsc::Receiver<LocalEvent>,
@@ -182,8 +194,24 @@ impl Engine {
         evict_tick.tick().await;
         loop {
             tokio::select! {
-                Some(ev) = local_rx.recv() => self.handle_local(ev).await?,
-                Some(ev) = remote_rx.recv() => self.handle_remote(ev).await?,
+                // Each channel arm matches the FULL `Option<...>`
+                // so a closed channel (recv returning `None`) is
+                // handled explicitly with an early return, rather
+                // than the previous `Some(ev) =` pattern which
+                // would silently drop the closure signal and let
+                // the `select!` keep polling. This is the fix for
+                // Devin Review R3 #1: with the always-ready
+                // eviction tick arm present, the `else` branch is
+                // unreachable -- the only way to signal shutdown
+                // is to return from the matched arm.
+                ev = local_rx.recv() => {
+                    let Some(ev) = ev else { return Ok(()); };
+                    self.handle_local(ev).await?;
+                }
+                ev = remote_rx.recv() => {
+                    let Some(ev) = ev else { return Ok(()); };
+                    self.handle_remote(ev).await?;
+                }
                 _ = evict_tick.tick(), if self.config.disk_quota_bytes.is_some() => {
                     // The `if` guard on the select arm means this
                     // arm is disabled entirely when no quota is
@@ -246,7 +274,6 @@ impl Engine {
                         }
                     }
                 }
-                else => return Ok(()),
             }
         }
     }
@@ -1563,6 +1590,89 @@ mod tests {
         assert_eq!(evicted, 2, "two oldest rows must be Evicted");
         drop(cat);
         handle.abort();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn run_terminates_when_local_channel_closes_with_quota_set() {
+        // Regression for Devin Review R3 #1: with disk_quota_bytes
+        // configured, the eviction tick arm is always ready, which
+        // previously masked the `else` branch and made the engine
+        // loop forever after channels closed. Assert closing
+        // local_rx causes run() to return Ok(()) within a bounded
+        // virtual-time window.
+        let tempdir = TempDir::new().unwrap();
+        let workspace_id = Uuid::new_v4();
+        let cat = Catalogue::open(tempdir.path().join("cat.db"), workspace_id).unwrap();
+        let catalogue = Arc::new(Mutex::new(cat));
+        let client = Arc::new(
+            zk_sync_api::Client::builder("https://example.com")
+                .build()
+                .unwrap(),
+        );
+        let engine = Engine::new(
+            EngineConfig {
+                workspace_id,
+                root: tempdir.path().to_path_buf(),
+                chunk_size: None,
+                disk_quota_bytes: Some(1 << 30),
+            },
+            client,
+            catalogue.clone(),
+        );
+        let (local_tx, local_rx) = tokio::sync::mpsc::channel::<LocalEvent>(1);
+        let (_remote_tx, remote_rx) = tokio::sync::mpsc::channel::<RemoteEvent>(1);
+        let handle = tokio::spawn(async move { engine.run(local_rx, remote_rx).await });
+        drop(local_tx);
+        // Bounded virtual-time wait: the engine should return as
+        // soon as the closed channel is observed. Cap at one full
+        // EVICTION_INTERVAL + slack so we don't depend on the
+        // exact poll order in `select!` but we DO catch a
+        // regression where shutdown only happens after a tick.
+        let result = tokio::time::timeout(
+            EVICTION_INTERVAL + std::time::Duration::from_secs(5),
+            handle,
+        )
+        .await
+        .expect("engine must terminate within one EVICTION_INTERVAL of channel close")
+        .expect("engine task must not panic");
+        result.expect("engine must return Ok(()) on channel close");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn run_terminates_when_remote_channel_closes_with_quota_set() {
+        // Mirror of run_terminates_when_local_channel_closes: the
+        // shell closes channels in either order depending on the
+        // shutdown path (controlled disconnect vs. abrupt restart),
+        // so both orderings must work.
+        let tempdir = TempDir::new().unwrap();
+        let (engine, _catalogue) = engine_for(&tempdir);
+        let client = Arc::new(
+            zk_sync_api::Client::builder("https://example.com")
+                .build()
+                .unwrap(),
+        );
+        let engine = Engine::new(
+            EngineConfig {
+                workspace_id: engine.config.workspace_id,
+                root: engine.config.root.clone(),
+                chunk_size: engine.config.chunk_size,
+                disk_quota_bytes: Some(1 << 30),
+            },
+            client,
+            engine.catalogue.clone(),
+        );
+        let (_local_tx, local_rx) = tokio::sync::mpsc::channel::<LocalEvent>(1);
+        let (remote_tx, remote_rx) = tokio::sync::mpsc::channel::<RemoteEvent>(1);
+        let handle = tokio::spawn(async move { engine.run(local_rx, remote_rx).await });
+        drop(remote_tx);
+        let result = tokio::time::timeout(
+            EVICTION_INTERVAL + std::time::Duration::from_secs(5),
+            handle,
+        )
+        .await
+        .expect("engine must terminate within one EVICTION_INTERVAL of channel close")
+        .expect("engine task must not panic");
+        result.expect("engine must return Ok(()) on channel close");
     }
 
     #[tokio::test(start_paused = true)]

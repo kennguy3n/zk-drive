@@ -279,11 +279,8 @@ async fn main() -> anyhow::Result<()> {
             // SQLite). The quota comes in via --disk-quota-bytes
             // (None means: don't compute over_quota); see the flag
             // doc on Cmd::Status for why this isn't auto-discovered.
-            let snap = StatusSnapshot::from_catalogue(
-                &c,
-                disk_quota_bytes,
-                ConnectivityState::Unknown,
-            )?;
+            let snap =
+                StatusSnapshot::from_catalogue(&c, disk_quota_bytes, ConnectivityState::Unknown)?;
             if json {
                 // Include the cursor in a JSON envelope alongside
                 // the snapshot so tools that diff `status --json`
