@@ -22,6 +22,7 @@ require (
 	github.com/redis/go-redis/v9 v9.19.0
 	github.com/stripe/stripe-go/v81 v81.4.0
 	github.com/xuri/excelize/v2 v2.10.1
+	github.com/yuin/goldmark v1.8.2
 	go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp v0.68.0
 	go.opentelemetry.io/otel v1.43.0
 	go.opentelemetry.io/otel/exporters/otlp/otlptrace v1.43.0
