@@ -33,15 +33,17 @@ async function createFolder(
   privacyMode: "managed_encrypted" | "strict_zk",
 ) {
   await page.getByRole("button", { name: /new folder/i }).click();
-  await page.getByLabel(/folder name/i).fill(name);
+  // The dialog labels its input "Name" via a <label> wrapping a
+  // <span>Name</span> + <input>; getByLabel matches that. The
+  // strict_zk radio shows an irreversibility warning panel but
+  // does NOT require a separate confirm checkbox before submit.
+  await page.getByLabel("Name", { exact: true }).fill(name);
   await page.locator(`input[name="encmode"][value="${privacyMode}"]`).check();
-  // strict_zk surfaces an irreversibility warning + a confirm
-  // checkbox before the submit button enables.
-  if (privacyMode === "strict_zk") {
-    await page.getByLabel(/i understand|confirm/i).check();
-  }
-  await page.getByRole("button", { name: /create folder/i }).click();
-  // The dialog closes and the page navigates to the new folder.
+  await page.getByRole("button", { name: /^create$/i }).click();
+  // The dialog closes; navigate into the new folder via the
+  // folder tree (the tree links carry the folder name as
+  // their accessible name).
+  await page.getByRole("link", { name }).first().click();
   await expect(page).toHaveURL(/\/drive\/folder\//);
 }
 
