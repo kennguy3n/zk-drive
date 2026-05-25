@@ -1,0 +1,83 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/crypto",
+    "crates/api-client",
+    "crates/auth",
+    "crates/sync-engine",
+    "crates/cli",
+]
+
+# zk-sync-sdk — Rust workspace that backs the ZK Drive desktop sync
+# agent and the future Tauri shell. The five crates are layered so
+# `cli` depends on `sync-engine`, which depends on `api-client`,
+# `auth`, and `crypto`. Each crate is independently usable from a
+# host language via UniFFI in a follow-up PR; for now the binding
+# layer is internal.
+#
+# Mapping to the Go encryption envelope:
+#   * crates/crypto must produce byte-identical ciphertext to
+#     zk-object-fabric/encryption/client_sdk for the same DEK +
+#     plaintext + chunk index + chunk AAD. The frame format
+#     (24-byte nonce | 4-byte BE len | ciphertext) is replicated
+#     verbatim. The chunk AAD format (chunkAAD || "|" ||
+#     big-endian uint64(chunk_index)) is replicated verbatim.
+#     This invariant is enforced by the cross-language test
+#     fixtures in crates/crypto/testdata/.
+
+[workspace.package]
+edition = "2021"
+rust-version = "1.86"
+license = "Apache-2.0"
+repository = "https://github.com/kennguy3n/zk-drive"
+authors = ["ZK Drive Engineering <eng@uney.com>"]
+
+[workspace.dependencies]
+# Async / runtime
+tokio = { version = "1", features = ["full"] }
+futures = "0.3"
+async-trait = "0.1"
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Errors / logging
+thiserror = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Crypto
+chacha20poly1305 = { version = "0.10", features = ["std"] }
+hkdf = "0.12"
+sha2 = "0.10"
+rand = "0.8"
+
+# HTTP / WS
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
+tokio-tungstenite = { version = "0.23", features = ["rustls-tls-webpki-roots"] }
+url = "2"
+
+# Local state
+rusqlite = { version = "0.31", features = ["bundled"] }
+notify = "6"
+
+# UUIDs / time
+uuid = { version = "1", features = ["v4", "serde"] }
+chrono = { version = "0.4", features = ["serde"] }
+
+# OS keychain
+keyring = "3"
+
+# Hashing
+blake3 = "1"
+
+# Testing
+mockito = "1"
+tempfile = "3"
+hex = "0.4"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = "symbols"

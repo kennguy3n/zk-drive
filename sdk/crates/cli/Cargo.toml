@@ -1,0 +1,29 @@
+[package]
+name = "zk-sync-cli"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Headless ZK Drive desktop sync daemon."
+
+[[bin]]
+name = "zk-sync"
+path = "src/main.rs"
+
+[dependencies]
+zk-sync-crypto = { path = "../crypto" }
+zk-sync-api = { path = "../api-client" }
+zk-sync-auth = { path = "../auth" }
+zk-sync-engine = { path = "../sync-engine" }
+
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+uuid = { workspace = true }
+url = { workspace = true }
+clap = { version = "4", features = ["derive", "env"] }
+anyhow = "1"

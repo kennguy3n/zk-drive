@@ -1,0 +1,28 @@
+[package]
+name = "zk-sync-auth"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Authentication for the ZK Drive desktop SDK: OAuth2 PKCE flow + OS-keychain token storage."
+
+[dependencies]
+async-trait = { workspace = true }
+keyring = { workspace = true }
+reqwest = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+url = { workspace = true }
+uuid = { workspace = true }
+chrono = { workspace = true }
+sha2 = { workspace = true }
+rand = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+mockito = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
