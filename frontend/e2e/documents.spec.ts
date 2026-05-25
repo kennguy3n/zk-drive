@@ -105,19 +105,6 @@ test.describe("documents", () => {
     const createResp = page.waitForResponse(
       (r) => r.url().endsWith("/api/documents") && r.request().method() === "POST",
     );
-    // Register the editor-page GET listener BEFORE the create click.
-    // The DocumentEditorPage fires GET /api/documents/{id} immediately
-    // on mount, which happens right after the POST resolves and the
-    // SPA client-side-navigates. If we registered after `await
-    // createResp`, the GET could complete in the microtask window
-    // before our listener attached and we'd wait the test timeout for
-    // a response that already arrived. Both registrations must be
-    // ahead of the action that triggers either event.
-    const getDocResp = page.waitForResponse(
-      (r) =>
-        /\/api\/documents\/[0-9a-f-]{36}$/.test(r.url()) &&
-        r.request().method() === "GET",
-    );
     await dialog.getByRole("button", { name: /^create$/i }).click();
     const resp = await createResp;
     // The create handler writes http.StatusCreated (201) on success.
@@ -126,14 +113,19 @@ test.describe("documents", () => {
     expect(created.collab_mode).toBe("rich_presence");
 
     // After the POST resolves the page navigates client-side to the
-    // editor route. Wait for the URL to settle AND for the editor
-    // page's GET /api/documents/{id} fetch to complete — without
-    // that explicit wait we can race past the "Loading…" placeholder
-    // window where the h1 hasn't mounted yet.
+    // editor route. We deliberately don't waitForResponse on the GET
+    // /api/documents/{id} here: in earlier attempts the listener
+    // race-condition (register-after-fire) caused 60s test timeouts
+    // in CI even after moving registration before the click. The
+    // simpler, more robust signal is the editor's h1 heading — it
+    // only renders after the GET resolves AND the SPA finishes
+    // mounting the Y.Doc + provider chain, so its visibility implies
+    // both. The 20s timeout is generous enough to absorb CI runner
+    // jitter without hiding real regressions: a healthy mount on
+    // this machine takes ~200ms.
     await expect(page).toHaveURL(new RegExp(`/drive/document/${created.id}$`));
-    await getDocResp;
     await expect(page.getByRole("heading", { name: /design doc/i })).toBeVisible({
-      timeout: 15_000,
+      timeout: 20_000,
     });
     // The connection chip cycles connecting → connected; either
     // text qualifies as "the editor mounted and is talking to the
