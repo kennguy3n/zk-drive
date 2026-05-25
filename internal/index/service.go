@@ -142,6 +142,24 @@ func ExtractTextWithContext(ctx context.Context, mimeType string, body []byte) (
 		return "", ErrUnsupportedMimeType
 	}
 	switch {
+	// Specific text/* MIME types must come BEFORE the generic
+	// `text/` prefix branch below. Otherwise the prefix match
+	// shadows extractor-specific handlers and the worker writes
+	// raw markup (HTML tags / RTF control codes) straight into
+	// content_text — polluting the FTS index and breaking phrase
+	// queries.
+	case mt == "text/html":
+		text, err := extractHTMLText(body)
+		if err != nil {
+			return "", err
+		}
+		return truncateUTF8(text, MaxIndexBytes), nil
+	case mt == "application/rtf", mt == "text/rtf":
+		text, err := extractRTFText(body)
+		if err != nil {
+			return "", err
+		}
+		return truncateUTF8(text, MaxIndexBytes), nil
 	case strings.HasPrefix(mt, "text/"):
 		return truncateUTF8(string(body), MaxIndexBytes), nil
 	case mt == "application/json", mt == "application/xml":
@@ -154,6 +172,26 @@ func ExtractTextWithContext(ctx context.Context, mimeType string, body []byte) (
 		return truncateUTF8(text, MaxIndexBytes), nil
 	case mt == "application/vnd.openxmlformats-officedocument.wordprocessingml.document":
 		text, err := extractDOCXText(body)
+		if err != nil {
+			return "", err
+		}
+		return truncateUTF8(text, MaxIndexBytes), nil
+	case mt == "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet":
+		text, err := extractXLSXText(body)
+		if err != nil {
+			return "", err
+		}
+		return truncateUTF8(text, MaxIndexBytes), nil
+	case mt == "application/vnd.openxmlformats-officedocument.presentationml.presentation":
+		text, err := extractPPTXText(body)
+		if err != nil {
+			return "", err
+		}
+		return truncateUTF8(text, MaxIndexBytes), nil
+	case mt == "application/vnd.oasis.opendocument.text",
+		mt == "application/vnd.oasis.opendocument.spreadsheet",
+		mt == "application/vnd.oasis.opendocument.presentation":
+		text, err := extractOpenDocumentText(body)
 		if err != nil {
 			return "", err
 		}

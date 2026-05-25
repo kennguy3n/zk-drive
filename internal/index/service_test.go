@@ -104,6 +104,50 @@ func TestExtractTextHandlesParametrisedMimeTypes(t *testing.T) {
 	}
 }
 
+// TestExtractText_RoutesHTMLAndRTFBeforeGenericTextPrefix pins the
+// dispatch ordering: text/html and text/rtf MUST be handled by
+// their dedicated extractors (which strip markup) BEFORE the
+// generic text/* prefix case, which would otherwise return raw
+// HTML tags / RTF control codes as content_text and pollute the
+// FTS corpus. This guards against an accidental re-ordering of
+// the switch cases.
+func TestExtractText_RoutesHTMLAndRTFBeforeGenericTextPrefix(t *testing.T) {
+	t.Run("html", func(t *testing.T) {
+		body := []byte("<html><body><p>hello <b>world</b></p><script>alert(1)</script></body></html>")
+		got, err := ExtractText("text/html", body)
+		if err != nil {
+			t.Fatalf("ExtractText(text/html): %v", err)
+		}
+		// If the generic text/* branch had shadowed text/html,
+		// the output would still contain "<p>" / "<script>".
+		if strings.Contains(got, "<p>") || strings.Contains(got, "<script>") {
+			t.Errorf("HTML markup leaked into extract — dispatch is wrong:\n%q", got)
+		}
+		if !strings.Contains(got, "hello") || !strings.Contains(got, "world") {
+			t.Errorf("HTML body text missing from extract:\n%q", got)
+		}
+		// <script> body must be dropped.
+		if strings.Contains(got, "alert") {
+			t.Errorf("script content leaked into extract: %q", got)
+		}
+	})
+	t.Run("rtf", func(t *testing.T) {
+		body := []byte("{\\rtf1\\ansi hello\\par world}")
+		got, err := ExtractText("text/rtf", body)
+		if err != nil {
+			t.Fatalf("ExtractText(text/rtf): %v", err)
+		}
+		// If text/* shadowed text/rtf, "\\rtf1" / "\\par" would
+		// remain in the output verbatim.
+		if strings.Contains(got, "\\rtf") || strings.Contains(got, "\\par") {
+			t.Errorf("RTF control words leaked into extract — dispatch is wrong:\n%q", got)
+		}
+		if !strings.Contains(got, "hello") || !strings.Contains(got, "world") {
+			t.Errorf("RTF body text missing from extract:\n%q", got)
+		}
+	})
+}
+
 // TestNormalizeMimeTypeFallback verifies that a malformed mime type
 // (one that mime.ParseMediaType rejects) still gets lowercased so
 // a legacy bare value like "APPLICATION/PDF" still routes correctly
