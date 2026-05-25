@@ -28,6 +28,25 @@ const markdownPreviewMaxBytes = 256 * 1024
 // working canvas at the current font size.
 const markdownPreviewMaxLines = 30
 
+// goldmarkParser is the shared goldmark instance used by every
+// renderMarkdown call. It's constructed once at package init time —
+// goldmark documents the parser as stateless after construction and
+// safe for concurrent use (each parse runs through its own
+// reader / state machine), so hoisting it to a package-level
+// singleton avoids re-doing the extension wiring on every call.
+//
+// The extension set must stay in sync with the walker switch cases
+// in walkMarkdownAST — see the comment on those cases for why each
+// extension is opted into here.
+var goldmarkParser = goldmark.New(
+	goldmark.WithExtensions(
+		extension.Table,
+		extension.Strikethrough,
+		extension.TaskList,
+	),
+	goldmark.WithParserOptions(parser.WithAutoHeadingID()),
+)
+
 // renderMarkdown produces a structured preview of a markdown
 // document. The pipeline is:
 //
@@ -60,24 +79,10 @@ func renderMarkdown(_ context.Context, srcBytes []byte) (image.Image, error) {
 		body = clipBytesToValidUTF8(body[:markdownPreviewMaxBytes])
 	}
 
-	// goldmark.New() without extensions = strict CommonMark. We
-	// explicitly opt-in to the three GFM extensions whose AST nodes
-	// the walker below handles:
-	//
-	//   - extension.Table         → *extast.Table (handled by
-	//                                emitTable, emits tab-separated
-	//                                rows for columnar structure in
-	//                                the thumbnail).
-	//   - extension.Strikethrough → AST node flattened to its inner
-	//                                text content (same as emphasis;
-	//                                marker characters add no signal
-	//                                at 256 px resolution).
-	//   - extension.TaskList      → so a `- [ ] foo` task item
-	//                                renders with the list marker
-	//                                plus a checkbox-style prefix
-	//                                rather than the literal
-	//                                `[ ] foo` body that strict
-	//                                CommonMark produces.
+	// We use the package-level goldmarkParser singleton — see its
+	// doc comment for why the parser is hoisted out of this hot path
+	// (stateless after construction, safe for concurrent use). The
+	// extension set is documented on the singleton.
 	//
 	// We DELIBERATELY do NOT enable goldmark's default extension set
 	// (extension.GFM + Linkify + Footnote + DefinitionList + Typo-
@@ -85,19 +90,10 @@ func renderMarkdown(_ context.Context, srcBytes []byte) (image.Image, error) {
 	// of node kinds and a surprise extension would silently drop
 	// through to the default "text content" fallback, which would
 	// just emit the marker text (e.g. an unhandled footnote
-	// definition rendering as `[^1]: …`). Each extension added here
-	// must have a matching walker case below.
-	md := goldmark.New(
-		goldmark.WithExtensions(
-			extension.Table,
-			extension.Strikethrough,
-			extension.TaskList,
-		),
-		goldmark.WithParserOptions(parser.WithAutoHeadingID()),
-	)
-
+	// definition rendering as `[^1]: …`). Each extension added to
+	// the singleton must have a matching walker case below.
 	reader := text.NewReader(body)
-	doc := md.Parser().Parse(reader)
+	doc := goldmarkParser.Parser().Parse(reader)
 
 	title, structured := walkMarkdownAST(doc, body)
 

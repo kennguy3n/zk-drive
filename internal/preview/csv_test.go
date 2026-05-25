@@ -45,10 +45,14 @@ func TestDetectCSVDelimiter_SemicolonForEuropean(t *testing.T) {
 	}
 }
 
-// TestRenderCSV_TSVRouted asserts the TSV-routed MIME path renders
-// correctly. A regression here would silently render TSV as comma-
-// CSV (single-column rows) on every upload.
-func TestRenderCSV_TSVRouted(t *testing.T) {
+// TestRenderCSV_AutoSniffsTabDelimiter asserts the auto-sniff path
+// (renderCSV → detectCSVDelimiter) correctly identifies tab-
+// delimited input that arrives via the `text/csv` MIME entry point.
+// The dedicated TSV-routed path (renderTSV with a forced `\t`) is
+// covered separately by TestRenderTSV_CommaInHeaderStillTabDelimited.
+// A regression here would mean tab-only files mis-labelled as
+// text/csv silently render as single-column rows.
+func TestRenderCSV_AutoSniffsTabDelimiter(t *testing.T) {
 	t.Parallel()
 	src := []byte("col1\tcol2\nval1\tval2\n")
 	img, err := renderCSV(context.Background(), src)
