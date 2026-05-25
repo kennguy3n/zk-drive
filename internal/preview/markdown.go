@@ -272,6 +272,26 @@ func walkMarkdownAST(doc ast.Node, source []byte) (title, body string) {
 			// expose the same inline subtree via nodeText)
 			// joined inline with the marker, then recurse into
 			// the rest as continuation lines.
+			//
+			// Continuation alignment: subsequent inline-content
+			// children (the 2nd paragraph in a loose list item,
+			// the 3rd, etc.) get a `contIndent` prefix that lines
+			// them up under the bullet's text column rather than
+			// the bullet itself — i.e. for `1. foo`, the marker
+			// occupies 3 cells (`1. `), so continuation text is
+			// prefixed with `indent + "   "` so it visually
+			// belongs to the list item. Without this, a loose-
+			// list continuation paragraph would render flush-
+			// left and look like a sibling of the list rather
+			// than a continuation of the item.
+			//
+			// Non-inline continuations (nested lists, code
+			// blocks, blockquotes) manage their own indent via
+			// their AST-case handling — nested lists track depth
+			// through listStk, code blocks bracket themselves
+			// with fence sentinels, etc. — so we walk them
+			// without injecting the continuation prefix.
+			contIndent := indent + strings.Repeat(" ", len(marker))
 			first := true
 			for c := nn.FirstChild(); c != nil; c = c.NextSibling() {
 				if first {
@@ -286,6 +306,10 @@ func walkMarkdownAST(doc ast.Node, source []byte) (title, body string) {
 						walk(c)
 					}
 					first = false
+					continue
+				}
+				if isInlineBlock(c) {
+					emitLine(contIndent + nodeText(c, source))
 					continue
 				}
 				walk(c)

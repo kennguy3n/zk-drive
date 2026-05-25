@@ -313,6 +313,55 @@ func TestWalkMarkdownAST_EmitBlankIsConstantTime(t *testing.T) {
 	}
 }
 
+// TestWalkMarkdownAST_LooseListContinuationIndented pins the fix for
+// the continuation-paragraph indent regression: in a loose list, a
+// second paragraph belonging to the same item must render under the
+// bullet's text column, not flush-left. Previously the first child
+// of a ListItem got `indent + marker`, but the second child walked
+// to the generic *ast.Paragraph case which emitted with no prefix,
+// causing it to render as a sibling of the list rather than a
+// continuation of the item.
+//
+// The source uses CommonMark's loose-list syntax: blank line between
+// the two paragraphs of the same list item, with the second paragraph
+// indented by ≥2 spaces in the source so goldmark recognises it as a
+// child of the list item rather than the start of a new sibling
+// block.
+func TestWalkMarkdownAST_LooseListContinuationIndented(t *testing.T) {
+	t.Parallel()
+	src := []byte("- First paragraph of the list item.\n\n  Second paragraph of the SAME list item.\n\n- Next list item.\n")
+	_, body := walkMarkdownASTFrom(src)
+	// The continuation paragraph must NOT appear flush-left
+	// (which would mean it was rendered as a top-level paragraph
+	// outside the list). It must carry the 2-space continuation
+	// indent that aligns it under the marker text column.
+	if !strings.Contains(body, "  Second paragraph of the SAME list item.") {
+		t.Errorf("continuation paragraph should be indented under bullet, got: %q", body)
+	}
+	// And it must NOT appear at the start of a line with no
+	// indent (the old buggy output).
+	if strings.Contains(body, "\nSecond paragraph of the SAME list item.") {
+		t.Errorf("continuation paragraph must not be flush-left, got: %q", body)
+	}
+}
+
+// TestWalkMarkdownAST_OrderedLooseListContinuationAlignsUnderMarker
+// covers the ordered-list variant — the continuation indent must
+// match the WIDTH of the marker (`1. ` = 3 cells, `10. ` = 4 cells)
+// rather than a fixed 2-space indent. We verify a single-digit case;
+// the multi-digit case is exercised by the indent computation itself
+// (`strings.Repeat(" ", len(marker))`).
+func TestWalkMarkdownAST_OrderedLooseListContinuationAlignsUnderMarker(t *testing.T) {
+	t.Parallel()
+	src := []byte("1. First paragraph.\n\n   Continuation under item 1.\n\n2. Second item.\n")
+	_, body := walkMarkdownASTFrom(src)
+	// Marker `1. ` is 3 cells wide, so continuation must be
+	// prefixed with 3 spaces.
+	if !strings.Contains(body, "   Continuation under item 1.") {
+		t.Errorf("continuation paragraph should align under ordered marker (3-space indent), got: %q", body)
+	}
+}
+
 // walkMarkdownASTFrom is a test helper that runs the AST walker
 // against a fresh goldmark parser instance — mirrors the production
 // pipeline in renderMarkdown but returns the (title, body) tuple
