@@ -78,7 +78,7 @@ type RecordInput struct {
 // violation that has to be parsed out of pgconn.PgError.
 func (in *RecordInput) validate() error {
 	switch in.Kind {
-	case KindFile, KindFolder, KindPermission:
+	case KindFile, KindFolder, KindPermission, KindDocument:
 	default:
 		return fmt.Errorf("changefeed: invalid kind %q", in.Kind)
 	}
