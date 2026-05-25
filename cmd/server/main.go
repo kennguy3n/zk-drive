@@ -37,6 +37,7 @@ import (
 	"github.com/kennguy3n/zk-drive/internal/config"
 	cryptopkg "github.com/kennguy3n/zk-drive/internal/crypto"
 	"github.com/kennguy3n/zk-drive/internal/database"
+	"github.com/kennguy3n/zk-drive/internal/document"
 	"github.com/kennguy3n/zk-drive/internal/email"
 	"github.com/kennguy3n/zk-drive/internal/fabric"
 	"github.com/kennguy3n/zk-drive/internal/file"
@@ -181,6 +182,9 @@ func run() error {
 
 	fileRepo := file.NewPostgresRepository(pool)
 	fileSvc := file.NewService(fileRepo)
+
+	documentRepo := document.NewPostgresRepository(pool)
+	documentSvc := document.NewService(documentRepo, folderSvc)
 
 	var storageClient *storage.Client
 	if cfg.S3Endpoint != "" {
@@ -512,6 +516,7 @@ func run() error {
 	}
 	driveHandler := drive.NewHandler(pool, wsSvc, folderSvc, fileSvc, userSvc, storageClient, permissionSvc, activitySvc).
 		WithStorageFactory(storageFactory).
+		WithDocuments(documentSvc).
 		WithSharing(sharingSvc).
 		WithSearch(searchSvc).
 		WithClientRooms(clientRoomSvc).
@@ -812,6 +817,16 @@ func run() error {
 			r.Put("/folders/{id}", driveHandler.RenameFolder)
 			r.Delete("/folders/{id}", driveHandler.DeleteFolder)
 			r.Post("/folders/{id}/move", driveHandler.MoveFolder)
+
+			r.Get("/folders/{id}/documents", driveHandler.ListFolderDocuments)
+			r.Post("/documents", driveHandler.CreateDocument)
+			r.Get("/documents/{id}", driveHandler.GetDocument)
+			r.Put("/documents/{id}", driveHandler.RenameDocument)
+			r.Patch("/documents/{id}/collab-mode", driveHandler.SetDocumentCollabMode)
+			r.Delete("/documents/{id}", driveHandler.DeleteDocument)
+			r.Get("/documents/{id}/snapshot", driveHandler.GetDocumentSnapshot)
+			r.Get("/documents/{id}/deltas", driveHandler.ListDocumentDeltas)
+			r.Post("/documents/{id}/deltas", driveHandler.AppendDocumentDelta)
 
 			r.Post("/files", driveHandler.CreateFile)
 			r.Post("/files/upload-url", driveHandler.UploadURL)

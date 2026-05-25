@@ -290,6 +290,10 @@ func TestChangefeedKindOpFor(t *testing.T) {
 		{activity.ActionFolderRename, changefeed.KindFolder, changefeed.OpRename, true},
 		{activity.ActionFolderMove, changefeed.KindFolder, changefeed.OpMove, true},
 		{activity.ActionFolderDelete, changefeed.KindFolder, changefeed.OpDelete, true},
+		{activity.ActionDocumentCreate, changefeed.KindDocument, changefeed.OpCreate, true},
+		{activity.ActionDocumentRename, changefeed.KindDocument, changefeed.OpRename, true},
+		{activity.ActionDocumentDelete, changefeed.KindDocument, changefeed.OpDelete, true},
+		{activity.ActionDocumentChangeCollabMode, changefeed.KindDocument, changefeed.OpUpdate, true},
 		{activity.ActionPermGrant, changefeed.KindPermission, changefeed.OpCreate, true},
 		{activity.ActionPermRevoke, changefeed.KindPermission, changefeed.OpDelete, true},
 		// Read events explicitly absent:

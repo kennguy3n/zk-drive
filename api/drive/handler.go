@@ -25,6 +25,7 @@ import (
 	"github.com/kennguy3n/zk-drive/internal/audit"
 	"github.com/kennguy3n/zk-drive/internal/billing"
 	"github.com/kennguy3n/zk-drive/internal/changefeed"
+	"github.com/kennguy3n/zk-drive/internal/document"
 	"github.com/kennguy3n/zk-drive/internal/email"
 	"github.com/kennguy3n/zk-drive/internal/file"
 	"github.com/kennguy3n/zk-drive/internal/folder"
@@ -51,6 +52,7 @@ type Handler struct {
 	workspaces     *workspace.Service
 	folders        *folder.Service
 	files          *file.Service
+	documents      *document.Service
 	users          *user.Service
 	storage        *storage.Client
 	storageFactory *storage.ClientFactory
@@ -130,6 +132,17 @@ func (h *Handler) WithWebhooks(p WebhookEventPublisher) *Handler {
 		return h
 	}
 	h.webhooks = p
+	return h
+}
+
+// WithDocuments wires the collaborative document service. When non-
+// nil the /api/v1/documents endpoints accept create / get / delta
+// requests; when nil the endpoints respond 503 Service Unavailable
+// so the metadata plane keeps working in deployments without the
+// collab feature provisioned. Mirrors the WithSharing / WithBilling
+// nil-safe patterns elsewhere in this file.
+func (h *Handler) WithDocuments(s *document.Service) *Handler {
+	h.documents = s
 	return h
 }
 
@@ -548,6 +561,14 @@ func changefeedKindOpFor(action, resourceType string) (string, string, bool) {
 		return changefeed.KindFolder, changefeed.OpMove, true
 	case activity.ActionFolderDelete:
 		return changefeed.KindFolder, changefeed.OpDelete, true
+	case activity.ActionDocumentCreate:
+		return changefeed.KindDocument, changefeed.OpCreate, true
+	case activity.ActionDocumentRename:
+		return changefeed.KindDocument, changefeed.OpRename, true
+	case activity.ActionDocumentDelete:
+		return changefeed.KindDocument, changefeed.OpDelete, true
+	case activity.ActionDocumentChangeCollabMode:
+		return changefeed.KindDocument, changefeed.OpUpdate, true
 	case activity.ActionPermGrant:
 		return changefeed.KindPermission, changefeed.OpCreate, true
 	case activity.ActionPermRevoke:

@@ -220,7 +220,17 @@ WHERE workspace_id = $1 AND id = $2 AND deleted_at IS NULL`
 }
 
 // SoftDeleteSubtree marks the given folder and every descendant folder (plus
-// files contained anywhere in the subtree) as soft-deleted.
+// files and collab documents contained anywhere in the subtree) as
+// soft-deleted. The three cascades (folders, files, documents) run inside
+// one transaction so an observer never sees a folder marked deleted while
+// its contents remain visible.
+//
+// Callers that need to emit per-resource activity / changefeed events for
+// the cascaded files and documents MUST snapshot those resources BEFORE
+// invoking this function (see api/drive: snapshotFilesForFolderSubtreeDelete
+// and snapshotDocumentsForFolderSubtreeDelete) — once the cascade commits,
+// the repo-level list queries filter out deleted_at IS NOT NULL rows, so the
+// emit phase would have nothing to walk.
 func (r *PostgresRepository) SoftDeleteSubtree(ctx context.Context, workspaceID, folderID uuid.UUID) error {
 	tx, err := r.pool.Begin(ctx)
 	if err != nil {
@@ -258,6 +268,27 @@ UPDATE files SET deleted_at = now(), updated_at = now()
 WHERE workspace_id = $1 AND folder_id IN (SELECT id FROM subtree) AND deleted_at IS NULL`
 	if _, err := tx.Exec(ctx, fileQ, workspaceID, folderID); err != nil {
 		return fmt.Errorf("delete files in subtree: %w", err)
+	}
+
+	// Cascade to collab documents in the subtree. Without this,
+	// documents are orphaned: the parent folder's deleted_at filter
+	// hides them from the API but the rows persist forever, and no
+	// activity / changefeed event ever fires — desktop sync clients
+	// keep stale state until they try to open a doc and 404. Deltas
+	// are intentionally retained so admin restore can rebuild Y.Doc
+	// state; a future retention job hard-deletes deltas N days after
+	// the document was soft-deleted.
+	const documentQ = `
+WITH RECURSIVE subtree AS (
+    SELECT id FROM folders WHERE workspace_id = $1 AND id = $2
+    UNION ALL
+    SELECT f.id FROM folders f JOIN subtree s ON f.parent_folder_id = s.id
+        WHERE f.workspace_id = $1
+)
+UPDATE documents SET deleted_at = now(), updated_at = now()
+WHERE workspace_id = $1 AND folder_id IN (SELECT id FROM subtree) AND deleted_at IS NULL`
+	if _, err := tx.Exec(ctx, documentQ, workspaceID, folderID); err != nil {
+		return fmt.Errorf("delete documents in subtree: %w", err)
 	}
 
 	return tx.Commit(ctx)

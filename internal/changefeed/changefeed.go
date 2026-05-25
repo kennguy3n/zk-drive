@@ -39,6 +39,11 @@ const (
 	KindFile       = "file"
 	KindFolder     = "folder"
 	KindPermission = "permission"
+	// KindDocument names collab editor (P2) document mutations.
+	// The change_log.kind CHECK accepts this value from migration
+	// 031 onward — older deployments that haven't yet applied 031
+	// will reject document mutations at the database layer.
+	KindDocument = "document"
 )
 
 // Op names the state transition. delete is final (no resurrection

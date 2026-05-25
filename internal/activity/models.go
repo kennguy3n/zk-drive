@@ -32,8 +32,16 @@ const (
 	ActionFolderRename     = "folder.rename"
 	ActionFolderMove       = "folder.move"
 	ActionFolderDelete     = "folder.delete"
-	ActionPermGrant        = "permission.grant"
-	ActionPermRevoke       = "permission.revoke"
+	// Collaborative document actions (P2). Delta-level appends are
+	// intentionally NOT logged here — one row per keystroke would
+	// flood the activity_log. The WebSocket provider records
+	// presence + session-level "X started editing" events instead.
+	ActionDocumentCreate           = "document.create"
+	ActionDocumentRename           = "document.rename"
+	ActionDocumentDelete           = "document.delete"
+	ActionDocumentChangeCollabMode = "document.change_collab_mode"
+	ActionPermGrant                = "permission.grant"
+	ActionPermRevoke               = "permission.revoke"
 )
 
 // AllActions enumerates every action constant defined above. Components
@@ -60,6 +68,10 @@ var AllActions = []string{
 	ActionFolderRename,
 	ActionFolderMove,
 	ActionFolderDelete,
+	ActionDocumentCreate,
+	ActionDocumentRename,
+	ActionDocumentDelete,
+	ActionDocumentChangeCollabMode,
 	ActionPermGrant,
 	ActionPermRevoke,
 }

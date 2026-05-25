@@ -174,20 +174,30 @@ func (h *Handler) DeleteFolder(w http.ResponseWriter, r *http.Request) {
 		writeServiceError(w, err)
 		return
 	}
-	// Snapshot every file in the subtree BEFORE the recursive
-	// folder soft-delete cascades to files.deleted_at — after that
-	// point the snapshot rows are no longer visible to the file
-	// repo's deleted_at IS NULL filter, so the emit-helper would
-	// silently miss them. Symmetric with the single-file DeleteFile
-	// path so subscribers see file.deleted events regardless of
-	// whether a file was removed individually or via folder cascade.
-	snaps := h.snapshotFilesForFolderSubtreeDelete(r.Context(), workspaceID, id)
+	// Snapshot every file AND collab document in the subtree BEFORE
+	// the recursive folder soft-delete cascades to their deleted_at
+	// columns. Once SoftDeleteSubtree commits, the repo-level list
+	// queries filter out deleted_at IS NOT NULL rows so the emit
+	// phase would silently miss them. Symmetric with the single-
+	// resource Delete paths so subscribers (webhooks, changefeed,
+	// activity log) see deleted events regardless of whether the
+	// resource was removed individually or via folder cascade.
+	fileSnaps := h.snapshotFilesForFolderSubtreeDelete(r.Context(), workspaceID, id)
+	docSnaps := h.snapshotDocumentsForFolderSubtreeDelete(r.Context(), workspaceID, id)
 	if err := h.folders.Delete(r.Context(), workspaceID, id); err != nil {
 		writeServiceError(w, err)
 		return
 	}
 	h.logActivity(r.Context(), activity.ActionFolderDelete, permission.ResourceFolder, id, nil)
-	h.emitWebhookFileDeletedBatch(r.Context(), workspaceID, snaps)
+	// Emit one ActionDocumentDelete per cascaded document so the
+	// changefeed and desktop sync clients see each removal — a
+	// single folder.delete event isn't enough because the document
+	// kind has its own changefeed stream that downstream consumers
+	// filter on. Same TOCTOU-tolerance contract as the file path
+	// (snapshot → delete → emit, best-effort relative to the
+	// durable folder soft-delete which already committed).
+	h.emitFolderCascadeDocumentDeletes(r.Context(), docSnaps)
+	h.emitWebhookFileDeletedBatch(r.Context(), workspaceID, fileSnaps)
 	w.WriteHeader(http.StatusNoContent)
 }
 
