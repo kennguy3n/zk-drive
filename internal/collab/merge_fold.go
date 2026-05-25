@@ -48,7 +48,7 @@ import (
 // at fold time would deliver a bundle to a client expecting a
 // compact update.
 func YjsMergeFold(rt *YjsRuntime) document.FoldFunc {
-	return func(currentState, _currentStateVector []byte, tail []*document.Delta) ([]byte, []byte, int64, error) {
+	return func(ctx context.Context, currentState, _currentStateVector []byte, tail []*document.Delta) ([]byte, []byte, int64, error) {
 		if len(tail) == 0 {
 			return nil, nil, 0, errors.New("collab: YjsMergeFold called with empty tail")
 		}
@@ -71,24 +71,14 @@ func YjsMergeFold(rt *YjsRuntime) document.FoldFunc {
 			updates = append(updates, d.Payload)
 		}
 
-		// Use a background context with the same lifetime as
-		// the underlying fold caller; the hub passes its own
-		// ctx via the document.Service.Compact path so we
-		// inherit cancellation when the server shuts down.
-		// We re-derive context.Background here only because
-		// the FoldFunc signature doesn't currently carry ctx
-		// — the runtime's acquire/call path tolerates
-		// background ctx (no per-call deadline propagation).
-		// A future signature change to add ctx would let us
-		// honor the caller's deadline; until then a long
-		// fold cannot be interrupted mid-operation, which is
-		// acceptable because the wasm-merge is bounded by
-		// MaxSnapshotTailDeltas (640) deltas of at most
-		// MaxDeltaPayloadBytes (1 MiB) each → worst case
-		// ~640 MiB throughput, well under one second on
-		// modern hardware.
-		ctx := context.Background()
-
+		// ctx is the caller's compaction context — for the
+		// production wiring this originates in the hub
+		// compaction scheduler, which derives it from the
+		// server lifecycle context. Server shutdown cancels
+		// every in-flight fold via this ctx, so the
+		// wasm-acquire spin loop and any pending wasm call
+		// abort within milliseconds instead of blocking
+		// graceful shutdown.
 		merged, err := rt.MergeUpdates(ctx, updates)
 		if err != nil {
 			return nil, nil, 0, err

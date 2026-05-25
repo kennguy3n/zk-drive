@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"time"
 
 	"github.com/tetratelabs/wazero"
 	"github.com/tetratelabs/wazero/api"
@@ -47,11 +48,46 @@ type YjsRuntime struct {
 	compiled     wazero.CompiledModule
 	maxInstances int
 
-	mu        sync.Mutex
-	idle      []*yjsInstance
-	live      int
+	mu sync.Mutex
+	// all tracks every live instance — idle and in-use — so
+	// Close can drain BOTH cohorts. Without this, instances that
+	// happen to be checked out during a graceful shutdown leak
+	// their linear memory until the wazero runtime itself is
+	// closed (which only happens after Close returns, by which
+	// point the leak has already been observed by metrics).
+	all []*yjsInstance
+	// idle is a LIFO stack of returned instances available for
+	// the next acquire. Every entry in idle is also present in
+	// all.
+	idle []*yjsInstance
+	// live counts instances that have been instantiated and not
+	// yet closed. Used to gate further instantiation against
+	// maxInstances. Equals len(all) outside of acquire's
+	// instantiate window.
+	live int
+	// closed flips to true once Close starts. acquire refuses
+	// to hand out instances after closed, release closes the
+	// instance instead of re-pooling it, and Close drains every
+	// remaining entry in `all`.
+	closed    bool
 	closeOnce sync.Once
+	// acquireBackoff is the sleep applied between acquire
+	// retries when the pool is at capacity. Constant in
+	// production; tests override to zero to keep latency
+	// predictable when forcing serial execution.
+	acquireBackoff time.Duration
 }
+
+// defaultAcquireBackoff is the inter-retry sleep duration
+// applied by acquire() when the pool is exhausted. The previous
+// implementation used `default:` in the select which spun the
+// retry loop at full CPU until an instance was released; a 1ms
+// sleep yields the scheduler so the goroutine waiting for an
+// instance contributes ~0% CPU instead of saturating a core.
+// 1ms is small enough that pool-release latency is not
+// noticeably amplified (release-then-reacquire roundtrip in
+// realistic workloads is microseconds).
+const defaultAcquireBackoff = time.Millisecond
 
 // yjsInstance wraps a single instantiated wasm module along with
 // the function handles we call repeatedly. Cached so each
@@ -119,9 +155,10 @@ func NewYjsRuntime(ctx context.Context) (*YjsRuntime, error) {
 		return nil, fmt.Errorf("collab: compile ymerge.wasm: %w", err)
 	}
 	return &YjsRuntime{
-		rt:           rt,
-		compiled:     compiled,
-		maxInstances: DefaultYjsRuntimeMaxInstances,
+		rt:             rt,
+		compiled:       compiled,
+		maxInstances:   DefaultYjsRuntimeMaxInstances,
+		acquireBackoff: defaultAcquireBackoff,
 	}, nil
 }
 
@@ -142,11 +179,28 @@ func (r *YjsRuntime) WithMaxInstances(n int) *YjsRuntime {
 // Close releases the compiled module and every cached instance.
 // Idempotent — safe to call multiple times from concurrent
 // shutdown paths.
+//
+// Both idle and in-use instances are drained: idle ones are
+// closed immediately, and in-use ones are tracked via r.all so a
+// concurrent caller's release path sees closed==true and closes
+// the instance instead of re-pooling it. The acquire loop also
+// returns ErrYjsRuntimeClosed once closed flips, so any goroutine
+// blocked waiting for an instance unblocks cleanly during
+// shutdown.
+//
+// The underlying wazero runtime is closed last so the in-flight
+// callers complete their per-instance close before the shared
+// JIT cache is torn down. Order matters: closing the runtime
+// while a callWithInput is mid-flight would yank the host
+// memory out from under it and produce a misleading panic on
+// shutdown.
 func (r *YjsRuntime) Close(ctx context.Context) error {
 	var err error
 	r.closeOnce.Do(func() {
 		r.mu.Lock()
-		instances := r.idle
+		r.closed = true
+		instances := r.all
+		r.all = nil
 		r.idle = nil
 		r.mu.Unlock()
 		for _, inst := range instances {
@@ -161,17 +215,32 @@ func (r *YjsRuntime) Close(ctx context.Context) error {
 	return err
 }
 
+// ErrYjsRuntimeClosed is returned by acquire (and the public
+// MergeUpdates / EncodeStateVector / ApplyAndExtractText /
+// MakeTextUpdateForTest entry points) once Close has begun.
+// Callers should treat this as a permanent failure for the
+// process lifetime.
+var ErrYjsRuntimeClosed = errors.New("collab: YjsRuntime is closed")
+
 // acquire pulls an instance from the idle pool or creates a new
-// one (up to maxInstances). When the pool is exhausted the call
-// BLOCKS the caller, instantiating a fresh module — instantiation
-// is cheap (~1 ms) but allocates a full linear memory, so the
-// runtime caps concurrency to maxInstances by serialising once
-// the cap is reached.
+// one (up to maxInstances). When the pool is at capacity the
+// call sleeps for acquireBackoff and retries until either an
+// instance becomes available, ctx is cancelled, or Close starts.
+//
+// The retry sleep is implemented via a timer rather than a sync.Cond:
+// instance churn is rare in steady state (compactions trigger at
+// the document.CompactionThreshold cadence) so the simpler
+// timer-based fallback avoids the complexity of a condvar without
+// the CPU-burn pathology of a `default:` spin.
 //
 // Acquire never returns a nil instance unless err is non-nil.
 func (r *YjsRuntime) acquire(ctx context.Context) (*yjsInstance, error) {
 	for {
 		r.mu.Lock()
+		if r.closed {
+			r.mu.Unlock()
+			return nil, ErrYjsRuntimeClosed
+		}
 		if len(r.idle) > 0 {
 			inst := r.idle[len(r.idle)-1]
 			r.idle = r.idle[:len(r.idle)-1]
@@ -188,29 +257,63 @@ func (r *YjsRuntime) acquire(ctx context.Context) (*yjsInstance, error) {
 				r.mu.Unlock()
 				return nil, err
 			}
+			r.mu.Lock()
+			if r.closed {
+				// Close ran while we were instantiating;
+				// close this instance directly so it is
+				// not leaked, and surface the closed error
+				// to the caller.
+				r.live--
+				r.mu.Unlock()
+				_ = inst.mod.Close(ctx)
+				return nil, ErrYjsRuntimeClosed
+			}
+			r.all = append(r.all, inst)
+			r.mu.Unlock()
 			return inst, nil
 		}
+		backoff := r.acquireBackoff
 		r.mu.Unlock()
-		// Pool exhausted; sleep for a short, ctx-cancellable
-		// interval and retry. The "sleep and retry" loop
-		// avoids needing a condvar — wasm-instance churn is
-		// rare in steady state because compactions are
-		// triggered at a 32-delta cadence per document.
+		// Pool exhausted; sleep for backoff and retry. A
+		// non-zero backoff (the production default is 1ms)
+		// yields the scheduler so the goroutine waiting for
+		// an instance contributes ~0% CPU instead of
+		// busy-waiting on a core.
+		if backoff <= 0 {
+			// Test path: caller opted into a zero-sleep
+			// retry loop. Honour ctx cancellation between
+			// iterations even though we never block.
+			select {
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			default:
+			}
+			continue
+		}
+		timer := time.NewTimer(backoff)
 		select {
 		case <-ctx.Done():
+			timer.Stop()
 			return nil, ctx.Err()
-		default:
-			// Tight loop is acceptable here: in normal
-			// operation the pool is never starved (live
-			// never reaches maxInstances under realistic
-			// load), and an exhausted pool is a transient
-			// state that resolves within milliseconds.
+		case <-timer.C:
 		}
 	}
 }
 
 func (r *YjsRuntime) release(inst *yjsInstance) {
 	r.mu.Lock()
+	if r.closed {
+		// Close ran while this instance was checked out; do
+		// not re-pool it. We use context.Background here
+		// because the release path is best-effort cleanup
+		// invoked from a `defer` whose ctx has typically
+		// been cancelled already; the wasm module's Close
+		// is a pure-Go memory release that does not need a
+		// live ctx.
+		r.mu.Unlock()
+		_ = inst.mod.Close(context.Background())
+		return
+	}
 	r.idle = append(r.idle, inst)
 	r.mu.Unlock()
 }

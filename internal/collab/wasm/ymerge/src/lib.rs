@@ -100,14 +100,16 @@ fn return_bytes(bytes: Vec<u8>) -> u64 {
     if bytes.is_empty() {
         // An empty result is legal — e.g. a no-op merge of one
         // update returns the update unchanged, but a merge of
-        // zero updates returns an empty state. We still allocate
-        // a 1-byte placeholder so the Go host's "zero ptr means
-        // error" convention isn't ambiguous.
-        let p = alloc(1);
-        unsafe {
-            *p = 0;
-        }
-        return pack_result(p, 0);
+        // zero updates returns an empty state. We return the
+        // same non-null sentinel `alloc(0)` would have produced
+        // (and which the Go host already special-cases via
+        // writeToWasm for zero-byte inputs) instead of taking a
+        // real 1-byte allocation. This avoids a per-call leak
+        // that the previous implementation produced: the host's
+        // deferred `dealloc(ptr, 0)` returns early because size
+        // is zero, never reclaiming the 1-byte placeholder the
+        // wasm side had handed out.
+        return pack_result(1 as *const u8, 0);
     }
     let len = bytes.len();
     let mut boxed = bytes.into_boxed_slice();

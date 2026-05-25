@@ -2,6 +2,7 @@ package collab
 
 import (
 	"bytes"
+	"context"
 	"encoding/binary"
 	"testing"
 
@@ -11,7 +12,7 @@ import (
 )
 
 func TestOpaqueConcatFold_EmptyTailReturnsError(t *testing.T) {
-	if _, _, _, err := OpaqueConcatFold(nil, nil, nil); err == nil {
+	if _, _, _, err := OpaqueConcatFold(context.Background(), nil, nil, nil); err == nil {
 		t.Fatal("expected error for empty tail")
 	}
 }
@@ -23,7 +24,7 @@ func TestOpaqueConcatFold_PrefixesStateAndDeltas(t *testing.T) {
 		{DocumentID: uuid.New(), Seq: 2, Payload: []byte("U2")},
 		{DocumentID: uuid.New(), Seq: 5, Payload: []byte("LAST-DELTA")},
 	}
-	newState, newSV, upToSeq, err := OpaqueConcatFold(state, []byte("vector"), tail)
+	newState, newSV, upToSeq, err := OpaqueConcatFold(context.Background(), state, []byte("vector"), tail)
 	if err != nil {
 		t.Fatalf("fold returned error: %v", err)
 	}
@@ -57,7 +58,7 @@ func TestOpaqueConcatFold_UpToSeqIsLastTailSeq(t *testing.T) {
 		{Seq: 101, Payload: []byte("b")},
 		{Seq: 102, Payload: []byte("c")},
 	}
-	_, _, upToSeq, err := OpaqueConcatFold(nil, nil, tail)
+	_, _, upToSeq, err := OpaqueConcatFold(context.Background(), nil, nil, tail)
 	if err != nil {
 		t.Fatalf("fold returned error: %v", err)
 	}
@@ -88,7 +89,7 @@ func TestFoldFor_NilRuntimeFallsBackToOpaqueConcat(t *testing.T) {
 	// Sanity check: invoke and assert the output is a length-
 	// prefix bundle (OpaqueConcatFold's wire format).
 	tail := []*document.Delta{{Seq: 1, Payload: []byte("x")}}
-	out, _, _, err := f(nil, nil, tail)
+	out, _, _, err := f(context.Background(), nil, nil, tail)
 	if err != nil {
 		t.Fatalf("fold call failed: %v", err)
 	}

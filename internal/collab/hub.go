@@ -612,7 +612,7 @@ func (h *DocumentHub) handleAwareness(c *DocumentClient, f Frame) error {
 
 // BroadcastFromRelay fans `payload` to every client in `documentID`'s
 // room. It is called by the Redis collab relay's subscribe loop when
-// another replica publishes a SyncUpdate or Awareness frame for a
+// ANOTHER replica publishes a SyncUpdate or Awareness frame for a
 // document any of our local clients is editing.
 //
 // Crucially, this DOES NOT re-publish to Redis — the relay caller is
@@ -622,12 +622,18 @@ func (h *DocumentHub) handleAwareness(c *DocumentClient, f Frame) error {
 // publish-to-Redis side of the wiring (via the relay's Publish
 // method invoked from the hub).
 //
-// All clients in the room receive the frame, including the original
-// author on the other replica. This matches the local-broadcast
-// behaviour seen from the editing replica's perspective: the local
-// broadcastExcept skips the originating client; the Redis relay
-// path on the other replicas has no "originating client" to skip,
-// so every local member receives the frame.
+// The relay's Subscribe loop drops the publishing replica's own
+// echo via the per-relay originID prefix, so this method is only
+// ever invoked for frames produced by a different replica. The
+// local handleSyncUpdate path already fanned the frame to local
+// peers (via broadcastExcept which skips the originating client);
+// this method's job is to mirror that fan-out for clients
+// connected to other replicas, NOT to round-trip frames back to
+// the originating replica.
+//
+// All local clients in the room receive the frame. There is no
+// "originating client" to skip because the originating client is
+// connected to the publishing replica, not this one.
 //
 // Slow consumers (full outbound buffer) are unregistered to match
 // the local broadcastExcept policy. The room lock is held for the

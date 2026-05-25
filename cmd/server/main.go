@@ -517,8 +517,17 @@ func run() error {
 	// constructor returns nil and the hub treats that as single-
 	// replica mode (PublishFrame is a no-op).
 	collabRelay := collab.NewRedisCollabRelay(redisClient)
-	collabHub.WithRelay(collabRelay)
+	// Guard the WithRelay call with an explicit nil check: a
+	// nil *RedisCollabRelay wrapped in the CollabRelayPublisher
+	// interface produces a non-nil interface value whose
+	// underlying pointer is nil. Without this guard the hub
+	// would observe `h.relay != nil` and call PublishFrame on
+	// every sync update, only for PublishFrame to no-op on the
+	// nil receiver path. Skipping WithRelay entirely keeps the
+	// hub's relay==nil fast path cleanly engaged in single-
+	// replica mode.
 	if collabRelay != nil {
+		collabHub.WithRelay(collabRelay)
 		bgGoroutines.Add(1)
 		go func() {
 			defer bgGoroutines.Done()

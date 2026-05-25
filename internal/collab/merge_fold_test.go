@@ -20,7 +20,7 @@ func TestYjsMergeFold_EmptyTailReturnsError(t *testing.T) {
 	t.Parallel()
 	rt := getYjsTestRuntime(t)
 	fold := YjsMergeFold(rt)
-	if _, _, _, err := fold(nil, nil, nil); err == nil {
+	if _, _, _, err := fold(context.Background(), nil, nil, nil); err == nil {
 		t.Fatal("expected error for empty tail")
 	}
 }
@@ -34,7 +34,7 @@ func TestYjsMergeFold_NilRuntimeReturnsError(t *testing.T) {
 	t.Parallel()
 	fold := YjsMergeFold(nil)
 	tail := []*document.Delta{{Seq: 1, Payload: []byte{0x01}}}
-	_, _, _, err := fold(nil, nil, tail)
+	_, _, _, err := fold(context.Background(), nil, nil, tail)
 	if err == nil {
 		t.Fatal("expected error for nil runtime")
 	}
@@ -61,7 +61,7 @@ func TestYjsMergeFold_ProducesValidSnapshot(t *testing.T) {
 	}
 
 	fold := YjsMergeFold(rt)
-	newState, newSV, upToSeq, err := fold(currentState, nil, tail)
+	newState, newSV, upToSeq, err := fold(context.Background(), currentState, nil, tail)
 	if err != nil {
 		t.Fatalf("fold: %v", err)
 	}
@@ -106,7 +106,7 @@ func TestYjsMergeFold_NoCurrentStateAcceptsTailOnly(t *testing.T) {
 		{Seq: 1, Payload: deltaA},
 	}
 	fold := YjsMergeFold(rt)
-	newState, _, _, err := fold(nil, nil, tail)
+	newState, _, _, err := fold(context.Background(), nil, nil, tail)
 	if err != nil {
 		t.Fatalf("fold with empty currentState: %v", err)
 	}
@@ -171,7 +171,7 @@ func TestYjsMergeFold_FoldForRoutesToMerge(t *testing.T) {
 
 	deltaA := makeUpdate(t, rt, 1, "hello")
 	tail := []*document.Delta{{Seq: 1, Payload: deltaA}}
-	out, _, _, err := fold(nil, nil, tail)
+	out, _, _, err := fold(context.Background(), nil, nil, tail)
 	if err != nil {
 		t.Fatalf("fold call: %v", err)
 	}

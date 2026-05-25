@@ -165,6 +165,56 @@ func TestRedisRelay_MultipleReplicasFanOut(t *testing.T) {
 	}
 }
 
+// TestRedisRelay_PublisherDoesNotEchoToItself pins the
+// origin-tag drop behaviour: a relay that subscribes to
+// `collab:*` while also publishing must NOT deliver its own
+// frames back to its consumer. Without the originID prefix the
+// publisher's Subscribe loop would observe every locally-
+// published frame coming back via pub/sub fan-out and re-deliver
+// it to BroadcastFromRelay, producing duplicate frame delivery
+// to every client in the originating room.
+func TestRedisRelay_PublisherDoesNotEchoToItself(t *testing.T) {
+	t.Parallel()
+	rdb := newTestRedis(t)
+
+	// A second relay (the "peer") subscribes so we can verify
+	// the publish is actually flowing through Redis. If the
+	// peer consumer never sees the frame, the test would be
+	// trivially green for the wrong reason.
+	publisher := NewRedisCollabRelay(rdb)
+	peer := NewRedisCollabRelay(rdb)
+
+	publisherCon := &stubConsumer{}
+	peerCon := &stubConsumer{}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() { _ = publisher.Subscribe(ctx, publisherCon) }()
+	go func() { _ = peer.Subscribe(ctx, peerCon) }()
+
+	docID := uuid.New()
+	payload := []byte{0x00, 0xCA, 0xFE}
+	waitUntil(t, 2*time.Second, func() bool {
+		if err := publisher.PublishFrame(context.Background(), docID, payload); err != nil {
+			t.Fatalf("publish: %v", err)
+		}
+		return peerCon.count.Load() > 0
+	})
+
+	if publisherCon.count.Load() != 0 {
+		got := publisherCon.snapshot()
+		t.Errorf("publisher's own Subscribe received %d echoed frame(s): %x", len(got), got[0].payload)
+	}
+
+	peerFrames := peerCon.snapshot()
+	if len(peerFrames) == 0 {
+		t.Fatal("peer received no frames — Redis pub/sub did not deliver")
+	}
+	if string(peerFrames[0].payload) != string(payload) {
+		t.Errorf("peer payload mismatch (origin tag not stripped?): got %x want %x", peerFrames[0].payload, payload)
+	}
+}
+
 // TestRedisRelay_PublishWithNilReceiverIsNoop pins the contract
 // that single-replica fallback is safe: a hub configured with a
 // nil relay must accept frame publishes without erroring or

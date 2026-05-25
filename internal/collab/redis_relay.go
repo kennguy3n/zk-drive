@@ -12,6 +12,17 @@ import (
 	"github.com/kennguy3n/zk-drive/internal/logging"
 )
 
+// originIDByteLen is the size of the per-relay origin tag
+// prepended to every published frame. It matches uuid.UUID's wire
+// size and is used by the subscribe loop to recognise — and drop
+// — frames the same replica just published. Without this tag the
+// publishing replica would receive its own broadcasts back via
+// Redis pub/sub fan-out (a publisher subscribed to the same
+// pattern always sees its own messages) and re-deliver them to
+// the originating room, causing duplicate frame delivery to every
+// local client and visible UI flicker on awareness updates.
+const originIDByteLen = 16
+
 // RedisCollabRelay multiplexes per-document collab frames across
 // replicas via Redis pub/sub. The wiring mirrors
 // notification.RedisPublisher and changefeed.RedisPublisher:
@@ -40,6 +51,12 @@ import (
 // end), the overhead is rounding error.
 type RedisCollabRelay struct {
 	rdb *redis.Client
+	// originID is a per-process random tag prepended to every
+	// publish and used by Subscribe to drop the publisher's own
+	// echoes. Stored as the raw 16-byte representation so the
+	// per-publish overhead is one append-to-slice, not a UUID
+	// formatting round-trip.
+	originID [originIDByteLen]byte
 }
 
 // NewRedisCollabRelay returns a relay backed by rdb. The relay
@@ -47,13 +64,37 @@ type RedisCollabRelay struct {
 //
 // A nil rdb returns a nil relay, which the hub treats as
 // "single-replica mode" — every CollabRelayPublisher call site
-// nil-checks first. This makes the wiring code in
-// cmd/server/main.go a clean `hub.WithRelay(maybeNilRelay)`.
+// nil-checks first. cmd/server/main.go nil-checks this before
+// calling DocumentHub.WithRelay (typed-nil interface guard).
+//
+// Each relay instance receives a fresh random originID. Two relay
+// objects in the same process — e.g. one created by the
+// production wiring and one created by a parallel integration
+// test in the same binary — therefore see each other's frames as
+// "from elsewhere" and deliver them normally, which is the
+// desired semantics: each relay represents a logical replica.
 func NewRedisCollabRelay(rdb *redis.Client) *RedisCollabRelay {
 	if rdb == nil {
 		return nil
 	}
-	return &RedisCollabRelay{rdb: rdb}
+	r := &RedisCollabRelay{rdb: rdb}
+	// uuid.New() panics only on a CSPRNG failure, which would
+	// also break the rest of the server's bootstrap (JWT
+	// signing, password hashing). Letting it propagate as a
+	// panic during startup is the right behaviour.
+	r.originID = [originIDByteLen]byte(uuid.New())
+	return r
+}
+
+// OriginID returns the relay's per-process origin tag. Exported
+// so multi-replica tests can assert that frames published by one
+// relay are delivered to a peer relay (but NOT echoed back to the
+// publisher's own subscribe loop).
+func (r *RedisCollabRelay) OriginID() [originIDByteLen]byte {
+	if r == nil {
+		return [originIDByteLen]byte{}
+	}
+	return r.originID
 }
 
 // channelForCollab returns the Redis pub/sub channel for a given
@@ -68,13 +109,24 @@ func channelForCollab(documentID uuid.UUID) string {
 const collabChannelPattern = "collab:*"
 
 // PublishFrame implements CollabRelayPublisher. It writes the
-// framed payload to the per-document Redis channel. A nil
-// receiver is a no-op (single-replica fallback).
+// framed payload to the per-document Redis channel, prefixed
+// with the relay's 16-byte originID so the subscribe loop on the
+// same relay can recognise and drop the echo.
+//
+// A nil receiver is a no-op (single-replica fallback). The wire
+// shape on Redis is `originID(16) || payload(N)`.
 func (r *RedisCollabRelay) PublishFrame(ctx context.Context, documentID uuid.UUID, payload []byte) error {
 	if r == nil || r.rdb == nil {
 		return nil
 	}
-	if err := r.rdb.Publish(ctx, channelForCollab(documentID), payload).Err(); err != nil {
+	// Build a fresh slice rather than mutating payload: callers
+	// (the hub) re-use the same frame buffer for the local
+	// broadcast and the relay publish, so prepending in-place
+	// would corrupt the local fan-out path.
+	tagged := make([]byte, 0, originIDByteLen+len(payload))
+	tagged = append(tagged, r.originID[:]...)
+	tagged = append(tagged, payload...)
+	if err := r.rdb.Publish(ctx, channelForCollab(documentID), tagged).Err(); err != nil {
 		return fmt.Errorf("collab: redis publish: %w", err)
 	}
 	return nil
@@ -125,7 +177,31 @@ func (r *RedisCollabRelay) Subscribe(ctx context.Context, consumer CollabRelayCo
 				logging.FromContext(ctx).Warn("collab redis drop message: invalid channel", "channel", msg.Channel, "err", err)
 				continue
 			}
-			consumer.BroadcastFromRelay(documentID, []byte(msg.Payload))
+			payload := []byte(msg.Payload)
+			if len(payload) < originIDByteLen {
+				// A frame shorter than the origin tag is
+				// malformed (e.g. a foreign producer
+				// publishing directly to collab:* without the
+				// origin prefix). Drop with a warn-log so
+				// the bug is visible at the receiver rather
+				// than producing a confusing decode failure
+				// in the hub layer.
+				logging.FromContext(ctx).Warn("collab redis drop message: payload shorter than origin tag", "channel", msg.Channel, "len", len(payload))
+				continue
+			}
+			// Drop our own echo: Redis pub/sub delivers a
+			// publisher's frames back to the publisher when
+			// the publisher is also subscribed to a matching
+			// pattern (which we always are, via PSubscribe
+			// collab:*). Without this check every local
+			// broadcast would be re-delivered to the same
+			// replica via BroadcastFromRelay, doubling the
+			// frame count to every client in the room and
+			// causing awareness flicker.
+			if [originIDByteLen]byte(payload[:originIDByteLen]) == r.originID {
+				continue
+			}
+			consumer.BroadcastFromRelay(documentID, payload[originIDByteLen:])
 		}
 	}
 }

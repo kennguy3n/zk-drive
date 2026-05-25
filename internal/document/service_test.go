@@ -512,7 +512,7 @@ func TestService_Compact_RejectsNonProgressingFold(t *testing.T) {
 	}}
 
 	// Fold returns a non-progressing upToSeq (== current floor).
-	_, err := svc.Compact(context.Background(), parent.WorkspaceID, docID, func(_, _ []byte, _ []*Delta) ([]byte, []byte, int64, error) {
+	_, err := svc.Compact(context.Background(), parent.WorkspaceID, docID, func(_ context.Context, _, _ []byte, _ []*Delta) ([]byte, []byte, int64, error) {
 		return []byte("snap"), []byte("vec"), 42, nil
 	})
 	if err == nil || !strings.Contains(err.Error(), "non-progressing") {
@@ -535,7 +535,7 @@ func TestService_Compact_NoTailIsNoOp(t *testing.T) {
 	repo.docs = map[uuid.UUID]*Document{docID: existing}
 	repo.listDeltas = nil
 
-	got, err := svc.Compact(context.Background(), parent.WorkspaceID, docID, func(_, _ []byte, _ []*Delta) ([]byte, []byte, int64, error) {
+	got, err := svc.Compact(context.Background(), parent.WorkspaceID, docID, func(_ context.Context, _, _ []byte, _ []*Delta) ([]byte, []byte, int64, error) {
 		t.Fatal("fold callback should NOT be called when tail is empty")
 		return nil, nil, 0, nil
 	})
@@ -574,7 +574,7 @@ func TestService_Compact_PassesObservedSnapshotVersion(t *testing.T) {
 		SnapshotVersion: 8,
 	}
 
-	if _, err := svc.Compact(context.Background(), parent.WorkspaceID, docID, func(_, _ []byte, _ []*Delta) ([]byte, []byte, int64, error) {
+	if _, err := svc.Compact(context.Background(), parent.WorkspaceID, docID, func(_ context.Context, _, _ []byte, _ []*Delta) ([]byte, []byte, int64, error) {
 		return []byte("snap"), []byte("vec"), 43, nil
 	}); err != nil {
 		t.Fatalf("Compact: %v", err)
@@ -601,7 +601,7 @@ func TestService_Compact_SurfacesSnapshotVersionConflict(t *testing.T) {
 	repo.listDeltas = []*Delta{{DocumentID: docID, Seq: 43, Payload: []byte{1}}}
 	repo.replaceSnapshotErr = ErrSnapshotVersionConflict
 
-	_, err := svc.Compact(context.Background(), parent.WorkspaceID, docID, func(_, _ []byte, _ []*Delta) ([]byte, []byte, int64, error) {
+	_, err := svc.Compact(context.Background(), parent.WorkspaceID, docID, func(_ context.Context, _, _ []byte, _ []*Delta) ([]byte, []byte, int64, error) {
 		return []byte("snap"), []byte("vec"), 43, nil
 	})
 	if !errors.Is(err, ErrSnapshotVersionConflict) {

@@ -1,6 +1,7 @@
 package collab
 
 import (
+	"context"
 	"errors"
 
 	"github.com/kennguy3n/zk-drive/internal/document"
@@ -48,7 +49,7 @@ import (
 //
 // The fold is pure (no I/O), so it's safe to call from any
 // goroutine without locking.
-func OpaqueConcatFold(currentState, _currentStateVector []byte, tail []*document.Delta) ([]byte, []byte, int64, error) {
+func OpaqueConcatFold(_ctx context.Context, currentState, _currentStateVector []byte, tail []*document.Delta) ([]byte, []byte, int64, error) {
 	if len(tail) == 0 {
 		return nil, nil, 0, errors.New("collab: OpaqueConcatFold called with empty tail")
 	}
