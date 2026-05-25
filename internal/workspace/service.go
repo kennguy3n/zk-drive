@@ -75,3 +75,37 @@ func (s *Service) ListForUser(ctx context.Context, userID uuid.UUID) ([]*Workspa
 func (s *Service) SetMFARequired(ctx context.Context, workspaceID uuid.UUID, required bool) (bool, error) {
 	return s.repo.SetMFARequired(ctx, workspaceID, required)
 }
+
+// ErrUnsupportedSearchLanguage is returned when the caller asks for
+// a Postgres dictionary that isn't on the IsSupportedSearchLanguage
+// allow-list. The handler maps it to 400 with the supported set in
+// the response body.
+var ErrUnsupportedSearchLanguage = errors.New("workspace: unsupported search language")
+
+// SetSearchLanguage updates the workspaces.search_language column
+// after validating lang against the IsSupportedSearchLanguage
+// allow-list. Returns the previous value (for the audit log) and
+// ErrUnsupportedSearchLanguage when lang is not on the allow-list.
+func (s *Service) SetSearchLanguage(ctx context.Context, workspaceID uuid.UUID, lang string) (string, error) {
+	if !IsSupportedSearchLanguage(lang) {
+		return "", ErrUnsupportedSearchLanguage
+	}
+	return s.repo.SetSearchLanguage(ctx, workspaceID, lang)
+}
+
+// GetSearchLanguage returns the workspace's currently-configured
+// FTS dictionary. Centralised here so callers (search handler,
+// admin GET endpoint) don't reach through to the repository.
+// Falls back to DefaultSearchLanguage when the workspace exists
+// but the column is somehow empty — defence in depth against a
+// future migration that forgets to set NOT NULL.
+func (s *Service) GetSearchLanguage(ctx context.Context, workspaceID uuid.UUID) (string, error) {
+	w, err := s.repo.GetByID(ctx, workspaceID)
+	if err != nil {
+		return "", err
+	}
+	if w.SearchLanguage == "" {
+		return DefaultSearchLanguage, nil
+	}
+	return w.SearchLanguage, nil
+}

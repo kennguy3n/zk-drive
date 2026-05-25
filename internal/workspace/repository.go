@@ -27,6 +27,13 @@ type Repository interface {
 	// the admin policy-toggle endpoint. Returns the previous value
 	// so the audit log can capture the transition.
 	SetMFARequired(ctx context.Context, workspaceID uuid.UUID, required bool) (previous bool, err error)
+	// SetSearchLanguage updates the workspace's FTS dictionary
+	// for stemming. Returns the previous value so the audit log
+	// can record the transition; returns ErrNotFound when no row
+	// matches. The caller MUST have already validated lang via
+	// IsSupportedSearchLanguage — the repo does not re-validate
+	// (single source of truth lives in workspace.go).
+	SetSearchLanguage(ctx context.Context, workspaceID uuid.UUID, lang string) (previous string, err error)
 }
 
 // PostgresRepository implements Repository against Postgres.
@@ -39,11 +46,11 @@ func NewPostgresRepository(pool *pgxpool.Pool) *PostgresRepository {
 	return &PostgresRepository{pool: pool}
 }
 
-const workspaceColumns = "id, name, owner_user_id, storage_quota_bytes, storage_used_bytes, tier, mfa_required, created_at, updated_at"
+const workspaceColumns = "id, name, owner_user_id, storage_quota_bytes, storage_used_bytes, tier, mfa_required, search_language, created_at, updated_at"
 
 func scanWorkspace(row pgx.Row) (*Workspace, error) {
 	w := &Workspace{}
-	if err := row.Scan(&w.ID, &w.Name, &w.OwnerUserID, &w.StorageQuotaBytes, &w.StorageUsedBytes, &w.Tier, &w.MFARequired, &w.CreatedAt, &w.UpdatedAt); err != nil {
+	if err := row.Scan(&w.ID, &w.Name, &w.OwnerUserID, &w.StorageQuotaBytes, &w.StorageUsedBytes, &w.Tier, &w.MFARequired, &w.SearchLanguage, &w.CreatedAt, &w.UpdatedAt); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, ErrNotFound
 		}
@@ -171,13 +178,46 @@ func (r *PostgresRepository) SetMFARequired(ctx context.Context, workspaceID uui
 	return prev, nil
 }
 
+// SetSearchLanguage updates the workspace's FTS dictionary under
+// a SELECT ... FOR UPDATE / UPDATE pair so a concurrent toggle
+// can't misreport the previous value to the audit log. Same
+// concurrency reasoning as SetMFARequired.
+func (r *PostgresRepository) SetSearchLanguage(ctx context.Context, workspaceID uuid.UUID, lang string) (string, error) {
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return "", fmt.Errorf("begin tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	var prev string
+	if err := tx.QueryRow(ctx,
+		"SELECT search_language FROM workspaces WHERE id = $1 FOR UPDATE",
+		workspaceID,
+	).Scan(&prev); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return "", ErrNotFound
+		}
+		return "", fmt.Errorf("read search_language: %w", err)
+	}
+	if _, err := tx.Exec(ctx,
+		"UPDATE workspaces SET search_language = $2, updated_at = now() WHERE id = $1",
+		workspaceID, lang,
+	); err != nil {
+		return "", fmt.Errorf("update search_language: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return "", fmt.Errorf("commit search_language: %w", err)
+	}
+	return prev, nil
+}
+
 // ListForUser returns every workspace the caller belongs to. Because each
 // workspace has its own users row per identity, we pivot through the
 // caller's email (resolved from the supplied user id) so workspaces joined
 // after signup are also returned.
 func (r *PostgresRepository) ListForUser(ctx context.Context, userID uuid.UUID) ([]*Workspace, error) {
 	q := `
-SELECT w.id, w.name, w.owner_user_id, w.storage_quota_bytes, w.storage_used_bytes, w.tier, w.mfa_required, w.created_at, w.updated_at
+SELECT w.id, w.name, w.owner_user_id, w.storage_quota_bytes, w.storage_used_bytes, w.tier, w.mfa_required, w.search_language, w.created_at, w.updated_at
 FROM workspaces w
 JOIN users u ON u.workspace_id = w.id
 WHERE u.email = (SELECT email FROM users WHERE id = $1)
@@ -191,7 +231,7 @@ ORDER BY w.created_at ASC`
 	var out []*Workspace
 	for rows.Next() {
 		w := &Workspace{}
-		if err := rows.Scan(&w.ID, &w.Name, &w.OwnerUserID, &w.StorageQuotaBytes, &w.StorageUsedBytes, &w.Tier, &w.MFARequired, &w.CreatedAt, &w.UpdatedAt); err != nil {
+		if err := rows.Scan(&w.ID, &w.Name, &w.OwnerUserID, &w.StorageQuotaBytes, &w.StorageUsedBytes, &w.Tier, &w.MFARequired, &w.SearchLanguage, &w.CreatedAt, &w.UpdatedAt); err != nil {
 			return nil, err
 		}
 		out = append(out, w)
