@@ -107,6 +107,21 @@ const DefaultLimit = 20
 // that need more can paginate with offset.
 const MaxLimit = 100
 
+// MaxOffset caps how deep a client can paginate via offset. The
+// search query pulls `limit*candidateMultiplier + offset` rows per
+// CTE before DISTINCT-ON dedup and re-ranking, so an unbounded
+// offset would translate into an unbounded candidate set across
+// five CTEs (5×(limit×candidateMultiplier+offset) rows). At
+// MaxLimit=100, candidateMultiplier=4 and MaxOffset=10_000 the
+// worst case is 5 CTEs × (100×4 + 10000) = ~52k candidate rows
+// — enough for ~100 pages of 100 results, which is far past any
+// realistic UI paginator. Anyone needing more than 10k results
+// should switch to a cursor- / keyset-pagination model, which
+// avoids the O(offset) candidate-set blowup entirely; clamping
+// here is the immediate defence against accidental deep pagination
+// pinning the worker.
+const MaxOffset = 10_000
+
 // candidateMultiplier is how many extra candidate rows each strategy
 // (FTS, trigram) pulls before the outer SELECT DISTINCT ON ranks
 // across them. A higher multiplier improves recall when both paths
@@ -188,6 +203,9 @@ func (s *Service) Search(ctx context.Context, workspaceID uuid.UUID, query strin
 	}
 	if offset < 0 {
 		offset = 0
+	}
+	if offset > MaxOffset {
+		offset = MaxOffset
 	}
 
 	lang := opts.resolvedLanguage()
@@ -370,7 +388,20 @@ trgm_files AS (
       AND parent.encryption_mode <> 'strict_zk'
       AND (
           immutable_unaccent($2) <% immutable_unaccent(f.name)
-          OR immutable_unaccent($2) <% immutable_unaccent(COALESCE(f.content_text, ''))
+          -- Explicit content_text IS NOT NULL so the planner can
+          -- prove the partial-index predicate on
+          -- idx_files_trgm_content (created WHERE deleted_at IS
+          -- NULL AND content_text IS NOT NULL). Without this, the
+          -- COALESCE wrapped the expression in a defeat-the-
+          -- planner-proof CASE and the content arm would fall back
+          -- to a workspace-scoped seq scan even though the partial
+          -- GIN index exists and covers the predicate. We also drop
+          -- the COALESCE -- once content_text IS NOT NULL is
+          -- asserted in the WHERE, immutable_unaccent(f.content_text)
+          -- matches the index expression byte-for-byte (the index
+          -- was migrated to drop its own COALESCE for the same
+          -- reason).
+          OR (f.content_text IS NOT NULL AND immutable_unaccent($2) <% immutable_unaccent(f.content_text))
       )
     ORDER BY rank DESC, f.created_at DESC
     LIMIT $3

@@ -41,6 +41,17 @@ func (h *Handler) Search(w http.ResponseWriter, r *http.Request) {
 	if limit > search.MaxLimit {
 		limit = search.MaxLimit
 	}
+	// Cap offset at the handler layer too so the response envelope
+	// echoes the clamped value back to the client. Without this, a
+	// caller paginating past MaxOffset would see "offset=999999" in
+	// the response while the service silently served page 100 — the
+	// next-page calculation `offset + limit` would then march
+	// further from reality with every click. Mirroring the cap at
+	// the handler keeps the response self-consistent and signals
+	// to the client that no further pages exist.
+	if offset > search.MaxOffset {
+		offset = search.MaxOffset
+	}
 
 	opts := search.Options{
 		FuzzyEnabled: parseBoolParam(r.URL.Query().Get("fuzzy")),

@@ -80,8 +80,14 @@ CREATE INDEX IF NOT EXISTS idx_files_trgm_name
   ON files USING gin ((immutable_unaccent(name)) gin_trgm_ops)
   WHERE deleted_at IS NULL;
 
+-- The partial index condition `content_text IS NOT NULL` guarantees that
+-- every indexed row has a non-null content_text — there is no need to
+-- COALESCE on the indexed expression, and dropping the COALESCE means
+-- the query's content arm can match the index expression byte-for-byte
+-- once the query also asserts `content_text IS NOT NULL` (so the
+-- planner can prove the partial-index predicate is satisfied).
 CREATE INDEX IF NOT EXISTS idx_files_trgm_content
-  ON files USING gin ((immutable_unaccent(COALESCE(content_text, ''))) gin_trgm_ops)
+  ON files USING gin ((immutable_unaccent(content_text)) gin_trgm_ops)
   WHERE deleted_at IS NULL AND content_text IS NOT NULL;
 
 CREATE INDEX IF NOT EXISTS idx_folders_trgm_name
@@ -109,14 +115,21 @@ CREATE INDEX IF NOT EXISTS idx_file_tags_trgm_tag
 -- don't get their own dedicated indexes (the trigram path is the
 -- only one fast enough to back that variety without bloating disk
 -- usage by 16× — one GIN tsvector per supported language).
+-- Use the explicit `'simple'::regconfig` cast in the index expression so
+-- it matches the query expression byte-for-byte. Postgres' planner
+-- folds the implicit cast and the explicit cast to the same regconfig
+-- Const node in every version we run on, but spelling them identically
+-- removes a known foot-gun for future PG upgrades (older versions of
+-- the planner have been known to be less aggressive about folding
+-- CoerceViaIO nodes for index-expression matching).
 CREATE INDEX IF NOT EXISTS idx_files_fts_unaccent_simple
   ON files USING gin (
-    to_tsvector('simple', immutable_unaccent(name || ' ' || COALESCE(content_text, '')))
+    to_tsvector('simple'::regconfig, immutable_unaccent(name || ' ' || COALESCE(content_text, '')))
   )
   WHERE deleted_at IS NULL;
 
 CREATE INDEX IF NOT EXISTS idx_folders_fts_unaccent_simple
   ON folders USING gin (
-    to_tsvector('simple', immutable_unaccent(name))
+    to_tsvector('simple'::regconfig, immutable_unaccent(name))
   )
   WHERE deleted_at IS NULL;
