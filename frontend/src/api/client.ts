@@ -24,12 +24,17 @@ client.interceptors.request.use((config) => {
 });
 
 // Redirect to /login on 401 so expired sessions don't leave the UI stuck.
+// Clear ALL auth-derived localStorage keys (token, workspace, user_id) so
+// the next login is a clean slate; otherwise a stale user_id could persist
+// into a different user's session and break presence (cursor colors keyed
+// on the wrong id, PresenceChips failing to filter the local user, etc.).
 client.interceptors.response.use(
   (resp) => resp,
   (err) => {
     if (err?.response?.status === 401) {
       localStorage.removeItem(TOKEN_STORAGE_KEY);
       localStorage.removeItem(WORKSPACE_STORAGE_KEY);
+      localStorage.removeItem(USER_STORAGE_KEY);
       if (window.location.pathname !== "/login") {
         window.location.href = "/login";
       }

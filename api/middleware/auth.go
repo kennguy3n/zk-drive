@@ -370,7 +370,14 @@ func extractBearerToken(r *http.Request) (string, bool) {
 		return strings.TrimPrefix(header, "Bearer "), true
 	}
 	if isWebSocketUpgrade(r) {
-		if token, ok := tokenFromSubprotocols(r.Header.Get("Sec-WebSocket-Protocol")); ok {
+		// RFC 6455 allows Sec-WebSocket-Protocol to be sent as either
+		// a single comma-separated header or multiple repeated
+		// headers (browsers always send the single-line form, but
+		// non-browser clients sometimes split). r.Header.Get returns
+		// only the first line; join all values so we honor both
+		// shapes. gorilla's own Subprotocols() helper does the same.
+		joined := strings.Join(r.Header.Values("Sec-WebSocket-Protocol"), ",")
+		if token, ok := tokenFromSubprotocols(joined); ok {
 			return token, true
 		}
 	}

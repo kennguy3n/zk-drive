@@ -178,7 +178,18 @@ export default function DocumentEditorPage() {
     providerRef.current = provider;
     provider.connect();
     return () => {
+      // Teardown order matches the y-protocols canonical lifecycle:
+      //   1. provider.destroy() — detaches WS, removes our awareness
+      //      slot via removeAwarenessStates so peers see us disappear.
+      //   2. awareness.destroy() — unregisters the internal listener
+      //      on the Y.Doc's destroy event. Calling this BEFORE the
+      //      Y.Doc is destroyed is the documented order; Y.Doc.destroy
+      //      would also trigger the same cleanup via its event emit,
+      //      but an explicit call is robust against future y-protocols
+      //      changes (and idempotent — destroy() is safe to call twice).
+      //   3. yDoc.destroy() — releases the CRDT state surface.
       provider.destroy();
+      nextAwareness?.destroy();
       nextYDoc.destroy();
       providerRef.current = null;
       setYDoc(null);
@@ -243,21 +254,35 @@ export default function DocumentEditorPage() {
     if (editor) editor.setEditable(writable);
   }, [editor, writable]);
 
+  // renameInFlight pins the rename callback against double-fire: the
+  // rename <input> wires both onSubmit (Enter key) AND onBlur to the
+  // same handler so a click-outside also commits, but pressing Enter
+  // triggers both events in quick succession (submit calls setRenaming
+  // (false) inside the finally block, which unmounts the input, which
+  // fires onBlur). Without this guard the onBlur invocation captures a
+  // stale closure where doc.name is still the pre-rename value, so the
+  // `next === doc.name` short-circuit fails and we send a duplicate
+  // PATCH. A ref (not state) avoids triggering an extra render between
+  // the two events.
+  const renameInFlight = useRef(false);
   const onRenameSubmit = useCallback(
     async (e: React.FormEvent) => {
       e.preventDefault();
+      if (renameInFlight.current) return;
       if (!doc || !id) return;
       const next = renameValue.trim();
       if (!next || next === doc.name) {
         setRenaming(false);
         return;
       }
+      renameInFlight.current = true;
       try {
         const updated = await renameDocument(id, next);
         setDoc(updated);
       } catch (err) {
         setLoadError(String((err as Error)?.message ?? err));
       } finally {
+        renameInFlight.current = false;
         setRenaming(false);
       }
     },

@@ -512,3 +512,48 @@ func TestAuthMiddleware_WebSocketSubprotocolBearer(t *testing.T) {
 		})
 	}
 }
+
+// TestAuthMiddlewareWebSocketSubprotocol_MultipleHeaders pins the
+// "Sec-WebSocket-Protocol sent as multiple header lines" case. RFC
+// 6455 permits clients to split the subprotocol list across repeated
+// headers; r.Header.Get returns only the first line, so the original
+// implementation would miss the JWT carried on a second line. We must
+// use r.Header.Values (joined with comma) to honor both shapes.
+func TestAuthMiddlewareWebSocketSubprotocol_MultipleHeaders(t *testing.T) {
+	t.Parallel()
+	const secret = "multi-header-secret"
+	workspaceID := uuid.New()
+	userID := uuid.New()
+	token, _, err := IssueToken(secret, userID, workspaceID, "admin", time.Hour)
+	if err != nil {
+		t.Fatalf("issue token: %v", err)
+	}
+
+	var nextCalled bool
+	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		nextCalled = true
+		if uid, ok := UserIDFromContext(r.Context()); !ok || uid != userID {
+			t.Errorf("UserIDFromContext: got (%v, %v), want (%v, true)", uid, ok, userID)
+		}
+		w.WriteHeader(http.StatusOK)
+	})
+
+	h := AuthMiddleware(secret, nil)(next)
+	req := httptest.NewRequest(http.MethodGet, "/api/documents/x/ws", nil)
+	req.Header.Set("Upgrade", "websocket")
+	req.Header.Set("Connection", "Upgrade")
+	// Split the subprotocol across two header lines. r.Header.Get
+	// would only see "bearer"; r.Header.Values + Join sees both.
+	req.Header.Add("Sec-WebSocket-Protocol", "bearer")
+	req.Header.Add("Sec-WebSocket-Protocol", token)
+
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Errorf("status: got %d, want %d (body=%q)", rr.Code, http.StatusOK, rr.Body.String())
+	}
+	if !nextCalled {
+		t.Error("next not called; multi-line subprotocol auth failed to extract token")
+	}
+}
