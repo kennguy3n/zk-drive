@@ -110,7 +110,15 @@ const CompactionThreshold = 64
 // clean 4xx rather than a Postgres constraint violation.
 const MaxDeltaPayloadBytes = 1 << 20 // 1 MiB
 
-// MaxNameBytes mirrors the CHECK constraint on documents.name.
+// MaxNameBytes is the application-side cap on documents.name.
+// NOTE: the Postgres CHECK constraint at migrations/030 uses
+// `length(name) <= 512`, which counts CHARACTERS, while this
+// constant is enforced in Go via `len(name)`, which counts BYTES.
+// They agree exactly for ASCII names; for multi-byte UTF-8 (e.g.
+// emoji) Go is stricter and rejects before the DB ever sees the
+// row, so the Postgres constraint can never trigger from a valid
+// API path. Treat this as the effective name limit; the DB
+// constraint is defence-in-depth against direct SQL access.
 const MaxNameBytes = 512
 
 // MaxDeltaPageLimit caps the per-page result count for the public

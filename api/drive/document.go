@@ -368,13 +368,12 @@ func (h *Handler) ListDocumentDeltas(w http.ResponseWriter, r *http.Request) {
 	// after_seq is a strict cursor — reject malformed input with 400 so
 	// clients catch fast-forward bugs instead of silently re-downloading
 	// from sequence 0. Matches the contract enforced by ListChanges.
+	// parseInt64Query already clips negative values to 0, so no extra
+	// guard is needed here.
 	afterSeq, err := parseInt64Query(r, "after_seq", 0)
 	if err != nil {
 		http.Error(w, "invalid after_seq cursor", http.StatusBadRequest)
 		return
-	}
-	if afterSeq < 0 {
-		afterSeq = 0
 	}
 	// limit is strict (matches ListChanges): malformed input is a 400
 	// rather than a silent fallback. We then clamp to MaxDeltaPageLimit

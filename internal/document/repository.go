@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -225,9 +226,19 @@ SELECT ` + documentListColumns + `
 }
 
 // AppendDelta inserts a delta atomically with a per-document seq.
-// The transaction uses REPEATABLE READ — sufficient because the
-// only contention is on the (document_id, seq) primary key and the
-// max-seq read is held via FOR UPDATE on the documents row.
+// The transaction uses READ COMMITTED — NOT REPEATABLE READ. Under
+// REPEATABLE READ, concurrent AppendDelta callers would observe
+// 'could not serialize access due to concurrent update' errors
+// when the second tx unblocks on FOR UPDATE and discovers the
+// documents row was modified by the now-committed first tx (PG
+// raises 40001 in this case per the docs). Under READ COMMITTED
+// each statement re-evaluates against the latest committed
+// snapshot, so the second tx's COALESCE(MAX(seq), 0) + 1 query
+// correctly observes the first tx's inserted delta and produces
+// the next sequential seq. The FOR UPDATE on the documents row
+// remains the serialisation point for concurrent writers; the
+// isolation level downgrade only changes what happens AFTER the
+// lock is acquired.
 func (r *PostgresRepository) AppendDelta(ctx context.Context, d *Delta) error {
 	if len(d.Payload) == 0 {
 		return ErrEmptyPayload
@@ -235,7 +246,7 @@ func (r *PostgresRepository) AppendDelta(ctx context.Context, d *Delta) error {
 	if len(d.Payload) > MaxDeltaPayloadBytes {
 		return ErrPayloadTooLarge
 	}
-	tx, err := r.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead})
+	tx, err := r.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
 	if err != nil {
 		return fmt.Errorf("begin tx: %w", err)
 	}
@@ -368,6 +379,15 @@ UPDATE documents
 RETURNING ` + documentColumns
 	d, err := scanDocument(tx.QueryRow(ctx, q, workspaceID, documentID, yState, yStateVector, upToSeq, expectedSnapshotVersion))
 	if err != nil {
+		if isPgSerializationFailure(err) {
+			// SERIALIZABLE conflicted with a concurrent writer (most
+			// likely AppendDelta bumping updated_at on the documents
+			// row). Surface this as ErrSnapshotVersionConflict so
+			// the caller's retry path is uniform — they re-read the
+			// (now updated) tail and re-fold against fresh state
+			// instead of needing to recognise PG's raw 40001.
+			return nil, ErrSnapshotVersionConflict
+		}
 		if errors.Is(err, ErrNotFound) && expectedSnapshotVersion != 0 {
 			// Disambiguate "row gone" from "version mismatch" — if the
 			// caller supplied a non-zero expected version and the
@@ -388,13 +408,34 @@ RETURNING ` + documentColumns
 DELETE FROM document_deltas
  WHERE workspace_id = $1 AND document_id = $2 AND seq <= $3`,
 		workspaceID, documentID, upToSeq); err != nil {
+		if isPgSerializationFailure(err) {
+			return nil, ErrSnapshotVersionConflict
+		}
 		return nil, fmt.Errorf("trim folded deltas: %w", err)
 	}
 
 	if err := tx.Commit(ctx); err != nil {
+		if isPgSerializationFailure(err) {
+			return nil, ErrSnapshotVersionConflict
+		}
 		return nil, fmt.Errorf("commit compaction: %w", err)
 	}
 	return d, nil
+}
+
+// pgSerializationFailure is the SQLSTATE class for
+// 'could not serialize access due to concurrent update / read /
+// dependency'. Surfaced by SERIALIZABLE / REPEATABLE READ
+// transactions when a concurrent committer makes the snapshot
+// inconsistent with the lock graph. We match on the literal
+// SQLSTATE so we don't take a pgconn dependency in this file.
+const pgSerializationFailure = "40001"
+
+func isPgSerializationFailure(err error) bool {
+	if err == nil {
+		return false
+	}
+	return strings.Contains(err.Error(), pgSerializationFailure)
 }
 
 // GetSnapshotBundle reads the document + tail deltas atomically.
