@@ -139,6 +139,21 @@ func (r *fakeRepo) ReplaceSnapshot(_ context.Context, _, _ uuid.UUID, yState, yS
 	return r.replaceSnapshotDoc, nil
 }
 
+func (r *fakeRepo) GetSnapshotBundle(ctx context.Context, workspaceID, documentID uuid.UUID, _ int) (*Document, []*Delta, error) {
+	// Fake conveniently composes GetByID + ListDeltas — production
+	// PostgresRepository runs both in a REPEATABLE READ tx; the
+	// in-memory fake has no concurrency to worry about.
+	d, err := r.GetByID(ctx, workspaceID, documentID)
+	if err != nil {
+		return nil, nil, err
+	}
+	deltas, err := r.ListDeltas(ctx, workspaceID, documentID, d.YStateSeqFloor, 0)
+	if err != nil {
+		return nil, nil, err
+	}
+	return d, deltas, nil
+}
+
 func newServiceFixture(t *testing.T, folderMode string) (*Service, *fakeRepo, *folder.Folder) {
 	t.Helper()
 	parent := &folder.Folder{

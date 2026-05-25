@@ -51,6 +51,16 @@ type Repository interface {
 	// (snapshot vN+1, deltas seq > floorN+1) but never a torn
 	// state. Returns the updated Document.
 	ReplaceSnapshot(ctx context.Context, workspaceID, documentID uuid.UUID, yState, yStateVector []byte, upToSeq int64) (*Document, error)
+
+	// GetSnapshotBundle reads the document row AND its tail deltas
+	// (seq > y_state_seq_floor) in a single REPEATABLE READ
+	// transaction so a concurrent ReplaceSnapshot can't tear the
+	// observed state. Without this, a Snapshot caller could read
+	// (old y_state, old floor) and then a Compact could land between
+	// the two reads, deleting the deltas that the Snapshot caller
+	// was about to fetch — leaving the client with a stale snapshot
+	// and a gap in its delta history.
+	GetSnapshotBundle(ctx context.Context, workspaceID, documentID uuid.UUID, tailLimit int) (*Document, []*Delta, error)
 }
 
 // PostgresRepository implements Repository against Postgres via pgxpool.
@@ -151,14 +161,17 @@ UPDATE documents
 
 // ListByFolder returns all non-deleted documents in a folder
 // ordered by most-recently-updated first (matches the UI's
-// document-list panel default sort).
+// document-list panel default sort). Capped at MaxDocumentsPerFolder
+// so a pathological folder cannot slow-list the whole table — the
+// UI paginates well below this in normal operation.
 func (r *PostgresRepository) ListByFolder(ctx context.Context, workspaceID, folderID uuid.UUID) ([]*Document, error) {
 	q := `
 SELECT ` + documentColumns + `
   FROM documents
  WHERE workspace_id = $1 AND folder_id = $2 AND deleted_at IS NULL
- ORDER BY updated_at DESC`
-	rows, err := r.pool.Query(ctx, q, workspaceID, folderID)
+ ORDER BY updated_at DESC
+ LIMIT $3`
+	rows, err := r.pool.Query(ctx, q, workspaceID, folderID, MaxDocumentsPerFolder)
 	if err != nil {
 		return nil, fmt.Errorf("list documents by folder: %w", err)
 	}
@@ -326,4 +339,57 @@ DELETE FROM document_deltas
 		return nil, fmt.Errorf("commit compaction: %w", err)
 	}
 	return d, nil
+}
+
+// GetSnapshotBundle reads the document + tail deltas atomically.
+// REPEATABLE READ is sufficient: ReplaceSnapshot runs at
+// SERIALIZABLE and touches both the documents row AND the
+// document_deltas rows, so a concurrent compaction either commits
+// fully before our tx snapshot is taken (we see the new floor +
+// trimmed tail) or after our tx commits (we see the old floor +
+// the deltas it will later trim). Either way the (snapshot, tail)
+// pair we return is internally consistent.
+func (r *PostgresRepository) GetSnapshotBundle(ctx context.Context, workspaceID, documentID uuid.UUID, tailLimit int) (*Document, []*Delta, error) {
+	if tailLimit <= 0 {
+		tailLimit = MaxDeltaPageLimit
+	}
+	tx, err := r.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly})
+	if err != nil {
+		return nil, nil, fmt.Errorf("begin snapshot tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	docQ := "SELECT " + documentColumns + " FROM documents WHERE workspace_id = $1 AND id = $2 AND deleted_at IS NULL"
+	d, err := scanDocument(tx.QueryRow(ctx, docQ, workspaceID, documentID))
+	if err != nil {
+		return nil, nil, err
+	}
+
+	rows, err := tx.Query(ctx, `
+SELECT document_id, seq, payload, author_user_id, created_at, workspace_id
+  FROM document_deltas
+ WHERE workspace_id = $1 AND document_id = $2 AND seq > $3
+ ORDER BY seq ASC
+ LIMIT $4`, workspaceID, documentID, d.YStateSeqFloor, tailLimit)
+	if err != nil {
+		return nil, nil, fmt.Errorf("list snapshot tail: %w", err)
+	}
+	defer rows.Close()
+
+	var tail []*Delta
+	for rows.Next() {
+		delta := &Delta{}
+		if err := rows.Scan(&delta.DocumentID, &delta.Seq, &delta.Payload, &delta.AuthorUserID, &delta.CreatedAt, &delta.WorkspaceID); err != nil {
+			return nil, nil, err
+		}
+		tail = append(tail, delta)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, nil, err
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return nil, nil, fmt.Errorf("commit snapshot tx: %w", err)
+	}
+	return d, tail, nil
 }

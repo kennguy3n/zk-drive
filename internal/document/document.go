@@ -113,6 +113,20 @@ const MaxDeltaPayloadBytes = 1 << 20 // 1 MiB
 // MaxNameBytes mirrors the CHECK constraint on documents.name.
 const MaxNameBytes = 512
 
+// MaxDeltaPageLimit caps the per-page result count for the public
+// delta-list endpoint. Chosen lower than the snapshot tail cap
+// (MaxSnapshotTailDeltas = 640) so a client paging deltas always
+// gets the same effective limit it asks for — the HTTP handler
+// clamps to this value and echoes the clamped result back, so the
+// `len(deltas) < limit` paging idiom remains reliable.
+const MaxDeltaPageLimit = 500
+
+// MaxDocumentsPerFolder caps the per-folder list result. Documents
+// per folder are bounded in normal UX (the document panel paginates
+// at ~100 entries) but the repository enforces a hard cap so a
+// pathological folder can't slow-list the whole table.
+const MaxDocumentsPerFolder = 1000
+
 // Sentinel errors so callers can map to HTTP status codes without
 // touching repository internals.
 var (

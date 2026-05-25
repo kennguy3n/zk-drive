@@ -234,18 +234,23 @@ type SnapshotResult struct {
 
 // Snapshot returns the latest snapshot + every delta with seq above
 // y_state_seq_floor. Clients use this as the one-shot
-// "open this document" payload.
+// "open this document" payload. The document and its tail deltas
+// are read inside a single REPEATABLE READ tx so a concurrent
+// Compact cannot tear the bundle — without the atomic read, a
+// caller could observe an old snapshot whose post-floor deltas
+// have already been folded + deleted by Compact, producing a gap
+// in the reconstructed Y.Doc state.
 func (s *Service) Snapshot(ctx context.Context, workspaceID, documentID uuid.UUID) (*SnapshotResult, error) {
-	d, parent, err := s.GetByID(ctx, workspaceID, documentID)
-	if err != nil {
-		return nil, err
-	}
 	// Cap the tail at MaxSnapshotTailDeltas — if the tail is longer
 	// the caller should trigger compaction; for now this is the
 	// theoretical upper bound until P2b lands the WS snapshot job.
-	deltas, err := s.repo.ListDeltas(ctx, workspaceID, documentID, d.YStateSeqFloor, MaxSnapshotTailDeltas)
+	d, deltas, err := s.repo.GetSnapshotBundle(ctx, workspaceID, documentID, MaxSnapshotTailDeltas)
 	if err != nil {
 		return nil, err
+	}
+	parent, err := s.folders.GetByID(ctx, workspaceID, d.FolderID)
+	if err != nil {
+		return nil, fmt.Errorf("lookup folder for snapshot: %w", err)
 	}
 	return &SnapshotResult{
 		Document:   d,

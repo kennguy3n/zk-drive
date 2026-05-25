@@ -376,11 +376,32 @@ func (h *Handler) ListDocumentDeltas(w http.ResponseWriter, r *http.Request) {
 	if afterSeq < 0 {
 		afterSeq = 0
 	}
-	limit := parseIntParam(r.URL.Query().Get("limit"), 100)
-	deltas, err := h.documents.ListDeltas(r.Context(), workspaceID, id, afterSeq, limit)
+	// limit is strict (matches ListChanges): malformed input is a 400
+	// rather than a silent fallback. We then clamp to MaxDeltaPageLimit
+	// so the echoed `limit` matches the effective limit applied by the
+	// repository — clients using `len(deltas) < limit` as the
+	// end-of-page sentinel get a reliable signal.
+	limit, err := parseIntQuery(r, "limit", 100)
+	if err != nil {
+		http.Error(w, "invalid limit", http.StatusBadRequest)
+		return
+	}
+	if limit <= 0 {
+		limit = 100
+	}
+	if limit > document.MaxDeltaPageLimit {
+		limit = document.MaxDeltaPageLimit
+	}
+	// Probe one row beyond `limit` so we can populate has_more
+	// without a second round-trip. Mirrors the ListChanges contract.
+	deltas, err := h.documents.ListDeltas(r.Context(), workspaceID, id, afterSeq, limit+1)
 	if err != nil {
 		http.Error(w, "list deltas: "+err.Error(), http.StatusInternalServerError)
 		return
+	}
+	hasMore := len(deltas) > limit
+	if hasMore {
+		deltas = deltas[:limit]
 	}
 	out := make([]deltaResponse, 0, len(deltas))
 	for _, d := range deltas {
@@ -395,6 +416,7 @@ func (h *Handler) ListDocumentDeltas(w http.ResponseWriter, r *http.Request) {
 		"deltas":    out,
 		"after_seq": afterSeq,
 		"limit":     limit,
+		"has_more":  hasMore,
 	})
 }
 
