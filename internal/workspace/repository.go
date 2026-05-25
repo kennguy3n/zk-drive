@@ -19,6 +19,17 @@ type Repository interface {
 	Create(ctx context.Context, w *Workspace) error
 	CreateTx(ctx context.Context, tx pgx.Tx, w *Workspace) error
 	GetByID(ctx context.Context, id uuid.UUID) (*Workspace, error)
+	// GetSearchLanguageByID is a hot-path helper used by the
+	// search handler on every search request. It pulls JUST the
+	// search_language column with a primary-key lookup, avoiding
+	// the GetByID full-row scan (which serialises 10 columns the
+	// search path doesn't need). At workspace scales of 10K+ this
+	// matters: high-QPS search would otherwise pay the full-row
+	// scan / unmarshal cost per query. Returns ErrNotFound when no
+	// row matches, and the empty string with no error when the
+	// column itself is empty (defence in depth against a future
+	// migration dropping NOT NULL).
+	GetSearchLanguageByID(ctx context.Context, workspaceID uuid.UUID) (string, error)
 	Update(ctx context.Context, w *Workspace) error
 	ListForUser(ctx context.Context, userID uuid.UUID) ([]*Workspace, error)
 	SetOwner(ctx context.Context, workspaceID, ownerUserID uuid.UUID) error
@@ -110,6 +121,34 @@ RETURNING created_at, updated_at, search_language`
 func (r *PostgresRepository) GetByID(ctx context.Context, id uuid.UUID) (*Workspace, error) {
 	q := "SELECT " + workspaceColumns + " FROM workspaces WHERE id = $1"
 	return scanWorkspace(r.pool.QueryRow(ctx, q, id))
+}
+
+// GetSearchLanguageByID returns just the search_language column —
+// a hot path used by the search handler on every request. A
+// dedicated single-column query is cheaper than the GetByID
+// full-row scan: at high search QPS the FTS handler does NOT need
+// owner_user_id / storage_quota_bytes / mfa_required / etc., so
+// pulling the whole row and discarding nine columns is wasted
+// bandwidth between Postgres and the API pod. The query still
+// hits the same primary-key index as GetByID, so the latency
+// difference is small per-request but compounds at scale.
+//
+// Returns ErrNotFound when no row matches. Returns ("", nil) when
+// the row exists but search_language is empty — callers (the
+// service layer's GetSearchLanguage helper) map this to
+// DefaultSearchLanguage. We deliberately don't apply the default
+// at the repo layer so the audit log can see the actual on-disk
+// value if that matters.
+func (r *PostgresRepository) GetSearchLanguageByID(ctx context.Context, id uuid.UUID) (string, error) {
+	const q = "SELECT search_language FROM workspaces WHERE id = $1"
+	var lang string
+	if err := r.pool.QueryRow(ctx, q, id).Scan(&lang); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return "", ErrNotFound
+		}
+		return "", fmt.Errorf("read search_language: %w", err)
+	}
+	return lang, nil
 }
 
 // Update persists changes to name, tier, and quota fields. CreatedAt is never

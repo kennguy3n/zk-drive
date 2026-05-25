@@ -99,13 +99,20 @@ func (s *Service) SetSearchLanguage(ctx context.Context, workspaceID uuid.UUID, 
 // Falls back to DefaultSearchLanguage when the workspace exists
 // but the column is somehow empty — defence in depth against a
 // future migration that forgets to set NOT NULL.
+//
+// Uses the dedicated single-column GetSearchLanguageByID helper
+// rather than GetByID. The search handler invokes this on every
+// search request; pulling the full ten-column workspace row each
+// time would be wasted bandwidth at high QPS. Both paths hit the
+// same primary-key index, so the only difference is the payload
+// size — small per-row but compounding at 10K+ workspace fleets.
 func (s *Service) GetSearchLanguage(ctx context.Context, workspaceID uuid.UUID) (string, error) {
-	w, err := s.repo.GetByID(ctx, workspaceID)
+	lang, err := s.repo.GetSearchLanguageByID(ctx, workspaceID)
 	if err != nil {
 		return "", err
 	}
-	if w.SearchLanguage == "" {
+	if lang == "" {
 		return DefaultSearchLanguage, nil
 	}
-	return w.SearchLanguage, nil
+	return lang, nil
 }

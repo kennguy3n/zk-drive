@@ -8,6 +8,7 @@ import (
 	"github.com/kennguy3n/zk-drive/api/middleware"
 	"github.com/kennguy3n/zk-drive/internal/logging"
 	"github.com/kennguy3n/zk-drive/internal/search"
+	"github.com/kennguy3n/zk-drive/internal/workspace"
 )
 
 // Search runs a workspace-scoped multilingual search over file +
@@ -55,6 +56,17 @@ func (h *Handler) Search(w http.ResponseWriter, r *http.Request) {
 
 	opts := search.Options{
 		FuzzyEnabled: parseBoolParam(r.URL.Query().Get("fuzzy")),
+		// Pre-seed Language with the package default. The
+		// response envelope echoes opts.Language back to the
+		// client so it can render the active dictionary in the
+		// UI; if we left it empty here, the response would say
+		// "language": "" while the service internally falls back
+		// to workspace.DefaultSearchLanguage (see
+		// Options.resolvedLanguage). That asymmetry has bitten
+		// integration tests in the past — keep the handler and
+		// service agreeing on the same default. The workspace
+		// lookup below overrides this when it succeeds.
+		Language: workspace.DefaultSearchLanguage,
 	}
 	// Resolve the workspace's preferred FTS dictionary. A lookup
 	// failure here is non-fatal: the service falls back to

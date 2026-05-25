@@ -71,6 +71,14 @@ type fakeRepo struct {
 	setLangLang        string
 	setLangErr         error
 	getByIDErr         error
+	// getLangCallCount lets tests assert the hot-path optimisation
+	// holds: the search handler must call the dedicated
+	// GetSearchLanguageByID, NOT the full-row GetByID. We bump
+	// this in the dedicated helper and assert GetByID was NOT
+	// invoked when only the language was needed.
+	getLangCallCount   int
+	getByIDCallCount   int
+	getLangErr         error
 }
 
 func (f *fakeRepo) Create(context.Context, *Workspace) error { return nil }
@@ -78,10 +86,21 @@ func (f *fakeRepo) CreateTx(context.Context, pgx.Tx, *Workspace) error {
 	return nil
 }
 func (f *fakeRepo) GetByID(ctx context.Context, id uuid.UUID) (*Workspace, error) {
+	f.getByIDCallCount++
 	if f.getByIDErr != nil {
 		return nil, f.getByIDErr
 	}
 	return f.w, nil
+}
+func (f *fakeRepo) GetSearchLanguageByID(_ context.Context, _ uuid.UUID) (string, error) {
+	f.getLangCallCount++
+	if f.getLangErr != nil {
+		return "", f.getLangErr
+	}
+	if f.w == nil {
+		return "", ErrNotFound
+	}
+	return f.w.SearchLanguage, nil
 }
 func (f *fakeRepo) Update(context.Context, *Workspace) error { return nil }
 func (f *fakeRepo) ListForUser(context.Context, uuid.UUID) ([]*Workspace, error) {
@@ -155,5 +174,31 @@ func TestServiceGetSearchLanguage_FallbackOnEmpty(t *testing.T) {
 	}
 	if got != DefaultSearchLanguage {
 		t.Errorf("expected fallback to %q, got %q", DefaultSearchLanguage, got)
+	}
+}
+
+// TestServiceGetSearchLanguage_UsesHotPathQuery pins the hot-path
+// optimisation Devin Review surfaced: the search handler invokes
+// GetSearchLanguage on every search request, so the service MUST
+// dispatch to the dedicated single-column GetSearchLanguageByID
+// helper (a one-column projection) and NOT to GetByID (a ten-
+// column full-row read). Pulling the entire workspace row per
+// search would waste bandwidth at high QPS / 10K+ workspace
+// fleets.
+func TestServiceGetSearchLanguage_UsesHotPathQuery(t *testing.T) {
+	repo := &fakeRepo{w: &Workspace{SearchLanguage: "english"}}
+	svc := NewService(repo)
+	got, err := svc.GetSearchLanguage(context.Background(), uuid.New())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got != "english" {
+		t.Errorf("expected 'english', got %q", got)
+	}
+	if repo.getLangCallCount != 1 {
+		t.Errorf("expected GetSearchLanguageByID called once, got %d", repo.getLangCallCount)
+	}
+	if repo.getByIDCallCount != 0 {
+		t.Errorf("regression: GetSearchLanguage took the slow full-row path GetByID (count=%d)", repo.getByIDCallCount)
 	}
 }
