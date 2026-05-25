@@ -15,9 +15,17 @@
 //      trigram path would have caught.
 //
 //   2. Trigram path: immutable_unaccent(name) <% immutable_unaccent($q)
-//      (and the same against COALESCE(content_text, '')) with
-//      word_similarity(...) scoring. The <% operator + GIN trgm
-//      index handles CJK substrings (no word boundaries needed) and
+//      against the file/folder name, plus a separate
+//      `content_text IS NOT NULL AND <% immutable_unaccent(content_text)`
+//      arm for the content body. The NULL-guard is mandatory: the
+//      partial GIN index `idx_files_trgm_content` is built WHERE
+//      content_text IS NOT NULL, so the planner only proves index-
+//      applicability when the query carries the same predicate verbatim.
+//      Wrapping the column in COALESCE there would silently demote
+//      the lookup to a seq scan. (We still emit COALESCE in the rank
+//      computation because rank is index-irrelevant.) The <% operator
+//      + GIN trgm index handles CJK substrings (no word boundaries
+//      needed) and
 //      fuzzy matches like "reportt" → "report". We use word_similarity
 //      / <% (NOT plain similarity / %) because filenames often embed
 //      the query inside longer strings ("季度报告.txt" contains
