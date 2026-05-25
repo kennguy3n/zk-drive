@@ -55,11 +55,17 @@ func init() {
 	// application/x-yaml / application/x-sh / etc. by browser MIME
 	// guessing, and they're all "monospace and printable" from a
 	// preview standpoint.
+	//
+	// `text/markdown`, `text/csv`, and `text/tab-separated-values`
+	// are intentionally NOT in this list. They have dedicated
+	// renderers in markdown.go / csv.go that produce a richer
+	// preview (heading hierarchy for MD, tab-aligned columns for
+	// CSV/TSV) than the raw-text fallback. Registry registration
+	// panics on duplicate MIME claims, so any future generic-text
+	// MIME added here that overlaps with a specialised renderer
+	// will fail fast at boot rather than silently shadowing.
 	mimes := []string{
 		"text/plain",
-		"text/markdown",
-		"text/csv",
-		"text/tab-separated-values",
 		"text/html",
 		"text/css",
 		"text/javascript",

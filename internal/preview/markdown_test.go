@@ -1,0 +1,173 @@
+package preview
+
+import (
+	"context"
+	"strings"
+	"testing"
+
+	"github.com/yuin/goldmark"
+	"github.com/yuin/goldmark/parser"
+	"github.com/yuin/goldmark/text"
+)
+
+func TestRenderMarkdown_ProducesNonEmptyImage(t *testing.T) {
+	t.Parallel()
+	src := []byte("# Title\n\nA short paragraph.\n\n## Subhead\n\n- one\n- two\n")
+	img, err := renderMarkdown(context.Background(), src)
+	if err != nil {
+		t.Fatalf("renderMarkdown: %v", err)
+	}
+	b := img.Bounds()
+	if b.Dx() <= 0 || b.Dy() <= 0 {
+		t.Fatalf("rendered image has empty bounds: %v", b)
+	}
+}
+
+// TestWalkMarkdownAST_HeadingBecomesBanner verifies the H1 → title +
+// uppercased-heading transform. The first H1 fills the title slot
+// for the rasteriser's header banner; H1 / H2 are upper-cased in
+// the body so they stand out at the rasterised resolution.
+func TestWalkMarkdownAST_HeadingBecomesBanner(t *testing.T) {
+	t.Parallel()
+	src := []byte("# Project README\n\nIntro text\n\n## Setup\n\nDo this.\n\n### Details\n\nFine print.\n")
+	title, body := walkMarkdownASTFrom(src)
+
+	if title != "Project README" {
+		t.Errorf("expected title 'Project README', got %q", title)
+	}
+	if !strings.Contains(body, "# PROJECT README") {
+		t.Errorf("expected upper-cased H1 banner in body, got: %q", body)
+	}
+	if !strings.Contains(body, "## SETUP") {
+		t.Errorf("expected upper-cased H2 banner in body, got: %q", body)
+	}
+	if !strings.Contains(body, "### Details") {
+		t.Errorf("expected H3 in original case in body, got: %q", body)
+	}
+}
+
+// TestWalkMarkdownAST_ListBulletsAndNumbering pins the structural
+// preservation: bullet vs numbered prefixes, nesting indentation,
+// and per-item content extraction. Without this the preview would
+// regress to flat paragraphs that lose the list structure entirely.
+func TestWalkMarkdownAST_ListBulletsAndNumbering(t *testing.T) {
+	t.Parallel()
+	src := []byte("- apple\n- banana\n  - banana cavendish\n  - banana plantain\n- cherry\n\n1. first\n2. second\n3. third\n")
+	_, body := walkMarkdownASTFrom(src)
+
+	mustContain := []string{
+		"- apple",
+		"- banana",
+		"  - banana cavendish",
+		"  - banana plantain",
+		"- cherry",
+		"1. first",
+		"2. second",
+		"3. third",
+	}
+	for _, want := range mustContain {
+		if !strings.Contains(body, want) {
+			t.Errorf("expected list line %q in body, got: %q", want, body)
+		}
+	}
+}
+
+// TestWalkMarkdownAST_CodeBlocksFencedAndIndented checks that both
+// fenced and 4-space-indented code blocks emit framing sentinels and
+// preserve the body verbatim. We DON'T want code blocks to flatten
+// into paragraph text — they're a major signal of "this README is a
+// dev doc" that we want to convey in the thumbnail.
+func TestWalkMarkdownAST_CodeBlocksFencedAndIndented(t *testing.T) {
+	t.Parallel()
+	src := []byte("Body text.\n\n```go\nfunc main() {}\n```\n\nMore body.\n\n    indented := true\n    other := false\n")
+	_, body := walkMarkdownASTFrom(src)
+
+	if !strings.Contains(body, "func main() {}") {
+		t.Errorf("fenced code body lost: %q", body)
+	}
+	if !strings.Contains(body, "indented := true") {
+		t.Errorf("indented code body lost: %q", body)
+	}
+	if !strings.Contains(body, "```") {
+		t.Errorf("expected code fence sentinel in output: %q", body)
+	}
+}
+
+// TestWalkMarkdownAST_EmphasisFlattenedToText verifies emphasis /
+// strong / strikethrough markers don't survive into the rasterised
+// output — at 256 px monochrome the markers are visual clutter
+// without conveying styling. We want the underlying text content
+// to remain searchable in the preview.
+func TestWalkMarkdownAST_EmphasisFlattenedToText(t *testing.T) {
+	t.Parallel()
+	src := []byte("This is *italic* and **bold** and `code` text.\n")
+	_, body := walkMarkdownASTFrom(src)
+
+	if !strings.Contains(body, "italic") {
+		t.Errorf("emphasis content dropped: %q", body)
+	}
+	if !strings.Contains(body, "bold") {
+		t.Errorf("strong content dropped: %q", body)
+	}
+	if !strings.Contains(body, "code") {
+		t.Errorf("code-span content dropped: %q", body)
+	}
+	// markers should not leak through
+	if strings.Contains(body, "*italic*") || strings.Contains(body, "**bold**") || strings.Contains(body, "`code`") {
+		t.Errorf("emphasis markers leaked into rasterised body: %q", body)
+	}
+}
+
+// TestWalkMarkdownAST_BlockquotePrefixCompound pins the > prefix
+// emission on every line inside a blockquote, including nested
+// children. Without this a blockquote would render as plain text
+// and visually merge with surrounding paragraphs in the thumbnail.
+func TestWalkMarkdownAST_BlockquotePrefixCompound(t *testing.T) {
+	t.Parallel()
+	src := []byte("> First quoted line\n> Second quoted line\n\nNormal text.\n")
+	_, body := walkMarkdownASTFrom(src)
+
+	if !strings.Contains(body, "> First quoted line Second quoted line") &&
+		!strings.Contains(body, "> First quoted line\n> Second quoted line") {
+		// goldmark concatenates soft-line-break siblings into one
+		// paragraph child; either of the above forms is acceptable.
+		t.Errorf("expected blockquote prefix in body, got: %q", body)
+	}
+}
+
+// TestRenderMarkdown_LongSourceTruncatedSafely asserts the byte-cap
+// truncation kicks in for over-large markdown without panicking.
+// We don't assert the visible output here because the rasteriser is
+// downstream of the parse step — the test exists to prevent a
+// regression of the markdownPreviewMaxBytes constant or the slice
+// math from re-introducing a slow path on large README dumps.
+func TestRenderMarkdown_LongSourceTruncatedSafely(t *testing.T) {
+	t.Parallel()
+	src := []byte(strings.Repeat("# heading\n\nbody text\n\n", markdownPreviewMaxBytes))
+	img, err := renderMarkdown(context.Background(), src)
+	if err != nil {
+		t.Fatalf("renderMarkdown: %v", err)
+	}
+	if img == nil {
+		t.Fatal("nil image returned")
+	}
+}
+
+func TestRenderMarkdown_IsRegistered(t *testing.T) {
+	t.Parallel()
+	for _, m := range []string{"text/markdown", "text/x-markdown"} {
+		if !IsSupportedMime(m) {
+			t.Errorf("expected %q to be registered for markdown rendering", m)
+		}
+	}
+}
+
+// walkMarkdownASTFrom is a test helper that runs the AST walker
+// against a fresh goldmark parser instance — mirrors the production
+// pipeline in renderMarkdown but returns the (title, body) tuple
+// instead of rasterising.
+func walkMarkdownASTFrom(src []byte) (string, string) {
+	md := goldmark.New(goldmark.WithParserOptions(parser.WithAutoHeadingID()))
+	doc := md.Parser().Parse(text.NewReader(src))
+	return walkMarkdownAST(doc, src)
+}
