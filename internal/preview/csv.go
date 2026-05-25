@@ -64,11 +64,14 @@ func renderTSV(ctx context.Context, srcBytes []byte) (image.Image, error) {
 }
 
 // autoDelim is the sentinel passed to renderCSVWithDelim when the
-// caller wants delimiter sniffing. It's intentionally `utf8.RuneError`
-// (an invalid rune at the protocol level) so a future change that
-// accidentally treats the sentinel as a literal field-separator
-// would fail loudly (the csv.Reader's Comma field rejects invalid
-// runes).
+// caller wants delimiter sniffing. `'\uFFFD'` is the Unicode REPLACEMENT
+// CHARACTER and equals `utf8.RuneError`; it's a valid codepoint in
+// general, but Go's `encoding/csv` `validDelim()` check explicitly
+// rejects `utf8.RuneError` as a Comma value (see Go stdlib
+// `csv/reader.go`). That means if a future change accidentally
+// routes this sentinel through to `csv.Reader.Comma` without
+// translating it to a real delimiter, `Reader.Read()` will fail
+// loudly with `ErrBadDelim` rather than silently mis-parsing.
 const autoDelim = '\uFFFD'
 
 // renderCSVWithDelim is the core CSV/TSV preview pipeline:

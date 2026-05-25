@@ -4,6 +4,7 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/yuin/goldmark"
 	"github.com/yuin/goldmark/extension"
@@ -258,6 +259,57 @@ func TestWalkMarkdownAST_BlockquoteBlankLineHasPrefix(t *testing.T) {
 		if !strings.Contains(body, "> \n> ") {
 			t.Errorf("expected '> ' on blank separator inside blockquote, got: %q", body)
 		}
+	}
+}
+
+// TestWalkMarkdownAST_NoLeadingBlankWhenStartsWithHeading pins the
+// fix for the leading-blank cosmetic bug: a markdown document whose
+// first block-level element is a heading must NOT produce a leading
+// `\n` in the rasterised body. The previous implementation called
+// `emitBlank()` before `emitLine(banner)` and the empty-buffer guard
+// (suffix-of-`\n\n`) didn't trip on the empty buffer, so a blank line
+// leaked through to the top of the preview.
+func TestWalkMarkdownAST_NoLeadingBlankWhenStartsWithHeading(t *testing.T) {
+	t.Parallel()
+	src := []byte("# Top Heading\n\nBody paragraph.\n")
+	_, body := walkMarkdownASTFrom(src)
+	if strings.HasPrefix(body, "\n") {
+		t.Errorf("body should not start with a blank line, got: %q", body)
+	}
+	// And the heading itself should still be the first line.
+	if !strings.HasPrefix(body, "# TOP HEADING") {
+		t.Errorf("body should start with the heading banner, got: %q", body)
+	}
+}
+
+// TestWalkMarkdownAST_EmitBlankIsConstantTime pins the algorithmic
+// fix for the emitBlank quadratic-buffer-copy issue. Walks a 1000-
+// block document and verifies the walk completes in well under a
+// second — the previous out.String() per emitBlank was O(n²) which
+// scaled badly even at the 256 KiB source cap.
+//
+// This test is a soft canary: the real production guard is the
+// markdownPreviewMaxBytes cap, but we want a regression to fail
+// loudly if someone reintroduces the buffer copy.
+func TestWalkMarkdownAST_EmitBlankIsConstantTime(t *testing.T) {
+	t.Parallel()
+	// Build a 1000-paragraph document — each paragraph triggers
+	// the surrounding emitBlank calls. With the old quadratic
+	// implementation this took several seconds on a workstation;
+	// with the O(1) tracking it's a few milliseconds.
+	var sb strings.Builder
+	for i := 0; i < 1000; i++ {
+		sb.WriteString("Paragraph text ")
+		sb.WriteString(strings.Repeat("x", 64))
+		sb.WriteString("\n\n")
+	}
+	start := time.Now()
+	_, _ = walkMarkdownASTFrom([]byte(sb.String()))
+	elapsed := time.Since(start)
+	// Generous upper bound so the test doesn't flake on slow CI
+	// runners but still catches a true quadratic regression.
+	if elapsed > 500*time.Millisecond {
+		t.Errorf("walkMarkdownAST took %v for 1000 paragraphs; suggests O(n^2) regression", elapsed)
 	}
 }
 

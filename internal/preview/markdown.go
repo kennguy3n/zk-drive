@@ -144,6 +144,23 @@ func walkMarkdownAST(doc ast.Node, source []byte) (title, body string) {
 		firstH1  string
 		listStk  []listFrame
 		blockqDp int
+		// emittedAny is true once any content line has been
+		// written. emitBlank is a no-op before the first content
+		// line so a document that opens with `# Heading` doesn't
+		// produce a leading blank line in the rasterised body
+		// (the heading's surrounding emitBlank() calls would
+		// otherwise prepend an empty line).
+		emittedAny bool
+		// trailingBlankDepth tracks the blockquote depth of the
+		// most-recent emitted blank line (or -1 if the last
+		// emission was a content line). emitBlank dedupes by
+		// checking trailingBlankDepth against the current depth
+		// — equality means we'd write a same-depth blank line
+		// twice in a row, which collapses. This replaces the
+		// previous approach of calling out.String() and scanning
+		// the suffix, which was O(n) per call and quadratic
+		// across a deeply nested document.
+		trailingBlankDepth = -1
 	)
 
 	emitLine := func(line string) {
@@ -155,37 +172,36 @@ func walkMarkdownAST(doc ast.Node, source []byte) (title, body string) {
 		}
 		out.WriteString(line)
 		out.WriteByte('\n')
+		emittedAny = true
+		trailingBlankDepth = -1
 	}
 
 	emitBlank := func() {
-		// Inside a blockquote, blank lines carry the same `> `
-		// prefix as content lines so the quote block remains
-		// visually contiguous if the rasteriser is ever changed
-		// to preserve leading whitespace on blank lines. Without
-		// the prefix here, a multi-paragraph blockquote would
-		// have its blank separator render as a bare empty line
-		// and break the visual continuity of the quote.
-		if blockqDp > 0 {
-			// Don't compound prefixes when the last line was
-			// also a blockquote-prefixed blank — two trailing
-			// blank-prefix lines in a row are no more useful
-			// than one.
-			s := out.String()
-			trail := strings.Repeat("> ", blockqDp) + "\n"
-			if strings.HasSuffix(s, trail+trail) {
-				return
-			}
-			out.WriteString(trail)
+		// Skip leading blanks before any content has been
+		// written — otherwise a document that starts with a
+		// heading would produce a wasted blank line at the top
+		// of the rasterised body.
+		if !emittedAny {
 			return
 		}
-		// Outside a blockquote: multiple consecutive emitBlanks
-		// collapse to one — we don't want N blank lines from N
-		// stacked AST blocks each emitting a trailing blank.
-		s := out.String()
-		if len(s) >= 2 && s[len(s)-2] == '\n' && s[len(s)-1] == '\n' {
+		// Dedupe: two consecutive blank lines at the same
+		// blockquote depth collapse to one. State tracked in a
+		// single int (-1 = trailing content, N = trailing blank
+		// at depth N) avoids the O(n) buffer-copy we'd otherwise
+		// pay in `out.String()` on every emitBlank.
+		if trailingBlankDepth == blockqDp {
 			return
+		}
+		// Inside a blockquote, blank lines carry the same `> `
+		// prefix as content lines so a multi-paragraph quote
+		// renders with `> ` separators between paragraphs rather
+		// than bare empty lines breaking the visual continuity
+		// of the quote.
+		if blockqDp > 0 {
+			out.WriteString(strings.Repeat("> ", blockqDp))
 		}
 		out.WriteByte('\n')
+		trailingBlankDepth = blockqDp
 	}
 
 	var walk func(n ast.Node)
