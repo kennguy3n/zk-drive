@@ -141,7 +141,14 @@ func (h *Handler) GetDocument(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid id", http.StatusBadRequest)
 		return
 	}
-	doc, parent, err := h.documents.GetByID(r.Context(), workspaceID, id)
+	// GetMetadata, not GetByID: the response envelope returned by
+	// newDocumentResponse never reads YState / YStateVector (both are
+	// json:"-" tagged on document.Document anyway), so fetching them
+	// is pure wasted Postgres I/O on what is the most common
+	// document endpoint (every navigation hit). Mirrors the same
+	// optimization on Rename / SetCollabMode / Delete /
+	// GetDocumentSnapshot's pre-permission probe.
+	doc, parent, err := h.documents.GetMetadata(r.Context(), workspaceID, id)
 	if err != nil {
 		writeDocumentError(w, err)
 		return
@@ -230,8 +237,16 @@ func (h *Handler) RenameDocument(w http.ResponseWriter, r *http.Request) {
 	}
 	// Rename doesn't change parent folder; reuse the folder fetched
 	// during the permission check above.
+	// "name" is the canonical key buildChangefeedInput lifts into
+	// the structured Mutation.Name column (see handler.go:449-454).
+	// We supply both the canonical key AND the old_name / new_name
+	// pair: the structured column gives sync clients a single
+	// field to render the new name without parsing JSONB; the
+	// old_name / new_name keys preserve the full diff for the
+	// activity log's audit view.
 	h.logActivity(r.Context(), activity.ActionDocumentRename, resourceTypeDocument, updated.ID, map[string]any{
 		"folder_id": updated.FolderID,
+		"name":      updated.Name,
 		"old_name":  oldName,
 		"new_name":  updated.Name,
 	})
@@ -278,8 +293,14 @@ func (h *Handler) SetDocumentCollabMode(w http.ResponseWriter, r *http.Request) 
 	}
 	// SetCollabMode doesn't change parent folder; reuse the folder
 	// fetched during the permission check above.
+	// Include "name" alongside the collab-mode diff for changefeed
+	// uniformity with create / rename / delete events; buildChangefeed-
+	// Input lifts it into the structured Mutation.Name column so a
+	// sync client filtering on kind=document op=update can render
+	// the doc name without a follow-up GET.
 	h.logActivity(r.Context(), activity.ActionDocumentChangeCollabMode, resourceTypeDocument, updated.ID, map[string]any{
 		"folder_id":       updated.FolderID,
+		"name":            updated.Name,
 		"old_collab_mode": oldMode,
 		"new_collab_mode": updated.CollabMode,
 	})
