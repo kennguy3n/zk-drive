@@ -183,25 +183,40 @@ func (r *PostgresRepository) GetMetadata(ctx context.Context, workspaceID, docum
 }
 
 // UpdateName changes the document's name and bumps updated_at.
+// RETURNING uses documentListColumns (not documentColumns): the
+// rename path never inspects y_state / y_state_vector, so streaming
+// those potentially multi-MB TOAST'd blobs back from Postgres on
+// every rename would be pure wasted I/O. The y_state and
+// y_state_vector fields on the returned Document are left nil;
+// callers that need them must round-trip through GetByID /
+// GetSnapshotBundle.
 func (r *PostgresRepository) UpdateName(ctx context.Context, workspaceID, documentID uuid.UUID, name string) (*Document, error) {
 	q := `
 UPDATE documents
    SET name = $3, updated_at = NOW()
  WHERE workspace_id = $1 AND id = $2 AND deleted_at IS NULL
-RETURNING ` + documentColumns
-	return scanDocument(r.pool.QueryRow(ctx, q, workspaceID, documentID, name))
+RETURNING ` + documentListColumns
+	return scanDocumentListItem(r.pool.QueryRow(ctx, q, workspaceID, documentID, name))
 }
 
 // UpdateCollabMode changes the document's collab_mode and bumps
 // updated_at. The service layer validates against the folder's
 // encryption mode before calling.
+//
+// RETURNING uses documentListColumns (not documentColumns) for the
+// same reason as UpdateName: the collab-mode flip path is metadata-
+// only and never reads y_state, so dragging the binary blobs back
+// across the wire is wasted I/O. The returned Document's YState /
+// YStateVector are nil; this is fine because the handler hands the
+// row straight to newDocumentResponse which serializes both as
+// json:"-".
 func (r *PostgresRepository) UpdateCollabMode(ctx context.Context, workspaceID, documentID uuid.UUID, collabMode string) (*Document, error) {
 	q := `
 UPDATE documents
    SET collab_mode = $3, updated_at = NOW()
  WHERE workspace_id = $1 AND id = $2 AND deleted_at IS NULL
-RETURNING ` + documentColumns
-	return scanDocument(r.pool.QueryRow(ctx, q, workspaceID, documentID, collabMode))
+RETURNING ` + documentListColumns
+	return scanDocumentListItem(r.pool.QueryRow(ctx, q, workspaceID, documentID, collabMode))
 }
 
 // SoftDelete marks the document deleted. Deltas are NOT trimmed —
