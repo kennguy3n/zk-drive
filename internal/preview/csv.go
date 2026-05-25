@@ -112,6 +112,18 @@ func renderCSVWithDelim(_ context.Context, srcBytes []byte, forcedDelim rune) (i
 	if len(body) > csvPreviewMaxBytes {
 		body = clipBytesToValidUTF8(body[:csvPreviewMaxBytes])
 	}
+	// Strip a leading UTF-8 BOM if present. Excel and many Windows
+	// CSV exporters prepend `\xEF\xBB\xBF` to identify the file as
+	// UTF-8, but `encoding/csv` and `detectCSVDelimiter` treat the
+	// BOM as ordinary bytes that survive into the first cell — the
+	// preview would then render the BOM glyph as a leading
+	// visual artefact on the first column of the first row. The
+	// BOM is purely a file-encoding marker; the bytes carry no
+	// semantic content and stripping is safe. We strip only at
+	// position 0 because BOM is a file-prefix concept, not a
+	// per-record marker (a `\xEF\xBB\xBF` byte sequence found
+	// mid-file is data, not a BOM).
+	body = bytes.TrimPrefix(body, []byte{0xEF, 0xBB, 0xBF})
 
 	var delim rune
 	if forcedDelim == autoDelim {
