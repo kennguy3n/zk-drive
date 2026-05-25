@@ -384,7 +384,14 @@ export default function DocumentEditorPage() {
           ) : (
             <h1
               style={{ fontSize: 20, fontWeight: 600, margin: 0, cursor: "text" }}
-              onClick={() => setRenaming(true)}
+              onClick={() => {
+                // Reset to the current name so a previous cancelled
+                // rename (e.g. user cleared the input then blurred to
+                // cancel) doesn't leave the next session pre-filled
+                // with a stale / empty value.
+                setRenameValue(doc.name);
+                setRenaming(true);
+              }}
               title="Click to rename"
             >
               {doc.name}
