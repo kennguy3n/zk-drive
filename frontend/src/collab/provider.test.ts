@@ -177,6 +177,85 @@ describe("CollabProvider close-code policy", () => {
     }
   });
 
+  it("flushes local state on reconnect so offline edits are not lost", () => {
+    // Wire up a fake WebSocket so we can observe what the provider
+    // sends after a reconnect. The provider only calls .send() when
+    // readyState === OPEN; we mock the minimum surface.
+    const sent: Uint8Array[] = [];
+    class FakeSocket {
+      readyState = 1; // OPEN
+      send(data: ArrayBuffer | ArrayBufferView) {
+        if (data instanceof ArrayBuffer) {
+          sent.push(new Uint8Array(data));
+        } else if (ArrayBuffer.isView(data)) {
+          sent.push(new Uint8Array(data.buffer, data.byteOffset, data.byteLength));
+        }
+      }
+      close() {}
+    }
+
+    const doc = new Y.Doc();
+    // Pre-populate with content so encodeStateAsUpdate has > 2 bytes.
+    doc.getText("body").insert(0, "offline edit");
+
+    const provider = new CollabProvider({
+      url: "ws://127.0.0.1:1/api/documents/x/ws",
+      token: "test",
+      doc,
+    });
+
+    // Force needsResync=true (as a real close() would) and install
+    // our fake WS so handleOpen's sendFrame path can observe it.
+    (provider as unknown as { needsResync: boolean }).needsResync = true;
+    (provider as unknown as { ws: unknown }).ws = new FakeSocket();
+    (provider as unknown as { handleOpen(): void }).handleOpen();
+
+    // We expect at least one SyncUpdate frame: byte0=0x00 (SYNC),
+    // byte1=0x02 (SYNC_UPDATE), followed by the Y.Doc update.
+    const syncUpdates = sent.filter((b) => b.length >= 2 && b[0] === 0x00 && b[1] === 0x02);
+    expect(syncUpdates.length).toBeGreaterThan(0);
+    // The flushed payload must round-trip back to the same content.
+    const recovered = new Y.Doc();
+    Y.applyUpdate(recovered, syncUpdates[0].subarray(2));
+    expect(recovered.getText("body").toString()).toBe("offline edit");
+
+    // The flag must reset so a second open does not duplicate.
+    expect((provider as unknown as { needsResync: boolean }).needsResync).toBe(false);
+
+    provider.destroy();
+  });
+
+  it("does NOT flush on the very first connect (avoids duplicate of server-sent baseline)", () => {
+    const sent: Uint8Array[] = [];
+    class FakeSocket {
+      readyState = 1;
+      send(data: ArrayBuffer | ArrayBufferView) {
+        if (data instanceof ArrayBuffer) {
+          sent.push(new Uint8Array(data));
+        } else if (ArrayBuffer.isView(data)) {
+          sent.push(new Uint8Array(data.buffer, data.byteOffset, data.byteLength));
+        }
+      }
+      close() {}
+    }
+
+    const doc = new Y.Doc();
+    doc.getText("body").insert(0, "first connect");
+    const provider = new CollabProvider({
+      url: "ws://127.0.0.1:1/api/documents/x/ws",
+      token: "test",
+      doc,
+    });
+    // needsResync defaults to false; first handleOpen should NOT emit
+    // a sync update even though the doc has content.
+    (provider as unknown as { ws: unknown }).ws = new FakeSocket();
+    (provider as unknown as { handleOpen(): void }).handleOpen();
+
+    const syncUpdates = sent.filter((b) => b.length >= 2 && b[0] === 0x00 && b[1] === 0x02);
+    expect(syncUpdates).toEqual([]);
+    provider.destroy();
+  });
+
   it("DOES reconnect on transient close codes (1006 abnormal closure)", () => {
     const events: string[] = [];
     const doc = new Y.Doc();

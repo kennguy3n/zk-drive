@@ -108,6 +108,16 @@ export class CollabProvider {
   // because callers should consume the value through the onStatus
   // channel rather than poll.
   private currentStatus: ConnectionStatus = "disconnected";
+  // needsResync flips true after every WS close. On the next
+  // successful open we flush our full local Y.Doc state to the
+  // server as a SyncUpdate, recovering any edits the user typed
+  // while the socket was down (handleDocUpdate's send is a no-op
+  // when the socket is not OPEN). We start at false so the
+  // first-ever open does NOT echo the empty initial doc back to the
+  // server. Yjs CRDT merge means a duplicate update is harmless on
+  // the server side; the only cost is at most one extra delta row
+  // per reconnect, which compaction folds away.
+  private needsResync = false;
 
   // Bound handlers so we can attach AND detach the same function
   // references on the Y.Doc / Awareness emitters.
@@ -221,6 +231,20 @@ export class CollabProvider {
   private handleOpen(): void {
     this.reconnectMs = this.initialReconnectMs;
     this.setStatus("connected");
+    // After a reconnect, push our full local Y.Doc state so any
+    // edits typed while the socket was down reach the server. See
+    // the needsResync field comment for why this is a one-shot
+    // per-reconnect operation (not on first connect) and why a
+    // single full-state send is safe under CRDT merge semantics.
+    if (this.needsResync) {
+      this.needsResync = false;
+      const localState = Y.encodeStateAsUpdate(this.doc);
+      // Yjs encodes an empty doc as a 2-byte structural sentinel;
+      // skip if we have nothing meaningful to push.
+      if (localState.length > 2) {
+        this.sendFrame(buildSyncUpdate(localState));
+      }
+    }
     // On reconnect, immediately advertise our local awareness state
     // so peers re-discover us without waiting for the next change.
     if (this.presenceAllowed && this.awareness) {
@@ -273,6 +297,9 @@ export class CollabProvider {
 
   private handleClose(e: CloseEvent): void {
     this.ws = null;
+    // Flag a resync for the next successful open so we can recover
+    // any local edits typed during the outage.
+    this.needsResync = true;
     if (this.destroyed) return;
     // Stop the reconnect loop when the server signals a permanent
     // failure. Reconnecting an expired JWT or a policy-rejected
