@@ -217,23 +217,28 @@ func (h *Handler) snapshotDocumentsForFolderSubtreeDelete(ctx context.Context, w
 	return snaps
 }
 
-// emitFolderCascadeDocumentDeletes is the second half of the
-// two-phase document-cascade pattern. Pair with
+// emitFolderCascadeDocumentDeletes is the single-handler half of
+// the two-phase document-cascade pattern. Pair with
 // snapshotDocumentsForFolderSubtreeDelete: snapshot before
-// folders.Delete, emit after. For single-handler callers
-// (DeleteFolder) it goes through logActivity so each cascaded
-// document gets its own activity + changefeed row. Bulk callers
-// (BulkDelete) instead accumulate per-doc changes into the
-// surrounding changeInput slice and call batchRecordChanges once
-// at the end — use emitFolderCascadeDocumentDeletesBatch for that
-// path.
+// folders.Delete, emit after. Delegates to the same batch builder
+// used by the bulk handler so per-document changefeed writes flush
+// in ONE Postgres round-trip (multi-row INSERT) instead of N
+// sequential round-trips. Mirrors the same batching pattern PR73
+// applied to bulk file/folder mutations: deleting a project folder
+// with 50 documents previously cost 50 changefeed INSERTs; now it
+// costs 1.
+//
+// Activity log entries are still per-item via logActivityOnly
+// inside the batch builder — that path is already async (LogAction
+// enqueues onto a buffered channel) so per-item dispatch is cheap.
+// Only the changefeed mirror gets the batched flush.
+//
+// Bulk callers (BulkDelete) call emitFolderCascadeDocumentDeletes-
+// Batch directly so they can accumulate the changeInput entries
+// across multiple folders into ONE outer batchRecordChanges call —
+// see api/drive/bulk.go.
 func (h *Handler) emitFolderCascadeDocumentDeletes(ctx context.Context, snaps []*document.Document) {
-	for _, d := range snaps {
-		h.logActivity(ctx, activity.ActionDocumentDelete, resourceTypeDocument, d.ID, map[string]any{
-			"folder_id": d.FolderID,
-			"name":      d.Name,
-		})
-	}
+	h.batchRecordChanges(ctx, h.emitFolderCascadeDocumentDeletesBatch(ctx, snaps))
 }
 
 // emitFolderCascadeDocumentDeletesBatch is the bulk-handler variant.

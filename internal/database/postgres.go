@@ -125,7 +125,7 @@ const migrateAdvisoryLockKey int64 = 0x5a4b44524956534D // 'ZKDRIVSM' ASCII
 // constant is the server/worker baseline. Server/worker do not touch
 // audit_log_archive_runs, so coupling their boot to migration 027
 // would block deploys that don't enable the archiver.
-const MinRequiredMigrationVersion = "026_user_totp"
+const MinRequiredMigrationVersion = "031_change_log_kind_document"
 
 // MinRequiredMigrationVersionAuditArchiver is the minimum schema
 // version that the cmd/audit-archiver binary requires — it inserts
