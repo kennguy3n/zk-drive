@@ -46,7 +46,7 @@ var collabUpgrader = websocket.Upgrader{
 }
 
 // WithCollab wires the collaborative editor WS hub so the
-// /api/v1/documents/{id}/ws endpoint becomes available. When nil
+// /api/documents/{id}/ws endpoint becomes available. When nil
 // the endpoint responds 503 Service Unavailable, matching the
 // nil-safe pattern of WithDocuments / WithSharing.
 //

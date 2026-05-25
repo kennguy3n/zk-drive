@@ -6,7 +6,11 @@
 
 import { describe, it, expect } from "vitest";
 import * as Y from "yjs";
-import { CollabProvider, splitLengthPrefixed } from "./provider";
+import {
+  CollabProvider,
+  PermanentCloseCodes,
+  splitLengthPrefixed,
+} from "./provider";
 
 // Build a Yjs update that meaningfully exercises Y.applyUpdate so
 // the snapshot bundle ingestion test below verifies decode + apply.
@@ -89,7 +93,7 @@ describe("CollabProvider snapshot ingestion", () => {
 
     const doc = new Y.Doc();
     const provider = new CollabProvider({
-      url: "ws://localhost/api/v1/documents/x/ws",
+      url: "ws://localhost/api/documents/x/ws",
       token: "test-token",
       doc,
     });
@@ -118,7 +122,7 @@ describe("CollabProvider lifecycle", () => {
     const events: string[] = [];
     const doc = new Y.Doc();
     const provider = new CollabProvider({
-      url: "ws://127.0.0.1:1/api/v1/documents/x/ws",
+      url: "ws://127.0.0.1:1/api/documents/x/ws",
       token: "test",
       doc,
       onStatus: (s) => events.push(s),
@@ -131,5 +135,65 @@ describe("CollabProvider lifecycle", () => {
     provider.destroy();
     expect(events).toContain("connecting");
     expect(events[events.length - 1]).toBe("disconnected");
+  });
+});
+
+describe("CollabProvider close-code policy", () => {
+  it("does NOT reconnect on permanent close codes (1000, 1008, 4001, 4003)", () => {
+    // Pin the exported list so any future drift fails the test
+    // rather than silently changing the policy.
+    expect(PermanentCloseCodes).toEqual([1000, 1008, 4001, 4003]);
+
+    const doc = new Y.Doc();
+    for (const code of PermanentCloseCodes) {
+      const events: string[] = [];
+      let errored = false;
+      const provider = new CollabProvider({
+        url: "ws://127.0.0.1:1/api/documents/x/ws",
+        token: "test",
+        doc,
+        onStatus: (s) => events.push(s),
+        onError: () => {
+          errored = true;
+        },
+      });
+      // Force the provider out of the initial "disconnected"
+      // state so a setStatus("disconnected") inside handleClose
+      // actually emits a transition we can observe.
+      (
+        provider as unknown as { setStatus(s: string): void }
+      ).setStatus("connected");
+      // Drive handleClose directly with the permanent code.
+      const handleClose = (
+        provider as unknown as { handleClose(e: CloseEvent): void }
+      ).handleClose.bind(provider);
+      handleClose(new CloseEvent("close", { code, reason: "test" }));
+      // No reconnect transition should ever appear; final status
+      // must end in "disconnected"; an error must be surfaced.
+      expect(events.includes("reconnecting"), `code=${code}`).toBe(false);
+      expect(events[events.length - 1], `code=${code}`).toBe("disconnected");
+      expect(errored, `code=${code} should onError`).toBe(true);
+      provider.destroy();
+    }
+  });
+
+  it("DOES reconnect on transient close codes (1006 abnormal closure)", () => {
+    const events: string[] = [];
+    const doc = new Y.Doc();
+    const provider = new CollabProvider({
+      url: "ws://127.0.0.1:1/api/documents/x/ws",
+      token: "test",
+      doc,
+      // Long enough that destroy() in the next line fires before
+      // the reconnect attempt; we only care about the status edge.
+      initialReconnectMs: 30_000,
+      onStatus: (s) => events.push(s),
+    });
+    const handleClose = (
+      provider as unknown as { handleClose(e: CloseEvent): void }
+    ).handleClose.bind(provider);
+    handleClose(new CloseEvent("close", { code: 1006, reason: "abnormal" }));
+    expect(events).toContain("reconnecting");
+    provider.destroy();
   });
 });

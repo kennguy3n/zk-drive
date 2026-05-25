@@ -487,7 +487,7 @@ func TestAuthMiddleware_WebSocketSubprotocolBearer(t *testing.T) {
 			})
 
 			h := AuthMiddleware(secret, nil)(next)
-			req := httptest.NewRequest(http.MethodGet, "/api/v1/documents/x/ws", nil)
+			req := httptest.NewRequest(http.MethodGet, "/api/documents/x/ws", nil)
 			if tc.upgrade {
 				req.Header.Set("Upgrade", "websocket")
 			}

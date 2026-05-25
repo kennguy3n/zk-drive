@@ -4,7 +4,7 @@
 //
 //   1. The Y.Doc + (optional) Awareness — the CRDT state surface.
 //   2. The CollabProvider — a WebSocket connection to
-//      `/api/v1/documents/{id}/ws` that pumps binary Yjs updates
+//      `/api/documents/{id}/ws` that pumps binary Yjs updates
 //      between the Y.Doc and the server (see src/collab/provider.ts).
 //   3. TipTap with capability-gated extensions — StarterKit always,
 //      plus tables / image / link in rich modes, plus
@@ -119,17 +119,26 @@ export default function DocumentEditorPage() {
 
   // Build (or rebuild) the Y.Doc + provider whenever the document's
   // collab_mode changes. We avoid recreating on every doc-fetch by
-  // pinning the dependency to (id, collab_mode); rename events
-  // don't trigger a re-init.
+  // depending on (id, collab_mode, presenceAllowed) — three primitive
+  // values derived from doc, NOT the `doc` object reference itself.
+  // Including `doc` in the dependency array would tear the
+  // WebSocket down on every rename (rename triggers setDoc which
+  // produces a new object reference), destroying the live CRDT
+  // state and forcing a resync. presenceAllowed is itself derived
+  // from collabMode + doc.capability.presence_allowed; when the
+  // capability flips (only possible across a collab_mode change),
+  // the dependency captures that transition.
   const collabMode: CollabMode = doc?.collab_mode ?? "disabled";
   const presenceAllowed =
     !!doc && doc.capability.presence_allowed && collabMode === "rich_presence";
   const writable = !!doc && collabMode !== "disabled";
 
   useEffect(() => {
-    if (!doc || !id) return;
+    if (!id) return;
     if (collabMode === "disabled") {
-      // No WS connection in tombstone mode; the editor below is
+      // No WS connection in tombstone mode (also the pre-load
+      // state where doc has not yet fetched, since collabMode
+      // defaults to "disabled" then). The editor below is
       // rendered with setEditable(false). Awareness instance is
       // not created so PresenceChips stays empty.
       setYDoc(null);
@@ -176,7 +185,7 @@ export default function DocumentEditorPage() {
       setAwareness(null);
       setStatus("disconnected");
     };
-  }, [id, collabMode, presenceAllowed, doc]);
+  }, [id, collabMode, presenceAllowed]);
 
   // Build the TipTap extension list based on the resolved
   // capability + collab mode. The "rich" extensions are

@@ -271,9 +271,30 @@ export class CollabProvider {
     this.onError(err);
   }
 
-  private handleClose(_e: CloseEvent): void {
+  private handleClose(e: CloseEvent): void {
     this.ws = null;
     if (this.destroyed) return;
+    // Stop the reconnect loop when the server signals a permanent
+    // failure. Reconnecting an expired JWT or a policy-rejected
+    // session would just burn the network — the user has to take
+    // explicit action (refresh, re-auth, fix permissions) before a
+    // new connection has any chance of succeeding.
+    //
+    //   1008 — RFC 6455 "Policy violation" (used by gorilla on
+    //          authorization / capability failures).
+    //   4001 — application-defined "auth failed / token rejected".
+    //   4003 — application-defined "document inaccessible /
+    //          forbidden / disabled".
+    //
+    // A graceful 1000 ("normal closure") is also non-retriable from
+    // the client's POV: the server explicitly told us to stop.
+    if (isPermanentCloseCode(e.code)) {
+      this.setStatus("disconnected");
+      this.onError(
+        new Error(`websocket closed permanently (code=${e.code}${e.reason ? `, reason=${e.reason}` : ""})`),
+      );
+      return;
+    }
     this.setStatus("reconnecting");
     // Exponential backoff with cap. The cap keeps tab-suspended
     // sessions from melting the server when 1,000 paused tabs all
@@ -297,6 +318,26 @@ export class CollabProvider {
     this.currentStatus = s;
     this.onStatus(s);
   }
+}
+
+// --- close-code policy --------------------------------------------
+
+// PermanentCloseCodes enumerates the WebSocket close codes that
+// indicate the server will keep rejecting future connections from
+// this client until something external changes (token refresh,
+// permission grant, etc.). Reconnecting on these codes is wasted
+// effort and can amplify auth-failure traffic.
+//
+// 1000 ("normal closure") is included because the server only sends
+// 1000 from explicit shutdown paths (Hub.Shutdown) — a transient
+// network blip surfaces as 1006 ("abnormal closure") instead, which
+// is correctly retriable.
+//
+// Exported for tests; the runtime check uses isPermanentCloseCode.
+export const PermanentCloseCodes: readonly number[] = [1000, 1008, 4001, 4003];
+
+function isPermanentCloseCode(code: number): boolean {
+  return PermanentCloseCodes.includes(code);
 }
 
 // --- frame builders ------------------------------------------------
