@@ -71,6 +71,22 @@ enum Cmd {
         /// through `jq` without reparsing prose.
         #[arg(long)]
         json: bool,
+        /// Disk-quota the snapshot should compare cached_bytes
+        /// against, in bytes. When omitted (default), the snapshot
+        /// has no quota to compare against and `over_quota` is
+        /// always `false`. Pass the same value here that you
+        /// passed to `--disk-quota-bytes` on `run` so a monitoring
+        /// script invoking `zk-sync status --json` sees the same
+        /// `over_quota` truth the running engine would.
+        ///
+        /// This is a separate flag (not auto-discovered from the
+        /// catalogue) because the catalogue does NOT persist the
+        /// engine's runtime config -- the quota is an operator
+        /// policy, not a property of the synced data. A `status`
+        /// invocation on a host with no running engine has no
+        /// other way to learn what quota the operator intends.
+        #[arg(long)]
+        disk_quota_bytes: Option<u64>,
     },
     /// Run the long-lived sync loop until SIGINT.
     Run {
@@ -249,15 +265,25 @@ async fn main() -> anyhow::Result<()> {
     // has lost network credentials to diagnose what the agent
     // thought the last-known state was.
     match args.cmd {
-        Cmd::Status { workspace, json } => {
+        Cmd::Status {
+            workspace,
+            json,
+            disk_quota_bytes,
+        } => {
             let c = catalogue.lock().await;
             let cursor = c.get_cursor(workspace)?;
             // The engine isn't running here so we can't surface a
             // live connectivity flag; report `Unknown` instead of
             // lying about online state. The status snapshot is
             // otherwise authoritative (everything else comes from
-            // SQLite).
-            let snap = StatusSnapshot::from_catalogue(&c, None, ConnectivityState::Unknown)?;
+            // SQLite). The quota comes in via --disk-quota-bytes
+            // (None means: don't compute over_quota); see the flag
+            // doc on Cmd::Status for why this isn't auto-discovered.
+            let snap = StatusSnapshot::from_catalogue(
+                &c,
+                disk_quota_bytes,
+                ConnectivityState::Unknown,
+            )?;
             if json {
                 // Include the cursor in a JSON envelope alongside
                 // the snapshot so tools that diff `status --json`

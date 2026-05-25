@@ -667,13 +667,39 @@ impl Catalogue {
                 "evicted" => counts.evicted = cnt,
                 // An unknown status string means the catalogue was
                 // written by a newer SDK version that knows a status
-                // this build doesn't. The aggregate quietly drops it
-                // from the per-variant counters but still includes
-                // its rows in `cached` / `pinned` because the SQL
-                // already classified those at the row level. Logging
-                // here would be too noisy for what is fundamentally
-                // a forward-compat scenario.
-                _ => {}
+                // this build doesn't. Three things happen for that
+                // row:
+                //
+                //   * the per-variant counter is dropped on the
+                //     floor (this match arm does nothing),
+                //   * `cached` is NOT incremented by the row's
+                //     bytes -- the SQL `CASE WHEN status IN (...)`
+                //     filter evaluates to 0 for any status outside
+                //     {'up_to_date','local_dirty','remote_dirty','conflict'},
+                //   * `pinned` IS incremented by the row's pinned
+                //     bit -- the pinned CASE is status-independent.
+                //
+                // This is the conservative undercount: an older
+                // SDK reading a newer catalogue will under-report
+                // cached_bytes for any forward-compat status that
+                // represents on-disk content, which can delay
+                // eviction. We accept that because (a) the policy
+                // for what counts as "on-disk" must stay with
+                // the SDK version that knows the semantic of each
+                // status, and (b) under-eviction degrades only the
+                // local cache footprint, not correctness. A future
+                // SDK can opt rows in by adding the new status to
+                // both the per-variant match and the SQL filter
+                // in lockstep.
+                _ => {
+                    warn!(
+                        status = %status_s,
+                        rows = cnt,
+                        "status_aggregate: unknown SyncStatus from catalogue; \
+                         skipping per-variant count, cached_bytes will undercount \
+                         on-disk rows for this status"
+                    );
+                }
             }
         }
         Ok((cached, pinned, counts))
@@ -760,7 +786,7 @@ impl Catalogue {
         content_hash: [u8; 32],
         size_bytes: u64,
     ) -> Result<()> {
-        let now = chrono::Utc::now().to_rfc3339();
+        let now = rfc3339_now();
         self.conn.execute(
             r#"UPDATE files
                   SET status = ?1,
