@@ -1,5 +1,7 @@
 import { useRef, useState } from "react";
+import { useTranslation } from "react-i18next";
 import { uploadFile, type FileItem } from "../api/client";
+import { translateApiError } from "../api/errors";
 
 export interface UploadButtonProps {
   folderID: string | null;
@@ -10,6 +12,7 @@ export interface UploadButtonProps {
 // three-step presigned-URL flow defined in api/client.ts. Errors bubble
 // up through an inline message so the user isn't left guessing.
 export default function UploadButton({ folderID, onUploaded }: UploadButtonProps) {
+  const { t } = useTranslation();
   const inputRef = useRef<HTMLInputElement>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -23,7 +26,7 @@ export default function UploadButton({ folderID, onUploaded }: UploadButtonProps
       const uploaded = await uploadFile(file, folderID);
       onUploaded(uploaded);
     } catch (err) {
-      setError(String((err as Error)?.message ?? err));
+      setError(translateApiError(err, t));
     } finally {
       setBusy(false);
       if (inputRef.current) inputRef.current.value = "";
@@ -46,7 +49,7 @@ export default function UploadButton({ folderID, onUploaded }: UploadButtonProps
           opacity: busy ? 0.6 : 1,
         }}
       >
-        {busy ? "Uploading..." : "Upload file"}
+        {busy ? t("drive.uploading") : t("drive.uploadFile")}
       </button>
       <input
         ref={inputRef}

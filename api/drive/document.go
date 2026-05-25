@@ -77,30 +77,30 @@ type deltaResponse struct {
 // service rejects out-of-policy combinations with a 422.
 func (h *Handler) CreateDocument(w http.ResponseWriter, r *http.Request) {
 	if h.documents == nil {
-		http.Error(w, "documents disabled", http.StatusServiceUnavailable)
+		middleware.RespondError(w, http.StatusServiceUnavailable, middleware.ErrCodeUnsupportedOp, "documents disabled")
 		return
 	}
 	workspaceID, ok := middleware.WorkspaceIDFromContext(r.Context())
 	userID, _ := middleware.UserIDFromContext(r.Context())
 	if !ok {
-		http.Error(w, "unauthenticated", http.StatusUnauthorized)
+		middleware.RespondError(w, http.StatusUnauthorized, middleware.ErrCodeAuthMissingToken, "unauthenticated")
 		return
 	}
 	var req createDocumentRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "invalid json body", http.StatusBadRequest)
+		middleware.RespondError(w, http.StatusBadRequest, middleware.ErrCodeMalformedJSON, "invalid json body")
 		return
 	}
 	if req.WorkspaceID != "" {
 		reqWS, err := uuid.Parse(req.WorkspaceID)
 		if err != nil || reqWS != workspaceID {
-			http.Error(w, "workspace_id mismatch", http.StatusForbidden)
+			middleware.RespondError(w, http.StatusForbidden, middleware.ErrCodeWrongTenant, "workspace_id mismatch")
 			return
 		}
 	}
 	folderID, err := uuid.Parse(req.FolderID)
 	if err != nil {
-		http.Error(w, "invalid folder_id", http.StatusBadRequest)
+		middleware.RespondError(w, http.StatusBadRequest, middleware.ErrCodeBadRequest, "invalid folder_id")
 		return
 	}
 	// Documents inherit folder-level permissions: the caller must
@@ -132,13 +132,13 @@ func (h *Handler) CreateDocument(w http.ResponseWriter, r *http.Request) {
 // GetDocument returns a document plus its current capability.
 func (h *Handler) GetDocument(w http.ResponseWriter, r *http.Request) {
 	if h.documents == nil {
-		http.Error(w, "documents disabled", http.StatusServiceUnavailable)
+		middleware.RespondError(w, http.StatusServiceUnavailable, middleware.ErrCodeUnsupportedOp, "documents disabled")
 		return
 	}
 	workspaceID, _ := middleware.WorkspaceIDFromContext(r.Context())
 	id, err := uuid.Parse(chi.URLParam(r, "id"))
 	if err != nil {
-		http.Error(w, "invalid id", http.StatusBadRequest)
+		middleware.RespondError(w, http.StatusBadRequest, middleware.ErrCodeBadRequest, "invalid id")
 		return
 	}
 	// GetMetadata, not GetByID: the response envelope returned by
@@ -163,13 +163,13 @@ func (h *Handler) GetDocument(w http.ResponseWriter, r *http.Request) {
 // ListFolderDocuments returns the documents under a folder.
 func (h *Handler) ListFolderDocuments(w http.ResponseWriter, r *http.Request) {
 	if h.documents == nil {
-		http.Error(w, "documents disabled", http.StatusServiceUnavailable)
+		middleware.RespondError(w, http.StatusServiceUnavailable, middleware.ErrCodeUnsupportedOp, "documents disabled")
 		return
 	}
 	workspaceID, _ := middleware.WorkspaceIDFromContext(r.Context())
 	folderID, err := uuid.Parse(chi.URLParam(r, "id"))
 	if err != nil {
-		http.Error(w, "invalid folder id", http.StatusBadRequest)
+		middleware.RespondError(w, http.StatusBadRequest, middleware.ErrCodeBadRequest, "invalid folder id")
 		return
 	}
 	if err := h.assertResourceAccess(r.Context(), permission.ResourceFolder, folderID, permission.RoleViewer); err != nil {
@@ -183,7 +183,7 @@ func (h *Handler) ListFolderDocuments(w http.ResponseWriter, r *http.Request) {
 	}
 	docs, err := h.documents.ListByFolder(r.Context(), workspaceID, folderID)
 	if err != nil {
-		http.Error(w, "list documents: "+err.Error(), http.StatusInternalServerError)
+		middleware.RespondError(w, http.StatusInternalServerError, middleware.ErrCodeInternal, "list documents: "+err.Error())
 		return
 	}
 	out := make([]documentResponse, 0, len(docs))
@@ -203,13 +203,13 @@ func (h *Handler) ListFolderDocuments(w http.ResponseWriter, r *http.Request) {
 // RenameDocument updates the document name.
 func (h *Handler) RenameDocument(w http.ResponseWriter, r *http.Request) {
 	if h.documents == nil {
-		http.Error(w, "documents disabled", http.StatusServiceUnavailable)
+		middleware.RespondError(w, http.StatusServiceUnavailable, middleware.ErrCodeUnsupportedOp, "documents disabled")
 		return
 	}
 	workspaceID, _ := middleware.WorkspaceIDFromContext(r.Context())
 	id, err := uuid.Parse(chi.URLParam(r, "id"))
 	if err != nil {
-		http.Error(w, "invalid id", http.StatusBadRequest)
+		middleware.RespondError(w, http.StatusBadRequest, middleware.ErrCodeBadRequest, "invalid id")
 		return
 	}
 	// GetMetadata, not GetByID: Rename only needs folder_id (for the
@@ -226,7 +226,7 @@ func (h *Handler) RenameDocument(w http.ResponseWriter, r *http.Request) {
 	}
 	var req renameDocumentRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "invalid json body", http.StatusBadRequest)
+		middleware.RespondError(w, http.StatusBadRequest, middleware.ErrCodeMalformedJSON, "invalid json body")
 		return
 	}
 	oldName := doc.Name
@@ -257,13 +257,13 @@ func (h *Handler) RenameDocument(w http.ResponseWriter, r *http.Request) {
 // the folder's capability ceiling.
 func (h *Handler) SetDocumentCollabMode(w http.ResponseWriter, r *http.Request) {
 	if h.documents == nil {
-		http.Error(w, "documents disabled", http.StatusServiceUnavailable)
+		middleware.RespondError(w, http.StatusServiceUnavailable, middleware.ErrCodeUnsupportedOp, "documents disabled")
 		return
 	}
 	workspaceID, _ := middleware.WorkspaceIDFromContext(r.Context())
 	id, err := uuid.Parse(chi.URLParam(r, "id"))
 	if err != nil {
-		http.Error(w, "invalid id", http.StatusBadRequest)
+		middleware.RespondError(w, http.StatusBadRequest, middleware.ErrCodeBadRequest, "invalid id")
 		return
 	}
 	// GetMetadata, not GetByID: SetCollabMode only needs folder_id
@@ -282,7 +282,7 @@ func (h *Handler) SetDocumentCollabMode(w http.ResponseWriter, r *http.Request) 
 	}
 	var req setCollabModeRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "invalid json body", http.StatusBadRequest)
+		middleware.RespondError(w, http.StatusBadRequest, middleware.ErrCodeMalformedJSON, "invalid json body")
 		return
 	}
 	oldMode := doc.CollabMode
@@ -310,13 +310,13 @@ func (h *Handler) SetDocumentCollabMode(w http.ResponseWriter, r *http.Request) 
 // DeleteDocument soft-deletes a document.
 func (h *Handler) DeleteDocument(w http.ResponseWriter, r *http.Request) {
 	if h.documents == nil {
-		http.Error(w, "documents disabled", http.StatusServiceUnavailable)
+		middleware.RespondError(w, http.StatusServiceUnavailable, middleware.ErrCodeUnsupportedOp, "documents disabled")
 		return
 	}
 	workspaceID, _ := middleware.WorkspaceIDFromContext(r.Context())
 	id, err := uuid.Parse(chi.URLParam(r, "id"))
 	if err != nil {
-		http.Error(w, "invalid id", http.StatusBadRequest)
+		middleware.RespondError(w, http.StatusBadRequest, middleware.ErrCodeBadRequest, "invalid id")
 		return
 	}
 	// GetMetadata, not GetByID: Delete only needs folder_id
@@ -346,13 +346,13 @@ func (h *Handler) DeleteDocument(w http.ResponseWriter, r *http.Request) {
 // client: y_state + tail deltas above the snapshot floor.
 func (h *Handler) GetDocumentSnapshot(w http.ResponseWriter, r *http.Request) {
 	if h.documents == nil {
-		http.Error(w, "documents disabled", http.StatusServiceUnavailable)
+		middleware.RespondError(w, http.StatusServiceUnavailable, middleware.ErrCodeUnsupportedOp, "documents disabled")
 		return
 	}
 	workspaceID, _ := middleware.WorkspaceIDFromContext(r.Context())
 	id, err := uuid.Parse(chi.URLParam(r, "id"))
 	if err != nil {
-		http.Error(w, "invalid id", http.StatusBadRequest)
+		middleware.RespondError(w, http.StatusBadRequest, middleware.ErrCodeBadRequest, "invalid id")
 		return
 	}
 	// Check access BEFORE fetching the full snapshot bundle: a
@@ -397,13 +397,13 @@ func (h *Handler) GetDocumentSnapshot(w http.ResponseWriter, r *http.Request) {
 // downloading the snapshot.
 func (h *Handler) ListDocumentDeltas(w http.ResponseWriter, r *http.Request) {
 	if h.documents == nil {
-		http.Error(w, "documents disabled", http.StatusServiceUnavailable)
+		middleware.RespondError(w, http.StatusServiceUnavailable, middleware.ErrCodeUnsupportedOp, "documents disabled")
 		return
 	}
 	workspaceID, _ := middleware.WorkspaceIDFromContext(r.Context())
 	id, err := uuid.Parse(chi.URLParam(r, "id"))
 	if err != nil {
-		http.Error(w, "invalid id", http.StatusBadRequest)
+		middleware.RespondError(w, http.StatusBadRequest, middleware.ErrCodeBadRequest, "invalid id")
 		return
 	}
 	// GetMetadata, not GetByID: ListDocumentDeltas only needs
@@ -426,7 +426,7 @@ func (h *Handler) ListDocumentDeltas(w http.ResponseWriter, r *http.Request) {
 	// guard is needed here.
 	afterSeq, err := parseInt64Query(r, "after_seq", 0)
 	if err != nil {
-		http.Error(w, "invalid after_seq cursor", http.StatusBadRequest)
+		middleware.RespondError(w, http.StatusBadRequest, middleware.ErrCodeBadRequest, "invalid after_seq cursor")
 		return
 	}
 	// limit is strict (matches ListChanges): malformed input is a 400
@@ -436,7 +436,7 @@ func (h *Handler) ListDocumentDeltas(w http.ResponseWriter, r *http.Request) {
 	// end-of-page sentinel get a reliable signal.
 	limit, err := parseIntQuery(r, "limit", 100)
 	if err != nil {
-		http.Error(w, "invalid limit", http.StatusBadRequest)
+		middleware.RespondError(w, http.StatusBadRequest, middleware.ErrCodeBadRequest, "invalid limit")
 		return
 	}
 	if limit <= 0 {
@@ -449,7 +449,7 @@ func (h *Handler) ListDocumentDeltas(w http.ResponseWriter, r *http.Request) {
 	// without a second round-trip. Mirrors the ListChanges contract.
 	deltas, err := h.documents.ListDeltas(r.Context(), workspaceID, id, afterSeq, limit+1)
 	if err != nil {
-		http.Error(w, "list deltas: "+err.Error(), http.StatusInternalServerError)
+		middleware.RespondError(w, http.StatusInternalServerError, middleware.ErrCodeInternal, "list deltas: "+err.Error())
 		return
 	}
 	hasMore := len(deltas) > limit
@@ -479,14 +479,14 @@ func (h *Handler) ListDocumentDeltas(w http.ResponseWriter, r *http.Request) {
 // the P2b WebSocket provider provides the low-latency duplex path.
 func (h *Handler) AppendDocumentDelta(w http.ResponseWriter, r *http.Request) {
 	if h.documents == nil {
-		http.Error(w, "documents disabled", http.StatusServiceUnavailable)
+		middleware.RespondError(w, http.StatusServiceUnavailable, middleware.ErrCodeUnsupportedOp, "documents disabled")
 		return
 	}
 	workspaceID, _ := middleware.WorkspaceIDFromContext(r.Context())
 	userID, _ := middleware.UserIDFromContext(r.Context())
 	id, err := uuid.Parse(chi.URLParam(r, "id"))
 	if err != nil {
-		http.Error(w, "invalid id", http.StatusBadRequest)
+		middleware.RespondError(w, http.StatusBadRequest, middleware.ErrCodeBadRequest, "invalid id")
 		return
 	}
 	// AppendDocumentDelta is the per-keystroke hot path. We only
@@ -508,12 +508,12 @@ func (h *Handler) AppendDocumentDelta(w http.ResponseWriter, r *http.Request) {
 	}
 	var req appendDeltaRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "invalid json body", http.StatusBadRequest)
+		middleware.RespondError(w, http.StatusBadRequest, middleware.ErrCodeMalformedJSON, "invalid json body")
 		return
 	}
 	payload, err := base64.StdEncoding.DecodeString(req.Payload)
 	if err != nil {
-		http.Error(w, "payload must be base64", http.StatusBadRequest)
+		middleware.RespondError(w, http.StatusBadRequest, middleware.ErrCodeValidation, "payload must be base64")
 		return
 	}
 	result, err := h.documents.AppendDelta(r.Context(), document.AppendDeltaInput{
@@ -556,17 +556,17 @@ func newDocumentResponse(d *document.Document, parent *folder.Folder) documentRe
 func writeDocumentError(w http.ResponseWriter, err error) {
 	switch {
 	case errors.Is(err, document.ErrNotFound):
-		http.Error(w, err.Error(), http.StatusNotFound)
+		middleware.RespondError(w, http.StatusNotFound, middleware.ErrCodeNotFound, err.Error())
 	case errors.Is(err, document.ErrInvalidName),
 		errors.Is(err, document.ErrInvalidCollabMode),
 		errors.Is(err, document.ErrEmptyPayload):
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		middleware.RespondError(w, http.StatusBadRequest, middleware.ErrCodeBadRequest, err.Error())
 	case errors.Is(err, document.ErrCollabModeNotAllowed):
-		http.Error(w, err.Error(), http.StatusUnprocessableEntity)
+		middleware.RespondError(w, http.StatusUnprocessableEntity, middleware.ErrCodeInternal, err.Error())
 	case errors.Is(err, document.ErrPayloadTooLarge):
-		http.Error(w, err.Error(), http.StatusRequestEntityTooLarge)
+		middleware.RespondError(w, http.StatusRequestEntityTooLarge, middleware.ErrCodeFileTooLarge, err.Error())
 	case errors.Is(err, document.ErrSeqConflict):
-		http.Error(w, err.Error(), http.StatusConflict)
+		middleware.RespondError(w, http.StatusConflict, middleware.ErrCodeConflict, err.Error())
 	default:
 		writeServiceError(w, err)
 	}

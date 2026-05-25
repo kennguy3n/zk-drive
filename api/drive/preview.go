@@ -22,13 +22,13 @@ import (
 // that case.
 func (h *Handler) PreviewURL(w http.ResponseWriter, r *http.Request) {
 	if h.previews == nil || (h.storage == nil && h.storageFactory == nil) {
-		http.Error(w, "previews not configured", http.StatusNotImplemented)
+		middleware.RespondError(w, http.StatusNotImplemented, middleware.ErrCodeUnsupportedOp, "previews not configured")
 		return
 	}
 	workspaceID, _ := middleware.WorkspaceIDFromContext(r.Context())
 	id, err := uuid.Parse(chi.URLParam(r, "id"))
 	if err != nil {
-		http.Error(w, "invalid id", http.StatusBadRequest)
+		middleware.RespondError(w, http.StatusBadRequest, middleware.ErrCodeBadRequest, "invalid id")
 		return
 	}
 	// Bind the file id to the caller's workspace before any permission
@@ -58,14 +58,14 @@ func (h *Handler) PreviewURL(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if current != nil && current.ScanStatus == scan.StatusQuarantined {
-			http.Error(w, "file version quarantined by virus scan", http.StatusForbidden)
+			middleware.RespondError(w, http.StatusForbidden, middleware.ErrCodeVirusDetected, "file version quarantined by virus scan")
 			return
 		}
 	}
 	p, err := h.previews.GetLatestByFile(r.Context(), id)
 	if err != nil {
 		if errors.Is(err, preview.ErrNotFound) {
-			http.Error(w, "no preview available", http.StatusNotFound)
+			middleware.RespondError(w, http.StatusNotFound, middleware.ErrCodeNotFound, "no preview available")
 			return
 		}
 		writeServiceError(w, err)
@@ -77,17 +77,17 @@ func (h *Handler) PreviewURL(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if previewVersion != nil && previewVersion.ScanStatus == scan.StatusQuarantined {
-		http.Error(w, "file version quarantined by virus scan", http.StatusForbidden)
+		middleware.RespondError(w, http.StatusForbidden, middleware.ErrCodeVirusDetected, "file version quarantined by virus scan")
 		return
 	}
 	store := h.resolveStorage(r.Context(), workspaceID)
 	if store == nil {
-		http.Error(w, "storage not configured", http.StatusNotImplemented)
+		middleware.RespondError(w, http.StatusNotImplemented, middleware.ErrCodeUnsupportedOp, "storage not configured")
 		return
 	}
 	url, err := store.GenerateDownloadURL(r.Context(), p.ObjectKey, storage.DefaultPresignExpiry)
 	if err != nil {
-		http.Error(w, "preview url: "+err.Error(), http.StatusInternalServerError)
+		middleware.RespondError(w, http.StatusInternalServerError, middleware.ErrCodeInternal, "preview url: "+err.Error())
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{

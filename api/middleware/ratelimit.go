@@ -67,7 +67,7 @@ func RateLimiter(cfg RateLimitConfig) func(http.Handler) http.Handler {
 					retry = 1
 				}
 				w.Header().Set("Retry-After", strconv.Itoa(retry))
-				http.Error(w, "rate limit exceeded", http.StatusTooManyRequests)
+				RespondError(w, http.StatusTooManyRequests, ErrCodeRateLimit, "rate limit exceeded")
 				return
 			}
 			next.ServeHTTP(w, r)

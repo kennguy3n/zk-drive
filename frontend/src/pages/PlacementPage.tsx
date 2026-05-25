@@ -1,10 +1,12 @@
 import { useCallback, useEffect, useState } from "react";
 import { Link } from "react-router-dom";
+import { useTranslation } from "react-i18next";
 import {
   fetchPlacement,
   updatePlacement,
   type PlacementPolicy,
 } from "../api/client";
+import { translateApiError } from "../api/errors";
 import { useAuth } from "../hooks/useAuth";
 
 // PlacementPage lets workspace admins view and edit the data-residency
@@ -14,6 +16,7 @@ import { useAuth } from "../hooks/useAuth";
 // GET payload when we PUT.
 export default function PlacementPage() {
   const { isAdmin } = useAuth();
+  const { t } = useTranslation();
   const [policy, setPolicy] = useState<PlacementPolicy | null>(null);
   const [provider, setProvider] = useState<string>("wasabi");
   const [region, setRegion] = useState("");
@@ -35,10 +38,11 @@ export default function PlacementPage() {
       setCountry(pl.country?.[0] ?? "");
       setStorageClass(pl.storage_class?.[0] ?? "");
     } catch (e) {
-      setError(errMessage(e));
+      setError(translateApiError(e, t));
     } finally {
       setLoading(false);
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   useEffect(() => {
@@ -48,10 +52,9 @@ export default function PlacementPage() {
   if (!isAdmin) {
     return (
       <div style={{ padding: 32 }}>
-        <h2>Admin only</h2>
+        <h2>{t("admin.adminOnly")}</h2>
         <p>
-          This page is restricted to workspace administrators.{" "}
-          <Link to="/drive">Back to drive</Link>
+          {t("admin.adminOnlyDescription")} <Link to="/drive">{t("admin.backToDrive")}</Link>
         </p>
       </div>
     );
@@ -79,10 +82,10 @@ export default function PlacementPage() {
     };
     try {
       await updatePlacement(next);
-      setMessage("Placement policy saved.");
+      setMessage(t("placement.savedConfirm"));
       await load();
     } catch (e) {
-      setError(errMessage(e));
+      setError(translateApiError(e, t));
     }
   };
 
@@ -96,10 +99,10 @@ export default function PlacementPage() {
           marginBottom: 16,
         }}
       >
-        <h1 style={{ margin: 0 }}>Placement policy</h1>
-        <Link to="/admin">Back to admin</Link>
+        <h1 style={{ margin: 0 }}>{t("placement.title")}</h1>
+        <Link to="/admin">{t("admin.backToAdmin")}</Link>
       </header>
-      {loading ? <p>Loading…</p> : null}
+      {loading ? <p>{t("common.loading")}</p> : null}
       {error ? <p style={{ color: "#b91c1c" }}>{error}</p> : null}
       {message ? <p style={{ color: "#047857" }}>{message}</p> : null}
       <form
@@ -110,7 +113,7 @@ export default function PlacementPage() {
         style={{ display: "grid", gap: 12, maxWidth: 480 }}
       >
         <label style={{ display: "grid", gap: 4 }}>
-          <span>Provider</span>
+          <span>{t("placement.provider")}</span>
           <select value={provider} onChange={(e) => setProvider(e.target.value)}>
             <option value="wasabi">wasabi</option>
             <option value="b2">b2</option>
@@ -118,34 +121,34 @@ export default function PlacementPage() {
           </select>
         </label>
         <label style={{ display: "grid", gap: 4 }}>
-          <span>Region</span>
+          <span>{t("placement.region")}</span>
           <input
             value={region}
             onChange={(e) => setRegion(e.target.value)}
-            placeholder="e.g. us-east-1"
+            placeholder={t("placement.regionPlaceholder")}
           />
         </label>
         <label style={{ display: "grid", gap: 4 }}>
-          <span>Country (ISO-3166 alpha-2)</span>
+          <span>{t("placement.country")}</span>
           <input
             value={country}
             onChange={(e) => setCountry(e.target.value)}
-            placeholder="e.g. US, DE"
+            placeholder={t("placement.countryPlaceholder")}
             maxLength={2}
           />
         </label>
         <label style={{ display: "grid", gap: 4 }}>
-          <span>Storage class</span>
+          <span>{t("placement.storageClass")}</span>
           <input
             value={storageClass}
             onChange={(e) => setStorageClass(e.target.value)}
-            placeholder="e.g. hot, cold"
+            placeholder={t("placement.storageClassPlaceholder")}
           />
         </label>
         <div style={{ display: "flex", gap: 8 }}>
-          <button type="submit">Save</button>
+          <button type="submit">{t("common.save")}</button>
           <button type="button" onClick={load}>
-            Reset
+            {t("common.reset")}
           </button>
         </div>
       </form>
@@ -153,9 +156,4 @@ export default function PlacementPage() {
   );
 }
 
-function errMessage(e: unknown): string {
-  if (e && typeof e === "object" && "message" in e) {
-    return String((e as { message: unknown }).message);
-  }
-  return String(e);
-}
+

@@ -12,7 +12,7 @@ func AdminOnly() func(http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			role, ok := RoleFromContext(r.Context())
 			if !ok || role != "admin" {
-				http.Error(w, "admin access required", http.StatusForbidden)
+				RespondError(w, http.StatusForbidden, ErrCodeAdminOnly, "admin access required")
 				return
 			}
 			next.ServeHTTP(w, r)

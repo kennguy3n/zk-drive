@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { useTranslation } from "react-i18next";
 import { getFilePreviewURL } from "../api/client";
 
 // FilePreview renders the server-generated thumbnail for a file.
@@ -25,6 +26,7 @@ export default function FilePreview({
   size = "thumb",
   alt,
 }: FilePreviewProps) {
+  const { t } = useTranslation();
   const [url, setUrl] = useState<string | null>(null);
   const [failed, setFailed] = useState(false);
 
@@ -63,7 +65,7 @@ export default function FilePreview({
       <div style={wrapper}>
         <img
           src={url}
-          alt={alt ?? "preview"}
+          alt={alt ?? t("preview.alt")}
           style={{ maxWidth: "100%", maxHeight: "100%", objectFit: "contain" }}
           onError={() => setFailed(true)}
         />
@@ -72,7 +74,7 @@ export default function FilePreview({
   }
 
   return (
-    <div style={wrapper} aria-label={alt ?? "no preview available"}>
+    <div style={wrapper} aria-label={alt ?? t("preview.unavailable")}>
       <span style={{ fontSize: size === "panel" ? 14 : 11, color: "#6b7280" }}>
         {placeholderLabel(mimeType)}
       </span>

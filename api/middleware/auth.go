@@ -192,12 +192,12 @@ func AuthMiddleware(secret string, checker SessionChecker) func(http.Handler) ht
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			raw, ok := extractBearerToken(r)
 			if !ok {
-				http.Error(w, "missing bearer token", http.StatusUnauthorized)
+				RespondError(w, http.StatusUnauthorized, ErrCodeAuthMissingToken, "missing bearer token")
 				return
 			}
 			claims, err := ParseToken(secret, raw)
 			if err != nil {
-				http.Error(w, "invalid token", http.StatusUnauthorized)
+				RespondError(w, http.StatusUnauthorized, ErrCodeAuthInvalidToken, "invalid token")
 				return
 			}
 			// Purpose-scoped tokens (mfa_challenge, mfa_enroll) MUST
@@ -208,7 +208,7 @@ func AuthMiddleware(secret string, checker SessionChecker) func(http.Handler) ht
 			// MFA endpoints (which use MFAChallengeMiddleware /
 			// MFAEnrollMiddleware below).
 			if claims.Purpose != "" {
-				http.Error(w, "token not valid for this endpoint", http.StatusUnauthorized)
+				RespondError(w, http.StatusUnauthorized, ErrCodeAuthBadPurpose, "token not valid for this endpoint")
 				return
 			}
 			if checker != nil {
@@ -219,7 +219,7 @@ func AuthMiddleware(secret string, checker SessionChecker) func(http.Handler) ht
 				// against a cutoff, so we conservatively fail
 				// closed.
 				if claims.IssuedAt == nil {
-					http.Error(w, "token missing iat", http.StatusUnauthorized)
+					RespondError(w, http.StatusUnauthorized, ErrCodeAuthMissingIat, "token missing iat")
 					return
 				}
 				// Bound the IsRevoked call so a partial Redis
@@ -237,11 +237,11 @@ func AuthMiddleware(secret string, checker SessionChecker) func(http.Handler) ht
 					// Fail closed on store unreachable. Without
 					// this the revocation guarantee would silently
 					// vanish behind a single Redis outage.
-					http.Error(w, "revocation check failed", http.StatusUnauthorized)
+					RespondError(w, http.StatusUnauthorized, ErrCodeRevocationCheck, "revocation check failed")
 					return
 				}
 				if revoked {
-					http.Error(w, "token revoked", http.StatusUnauthorized)
+					RespondError(w, http.StatusUnauthorized, ErrCodeAuthRevokedToken, "token revoked")
 					return
 				}
 			}
@@ -464,17 +464,17 @@ func PurposeMiddleware(secret, want string) func(http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			header := r.Header.Get("Authorization")
 			if header == "" || !strings.HasPrefix(header, "Bearer ") {
-				http.Error(w, "missing bearer token", http.StatusUnauthorized)
+				RespondError(w, http.StatusUnauthorized, ErrCodeAuthMissingToken, "missing bearer token")
 				return
 			}
 			raw := strings.TrimPrefix(header, "Bearer ")
 			claims, err := ParseToken(secret, raw)
 			if err != nil {
-				http.Error(w, "invalid token", http.StatusUnauthorized)
+				RespondError(w, http.StatusUnauthorized, ErrCodeAuthInvalidToken, "invalid token")
 				return
 			}
 			if claims.Purpose != want {
-				http.Error(w, "token not valid for this endpoint", http.StatusUnauthorized)
+				RespondError(w, http.StatusUnauthorized, ErrCodeAuthBadPurpose, "token not valid for this endpoint")
 				return
 			}
 			ctx := withClaims(r.Context(), claims)

@@ -1,57 +1,46 @@
 import { useEffect, useMemo, useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
+import { useTranslation } from "react-i18next";
+import type { TFunction } from "i18next";
 import {
   createCheckoutSession,
   createPortalSession,
   fetchBillingUsage,
   type BillingUsageSummary,
 } from "../api/client";
+import { translateApiError } from "../api/errors";
 import { useAuth } from "../hooks/useAuth";
 
 // Tier metadata mirrors the canonical strings in
-// internal/billing/billing.go. The blurbs are kept short — full
-// pricing lives on the marketing site, not in the admin shell.
-const TIER_OPTIONS = [
-  {
-    id: "starter",
-    label: "Starter",
-    blurb: "10 GB / user pooled, 25 users, 100 GB bandwidth / month.",
-  },
-  {
-    id: "business",
-    label: "Business",
-    blurb: "1 TB pooled, 250 users, 1 TB bandwidth / month, audit log.",
-  },
-  {
-    id: "secure_business",
-    label: "Secure Business",
-    blurb: "Customer-managed keys, regional placement, larger limits.",
-  },
-] as const;
-
-type TierID = (typeof TIER_OPTIONS)[number]["id"];
+// internal/billing/billing.go. Translated label/blurb live in en.json
+// so non-English locales can customise the plan card copy without
+// changing component code.
+const TIER_IDS = ["starter", "business", "secure_business"] as const;
+type TierID = (typeof TIER_IDS)[number];
 
 // BillingPage shows the workspace's current plan tier and usage-vs-limit
 // bars. Admin-only because the underlying /api/admin/billing/usage
 // endpoint is admin-only.
 export default function BillingPage() {
   const { isAdmin } = useAuth();
+  const { t } = useTranslation();
   const [usage, setUsage] = useState<BillingUsageSummary | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [selectedTier, setSelectedTier] = useState<TierID>("business");
   const [busy, setBusy] = useState<"checkout" | "portal" | null>(null);
   const [searchParams, setSearchParams] = useSearchParams();
 
-  const banner = useMemo(() => bannerFromSearch(searchParams), [searchParams]);
+  const banner = useMemo(() => bannerFromSearch(searchParams, t), [searchParams, t]);
 
   useEffect(() => {
     (async () => {
       try {
         setUsage(await fetchBillingUsage());
       } catch (e) {
-        setError(e instanceof Error ? e.message : String(e));
+        setError(translateApiError(e, t));
       }
     })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   async function handleUpgrade() {
@@ -67,7 +56,7 @@ export default function BillingPage() {
       window.location.assign(url);
     } catch (e) {
       setBusy(null);
-      setError(formatApiError(e, "Could not start checkout"));
+      setError(translateApiError(e, t) || t("billing.checkoutFailed"));
     }
   }
 
@@ -80,7 +69,7 @@ export default function BillingPage() {
       window.location.assign(url);
     } catch (e) {
       setBusy(null);
-      setError(formatApiError(e, "Could not open the customer portal"));
+      setError(translateApiError(e, t) || t("billing.portalFailed"));
     }
   }
 
@@ -93,10 +82,9 @@ export default function BillingPage() {
   if (!isAdmin) {
     return (
       <div style={{ padding: 32 }}>
-        <h2>Admin only</h2>
+        <h2>{t("admin.adminOnly")}</h2>
         <p>
-          Billing is restricted to workspace administrators.{" "}
-          <Link to="/drive">Back to drive</Link>
+          {t("billing.adminOnlyDescription")} <Link to="/drive">{t("admin.backToDrive")}</Link>
         </p>
       </div>
     );
@@ -104,12 +92,12 @@ export default function BillingPage() {
   return (
     <div style={{ padding: 24 }}>
       <header style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
-        <h1 style={{ margin: 0 }}>Billing</h1>
+        <h1 style={{ margin: 0 }}>{t("billing.title")}</h1>
         <div>
           <Link to="/admin" style={{ marginRight: 16 }}>
-            Admin
+            {t("nav.admin")}
           </Link>
-          <Link to="/drive">Back to drive</Link>
+          <Link to="/drive">{t("admin.backToDrive")}</Link>
         </div>
       </header>
       {banner && (
@@ -133,26 +121,24 @@ export default function BillingPage() {
             onClick={dismissBanner}
             style={{ background: "transparent", border: "none", cursor: "pointer", color: "inherit" }}
           >
-            Dismiss
+            {t("common.dismiss")}
           </button>
         </div>
       )}
       {error && <p style={{ color: "#b91c1c" }}>{error}</p>}
       {usage && (
         <div>
-          <h2 style={{ marginBottom: 4 }}>Plan: {usage.tier}</h2>
+          <h2 style={{ marginBottom: 4 }}>{t("billing.planLabel", { tier: usage.tier })}</h2>
           {!usage.plan_configured && (
             <p style={{ color: "#6b7280", marginTop: 0 }}>
-              No plan row configured — showing free-tier defaults.
+              {t("billing.noPlanConfigured")}
             </p>
           )}
 
           <section style={{ marginTop: 24, marginBottom: 24 }}>
-            <h3 style={{ marginBottom: 8 }}>Manage subscription</h3>
+            <h3 style={{ marginBottom: 8 }}>{t("billing.manageSubscription")}</h3>
             <p style={{ color: "#6b7280", marginTop: 0 }}>
-              Pick a tier and start a Stripe Checkout flow, or open the
-              customer portal to update payment details, swap tiers, or
-              cancel.
+              {t("billing.manageDescription")}
             </p>
             <fieldset
               style={{
@@ -164,13 +150,13 @@ export default function BillingPage() {
                 gap: 12,
               }}
             >
-              <legend style={{ padding: "0 6px", color: "#374151" }}>Choose a tier</legend>
-              {TIER_OPTIONS.map((opt) => {
-                const active = selectedTier === opt.id;
-                const current = usage.tier === opt.id;
+              <legend style={{ padding: "0 6px", color: "#374151" }}>{t("billing.chooseTier")}</legend>
+              {TIER_IDS.map((id) => {
+                const active = selectedTier === id;
+                const current = usage.tier === id;
                 return (
                   <label
-                    key={opt.id}
+                    key={id}
                     style={{
                       border: `1px solid ${active ? "#2563eb" : "#e5e7eb"}`,
                       borderRadius: 6,
@@ -183,14 +169,14 @@ export default function BillingPage() {
                       <input
                         type="radio"
                         name="tier"
-                        value={opt.id}
+                        value={id}
                         checked={active}
-                        onChange={() => setSelectedTier(opt.id)}
+                        onChange={() => setSelectedTier(id)}
                       />
-                      <strong>{opt.label}</strong>
-                      {current && <span style={{ color: "#059669", fontSize: 12 }}>(current)</span>}
+                      <strong>{t(`billing.tier.${id}.label`)}</strong>
+                      {current && <span style={{ color: "#059669", fontSize: 12 }}>{t("billing.currentBadge")}</span>}
                     </div>
-                    <div style={{ color: "#6b7280", fontSize: 13, marginTop: 6 }}>{opt.blurb}</div>
+                    <div style={{ color: "#6b7280", fontSize: 13, marginTop: 6 }}>{t(`billing.tier.${id}.blurb`)}</div>
                   </label>
                 );
               })}
@@ -202,7 +188,7 @@ export default function BillingPage() {
                 disabled={busy !== null}
                 style={primaryButtonStyle(busy === "checkout")}
               >
-                {busy === "checkout" ? "Redirecting…" : "Upgrade plan"}
+                {busy === "checkout" ? t("billing.redirecting") : t("billing.upgradePlan")}
               </button>
               {usage.plan_configured && (
                 <button
@@ -211,20 +197,20 @@ export default function BillingPage() {
                   disabled={busy !== null}
                   style={secondaryButtonStyle(busy === "portal")}
                 >
-                  {busy === "portal" ? "Redirecting…" : "Manage subscription"}
+                  {busy === "portal" ? t("billing.redirecting") : t("billing.manageSubscription")}
                 </button>
               )}
             </div>
           </section>
 
-          <UsageBar label="Storage" used={usage.storage_used_bytes} limit={usage.storage_limit_bytes} bytes />
+          <UsageBar label={t("billing.usageStorage")} used={usage.storage_used_bytes} limit={usage.storage_limit_bytes} bytes />
           <UsageBar
-            label="Bandwidth (this month)"
+            label={t("billing.usageBandwidth")}
             used={usage.bandwidth_used_bytes_month}
             limit={usage.bandwidth_limit_bytes_month}
             bytes
           />
-          <UsageBar label="Users" used={usage.user_count} limit={usage.user_limit} />
+          <UsageBar label={t("billing.usageUsers")} used={usage.user_count} limit={usage.user_limit} />
         </div>
       )}
     </div>
@@ -278,19 +264,15 @@ function formatBytes(n: number): string {
   return `${v.toFixed(1)} ${units[i]}`;
 }
 
-function bannerFromSearch(params: URLSearchParams): { tone: "success" | "warning"; message: string } | null {
+function bannerFromSearch(
+  params: URLSearchParams,
+  t: TFunction,
+): { tone: "success" | "warning"; message: string } | null {
   switch (params.get("stripe")) {
     case "success":
-      return {
-        tone: "success",
-        message:
-          "Checkout complete — your plan will update once Stripe delivers the webhook (usually within a few seconds).",
-      };
+      return { tone: "success", message: t("billing.bannerCheckoutSuccess") };
     case "cancel":
-      return {
-        tone: "warning",
-        message: "Checkout was cancelled. No changes were made to your plan.",
-      };
+      return { tone: "warning", message: t("billing.bannerCheckoutCancel") };
     default:
       return null;
   }
@@ -320,23 +302,4 @@ function secondaryButtonStyle(busy: boolean): React.CSSProperties {
   };
 }
 
-function formatApiError(e: unknown, fallback: string): string {
-  if (e && typeof e === "object" && "response" in e) {
-    const resp = (e as { response?: { data?: unknown; status?: number } }).response;
-    if (resp) {
-      if (typeof resp.data === "string" && resp.data.trim() !== "") {
-        return `${fallback}: ${resp.data.trim()}`;
-      }
-      if (resp.status === 501) {
-        return `${fallback}: Stripe is not configured on this server.`;
-      }
-      if (resp.status === 412) {
-        return `${fallback}: this workspace has no active Stripe subscription yet.`;
-      }
-      if (resp.status) {
-        return `${fallback}: HTTP ${resp.status}`;
-      }
-    }
-  }
-  return e instanceof Error ? `${fallback}: ${e.message}` : `${fallback}: ${String(e)}`;
-}
+

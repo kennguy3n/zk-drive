@@ -1,6 +1,8 @@
 import { useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
+import { useTranslation } from "react-i18next";
 import { searchFiles, type SearchHit } from "../api/client";
+import { translateApiError } from "../api/errors";
 
 // SearchBar is a header-mounted FTS input that queries the backend's
 // /api/search endpoint. Results are rendered in a dropdown anchored to
@@ -10,6 +12,7 @@ import { searchFiles, type SearchHit } from "../api/client";
 // queries.
 export default function SearchBar() {
   const nav = useNavigate();
+  const { t } = useTranslation();
   const [query, setQuery] = useState("");
   const [hits, setHits] = useState<SearchHit[]>([]);
   const [open, setOpen] = useState(false);
@@ -45,7 +48,7 @@ export default function SearchBar() {
         setError(null);
         setOpen(true);
       } catch (err) {
-        setError(String((err as Error)?.message ?? err));
+        setError(translateApiError(err, t));
       } finally {
         setLoading(false);
       }
@@ -67,7 +70,7 @@ export default function SearchBar() {
     <div ref={wrapRef} style={wrap}>
       <input
         type="search"
-        placeholder="Search files and folders…"
+        placeholder={t("search.placeholder")}
         value={query}
         onFocus={() => query && setOpen(true)}
         onChange={(e) => setQuery(e.target.value)}
@@ -78,7 +81,7 @@ export default function SearchBar() {
       />
       {open && (hits.length > 0 || error || loading) ? (
         <div style={dropdown} role="listbox">
-          {loading ? <div style={statusRow}>Searching…</div> : null}
+          {loading ? <div style={statusRow}>{t("search.searching")}</div> : null}
           {error ? <div style={{ ...statusRow, color: "#b91c1c" }}>{error}</div> : null}
           {hits.map((hit) => (
             <button
@@ -87,13 +90,15 @@ export default function SearchBar() {
               style={hitRow}
               role="option"
             >
-              <span style={typeBadge(hit.type)}>{hit.type}</span>
+              <span style={typeBadge(hit.type)}>
+                {hit.type === "folder" ? t("search.typeFolder") : t("search.typeFile")}
+              </span>
               <span style={{ fontWeight: 500 }}>{hit.name}</span>
               <span style={{ color: "#6b7280", fontSize: 11 }}>{hit.path}</span>
             </button>
           ))}
           {!loading && !error && hits.length === 0 ? (
-            <div style={statusRow}>No results</div>
+            <div style={statusRow}>{t("search.noResults")}</div>
           ) : null}
         </div>
       ) : null}

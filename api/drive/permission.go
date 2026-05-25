@@ -34,7 +34,7 @@ type grantPermissionRequest struct {
 // workspace so one tenant never sees another's grants.
 func (h *Handler) ListPermissions(w http.ResponseWriter, r *http.Request) {
 	if h.permissions == nil {
-		http.Error(w, "permissions not configured", http.StatusNotImplemented)
+		middleware.RespondError(w, http.StatusNotImplemented, middleware.ErrCodeUnsupportedOp, "permissions not configured")
 		return
 	}
 	workspaceID, _ := middleware.WorkspaceIDFromContext(r.Context())
@@ -42,12 +42,12 @@ func (h *Handler) ListPermissions(w http.ResponseWriter, r *http.Request) {
 	resourceType := r.URL.Query().Get("resource_type")
 	resourceIDParam := r.URL.Query().Get("resource_id")
 	if resourceType == "" || resourceIDParam == "" {
-		http.Error(w, "resource_type and resource_id are required", http.StatusBadRequest)
+		middleware.RespondError(w, http.StatusBadRequest, middleware.ErrCodeMissingField, "resource_type and resource_id are required")
 		return
 	}
 	resourceID, err := uuid.Parse(resourceIDParam)
 	if err != nil {
-		http.Error(w, "invalid resource_id", http.StatusBadRequest)
+		middleware.RespondError(w, http.StatusBadRequest, middleware.ErrCodeBadRequest, "invalid resource_id")
 		return
 	}
 	if err := h.assertResourceInWorkspace(r.Context(), workspaceID, resourceType, resourceID); err != nil {
@@ -65,29 +65,29 @@ func (h *Handler) ListPermissions(w http.ResponseWriter, r *http.Request) {
 // GrantPermission creates a new permission. Admin-only.
 func (h *Handler) GrantPermission(w http.ResponseWriter, r *http.Request) {
 	if h.permissions == nil {
-		http.Error(w, "permissions not configured", http.StatusNotImplemented)
+		middleware.RespondError(w, http.StatusNotImplemented, middleware.ErrCodeUnsupportedOp, "permissions not configured")
 		return
 	}
 	role, _ := middleware.RoleFromContext(r.Context())
 	if role != user.RoleAdmin {
-		http.Error(w, "admin role required", http.StatusForbidden)
+		middleware.RespondError(w, http.StatusForbidden, middleware.ErrCodeAdminOnly, "admin role required")
 		return
 	}
 	workspaceID, _ := middleware.WorkspaceIDFromContext(r.Context())
 
 	var req grantPermissionRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "invalid json body", http.StatusBadRequest)
+		middleware.RespondError(w, http.StatusBadRequest, middleware.ErrCodeMalformedJSON, "invalid json body")
 		return
 	}
 	resourceID, err := uuid.Parse(req.ResourceID)
 	if err != nil {
-		http.Error(w, "invalid resource_id", http.StatusBadRequest)
+		middleware.RespondError(w, http.StatusBadRequest, middleware.ErrCodeBadRequest, "invalid resource_id")
 		return
 	}
 	granteeID, err := uuid.Parse(req.GranteeID)
 	if err != nil {
-		http.Error(w, "invalid grantee_id", http.StatusBadRequest)
+		middleware.RespondError(w, http.StatusBadRequest, middleware.ErrCodeBadRequest, "invalid grantee_id")
 		return
 	}
 
@@ -110,7 +110,7 @@ func (h *Handler) GrantPermission(w http.ResponseWriter, r *http.Request) {
 	if req.ExpiresAt != nil && *req.ExpiresAt != "" {
 		t, terr := time.Parse(time.RFC3339, *req.ExpiresAt)
 		if terr != nil {
-			http.Error(w, "invalid expires_at (expected RFC3339)", http.StatusBadRequest)
+			middleware.RespondError(w, http.StatusBadRequest, middleware.ErrCodeBadRequest, "invalid expires_at (expected RFC3339)")
 			return
 		}
 		expiresAt = &t
@@ -141,18 +141,18 @@ func (h *Handler) GrantPermission(w http.ResponseWriter, r *http.Request) {
 // RevokePermission deletes a grant. Admin-only.
 func (h *Handler) RevokePermission(w http.ResponseWriter, r *http.Request) {
 	if h.permissions == nil {
-		http.Error(w, "permissions not configured", http.StatusNotImplemented)
+		middleware.RespondError(w, http.StatusNotImplemented, middleware.ErrCodeUnsupportedOp, "permissions not configured")
 		return
 	}
 	role, _ := middleware.RoleFromContext(r.Context())
 	if role != user.RoleAdmin {
-		http.Error(w, "admin role required", http.StatusForbidden)
+		middleware.RespondError(w, http.StatusForbidden, middleware.ErrCodeAdminOnly, "admin role required")
 		return
 	}
 	workspaceID, _ := middleware.WorkspaceIDFromContext(r.Context())
 	id, err := uuid.Parse(chi.URLParam(r, "id"))
 	if err != nil {
-		http.Error(w, "invalid id", http.StatusBadRequest)
+		middleware.RespondError(w, http.StatusBadRequest, middleware.ErrCodeBadRequest, "invalid id")
 		return
 	}
 	// Fetch first so we can log the resource context on revoke.
@@ -244,7 +244,7 @@ func writePermissionError(w http.ResponseWriter, err error) {
 	case errors.Is(err, permission.ErrInvalidRole),
 		errors.Is(err, permission.ErrInvalidResourceType),
 		errors.Is(err, permission.ErrInvalidGranteeType):
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		middleware.RespondError(w, http.StatusBadRequest, middleware.ErrCodeBadRequest, err.Error())
 	default:
 		writeServiceError(w, err)
 	}

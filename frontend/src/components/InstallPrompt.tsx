@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { useTranslation } from "react-i18next";
 
 // Subset of the BeforeInstallPromptEvent surface we use. The DOM lib does
 // not declare it, so we keep just the bits we need.
@@ -15,6 +16,7 @@ const DISMISS_KEY = "zk-drive:install-prompt-dismissed";
 // ZK Drive as a PWA. Once dismissed (or installed), the banner stays
 // hidden for the rest of the session via localStorage.
 export default function InstallPrompt() {
+  const { t } = useTranslation();
   const [deferred, setDeferred] = useState<BeforeInstallPromptEvent | null>(
     null,
   );
@@ -67,7 +69,7 @@ export default function InstallPrompt() {
   return (
     <div
       role="dialog"
-      aria-label="Install ZK Drive"
+      aria-label={t("install.dialogLabel")}
       style={{
         position: "fixed",
         left: 16,
@@ -88,7 +90,7 @@ export default function InstallPrompt() {
         color: "#1f2937",
       }}
     >
-      <span style={{ flex: 1 }}>Install ZK Drive for quick access</span>
+      <span style={{ flex: 1 }}>{t("install.bannerText")}</span>
       <button
         type="button"
         onClick={handleInstall}
@@ -101,12 +103,12 @@ export default function InstallPrompt() {
           fontSize: 13,
         }}
       >
-        Install
+        {t("install.install")}
       </button>
       <button
         type="button"
         onClick={handleDismiss}
-        aria-label="Dismiss install prompt"
+        aria-label={t("install.dismissAria")}
         style={{
           padding: "6px 10px",
           background: "transparent",
@@ -116,7 +118,7 @@ export default function InstallPrompt() {
           fontSize: 13,
         }}
       >
-        Not now
+        {t("install.notNow")}
       </button>
     </div>
   );

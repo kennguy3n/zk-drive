@@ -100,22 +100,22 @@ func (h *Handler) WithCollab(hub *collab.DocumentHub) *Handler {
 // claims, the documentID from the URL.
 func (h *Handler) ServeDocumentCollab(w http.ResponseWriter, r *http.Request) {
 	if h.documents == nil || h.collab == nil {
-		http.Error(w, "documents disabled", http.StatusServiceUnavailable)
+		middleware.RespondError(w, http.StatusServiceUnavailable, middleware.ErrCodeUnsupportedOp, "documents disabled")
 		return
 	}
 	workspaceID, ok := middleware.WorkspaceIDFromContext(r.Context())
 	if !ok {
-		http.Error(w, "unauthenticated", http.StatusUnauthorized)
+		middleware.RespondError(w, http.StatusUnauthorized, middleware.ErrCodeAuthMissingToken, "unauthenticated")
 		return
 	}
 	userID, ok := middleware.UserIDFromContext(r.Context())
 	if !ok {
-		http.Error(w, "unauthenticated", http.StatusUnauthorized)
+		middleware.RespondError(w, http.StatusUnauthorized, middleware.ErrCodeAuthMissingToken, "unauthenticated")
 		return
 	}
 	documentID, err := uuid.Parse(chi.URLParam(r, "id"))
 	if err != nil {
-		http.Error(w, "invalid document id", http.StatusBadRequest)
+		middleware.RespondError(w, http.StatusBadRequest, middleware.ErrCodeBadRequest, "invalid document id")
 		return
 	}
 
@@ -135,7 +135,7 @@ func (h *Handler) ServeDocumentCollab(w http.ResponseWriter, r *http.Request) {
 		// /documents/{id}/collab-mode first. Returning 409
 		// instead of an opaque "upgrade rejected" surfaces the
 		// reason to the SDK author.
-		http.Error(w, "document collab is disabled", http.StatusConflict)
+		middleware.RespondError(w, http.StatusConflict, middleware.ErrCodeConflict, "document collab is disabled")
 		return
 	}
 

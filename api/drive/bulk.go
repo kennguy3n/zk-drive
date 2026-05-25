@@ -67,7 +67,7 @@ func (h *Handler) BulkMove(w http.ResponseWriter, r *http.Request) {
 	}
 	targetID, err := uuid.Parse(req.TargetFolderID)
 	if err != nil {
-		http.Error(w, "invalid target_folder_id", http.StatusBadRequest)
+		middleware.RespondError(w, http.StatusBadRequest, middleware.ErrCodeBadRequest, "invalid target_folder_id")
 		return
 	}
 	targetFolder, err := h.folders.GetByID(r.Context(), workspaceID, targetID)
@@ -247,12 +247,12 @@ func (h *Handler) BulkCopy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if len(req.FolderIDs) > 0 {
-		http.Error(w, "folder copy is not supported; use file_ids only", http.StatusBadRequest)
+		middleware.RespondError(w, http.StatusBadRequest, middleware.ErrCodeBadRequest, "folder copy is not supported; use file_ids only")
 		return
 	}
 	targetID, err := uuid.Parse(req.TargetFolderID)
 	if err != nil {
-		http.Error(w, "invalid target_folder_id", http.StatusBadRequest)
+		middleware.RespondError(w, http.StatusBadRequest, middleware.ErrCodeBadRequest, "invalid target_folder_id")
 		return
 	}
 	targetFolder, err := h.folders.GetByID(r.Context(), workspaceID, targetID)
@@ -364,20 +364,20 @@ func (h *Handler) BulkDownload(w http.ResponseWriter, r *http.Request) {
 	workspaceID, _ := middleware.WorkspaceIDFromContext(r.Context())
 	store := h.resolveStorage(r.Context(), workspaceID)
 	if store == nil {
-		http.Error(w, "storage not configured", http.StatusNotImplemented)
+		middleware.RespondError(w, http.StatusNotImplemented, middleware.ErrCodeUnsupportedOp, "storage not configured")
 		return
 	}
 	var req bulkDownloadRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "invalid json body", http.StatusBadRequest)
+		middleware.RespondError(w, http.StatusBadRequest, middleware.ErrCodeMalformedJSON, "invalid json body")
 		return
 	}
 	if len(req.FileIDs) == 0 {
-		http.Error(w, "file_ids required", http.StatusBadRequest)
+		middleware.RespondError(w, http.StatusBadRequest, middleware.ErrCodeMissingField, "file_ids required")
 		return
 	}
 	if len(req.FileIDs) > MaxBulkItems {
-		http.Error(w, fmt.Sprintf("max %d files per bulk download", MaxBulkItems), http.StatusBadRequest)
+		middleware.RespondError(w, http.StatusBadRequest, middleware.ErrCodeBadRequest, fmt.Sprintf("max %d files per bulk download", MaxBulkItems))
 		return
 	}
 	// Resolve each file + permission + current version up front so we
@@ -394,7 +394,7 @@ func (h *Handler) BulkDownload(w http.ResponseWriter, r *http.Request) {
 	for _, raw := range req.FileIDs {
 		id, err := uuid.Parse(raw)
 		if err != nil {
-			http.Error(w, "invalid uuid: "+raw, http.StatusBadRequest)
+			middleware.RespondError(w, http.StatusBadRequest, middleware.ErrCodeBadRequest, "invalid uuid: "+raw)
 			return
 		}
 		if err := h.assertResourceAccess(r.Context(), permission.ResourceFile, id, permission.RoleViewer); err != nil {
@@ -407,7 +407,7 @@ func (h *Handler) BulkDownload(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if f.CurrentVersionID == nil {
-			http.Error(w, "file has no current version: "+raw, http.StatusConflict)
+			middleware.RespondError(w, http.StatusConflict, middleware.ErrCodeConflict, "file has no current version: "+raw)
 			return
 		}
 		v, err := h.files.GetVersionByID(r.Context(), workspaceID, *f.CurrentVersionID)
@@ -416,12 +416,12 @@ func (h *Handler) BulkDownload(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if v.ScanStatus == scan.StatusQuarantined {
-			http.Error(w, "file version quarantined by virus scan: "+raw, http.StatusForbidden)
+			middleware.RespondError(w, http.StatusForbidden, middleware.ErrCodeVirusDetected, "file version quarantined by virus scan: "+raw)
 			return
 		}
 		total += v.SizeBytes
 		if total > MaxBulkDownloadBytes {
-			http.Error(w, fmt.Sprintf("bulk download exceeds %d byte cap", MaxBulkDownloadBytes), http.StatusRequestEntityTooLarge)
+			middleware.RespondError(w, http.StatusRequestEntityTooLarge, middleware.ErrCodeFileTooLarge, fmt.Sprintf("bulk download exceeds %d byte cap", MaxBulkDownloadBytes))
 			return
 		}
 		items = append(items, prepped{name: dedupeZipName(seenNames, f.Name), objectKey: v.ObjectKey, size: v.SizeBytes})
@@ -504,19 +504,19 @@ func appendZipEntry(ctx context.Context, zw *zip.Writer, client *http.Client, st
 func decodeBulkMutate(w http.ResponseWriter, r *http.Request, requireTarget bool) (bulkMutateRequest, bool) {
 	var req bulkMutateRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "invalid json body", http.StatusBadRequest)
+		middleware.RespondError(w, http.StatusBadRequest, middleware.ErrCodeMalformedJSON, "invalid json body")
 		return req, false
 	}
 	if len(req.FileIDs)+len(req.FolderIDs) == 0 {
-		http.Error(w, "file_ids or folder_ids required", http.StatusBadRequest)
+		middleware.RespondError(w, http.StatusBadRequest, middleware.ErrCodeMissingField, "file_ids or folder_ids required")
 		return req, false
 	}
 	if len(req.FileIDs)+len(req.FolderIDs) > MaxBulkItems {
-		http.Error(w, fmt.Sprintf("max %d items per bulk request", MaxBulkItems), http.StatusBadRequest)
+		middleware.RespondError(w, http.StatusBadRequest, middleware.ErrCodeBadRequest, fmt.Sprintf("max %d items per bulk request", MaxBulkItems))
 		return req, false
 	}
 	if requireTarget && req.TargetFolderID == "" {
-		http.Error(w, "target_folder_id required", http.StatusBadRequest)
+		middleware.RespondError(w, http.StatusBadRequest, middleware.ErrCodeMissingField, "target_folder_id required")
 		return req, false
 	}
 	return req, true

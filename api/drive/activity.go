@@ -19,14 +19,14 @@ const activityMaxPageSize = 200
 // tenant bound to the session.
 func (h *Handler) ListActivity(w http.ResponseWriter, r *http.Request) {
 	if h.activity == nil {
-		http.Error(w, "activity not configured", http.StatusNotImplemented)
+		middleware.RespondError(w, http.StatusNotImplemented, middleware.ErrCodeUnsupportedOp, "activity not configured")
 		return
 	}
 	workspaceID, _ := middleware.WorkspaceIDFromContext(r.Context())
 	if wsParam := r.URL.Query().Get("workspace_id"); wsParam != "" {
 		wsID, err := uuid.Parse(wsParam)
 		if err != nil || wsID != workspaceID {
-			http.Error(w, "workspace_id mismatch", http.StatusForbidden)
+			middleware.RespondError(w, http.StatusForbidden, middleware.ErrCodeWrongTenant, "workspace_id mismatch")
 			return
 		}
 	}
@@ -50,7 +50,7 @@ func (h *Handler) ListActivity(w http.ResponseWriter, r *http.Request) {
 	if rt, rid := r.URL.Query().Get("resource_type"), r.URL.Query().Get("resource_id"); rt != "" && rid != "" {
 		resourceID, perr := uuid.Parse(rid)
 		if perr != nil {
-			http.Error(w, "invalid resource_id", http.StatusBadRequest)
+			middleware.RespondError(w, http.StatusBadRequest, middleware.ErrCodeBadRequest, "invalid resource_id")
 			return
 		}
 		list, err = h.activity.ListByResource(r.Context(), workspaceID, rt, resourceID, limit, offset)
@@ -58,7 +58,7 @@ func (h *Handler) ListActivity(w http.ResponseWriter, r *http.Request) {
 		list, err = h.activity.List(r.Context(), workspaceID, limit, offset)
 	}
 	if err != nil {
-		http.Error(w, "list activity: "+err.Error(), http.StatusInternalServerError)
+		middleware.RespondError(w, http.StatusInternalServerError, middleware.ErrCodeInternal, "list activity: "+err.Error())
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{

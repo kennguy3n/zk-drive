@@ -47,27 +47,27 @@ type sessionURLResponse struct {
 // upserts the plan row.
 func (h *Handler) CreateCheckoutSession(w http.ResponseWriter, r *http.Request) {
 	if h.stripe == nil || h.billing == nil {
-		http.Error(w, "stripe billing not configured", http.StatusNotImplemented)
+		middleware.RespondError(w, http.StatusNotImplemented, middleware.ErrCodeUnsupportedOp, "stripe billing not configured")
 		return
 	}
 	workspaceID, ok := middleware.WorkspaceIDFromContext(r.Context())
 	if !ok {
-		http.Error(w, "unauthenticated", http.StatusUnauthorized)
+		middleware.RespondError(w, http.StatusUnauthorized, middleware.ErrCodeAuthMissingToken, "unauthenticated")
 		return
 	}
 	actor, _ := middleware.UserIDFromContext(r.Context())
 
 	var req checkoutSessionRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "invalid json body", http.StatusBadRequest)
+		middleware.RespondError(w, http.StatusBadRequest, middleware.ErrCodeMalformedJSON, "invalid json body")
 		return
 	}
 	if !billing.IsValidTier(req.Tier) {
-		http.Error(w, "invalid tier", http.StatusBadRequest)
+		middleware.RespondError(w, http.StatusBadRequest, middleware.ErrCodeBadRequest, "invalid tier")
 		return
 	}
 	if req.SuccessURL == "" || req.CancelURL == "" {
-		http.Error(w, "success_url and cancel_url are required", http.StatusBadRequest)
+		middleware.RespondError(w, http.StatusBadRequest, middleware.ErrCodeMissingField, "success_url and cancel_url are required")
 		return
 	}
 
@@ -75,11 +75,11 @@ func (h *Handler) CreateCheckoutSession(w http.ResponseWriter, r *http.Request) 
 	if err != nil {
 		switch {
 		case errors.Is(err, billing.ErrStripeNotConfigured):
-			http.Error(w, "stripe not configured", http.StatusNotImplemented)
+			middleware.RespondError(w, http.StatusNotImplemented, middleware.ErrCodeUnsupportedOp, "stripe not configured")
 		case errors.Is(err, billing.ErrStripePriceNotMapped):
-			http.Error(w, err.Error(), http.StatusBadRequest)
+			middleware.RespondError(w, http.StatusBadRequest, middleware.ErrCodeBadRequest, err.Error())
 		default:
-			http.Error(w, "create checkout session: "+err.Error(), http.StatusInternalServerError)
+			middleware.RespondError(w, http.StatusInternalServerError, middleware.ErrCodeInternal, "create checkout session: "+err.Error())
 		}
 		return
 	}
@@ -97,29 +97,29 @@ func (h *Handler) CreateCheckoutSession(w http.ResponseWriter, r *http.Request) 
 // to the returned URL; on return the user lands at return_url.
 func (h *Handler) CreatePortalSession(w http.ResponseWriter, r *http.Request) {
 	if h.stripe == nil || h.billing == nil {
-		http.Error(w, "stripe billing not configured", http.StatusNotImplemented)
+		middleware.RespondError(w, http.StatusNotImplemented, middleware.ErrCodeUnsupportedOp, "stripe billing not configured")
 		return
 	}
 	workspaceID, ok := middleware.WorkspaceIDFromContext(r.Context())
 	if !ok {
-		http.Error(w, "unauthenticated", http.StatusUnauthorized)
+		middleware.RespondError(w, http.StatusUnauthorized, middleware.ErrCodeAuthMissingToken, "unauthenticated")
 		return
 	}
 	actor, _ := middleware.UserIDFromContext(r.Context())
 
 	var req portalSessionRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "invalid json body", http.StatusBadRequest)
+		middleware.RespondError(w, http.StatusBadRequest, middleware.ErrCodeMalformedJSON, "invalid json body")
 		return
 	}
 	if req.ReturnURL == "" {
-		http.Error(w, "return_url is required", http.StatusBadRequest)
+		middleware.RespondError(w, http.StatusBadRequest, middleware.ErrCodeMissingField, "return_url is required")
 		return
 	}
 
 	customerID := h.stripe.LookupCustomerID(r.Context(), workspaceID)
 	if customerID == "" {
-		http.Error(w, "workspace has no stripe customer on file", http.StatusPreconditionFailed)
+		middleware.RespondError(w, http.StatusPreconditionFailed, middleware.ErrCodeInternal, "workspace has no stripe customer on file")
 		return
 	}
 
@@ -127,11 +127,11 @@ func (h *Handler) CreatePortalSession(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		switch {
 		case errors.Is(err, billing.ErrStripeNotConfigured):
-			http.Error(w, "stripe not configured", http.StatusNotImplemented)
+			middleware.RespondError(w, http.StatusNotImplemented, middleware.ErrCodeUnsupportedOp, "stripe not configured")
 		case errors.Is(err, billing.ErrStripeNoCustomer):
-			http.Error(w, err.Error(), http.StatusPreconditionFailed)
+			middleware.RespondError(w, http.StatusPreconditionFailed, middleware.ErrCodeInternal, err.Error())
 		default:
-			http.Error(w, "create portal session: "+err.Error(), http.StatusInternalServerError)
+			middleware.RespondError(w, http.StatusInternalServerError, middleware.ErrCodeInternal, "create portal session: "+err.Error())
 		}
 		return
 	}

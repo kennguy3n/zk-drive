@@ -26,7 +26,7 @@ import (
 func requireAdmin(w http.ResponseWriter, r *http.Request) bool {
 	role, _ := middleware.RoleFromContext(r.Context())
 	if role != user.RoleAdmin {
-		http.Error(w, "admin role required", http.StatusForbidden)
+		middleware.RespondError(w, http.StatusForbidden, middleware.ErrCodeAdminOnly, "admin role required")
 		return true
 	}
 	return false
@@ -76,7 +76,7 @@ type createRoomRequest struct {
 func (h *Handler) CreateRoom(w http.ResponseWriter, r *http.Request) {
 	workspaceID, ok := middleware.WorkspaceIDFromContext(r.Context())
 	if !ok {
-		http.Error(w, "unauthenticated", http.StatusUnauthorized)
+		middleware.RespondError(w, http.StatusUnauthorized, middleware.ErrCodeAuthMissingToken, "unauthenticated")
 		return
 	}
 	if requireAdmin(w, r) {
@@ -86,7 +86,7 @@ func (h *Handler) CreateRoom(w http.ResponseWriter, r *http.Request) {
 
 	var req createRoomRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "invalid json body", http.StatusBadRequest)
+		middleware.RespondError(w, http.StatusBadRequest, middleware.ErrCodeMalformedJSON, "invalid json body")
 		return
 	}
 	room, err := h.rooms.CreateRoomFolder(r.Context(), workspaceID, req.KChatRoomID, userID)
@@ -101,7 +101,7 @@ func (h *Handler) CreateRoom(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) ListRooms(w http.ResponseWriter, r *http.Request) {
 	workspaceID, ok := middleware.WorkspaceIDFromContext(r.Context())
 	if !ok {
-		http.Error(w, "unauthenticated", http.StatusUnauthorized)
+		middleware.RespondError(w, http.StatusUnauthorized, middleware.ErrCodeAuthMissingToken, "unauthenticated")
 		return
 	}
 	rooms, err := h.rooms.List(r.Context(), workspaceID)
@@ -119,12 +119,12 @@ func (h *Handler) ListRooms(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) GetRoom(w http.ResponseWriter, r *http.Request) {
 	workspaceID, ok := middleware.WorkspaceIDFromContext(r.Context())
 	if !ok {
-		http.Error(w, "unauthenticated", http.StatusUnauthorized)
+		middleware.RespondError(w, http.StatusUnauthorized, middleware.ErrCodeAuthMissingToken, "unauthenticated")
 		return
 	}
 	id, err := uuid.Parse(chi.URLParam(r, "id"))
 	if err != nil {
-		http.Error(w, "invalid id", http.StatusBadRequest)
+		middleware.RespondError(w, http.StatusBadRequest, middleware.ErrCodeBadRequest, "invalid id")
 		return
 	}
 	room, err := h.rooms.Get(r.Context(), workspaceID, id)
@@ -143,7 +143,7 @@ func (h *Handler) GetRoom(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) DeleteRoom(w http.ResponseWriter, r *http.Request) {
 	workspaceID, ok := middleware.WorkspaceIDFromContext(r.Context())
 	if !ok {
-		http.Error(w, "unauthenticated", http.StatusUnauthorized)
+		middleware.RespondError(w, http.StatusUnauthorized, middleware.ErrCodeAuthMissingToken, "unauthenticated")
 		return
 	}
 	if requireAdmin(w, r) {
@@ -151,7 +151,7 @@ func (h *Handler) DeleteRoom(w http.ResponseWriter, r *http.Request) {
 	}
 	id, err := uuid.Parse(chi.URLParam(r, "id"))
 	if err != nil {
-		http.Error(w, "invalid id", http.StatusBadRequest)
+		middleware.RespondError(w, http.StatusBadRequest, middleware.ErrCodeBadRequest, "invalid id")
 		return
 	}
 	if err := h.rooms.Delete(r.Context(), workspaceID, id); err != nil {
@@ -180,7 +180,7 @@ type memberSyncJSON struct {
 func (h *Handler) SyncMembers(w http.ResponseWriter, r *http.Request) {
 	workspaceID, ok := middleware.WorkspaceIDFromContext(r.Context())
 	if !ok {
-		http.Error(w, "unauthenticated", http.StatusUnauthorized)
+		middleware.RespondError(w, http.StatusUnauthorized, middleware.ErrCodeAuthMissingToken, "unauthenticated")
 		return
 	}
 	if requireAdmin(w, r) {
@@ -188,7 +188,7 @@ func (h *Handler) SyncMembers(w http.ResponseWriter, r *http.Request) {
 	}
 	id, err := uuid.Parse(chi.URLParam(r, "id"))
 	if err != nil {
-		http.Error(w, "invalid id", http.StatusBadRequest)
+		middleware.RespondError(w, http.StatusBadRequest, middleware.ErrCodeBadRequest, "invalid id")
 		return
 	}
 	mapping, err := h.rooms.Get(r.Context(), workspaceID, id)
@@ -198,14 +198,14 @@ func (h *Handler) SyncMembers(w http.ResponseWriter, r *http.Request) {
 	}
 	var req syncMembersRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "invalid json body", http.StatusBadRequest)
+		middleware.RespondError(w, http.StatusBadRequest, middleware.ErrCodeMalformedJSON, "invalid json body")
 		return
 	}
 	members := make([]kchatpkg.MemberSync, 0, len(req.Members))
 	for _, m := range req.Members {
 		uid, err := uuid.Parse(m.UserID)
 		if err != nil {
-			http.Error(w, "invalid user_id: "+m.UserID, http.StatusBadRequest)
+			middleware.RespondError(w, http.StatusBadRequest, middleware.ErrCodeBadRequest, "invalid user_id: "+m.UserID)
 			return
 		}
 		members = append(members, kchatpkg.MemberSync{UserID: uid, Role: m.Role})
@@ -231,14 +231,14 @@ type attachmentUploadRequest struct {
 func (h *Handler) AttachmentUploadURL(w http.ResponseWriter, r *http.Request) {
 	workspaceID, ok := middleware.WorkspaceIDFromContext(r.Context())
 	if !ok {
-		http.Error(w, "unauthenticated", http.StatusUnauthorized)
+		middleware.RespondError(w, http.StatusUnauthorized, middleware.ErrCodeAuthMissingToken, "unauthenticated")
 		return
 	}
 	userID, _ := middleware.UserIDFromContext(r.Context())
 
 	var req attachmentUploadRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "invalid json body", http.StatusBadRequest)
+		middleware.RespondError(w, http.StatusBadRequest, middleware.ErrCodeMalformedJSON, "invalid json body")
 		return
 	}
 	res, err := h.rooms.AttachmentUploadURL(r.Context(), workspaceID, req.KChatRoomID, req.Filename, req.MimeType, req.SizeBytes, userID)
@@ -263,19 +263,19 @@ type attachmentConfirmRequest struct {
 func (h *Handler) AttachmentConfirm(w http.ResponseWriter, r *http.Request) {
 	workspaceID, ok := middleware.WorkspaceIDFromContext(r.Context())
 	if !ok {
-		http.Error(w, "unauthenticated", http.StatusUnauthorized)
+		middleware.RespondError(w, http.StatusUnauthorized, middleware.ErrCodeAuthMissingToken, "unauthenticated")
 		return
 	}
 	userID, _ := middleware.UserIDFromContext(r.Context())
 
 	var req attachmentConfirmRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "invalid json body", http.StatusBadRequest)
+		middleware.RespondError(w, http.StatusBadRequest, middleware.ErrCodeMalformedJSON, "invalid json body")
 		return
 	}
 	fileID, err := uuid.Parse(req.FileID)
 	if err != nil {
-		http.Error(w, "invalid file_id", http.StatusBadRequest)
+		middleware.RespondError(w, http.StatusBadRequest, middleware.ErrCodeBadRequest, "invalid file_id")
 		return
 	}
 	res, err := h.rooms.ConfirmAttachment(r.Context(), workspaceID, fileID, req.ObjectKey, req.Checksum, req.SizeBytes, userID)
@@ -292,16 +292,16 @@ func (h *Handler) AttachmentConfirm(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) RoomSummary(w http.ResponseWriter, r *http.Request) {
 	workspaceID, ok := middleware.WorkspaceIDFromContext(r.Context())
 	if !ok {
-		http.Error(w, "unauthenticated", http.StatusUnauthorized)
+		middleware.RespondError(w, http.StatusUnauthorized, middleware.ErrCodeAuthMissingToken, "unauthenticated")
 		return
 	}
 	if h.summary == nil {
-		http.Error(w, "summary service unavailable", http.StatusServiceUnavailable)
+		middleware.RespondError(w, http.StatusServiceUnavailable, middleware.ErrCodeMaintenance, "summary service unavailable")
 		return
 	}
 	id, err := uuid.Parse(chi.URLParam(r, "id"))
 	if err != nil {
-		http.Error(w, "invalid id", http.StatusBadRequest)
+		middleware.RespondError(w, http.StatusBadRequest, middleware.ErrCodeBadRequest, "invalid id")
 		return
 	}
 	mapping, err := h.rooms.Get(r.Context(), workspaceID, id)
@@ -313,11 +313,11 @@ func (h *Handler) RoomSummary(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		switch {
 		case errors.Is(err, ai.ErrStrictZKForbidden):
-			http.Error(w, err.Error(), http.StatusForbidden)
+			middleware.RespondError(w, http.StatusForbidden, middleware.ErrCodeForbidden, err.Error())
 		case errors.Is(err, ai.ErrFolderNotFound):
-			http.Error(w, err.Error(), http.StatusNotFound)
+			middleware.RespondError(w, http.StatusNotFound, middleware.ErrCodeNotFound, err.Error())
 		default:
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+			middleware.RespondError(w, http.StatusInternalServerError, middleware.ErrCodeInternal, err.Error())
 		}
 		return
 	}
@@ -342,16 +342,16 @@ func writeServiceError(w http.ResponseWriter, err error) {
 	switch {
 	case errors.Is(err, kchatpkg.ErrRoomNotFound),
 		errors.Is(err, file.ErrNotFound):
-		http.Error(w, err.Error(), http.StatusNotFound)
+		middleware.RespondError(w, http.StatusNotFound, middleware.ErrCodeNotFound, err.Error())
 	case errors.Is(err, kchatpkg.ErrRoomAlreadyMapped):
-		http.Error(w, err.Error(), http.StatusConflict)
+		middleware.RespondError(w, http.StatusConflict, middleware.ErrCodeConflict, err.Error())
 	case errors.Is(err, kchatpkg.ErrInvalidRoomID),
 		errors.Is(err, kchatpkg.ErrInvalidRole),
 		errors.Is(err, kchatpkg.ErrInvalidObjectKey),
 		errors.Is(err, kchatpkg.ErrInvalidSize),
 		errors.Is(err, kchatpkg.ErrObjectKeyMismatch):
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		middleware.RespondError(w, http.StatusBadRequest, middleware.ErrCodeBadRequest, err.Error())
 	default:
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		middleware.RespondError(w, http.StatusInternalServerError, middleware.ErrCodeInternal, err.Error())
 	}
 }

@@ -213,11 +213,11 @@ func toDeliveryView(d *webhooks.Delivery) deliveryView {
 func (h *Handler) requireAdmin(w http.ResponseWriter, r *http.Request) bool {
 	role, ok := middleware.RoleFromContext(r.Context())
 	if !ok {
-		http.Error(w, "authentication required", http.StatusUnauthorized)
+		middleware.RespondError(w, http.StatusUnauthorized, middleware.ErrCodeMissingField, "authentication required")
 		return false
 	}
 	if role != user.RoleAdmin {
-		http.Error(w, "admin role required", http.StatusForbidden)
+		middleware.RespondError(w, http.StatusForbidden, middleware.ErrCodeAdminOnly, "admin role required")
 		return false
 	}
 	return true
@@ -230,29 +230,29 @@ func (h *Handler) Create(w http.ResponseWriter, r *http.Request) {
 	}
 	workspaceID, ok := middleware.WorkspaceIDFromContext(r.Context())
 	if !ok {
-		http.Error(w, "workspace context missing", http.StatusBadRequest)
+		middleware.RespondError(w, http.StatusBadRequest, middleware.ErrCodeBadRequest, "workspace context missing")
 		return
 	}
 	var req createRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "invalid json body", http.StatusBadRequest)
+		middleware.RespondError(w, http.StatusBadRequest, middleware.ErrCodeMalformedJSON, "invalid json body")
 		return
 	}
 	req.URL = strings.TrimSpace(req.URL)
 	req.EventType = webhooks.NormaliseEventType(req.EventType)
 	req.Description = strings.TrimSpace(req.Description)
 	if req.URL == "" {
-		http.Error(w, "url is required", http.StatusBadRequest)
+		middleware.RespondError(w, http.StatusBadRequest, middleware.ErrCodeMissingField, "url is required")
 		return
 	}
 	if !webhooks.IsValidEventType(req.EventType) {
-		http.Error(w, "unknown event_type; see /api/workspaces/{ws}/webhooks/event-types", http.StatusBadRequest)
+		middleware.RespondError(w, http.StatusBadRequest, middleware.ErrCodeBadRequest, "unknown event_type; see /api/workspaces/{ws}/webhooks/event-types")
 		return
 	}
 	// SSRF validation at create-time. The same Validator is re-run
 	// at every delivery attempt as the DNS-rebinding defence.
 	if _, err := h.validator.Validate(r.Context(), req.URL); err != nil {
-		http.Error(w, "url invalid: "+err.Error(), http.StatusBadRequest)
+		middleware.RespondError(w, http.StatusBadRequest, middleware.ErrCodeBadRequest, "url invalid: "+err.Error())
 		return
 	}
 	actorID, _ := middleware.UserIDFromContext(r.Context())
@@ -265,7 +265,7 @@ func (h *Handler) Create(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := h.repo.Create(r.Context(), sub); err != nil {
 		if errors.Is(err, webhooks.ErrSubscriptionCapReached) {
-			http.Error(w, "subscription cap reached for this workspace", http.StatusConflict)
+			middleware.RespondError(w, http.StatusConflict, middleware.ErrCodeConflict, "subscription cap reached for this workspace")
 			return
 		}
 		writeServerError(r.Context(), w, "create subscription", err)
@@ -309,12 +309,12 @@ func (h *Handler) Get(w http.ResponseWriter, r *http.Request) {
 	workspaceID, _ := middleware.WorkspaceIDFromContext(r.Context())
 	id, err := uuid.Parse(chi.URLParam(r, "id"))
 	if err != nil {
-		http.Error(w, "invalid id", http.StatusBadRequest)
+		middleware.RespondError(w, http.StatusBadRequest, middleware.ErrCodeBadRequest, "invalid id")
 		return
 	}
 	sub, err := h.repo.GetByID(r.Context(), workspaceID, id)
 	if errors.Is(err, webhooks.ErrSubscriptionNotFound) {
-		http.Error(w, "subscription not found", http.StatusNotFound)
+		middleware.RespondError(w, http.StatusNotFound, middleware.ErrCodeNotFound, "subscription not found")
 		return
 	}
 	if err != nil {
@@ -332,12 +332,12 @@ func (h *Handler) Delete(w http.ResponseWriter, r *http.Request) {
 	workspaceID, _ := middleware.WorkspaceIDFromContext(r.Context())
 	id, err := uuid.Parse(chi.URLParam(r, "id"))
 	if err != nil {
-		http.Error(w, "invalid id", http.StatusBadRequest)
+		middleware.RespondError(w, http.StatusBadRequest, middleware.ErrCodeBadRequest, "invalid id")
 		return
 	}
 	if err := h.repo.Delete(r.Context(), workspaceID, id); err != nil {
 		if errors.Is(err, webhooks.ErrSubscriptionNotFound) {
-			http.Error(w, "subscription not found", http.StatusNotFound)
+			middleware.RespondError(w, http.StatusNotFound, middleware.ErrCodeNotFound, "subscription not found")
 			return
 		}
 		writeServerError(r.Context(), w, "delete subscription", err)
@@ -359,7 +359,7 @@ func (h *Handler) ListDeliveries(w http.ResponseWriter, r *http.Request) {
 	workspaceID, _ := middleware.WorkspaceIDFromContext(r.Context())
 	id, err := uuid.Parse(chi.URLParam(r, "id"))
 	if err != nil {
-		http.Error(w, "invalid id", http.StatusBadRequest)
+		middleware.RespondError(w, http.StatusBadRequest, middleware.ErrCodeBadRequest, "invalid id")
 		return
 	}
 	// Verify the subscription exists in this workspace before
@@ -371,7 +371,7 @@ func (h *Handler) ListDeliveries(w http.ResponseWriter, r *http.Request) {
 	// Mirrors the Get handler's 404 behaviour for consistency.
 	if _, err := h.repo.GetByID(r.Context(), workspaceID, id); err != nil {
 		if errors.Is(err, webhooks.ErrSubscriptionNotFound) {
-			http.Error(w, "subscription not found", http.StatusNotFound)
+			middleware.RespondError(w, http.StatusNotFound, middleware.ErrCodeNotFound, "subscription not found")
 			return
 		}
 		writeServerError(r.Context(), w, "verify subscription", err)
@@ -409,18 +409,18 @@ func (h *Handler) Test(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if h.tester == nil {
-		http.Error(w, "webhook test dispatcher not configured", http.StatusServiceUnavailable)
+		middleware.RespondError(w, http.StatusServiceUnavailable, middleware.ErrCodeMaintenance, "webhook test dispatcher not configured")
 		return
 	}
 	workspaceID, _ := middleware.WorkspaceIDFromContext(r.Context())
 	id, err := uuid.Parse(chi.URLParam(r, "id"))
 	if err != nil {
-		http.Error(w, "invalid id", http.StatusBadRequest)
+		middleware.RespondError(w, http.StatusBadRequest, middleware.ErrCodeBadRequest, "invalid id")
 		return
 	}
 	sub, err := h.repo.GetByID(r.Context(), workspaceID, id)
 	if errors.Is(err, webhooks.ErrSubscriptionNotFound) {
-		http.Error(w, "subscription not found", http.StatusNotFound)
+		middleware.RespondError(w, http.StatusNotFound, middleware.ErrCodeNotFound, "subscription not found")
 		return
 	}
 	if err != nil {
@@ -491,12 +491,12 @@ func (h *Handler) Resume(w http.ResponseWriter, r *http.Request) {
 	workspaceID, _ := middleware.WorkspaceIDFromContext(r.Context())
 	id, err := uuid.Parse(chi.URLParam(r, "id"))
 	if err != nil {
-		http.Error(w, "invalid id", http.StatusBadRequest)
+		middleware.RespondError(w, http.StatusBadRequest, middleware.ErrCodeBadRequest, "invalid id")
 		return
 	}
 	if err := h.repo.SetActive(r.Context(), workspaceID, id, true); err != nil {
 		if errors.Is(err, webhooks.ErrSubscriptionNotFound) {
-			http.Error(w, "subscription not found", http.StatusNotFound)
+			middleware.RespondError(w, http.StatusNotFound, middleware.ErrCodeNotFound, "subscription not found")
 			return
 		}
 		writeServerError(r.Context(), w, "resume subscription", err)
@@ -518,5 +518,5 @@ func writeJSON(w http.ResponseWriter, status int, payload any) {
 
 func writeServerError(ctx context.Context, w http.ResponseWriter, op string, err error) {
 	logging.FromContext(ctx).Error("webhooks handler "+op, "err", err)
-	http.Error(w, "internal server error", http.StatusInternalServerError)
+	middleware.RespondError(w, http.StatusInternalServerError, middleware.ErrCodeInternal, "internal server error")
 }

@@ -12,6 +12,10 @@ export default defineConfig({
     globals: false,
     include: ["src/**/*.test.{ts,tsx}"],
     exclude: ["tests/e2e/**", "node_modules/**"],
+    // Initialize i18next synchronously so components using
+    // useTranslation() render the English copy in tests instead
+    // of the raw "namespace.key" identifiers. Mirrors src/main.tsx.
+    setupFiles: ["./src/test/setup.ts"],
   },
   plugins: [
     react(),

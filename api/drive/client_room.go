@@ -55,12 +55,12 @@ type clientRoomTemplateResponse struct {
 // external access is a sensitive operation.
 func (h *Handler) CreateClientRoom(w http.ResponseWriter, r *http.Request) {
 	if h.clientRooms == nil {
-		http.Error(w, "client rooms not configured", http.StatusNotImplemented)
+		middleware.RespondError(w, http.StatusNotImplemented, middleware.ErrCodeUnsupportedOp, "client rooms not configured")
 		return
 	}
 	role, _ := middleware.RoleFromContext(r.Context())
 	if role != user.RoleAdmin {
-		http.Error(w, "admin role required", http.StatusForbidden)
+		middleware.RespondError(w, http.StatusForbidden, middleware.ErrCodeAdminOnly, "admin role required")
 		return
 	}
 	workspaceID, _ := middleware.WorkspaceIDFromContext(r.Context())
@@ -68,14 +68,14 @@ func (h *Handler) CreateClientRoom(w http.ResponseWriter, r *http.Request) {
 
 	var req createClientRoomRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "invalid json body", http.StatusBadRequest)
+		middleware.RespondError(w, http.StatusBadRequest, middleware.ErrCodeMalformedJSON, "invalid json body")
 		return
 	}
 	var expiresAt *time.Time
 	if req.ExpiresAt != nil && *req.ExpiresAt != "" {
 		t, terr := time.Parse(time.RFC3339, *req.ExpiresAt)
 		if terr != nil {
-			http.Error(w, "invalid expires_at (expected RFC3339)", http.StatusBadRequest)
+			middleware.RespondError(w, http.StatusBadRequest, middleware.ErrCodeBadRequest, "invalid expires_at (expected RFC3339)")
 			return
 		}
 		expiresAt = &t
@@ -88,7 +88,7 @@ func (h *Handler) CreateClientRoom(w http.ResponseWriter, r *http.Request) {
 	})
 	if err != nil {
 		if errors.Is(err, sharing.ErrInvalidRoomName) {
-			http.Error(w, err.Error(), http.StatusBadRequest)
+			middleware.RespondError(w, http.StatusBadRequest, middleware.ErrCodeBadRequest, err.Error())
 			return
 		}
 		writeSharingError(w, err)
@@ -103,12 +103,12 @@ func (h *Handler) CreateClientRoom(w http.ResponseWriter, r *http.Request) {
 // CreateClientRoom — public-link configuration is sensitive.
 func (h *Handler) CreateClientRoomFromTemplate(w http.ResponseWriter, r *http.Request) {
 	if h.clientRooms == nil {
-		http.Error(w, "client rooms not configured", http.StatusNotImplemented)
+		middleware.RespondError(w, http.StatusNotImplemented, middleware.ErrCodeUnsupportedOp, "client rooms not configured")
 		return
 	}
 	role, _ := middleware.RoleFromContext(r.Context())
 	if role != user.RoleAdmin {
-		http.Error(w, "admin role required", http.StatusForbidden)
+		middleware.RespondError(w, http.StatusForbidden, middleware.ErrCodeAdminOnly, "admin role required")
 		return
 	}
 	workspaceID, _ := middleware.WorkspaceIDFromContext(r.Context())
@@ -116,14 +116,14 @@ func (h *Handler) CreateClientRoomFromTemplate(w http.ResponseWriter, r *http.Re
 
 	var req createClientRoomFromTemplateRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "invalid json body", http.StatusBadRequest)
+		middleware.RespondError(w, http.StatusBadRequest, middleware.ErrCodeMalformedJSON, "invalid json body")
 		return
 	}
 	var expiresAt *time.Time
 	if req.ExpiresAt != nil && *req.ExpiresAt != "" {
 		t, terr := time.Parse(time.RFC3339, *req.ExpiresAt)
 		if terr != nil {
-			http.Error(w, "invalid expires_at (expected RFC3339)", http.StatusBadRequest)
+			middleware.RespondError(w, http.StatusBadRequest, middleware.ErrCodeBadRequest, "invalid expires_at (expected RFC3339)")
 			return
 		}
 		expiresAt = &t
@@ -137,10 +137,10 @@ func (h *Handler) CreateClientRoomFromTemplate(w http.ResponseWriter, r *http.Re
 	if err != nil {
 		switch {
 		case errors.Is(err, sharing.ErrUnknownTemplate):
-			http.Error(w, err.Error(), http.StatusBadRequest)
+			middleware.RespondError(w, http.StatusBadRequest, middleware.ErrCodeBadRequest, err.Error())
 			return
 		case errors.Is(err, sharing.ErrInvalidRoomName):
-			http.Error(w, err.Error(), http.StatusBadRequest)
+			middleware.RespondError(w, http.StatusBadRequest, middleware.ErrCodeBadRequest, err.Error())
 			return
 		default:
 			writeSharingError(w, err)
@@ -172,7 +172,7 @@ func (h *Handler) ListClientRoomTemplates(w http.ResponseWriter, r *http.Request
 // gated by folder-level permissions downstream.
 func (h *Handler) ListClientRooms(w http.ResponseWriter, r *http.Request) {
 	if h.clientRooms == nil {
-		http.Error(w, "client rooms not configured", http.StatusNotImplemented)
+		middleware.RespondError(w, http.StatusNotImplemented, middleware.ErrCodeUnsupportedOp, "client rooms not configured")
 		return
 	}
 	workspaceID, _ := middleware.WorkspaceIDFromContext(r.Context())
@@ -187,13 +187,13 @@ func (h *Handler) ListClientRooms(w http.ResponseWriter, r *http.Request) {
 // GetClientRoom returns a single room. Scoped to workspace.
 func (h *Handler) GetClientRoom(w http.ResponseWriter, r *http.Request) {
 	if h.clientRooms == nil {
-		http.Error(w, "client rooms not configured", http.StatusNotImplemented)
+		middleware.RespondError(w, http.StatusNotImplemented, middleware.ErrCodeUnsupportedOp, "client rooms not configured")
 		return
 	}
 	workspaceID, _ := middleware.WorkspaceIDFromContext(r.Context())
 	id, err := uuid.Parse(chi.URLParam(r, "id"))
 	if err != nil {
-		http.Error(w, "invalid id", http.StatusBadRequest)
+		middleware.RespondError(w, http.StatusBadRequest, middleware.ErrCodeBadRequest, "invalid id")
 		return
 	}
 	room, err := h.clientRooms.Get(r.Context(), workspaceID, id)
@@ -209,18 +209,18 @@ func (h *Handler) GetClientRoom(w http.ResponseWriter, r *http.Request) {
 // see ClientRoomService.Delete for rationale.
 func (h *Handler) DeleteClientRoom(w http.ResponseWriter, r *http.Request) {
 	if h.clientRooms == nil {
-		http.Error(w, "client rooms not configured", http.StatusNotImplemented)
+		middleware.RespondError(w, http.StatusNotImplemented, middleware.ErrCodeUnsupportedOp, "client rooms not configured")
 		return
 	}
 	role, _ := middleware.RoleFromContext(r.Context())
 	if role != user.RoleAdmin {
-		http.Error(w, "admin role required", http.StatusForbidden)
+		middleware.RespondError(w, http.StatusForbidden, middleware.ErrCodeAdminOnly, "admin role required")
 		return
 	}
 	workspaceID, _ := middleware.WorkspaceIDFromContext(r.Context())
 	id, err := uuid.Parse(chi.URLParam(r, "id"))
 	if err != nil {
-		http.Error(w, "invalid id", http.StatusBadRequest)
+		middleware.RespondError(w, http.StatusBadRequest, middleware.ErrCodeBadRequest, "invalid id")
 		return
 	}
 	if err := h.clientRooms.Delete(r.Context(), workspaceID, id); err != nil {

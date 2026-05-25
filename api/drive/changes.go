@@ -48,22 +48,22 @@ type changesResponse struct {
 func (h *Handler) ListChanges(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	if h.changefeed == nil {
-		http.Error(w, "change feed not configured", http.StatusNotImplemented)
+		middleware.RespondError(w, http.StatusNotImplemented, middleware.ErrCodeUnsupportedOp, "change feed not configured")
 		return
 	}
 	workspaceID, ok := middleware.WorkspaceIDFromContext(ctx)
 	if !ok {
-		http.Error(w, "unauthenticated", http.StatusUnauthorized)
+		middleware.RespondError(w, http.StatusUnauthorized, middleware.ErrCodeAuthMissingToken, "unauthenticated")
 		return
 	}
 	since, err := parseInt64Query(r, "since", 0)
 	if err != nil {
-		http.Error(w, "invalid since cursor", http.StatusBadRequest)
+		middleware.RespondError(w, http.StatusBadRequest, middleware.ErrCodeBadRequest, "invalid since cursor")
 		return
 	}
 	limit, err := parseIntQuery(r, "limit", changefeed.DefaultLimit)
 	if err != nil {
-		http.Error(w, "invalid limit", http.StatusBadRequest)
+		middleware.RespondError(w, http.StatusBadRequest, middleware.ErrCodeBadRequest, "invalid limit")
 		return
 	}
 	page, err := h.changefeed.Since(ctx, workspaceID, since, limit)
@@ -74,7 +74,7 @@ func (h *Handler) ListChanges(w http.ResponseWriter, r *http.Request) {
 			"limit", limit,
 			"err", err,
 		)
-		http.Error(w, "internal error", http.StatusInternalServerError)
+		middleware.RespondError(w, http.StatusInternalServerError, middleware.ErrCodeInternal, "internal error")
 		return
 	}
 	writeJSON(w, http.StatusOK, changesResponse{
@@ -93,12 +93,12 @@ func (h *Handler) ListChanges(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) LatestChange(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	if h.changefeed == nil {
-		http.Error(w, "change feed not configured", http.StatusNotImplemented)
+		middleware.RespondError(w, http.StatusNotImplemented, middleware.ErrCodeUnsupportedOp, "change feed not configured")
 		return
 	}
 	workspaceID, ok := middleware.WorkspaceIDFromContext(ctx)
 	if !ok {
-		http.Error(w, "unauthenticated", http.StatusUnauthorized)
+		middleware.RespondError(w, http.StatusUnauthorized, middleware.ErrCodeAuthMissingToken, "unauthenticated")
 		return
 	}
 	seq, err := h.changefeed.Latest(ctx, workspaceID)
@@ -107,7 +107,7 @@ func (h *Handler) LatestChange(w http.ResponseWriter, r *http.Request) {
 			"workspace_id", workspaceID,
 			"err", err,
 		)
-		http.Error(w, "internal error", http.StatusInternalServerError)
+		middleware.RespondError(w, http.StatusInternalServerError, middleware.ErrCodeInternal, "internal error")
 		return
 	}
 	writeJSON(w, http.StatusOK, struct {

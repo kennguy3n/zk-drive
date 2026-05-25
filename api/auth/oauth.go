@@ -21,6 +21,7 @@ import (
 	"github.com/google/uuid"
 	"golang.org/x/oauth2"
 
+	"github.com/kennguy3n/zk-drive/api/middleware"
 	"github.com/kennguy3n/zk-drive/internal/audit"
 	"github.com/kennguy3n/zk-drive/internal/user"
 )
@@ -141,17 +142,17 @@ func (h *OAuthHandler) RegisterRoutes(r chi.Router) {
 
 func (h *OAuthHandler) start(w http.ResponseWriter, r *http.Request, c *oauth2.Config, provider string) {
 	if c == nil {
-		http.Error(w, provider+" SSO not configured", http.StatusNotImplemented)
+		middleware.RespondError(w, http.StatusNotImplemented, middleware.ErrCodeUnsupportedOp, provider+" SSO not configured")
 		return
 	}
 	state, err := randomString(32)
 	if err != nil {
-		http.Error(w, "generate state: "+err.Error(), http.StatusInternalServerError)
+		middleware.RespondError(w, http.StatusInternalServerError, middleware.ErrCodeInternal, "generate state: "+err.Error())
 		return
 	}
 	verifier, err := randomString(48)
 	if err != nil {
-		http.Error(w, "generate pkce: "+err.Error(), http.StatusInternalServerError)
+		middleware.RespondError(w, http.StatusInternalServerError, middleware.ErrCodeInternal, "generate pkce: "+err.Error())
 		return
 	}
 	challenge := pkceChallenge(verifier)
@@ -175,24 +176,24 @@ func (h *OAuthHandler) start(w http.ResponseWriter, r *http.Request, c *oauth2.C
 
 func (h *OAuthHandler) callback(w http.ResponseWriter, r *http.Request, c *oauth2.Config, provider string) {
 	if c == nil {
-		http.Error(w, provider+" SSO not configured", http.StatusNotImplemented)
+		middleware.RespondError(w, http.StatusNotImplemented, middleware.ErrCodeUnsupportedOp, provider+" SSO not configured")
 		return
 	}
 	q := r.URL.Query()
 	state := q.Get("state")
 	code := q.Get("code")
 	if state == "" || code == "" {
-		http.Error(w, "missing state or code", http.StatusBadRequest)
+		middleware.RespondError(w, http.StatusBadRequest, middleware.ErrCodeMissingField, "missing state or code")
 		return
 	}
 	cookie, err := r.Cookie(stateCookieName)
 	if err != nil {
-		http.Error(w, "missing state cookie", http.StatusBadRequest)
+		middleware.RespondError(w, http.StatusBadRequest, middleware.ErrCodeMissingField, "missing state cookie")
 		return
 	}
 	parts := strings.SplitN(cookie.Value, ":", 2)
 	if len(parts) != 2 || parts[0] != state {
-		http.Error(w, "state mismatch", http.StatusBadRequest)
+		middleware.RespondError(w, http.StatusBadRequest, middleware.ErrCodeBadRequest, "state mismatch")
 		return
 	}
 	verifier := parts[1]
@@ -213,17 +214,17 @@ func (h *OAuthHandler) callback(w http.ResponseWriter, r *http.Request, c *oauth
 		oauth2.SetAuthURLParam("code_verifier", verifier),
 	)
 	if err != nil {
-		http.Error(w, "token exchange: "+err.Error(), http.StatusBadGateway)
+		middleware.RespondError(w, http.StatusBadGateway, middleware.ErrCodeUpstream, "token exchange: "+err.Error())
 		return
 	}
 	email, subject, name, err := fetchUserinfo(ctx, c, tok, provider)
 	if err != nil {
-		http.Error(w, "userinfo: "+err.Error(), http.StatusBadGateway)
+		middleware.RespondError(w, http.StatusBadGateway, middleware.ErrCodeUpstream, "userinfo: "+err.Error())
 		return
 	}
 	email = strings.TrimSpace(strings.ToLower(email))
 	if email == "" || subject == "" {
-		http.Error(w, "provider returned incomplete profile", http.StatusBadGateway)
+		middleware.RespondError(w, http.StatusBadGateway, middleware.ErrCodeUpstream, "provider returned incomplete profile")
 		return
 	}
 
@@ -232,7 +233,7 @@ func (h *OAuthHandler) callback(w http.ResponseWriter, r *http.Request, c *oauth
 	// provider without creating a second row.
 	u, err := users.GetByAuthProvider(ctx, provider, subject)
 	if err != nil && !errors.Is(err, user.ErrNotFound) {
-		http.Error(w, "lookup user: "+err.Error(), http.StatusInternalServerError)
+		middleware.RespondError(w, http.StatusInternalServerError, middleware.ErrCodeInternal, "lookup user: "+err.Error())
 		return
 	}
 	if u == nil {
@@ -242,14 +243,14 @@ func (h *OAuthHandler) callback(w http.ResponseWriter, r *http.Request, c *oauth
 		u, err = users.GetByEmailAnyWorkspace(ctx, email)
 		if err != nil {
 			if errors.Is(err, user.ErrNotFound) {
-				http.Error(w, "no zk-drive account for "+email, http.StatusForbidden)
+				middleware.RespondError(w, http.StatusForbidden, middleware.ErrCodeForbidden, "no zk-drive account for "+email)
 				return
 			}
-			http.Error(w, "lookup user: "+err.Error(), http.StatusInternalServerError)
+			middleware.RespondError(w, http.StatusInternalServerError, middleware.ErrCodeInternal, "lookup user: "+err.Error())
 			return
 		}
 		if err := users.LinkAuthProvider(ctx, u.ID, provider, subject); err != nil {
-			http.Error(w, "link provider: "+err.Error(), http.StatusInternalServerError)
+			middleware.RespondError(w, http.StatusInternalServerError, middleware.ErrCodeInternal, "link provider: "+err.Error())
 			return
 		}
 		if h.audit != nil {
@@ -261,7 +262,7 @@ func (h *OAuthHandler) callback(w http.ResponseWriter, r *http.Request, c *oauth
 		}
 	}
 	if u.DeactivatedAt != nil {
-		http.Error(w, "account deactivated", http.StatusForbidden)
+		middleware.RespondError(w, http.StatusForbidden, middleware.ErrCodeForbidden, "account deactivated")
 		return
 	}
 
@@ -274,7 +275,7 @@ func (h *OAuthHandler) callback(w http.ResponseWriter, r *http.Request, c *oauth
 	if h.auth.TOTPService() != nil {
 		mfaResp, err := h.auth.maybeIssueMFAChallenge(ctx, u, r)
 		if err != nil {
-			http.Error(w, "mfa: "+err.Error(), http.StatusInternalServerError)
+			middleware.RespondError(w, http.StatusInternalServerError, middleware.ErrCodeInternal, "mfa: "+err.Error())
 			return
 		}
 		if mfaResp != nil {

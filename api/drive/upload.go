@@ -57,19 +57,19 @@ type downloadURLResponse struct {
 func (h *Handler) UploadURL(w http.ResponseWriter, r *http.Request) {
 	workspaceID, ok := middleware.WorkspaceIDFromContext(r.Context())
 	if !ok {
-		http.Error(w, "unauthenticated", http.StatusUnauthorized)
+		middleware.RespondError(w, http.StatusUnauthorized, middleware.ErrCodeAuthMissingToken, "unauthenticated")
 		return
 	}
 	userID, _ := middleware.UserIDFromContext(r.Context())
 
 	var req uploadURLRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "invalid json body", http.StatusBadRequest)
+		middleware.RespondError(w, http.StatusBadRequest, middleware.ErrCodeMalformedJSON, "invalid json body")
 		return
 	}
 	folderID, err := uuid.Parse(req.FolderID)
 	if err != nil {
-		http.Error(w, "invalid folder_id", http.StatusBadRequest)
+		middleware.RespondError(w, http.StatusBadRequest, middleware.ErrCodeBadRequest, "invalid folder_id")
 		return
 	}
 	if _, err := h.folders.GetByID(r.Context(), workspaceID, folderID); err != nil {
@@ -97,7 +97,7 @@ func (h *Handler) UploadURL(w http.ResponseWriter, r *http.Request) {
 	// has no corresponding upload URL or object.
 	store := h.resolveStorage(r.Context(), workspaceID)
 	if store == nil {
-		http.Error(w, "storage not configured", http.StatusNotImplemented)
+		middleware.RespondError(w, http.StatusNotImplemented, middleware.ErrCodeUnsupportedOp, "storage not configured")
 		return
 	}
 
@@ -125,7 +125,7 @@ func (h *Handler) UploadURL(w http.ResponseWriter, r *http.Request) {
 
 	url, err := store.GenerateUploadURL(r.Context(), objectKey, req.MimeType, storage.DefaultPresignExpiry)
 	if err != nil {
-		http.Error(w, "generate upload url: "+err.Error(), http.StatusInternalServerError)
+		middleware.RespondError(w, http.StatusInternalServerError, middleware.ErrCodeInternal, "generate upload url: "+err.Error())
 		return
 	}
 	writeJSON(w, http.StatusOK, uploadURLResponse{
@@ -141,32 +141,32 @@ func (h *Handler) UploadURL(w http.ResponseWriter, r *http.Request) {
 // without a current version and Downloads will 404.
 func (h *Handler) ConfirmUpload(w http.ResponseWriter, r *http.Request) {
 	if h.storage == nil && h.storageFactory == nil {
-		http.Error(w, "storage not configured", http.StatusNotImplemented)
+		middleware.RespondError(w, http.StatusNotImplemented, middleware.ErrCodeUnsupportedOp, "storage not configured")
 		return
 	}
 	workspaceID, ok := middleware.WorkspaceIDFromContext(r.Context())
 	if !ok {
-		http.Error(w, "unauthenticated", http.StatusUnauthorized)
+		middleware.RespondError(w, http.StatusUnauthorized, middleware.ErrCodeAuthMissingToken, "unauthenticated")
 		return
 	}
 	userID, _ := middleware.UserIDFromContext(r.Context())
 
 	var req confirmUploadRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "invalid json body", http.StatusBadRequest)
+		middleware.RespondError(w, http.StatusBadRequest, middleware.ErrCodeMalformedJSON, "invalid json body")
 		return
 	}
 	if req.ObjectKey == "" {
-		http.Error(w, "object_key is required", http.StatusBadRequest)
+		middleware.RespondError(w, http.StatusBadRequest, middleware.ErrCodeMissingField, "object_key is required")
 		return
 	}
 	if req.SizeBytes < 0 {
-		http.Error(w, "size_bytes must be non-negative", http.StatusBadRequest)
+		middleware.RespondError(w, http.StatusBadRequest, middleware.ErrCodeValidation, "size_bytes must be non-negative")
 		return
 	}
 	fileID, err := uuid.Parse(req.FileID)
 	if err != nil {
-		http.Error(w, "invalid file_id", http.StatusBadRequest)
+		middleware.RespondError(w, http.StatusBadRequest, middleware.ErrCodeBadRequest, "invalid file_id")
 		return
 	}
 	f, err := h.files.GetByID(r.Context(), workspaceID, fileID)
@@ -187,7 +187,7 @@ func (h *Handler) ConfirmUpload(w http.ResponseWriter, r *http.Request) {
 	// no backslashes).
 	versionID, err := storage.ValidateObjectKey(req.ObjectKey, workspaceID, f.ID)
 	if err != nil {
-		http.Error(w, "object_key does not belong to this file", http.StatusForbidden)
+		middleware.RespondError(w, http.StatusForbidden, middleware.ErrCodeForbidden, "object_key does not belong to this file")
 		return
 	}
 
@@ -345,13 +345,13 @@ func (h *Handler) publishPostUploadJobs(ctx context.Context, fileID, versionID u
 // DownloadURL returns a presigned GET URL for the file's current version.
 func (h *Handler) DownloadURL(w http.ResponseWriter, r *http.Request) {
 	if h.storage == nil && h.storageFactory == nil {
-		http.Error(w, "storage not configured", http.StatusNotImplemented)
+		middleware.RespondError(w, http.StatusNotImplemented, middleware.ErrCodeUnsupportedOp, "storage not configured")
 		return
 	}
 	workspaceID, _ := middleware.WorkspaceIDFromContext(r.Context())
 	id, err := uuid.Parse(chi.URLParam(r, "id"))
 	if err != nil {
-		http.Error(w, "invalid id", http.StatusBadRequest)
+		middleware.RespondError(w, http.StatusBadRequest, middleware.ErrCodeBadRequest, "invalid id")
 		return
 	}
 	f, err := h.files.GetByID(r.Context(), workspaceID, id)
@@ -364,13 +364,13 @@ func (h *Handler) DownloadURL(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if f.CurrentVersionID == nil {
-		http.Error(w, "file has no current version", http.StatusNotFound)
+		middleware.RespondError(w, http.StatusNotFound, middleware.ErrCodeNotFound, "file has no current version")
 		return
 	}
 	current, err := h.files.GetVersionByID(r.Context(), workspaceID, *f.CurrentVersionID)
 	if err != nil {
 		if errors.Is(err, file.ErrNotFound) {
-			http.Error(w, "current version not found", http.StatusNotFound)
+			middleware.RespondError(w, http.StatusNotFound, middleware.ErrCodeNotFound, "current version not found")
 			return
 		}
 		writeServiceError(w, err)
@@ -381,7 +381,7 @@ func (h *Handler) DownloadURL(w http.ResponseWriter, r *http.Request) {
 	// without it the scan pipeline only surfaces quarantine via the
 	// admin notification, while the infected bytes remain pullable.
 	if current.ScanStatus == scan.StatusQuarantined {
-		http.Error(w, "file version quarantined by virus scan", http.StatusForbidden)
+		middleware.RespondError(w, http.StatusForbidden, middleware.ErrCodeVirusDetected, "file version quarantined by virus scan")
 		return
 	}
 	if err := h.billing.CheckBandwidthQuota(r.Context(), workspaceID, current.SizeBytes); err != nil {
@@ -390,12 +390,12 @@ func (h *Handler) DownloadURL(w http.ResponseWriter, r *http.Request) {
 	}
 	store := h.resolveStorage(r.Context(), workspaceID)
 	if store == nil {
-		http.Error(w, "storage not configured", http.StatusNotImplemented)
+		middleware.RespondError(w, http.StatusNotImplemented, middleware.ErrCodeUnsupportedOp, "storage not configured")
 		return
 	}
 	url, err := store.GenerateDownloadURL(r.Context(), current.ObjectKey, storage.DefaultPresignExpiry)
 	if err != nil {
-		http.Error(w, "generate download url: "+err.Error(), http.StatusInternalServerError)
+		middleware.RespondError(w, http.StatusInternalServerError, middleware.ErrCodeInternal, "generate download url: "+err.Error())
 		return
 	}
 	// Bandwidth accounting: record the version's size as a download.
@@ -417,7 +417,7 @@ func (h *Handler) DownloadURL(w http.ResponseWriter, r *http.Request) {
 func writeBillingError(w http.ResponseWriter, err error) {
 	switch {
 	case errors.Is(err, billing.ErrQuotaExceeded):
-		http.Error(w, err.Error(), http.StatusPaymentRequired)
+		middleware.RespondError(w, http.StatusPaymentRequired, middleware.ErrCodeInternal, err.Error())
 	default:
 		writeServiceError(w, err)
 	}

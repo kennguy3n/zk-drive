@@ -74,14 +74,14 @@ func writeServiceError(w http.ResponseWriter, err error) {
 		errors.Is(err, workspace.ErrNotFound),
 		errors.Is(err, user.ErrNotFound),
 		errors.Is(err, permission.ErrNotFound):
-		http.Error(w, err.Error(), http.StatusNotFound)
+		middleware.RespondError(w, http.StatusNotFound, middleware.ErrCodeNotFound, err.Error())
 	case errors.Is(err, folder.ErrInvalidName),
 		errors.Is(err, folder.ErrInvalidParent),
 		errors.Is(err, folder.ErrInvalidEncryptionMode),
 		errors.Is(err, file.ErrInvalidName):
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		middleware.RespondError(w, http.StatusBadRequest, middleware.ErrCodeValidation, err.Error())
 	case errors.Is(err, folder.ErrEncryptionModeMismatch):
-		http.Error(w, err.Error(), http.StatusConflict)
+		middleware.RespondError(w, http.StatusConflict, middleware.ErrCodeConflict, err.Error())
 	case errors.Is(err, file.ErrVersionConflict):
 		// Surface the generic 409 rather than err.Error() so the
 		// internal "file version conflicts with existing row" detail
@@ -89,20 +89,63 @@ func writeServiceError(w http.ResponseWriter, err error) {
 		// not leak to the client. The only way to trip this branch
 		// is a UUID forge attempt or a programming error, so a
 		// terse message is appropriate.
-		http.Error(w, "version conflict", http.StatusConflict)
+		middleware.RespondError(w, http.StatusConflict, middleware.ErrCodeConflict, "version conflict")
 	default:
 		var br badRequestErr
 		var fb forbiddenErr
 		if errors.As(err, &br) {
-			http.Error(w, err.Error(), http.StatusBadRequest)
+			middleware.RespondError(w, http.StatusBadRequest, middleware.ErrCodeBadRequest, err.Error())
 			return
 		}
 		if errors.As(err, &fb) {
-			http.Error(w, err.Error(), http.StatusForbidden)
+			middleware.RespondError(w, http.StatusForbidden, middleware.ErrCodeForbidden, err.Error())
 			return
 		}
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		middleware.RespondError(w, http.StatusInternalServerError, middleware.ErrCodeInternal, err.Error())
 	}
+}
+
+// apiError is the package-local helper that callers use instead
+// of http.Error so every error response carries a stable JSON
+// `{code, message}` body. The four most-common error shapes
+// (invalid-id, invalid-json, workspace-mismatch, unauthenticated)
+// have dedicated shorthands below to keep call sites terse.
+//
+// New error codes should be added to api/middleware/error_codes.go
+// alongside their English fallback in
+// frontend/src/i18n/locales/en.json. Reusing an existing code is
+// fine when the semantics match (e.g. every "invalid {x}_id" goes
+// through ErrCodeBadRequest with a specific message).
+func apiError(w http.ResponseWriter, status int, code middleware.ErrorCode, message string) {
+	middleware.RespondError(w, status, code, message)
+}
+
+func apiBadRequest(w http.ResponseWriter, message string) {
+	middleware.RespondError(w, http.StatusBadRequest, middleware.ErrCodeBadRequest, message)
+}
+
+func apiForbidden(w http.ResponseWriter, message string) {
+	middleware.RespondError(w, http.StatusForbidden, middleware.ErrCodeForbidden, message)
+}
+
+func apiUnauthorized(w http.ResponseWriter, message string) {
+	middleware.RespondError(w, http.StatusUnauthorized, middleware.ErrCodeAuthMissingToken, message)
+}
+
+func apiNotFound(w http.ResponseWriter, message string) {
+	middleware.RespondError(w, http.StatusNotFound, middleware.ErrCodeNotFound, message)
+}
+
+func apiInternal(w http.ResponseWriter, message string) {
+	middleware.RespondError(w, http.StatusInternalServerError, middleware.ErrCodeInternal, message)
+}
+
+func apiConflict(w http.ResponseWriter, message string) {
+	middleware.RespondError(w, http.StatusConflict, middleware.ErrCodeConflict, message)
+}
+
+func apiMalformedJSON(w http.ResponseWriter, message string) {
+	middleware.RespondError(w, http.StatusBadRequest, middleware.ErrCodeMalformedJSON, message)
 }
 
 func writeJSON(w http.ResponseWriter, status int, payload any) {

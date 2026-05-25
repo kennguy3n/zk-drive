@@ -34,18 +34,18 @@ func (h *Handler) CreateFolder(w http.ResponseWriter, r *http.Request) {
 	workspaceID, ok := middleware.WorkspaceIDFromContext(r.Context())
 	userID, _ := middleware.UserIDFromContext(r.Context())
 	if !ok {
-		http.Error(w, "unauthenticated", http.StatusUnauthorized)
+		middleware.RespondError(w, http.StatusUnauthorized, middleware.ErrCodeAuthMissingToken, "unauthenticated")
 		return
 	}
 	var req createFolderRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "invalid json body", http.StatusBadRequest)
+		middleware.RespondError(w, http.StatusBadRequest, middleware.ErrCodeMalformedJSON, "invalid json body")
 		return
 	}
 	if req.WorkspaceID != "" {
 		reqWS, err := uuid.Parse(req.WorkspaceID)
 		if err != nil || reqWS != workspaceID {
-			http.Error(w, "workspace_id mismatch", http.StatusForbidden)
+			middleware.RespondError(w, http.StatusForbidden, middleware.ErrCodeWrongTenant, "workspace_id mismatch")
 			return
 		}
 	}
@@ -53,7 +53,7 @@ func (h *Handler) CreateFolder(w http.ResponseWriter, r *http.Request) {
 	if req.ParentFolderID != nil && *req.ParentFolderID != "" {
 		pid, err := uuid.Parse(*req.ParentFolderID)
 		if err != nil {
-			http.Error(w, "invalid parent_folder_id", http.StatusBadRequest)
+			middleware.RespondError(w, http.StatusBadRequest, middleware.ErrCodeBadRequest, "invalid parent_folder_id")
 			return
 		}
 		parentID = &pid
@@ -76,7 +76,7 @@ func (h *Handler) GetFolder(w http.ResponseWriter, r *http.Request) {
 	workspaceID, _ := middleware.WorkspaceIDFromContext(r.Context())
 	id, err := uuid.Parse(chi.URLParam(r, "id"))
 	if err != nil {
-		http.Error(w, "invalid id", http.StatusBadRequest)
+		middleware.RespondError(w, http.StatusBadRequest, middleware.ErrCodeBadRequest, "invalid id")
 		return
 	}
 	f, err := h.folders.GetByID(r.Context(), workspaceID, id)
@@ -90,12 +90,12 @@ func (h *Handler) GetFolder(w http.ResponseWriter, r *http.Request) {
 	}
 	children, err := h.folders.ListChildren(r.Context(), workspaceID, &id)
 	if err != nil {
-		http.Error(w, "list children: "+err.Error(), http.StatusInternalServerError)
+		middleware.RespondError(w, http.StatusInternalServerError, middleware.ErrCodeInternal, "list children: "+err.Error())
 		return
 	}
 	fileList, err := h.files.ListByFolder(r.Context(), workspaceID, id)
 	if err != nil {
-		http.Error(w, "list files: "+err.Error(), http.StatusInternalServerError)
+		middleware.RespondError(w, http.StatusInternalServerError, middleware.ErrCodeInternal, "list files: "+err.Error())
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
@@ -112,7 +112,7 @@ func (h *Handler) ListFolders(w http.ResponseWriter, r *http.Request) {
 	if wsParam := r.URL.Query().Get("workspace_id"); wsParam != "" {
 		wsID, err := uuid.Parse(wsParam)
 		if err != nil || wsID != workspaceID {
-			http.Error(w, "workspace_id mismatch", http.StatusForbidden)
+			middleware.RespondError(w, http.StatusForbidden, middleware.ErrCodeWrongTenant, "workspace_id mismatch")
 			return
 		}
 	}
@@ -121,14 +121,14 @@ func (h *Handler) ListFolders(w http.ResponseWriter, r *http.Request) {
 	if parentParam != "" && parentParam != "root" {
 		pid, err := uuid.Parse(parentParam)
 		if err != nil {
-			http.Error(w, "invalid parent_folder_id", http.StatusBadRequest)
+			middleware.RespondError(w, http.StatusBadRequest, middleware.ErrCodeBadRequest, "invalid parent_folder_id")
 			return
 		}
 		parentID = &pid
 	}
 	list, err := h.folders.ListChildren(r.Context(), workspaceID, parentID)
 	if err != nil {
-		http.Error(w, "list folders: "+err.Error(), http.StatusInternalServerError)
+		middleware.RespondError(w, http.StatusInternalServerError, middleware.ErrCodeInternal, "list folders: "+err.Error())
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"folders": list})
@@ -139,12 +139,12 @@ func (h *Handler) RenameFolder(w http.ResponseWriter, r *http.Request) {
 	workspaceID, _ := middleware.WorkspaceIDFromContext(r.Context())
 	id, err := uuid.Parse(chi.URLParam(r, "id"))
 	if err != nil {
-		http.Error(w, "invalid id", http.StatusBadRequest)
+		middleware.RespondError(w, http.StatusBadRequest, middleware.ErrCodeBadRequest, "invalid id")
 		return
 	}
 	var req renameFolderRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "invalid json body", http.StatusBadRequest)
+		middleware.RespondError(w, http.StatusBadRequest, middleware.ErrCodeMalformedJSON, "invalid json body")
 		return
 	}
 	if err := h.assertResourceAccess(r.Context(), permission.ResourceFolder, id, permission.RoleEditor); err != nil {
@@ -167,7 +167,7 @@ func (h *Handler) DeleteFolder(w http.ResponseWriter, r *http.Request) {
 	workspaceID, _ := middleware.WorkspaceIDFromContext(r.Context())
 	id, err := uuid.Parse(chi.URLParam(r, "id"))
 	if err != nil {
-		http.Error(w, "invalid id", http.StatusBadRequest)
+		middleware.RespondError(w, http.StatusBadRequest, middleware.ErrCodeBadRequest, "invalid id")
 		return
 	}
 	if err := h.assertResourceAccess(r.Context(), permission.ResourceFolder, id, permission.RoleEditor); err != nil {
@@ -206,19 +206,19 @@ func (h *Handler) MoveFolder(w http.ResponseWriter, r *http.Request) {
 	workspaceID, _ := middleware.WorkspaceIDFromContext(r.Context())
 	id, err := uuid.Parse(chi.URLParam(r, "id"))
 	if err != nil {
-		http.Error(w, "invalid id", http.StatusBadRequest)
+		middleware.RespondError(w, http.StatusBadRequest, middleware.ErrCodeBadRequest, "invalid id")
 		return
 	}
 	var req moveFolderRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "invalid json body", http.StatusBadRequest)
+		middleware.RespondError(w, http.StatusBadRequest, middleware.ErrCodeMalformedJSON, "invalid json body")
 		return
 	}
 	var parentID *uuid.UUID
 	if req.NewParentFolderID != nil && *req.NewParentFolderID != "" {
 		pid, perr := uuid.Parse(*req.NewParentFolderID)
 		if perr != nil {
-			http.Error(w, "invalid new_parent_folder_id", http.StatusBadRequest)
+			middleware.RespondError(w, http.StatusBadRequest, middleware.ErrCodeBadRequest, "invalid new_parent_folder_id")
 			return
 		}
 		parentID = &pid

@@ -1,6 +1,8 @@
 import { useState, useEffect } from "react";
 import { useNavigate, useLocation } from "react-router-dom";
+import { useTranslation } from "react-i18next";
 import { totpVerifyWithChallenge } from "../api/client";
+import { translateApiError } from "../api/errors";
 
 // MfaChallengePage is the second-factor step after a successful
 // password login. The /auth/login handler returned a short-lived
@@ -18,6 +20,7 @@ import { totpVerifyWithChallenge } from "../api/client";
 export default function MfaChallengePage() {
   const nav = useNavigate();
   const loc = useLocation();
+  const { t } = useTranslation();
   const state = (loc.state as MfaChallengeState | null) ?? null;
   const [code, setCode] = useState("");
   const [busy, setBusy] = useState(false);
@@ -46,11 +49,8 @@ export default function MfaChallengePage() {
 
   return (
     <div className="auth-page">
-      <h1>Two-factor verification</h1>
-      <p>
-        Enter the 6-digit code from your authenticator app, or one of your
-        recovery codes if you no longer have access to the device.
-      </p>
+      <h1>{t("auth.mfaTitle")}</h1>
+      <p>{t("auth.mfaPrompt")}</p>
       <form
         onSubmit={async (e) => {
           e.preventDefault();
@@ -61,13 +61,13 @@ export default function MfaChallengePage() {
             await totpVerifyWithChallenge(state.mfaToken, code.trim());
             nav("/drive", { replace: true });
           } catch (err) {
-            setError(extractErr(err));
+            setError(translateApiError(err, t));
           } finally {
             setBusy(false);
           }
         }}
       >
-        <label htmlFor="mfa-code">Code</label>
+        <label htmlFor="mfa-code">{t("auth.mfaCodeLabel")}</label>
         <input
           id="mfa-code"
           type="text"
@@ -76,10 +76,10 @@ export default function MfaChallengePage() {
           autoFocus
           value={code}
           onChange={(e) => setCode(e.target.value)}
-          placeholder="123456 or xb-4q-9z-pm-tk"
+          placeholder={t("auth.mfaCodePlaceholder")}
         />
         <button type="submit" disabled={busy || code.trim() === ""}>
-          {busy ? "Verifying…" : "Verify"}
+          {busy ? t("common.verifying") : t("auth.mfaVerify")}
         </button>
       </form>
       {error && <p className="auth-error">{error}</p>}
@@ -89,7 +89,7 @@ export default function MfaChallengePage() {
           className="link-button"
           onClick={() => nav("/login", { replace: true })}
         >
-          Cancel and sign in again
+          {t("auth.mfaCancelAndSignIn")}
         </button>
       </p>
     </div>
@@ -100,9 +100,4 @@ interface MfaChallengeState {
   mfaToken: string;
   expiresAt: string;
   mustEnroll?: boolean;
-}
-
-function extractErr(e: unknown): string {
-  const maybe = e as { response?: { data?: string }; message?: string };
-  return maybe.response?.data || maybe.message || "Invalid code";
 }

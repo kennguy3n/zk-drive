@@ -1,19 +1,27 @@
 import { useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
+import { useTranslation } from "react-i18next";
 import AuthForm from "../components/AuthForm";
 import { login } from "../api/client";
+import { translateApiError } from "../api/errors";
 
 export default function LoginPage() {
   const nav = useNavigate();
+  const { t } = useTranslation();
   const [error, setError] = useState<string | null>(null);
 
   return (
     <AuthForm
-      title="Sign in to zk-drive"
-      submitLabel="Sign in"
+      title={t("auth.loginPageTitle")}
+      submitLabel={t("auth.login")}
       fields={[
-        { name: "email", label: "Email", type: "email", autoComplete: "email" },
-        { name: "password", label: "Password", type: "password", autoComplete: "current-password" },
+        { name: "email", label: t("auth.email"), type: "email", autoComplete: "email" },
+        {
+          name: "password",
+          label: t("auth.password"),
+          type: "password",
+          autoComplete: "current-password",
+        },
       ]}
       onSubmit={async (v) => {
         try {
@@ -36,20 +44,15 @@ export default function LoginPage() {
           }
           nav("/drive", { replace: true });
         } catch (err) {
-          setError(extractErr(err));
+          setError(translateApiError(err, t));
         }
       }}
       error={error}
       footer={
         <span>
-          No account? <Link to="/signup">Create one</Link>
+          {t("auth.noAccount")} <Link to="/signup">{t("auth.createOne")}</Link>
         </span>
       }
     />
   );
-}
-
-function extractErr(e: unknown): string {
-  const maybe = e as { response?: { data?: string }; message?: string };
-  return maybe.response?.data || maybe.message || "Something went wrong";
 }

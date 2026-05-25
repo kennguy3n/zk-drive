@@ -15,7 +15,7 @@ import (
 // newest-first). limit is capped at 100.
 func (h *Handler) ListNotifications(w http.ResponseWriter, r *http.Request) {
 	if h.notifications == nil {
-		http.Error(w, "notifications not configured", http.StatusNotImplemented)
+		middleware.RespondError(w, http.StatusNotImplemented, middleware.ErrCodeUnsupportedOp, "notifications not configured")
 		return
 	}
 	workspaceID, _ := middleware.WorkspaceIDFromContext(r.Context())
@@ -50,19 +50,19 @@ func (h *Handler) ListNotifications(w http.ResponseWriter, r *http.Request) {
 // MarkNotificationRead flips a single notification to read.
 func (h *Handler) MarkNotificationRead(w http.ResponseWriter, r *http.Request) {
 	if h.notifications == nil {
-		http.Error(w, "notifications not configured", http.StatusNotImplemented)
+		middleware.RespondError(w, http.StatusNotImplemented, middleware.ErrCodeUnsupportedOp, "notifications not configured")
 		return
 	}
 	workspaceID, _ := middleware.WorkspaceIDFromContext(r.Context())
 	userID, _ := middleware.UserIDFromContext(r.Context())
 	id, err := uuid.Parse(chi.URLParam(r, "id"))
 	if err != nil {
-		http.Error(w, "invalid id", http.StatusBadRequest)
+		middleware.RespondError(w, http.StatusBadRequest, middleware.ErrCodeBadRequest, "invalid id")
 		return
 	}
 	if err := h.notifications.MarkRead(r.Context(), workspaceID, userID, id); err != nil {
 		if errors.Is(err, notification.ErrNotFound) {
-			http.Error(w, err.Error(), http.StatusNotFound)
+			middleware.RespondError(w, http.StatusNotFound, middleware.ErrCodeNotFound, err.Error())
 			return
 		}
 		writeServiceError(w, err)
@@ -74,7 +74,7 @@ func (h *Handler) MarkNotificationRead(w http.ResponseWriter, r *http.Request) {
 // MarkAllNotificationsRead flips every unread notification for the caller.
 func (h *Handler) MarkAllNotificationsRead(w http.ResponseWriter, r *http.Request) {
 	if h.notifications == nil {
-		http.Error(w, "notifications not configured", http.StatusNotImplemented)
+		middleware.RespondError(w, http.StatusNotImplemented, middleware.ErrCodeUnsupportedOp, "notifications not configured")
 		return
 	}
 	workspaceID, _ := middleware.WorkspaceIDFromContext(r.Context())

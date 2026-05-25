@@ -28,6 +28,8 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
+import { Trans, useTranslation } from "react-i18next";
+import type { TFunction } from "i18next";
 import * as Y from "yjs";
 import { Awareness } from "y-protocols/awareness";
 import { useEditor, EditorContent, type AnyExtension } from "@tiptap/react";
@@ -45,6 +47,7 @@ import {
   type Document,
 } from "../api/client";
 import { CollabProvider, type ConnectionStatus } from "../collab/provider";
+import { translateApiError } from "../api/errors";
 import EncryptionBadge from "../components/EncryptionBadge";
 import ConnectionStatusChip from "../components/ConnectionStatusChip";
 import PresenceChips from "../components/PresenceChips";
@@ -68,14 +71,15 @@ function userPresenceColor(userID: string): string {
 // we use a deterministic prefix; once a profile endpoint exists the
 // chip will switch to real names without a wire-shape change
 // (PresenceChips reads `awareness.user.name`).
-function displayNameForUser(userID: string | null): string {
-  if (!userID) return "Anonymous";
-  return `User ${userID.slice(0, 6)}`;
+function displayNameForUser(t: TFunction, userID: string | null): string {
+  if (!userID) return t("collab.anonymous");
+  return t("docs.userLabel", { id: userID.slice(0, 6) });
 }
 
 export default function DocumentEditorPage() {
   const { id } = useParams<{ id: string }>();
   const nav = useNavigate();
+  const { t } = useTranslation();
 
   const [doc, setDoc] = useState<Document | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -110,12 +114,12 @@ export default function DocumentEditorPage() {
       })
       .catch((e) => {
         if (cancelled) return;
-        setLoadError(String((e as Error)?.message ?? e));
+        setLoadError(translateApiError(e, t));
       });
     return () => {
       cancelled = true;
     };
-  }, [id]);
+  }, [id, t]);
 
   // Build (or rebuild) the Y.Doc + provider whenever the document's
   // collab_mode changes. We avoid recreating on every doc-fetch by
@@ -149,7 +153,7 @@ export default function DocumentEditorPage() {
     const nextAwareness = presenceAllowed ? new Awareness(nextYDoc) : null;
     const token = currentToken();
     if (!token) {
-      setLoadError("not authenticated");
+      setLoadError(t("errors.AUTH_MISSING_TOKEN"));
       nextYDoc.destroy();
       return;
     }
@@ -162,7 +166,7 @@ export default function DocumentEditorPage() {
       awareness: nextAwareness ?? undefined,
       presenceAllowed,
       user: {
-        name: displayNameForUser(currentUserID()),
+        name: displayNameForUser(t, currentUserID()),
         color: userPresenceColor(currentUserID() ?? id),
       },
       onStatus: setStatus,
@@ -196,6 +200,7 @@ export default function DocumentEditorPage() {
       setAwareness(null);
       setStatus("disconnected");
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [id, collabMode, presenceAllowed]);
 
   // Build the TipTap extension list based on the resolved
@@ -297,12 +302,12 @@ export default function DocumentEditorPage() {
         const updated = await renameDocument(id, next);
         setDoc(updated);
       } catch (err) {
-        setLoadError(String((err as Error)?.message ?? err));
+        setLoadError(translateApiError(err, t));
       } finally {
         setRenaming(false);
       }
     },
-    [doc, id, renameValue],
+    [doc, id, renameValue, t],
   );
 
   const onChangeMode = useCallback(
@@ -319,27 +324,27 @@ export default function DocumentEditorPage() {
         setDoc(updated);
         setModeSwitchOpen(false);
       } catch (err) {
-        setModeSwitchError(String((err as Error)?.message ?? err));
+        setModeSwitchError(translateApiError(err, t));
       } finally {
         setModeSwitching(false);
       }
     },
-    [doc, id],
+    [doc, id, t],
   );
 
   if (!id) {
-    return <div style={pageStyle}>Missing document id.</div>;
+    return <div style={pageStyle}>{t("docs.missingDocumentId")}</div>;
   }
   if (loadError) {
     return (
       <div style={pageStyle}>
         <p style={{ color: "#991b1b" }}>{loadError}</p>
-        <Link to="/drive">Back to drive</Link>
+        <Link to="/drive">{t("admin.backToDrive")}</Link>
       </div>
     );
   }
   if (!doc) {
-    return <div style={pageStyle}>Loading…</div>;
+    return <div style={pageStyle}>{t("common.loading")}</div>;
   }
 
   return (
@@ -359,7 +364,7 @@ export default function DocumentEditorPage() {
           <button
             onClick={() => nav(`/drive/folder/${doc.folder_id}`)}
             style={backBtn}
-            aria-label="Back to folder"
+            aria-label={t("docs.backToFolderAria")}
           >
             ←
           </button>
@@ -392,7 +397,7 @@ export default function DocumentEditorPage() {
                 setRenameValue(doc.name);
                 setRenaming(true);
               }}
-              title="Click to rename"
+              title={t("docs.clickToRename")}
             >
               {doc.name}
             </h1>
@@ -407,7 +412,7 @@ export default function DocumentEditorPage() {
             localClientID={yDoc?.clientID ?? null}
           />
           <button onClick={() => setModeSwitchOpen(true)} style={modeBtn}>
-            Change mode
+            {t("docs.changeMode")}
           </button>
         </div>
       </header>
@@ -432,7 +437,7 @@ export default function DocumentEditorPage() {
               marginBottom: 16,
             }}
           >
-            This document's collab mode is <code>disabled</code> — editing is locked.
+            <Trans i18nKey="docs.disabledBanner" components={{ code: <code /> }} />
           </div>
         )}
         {editor ? (
@@ -449,7 +454,7 @@ export default function DocumentEditorPage() {
             }}
           />
         ) : (
-          <div style={{ color: "#6b7280" }}>Initializing editor…</div>
+          <div style={{ color: "#6b7280" }}>{t("docs.initializing")}</div>
         )}
       </div>
 
@@ -464,13 +469,14 @@ export default function DocumentEditorPage() {
             style={modalCard}
             onClick={(e) => e.stopPropagation()}
           >
-            <h2 style={{ margin: 0, fontSize: 18 }}>Change editor experience</h2>
+            <h2 style={{ margin: 0, fontSize: 18 }}>{t("docs.changeExperience")}</h2>
             <p style={{ color: "#4b5563", fontSize: 13, marginTop: 4 }}>
-              The folder is{" "}
-              <strong>
-                {doc.encryption_mode === "strict_zk" ? "zero-knowledge" : "confidential"}
-              </strong>
-              . Only modes allowed by the folder's privacy boundary are selectable.
+              {t("docs.modeFolderHint", {
+                mode:
+                  doc.encryption_mode === "strict_zk"
+                    ? t("encryption.zeroKnowledge")
+                    : t("encryption.confidential"),
+              })}
             </p>
             <CollabModeSelector
               value={doc.collab_mode}
@@ -488,7 +494,7 @@ export default function DocumentEditorPage() {
                 disabled={modeSwitching}
                 style={modeBtn}
               >
-                Close
+                {t("common.close")}
               </button>
             </div>
           </div>
@@ -503,11 +509,12 @@ export default function DocumentEditorPage() {
 // the (privacy boundary, editor experience) tuple that governs
 // every collab feature on the page.
 function CollabModeBadge({ mode }: { mode: CollabMode }) {
+  const { t } = useTranslation();
   const labels: Record<CollabMode, string> = {
-    markdown: "Markdown",
-    rich: "Rich",
-    rich_presence: "Rich + presence",
-    disabled: "Disabled",
+    markdown: t("collab.markdown"),
+    rich: t("collab.rich"),
+    rich_presence: t("collab.richPresence"),
+    disabled: t("collab.disabled"),
   };
   const colors: Record<CollabMode, { bg: string; fg: string }> = {
     markdown: { bg: "#eff6ff", fg: "#1d4ed8" },
@@ -518,7 +525,7 @@ function CollabModeBadge({ mode }: { mode: CollabMode }) {
   const c = colors[mode];
   return (
     <span
-      title={`Editor mode: ${labels[mode].toLowerCase()}`}
+      title={t("docs.editorModeTooltip", { mode: labels[mode].toLowerCase() })}
       style={{
         display: "inline-flex",
         alignItems: "center",

@@ -1,11 +1,13 @@
 import { useCallback, useEffect, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
+import { Trans, useTranslation } from "react-i18next";
 import FolderTree from "../components/FolderTree";
 import FileList from "../components/FileList";
 import UploadButton from "../components/UploadButton";
 import SearchBar from "../components/SearchBar";
 import ShareDialog from "../components/ShareDialog";
 import EncryptionBadge, { type EncryptionMode } from "../components/EncryptionBadge";
+import { translateApiError } from "../api/errors";
 import {
   bulkCopy,
   bulkDelete,
@@ -39,6 +41,7 @@ export default function FileBrowserPage() {
   const { folderId } = useParams<{ folderId?: string }>();
   const currentFolderID = folderId ?? null;
   const nav = useNavigate();
+  const { t } = useTranslation();
   const { logout, isAdmin } = useAuth();
 
   const [folder, setFolder] = useState<Folder | null>(null);
@@ -76,9 +79,9 @@ export default function FileBrowserPage() {
         setFiles([]);
       }
     } catch (err) {
-      setError(String((err as Error)?.message ?? err));
+      setError(translateApiError(err, t));
     }
-  }, [currentFolderID]);
+  }, [currentFolderID, t]);
 
   useEffect(() => {
     refresh();
@@ -95,7 +98,7 @@ export default function FileBrowserPage() {
   };
 
   const handleDeleteFolder = async (id: string) => {
-    if (!confirm("Delete folder and all contents?")) return;
+    if (!confirm(t("drive.deleteFolderConfirm"))) return;
     await deleteFolder(id);
     refresh();
   };
@@ -115,10 +118,10 @@ export default function FileBrowserPage() {
           <Breadcrumb folder={folder} />
           <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
             <SearchBar />
-            <button onClick={handleCreateFolder} style={btn}>New folder</button>
+            <button onClick={handleCreateFolder} style={btn}>{t("drive.newFolder")}</button>
             {isAdmin ? (
               <button onClick={() => setTemplateDialogOpen(true)} style={btn}>
-                Create from template
+                {t("drive.createFromTemplate")}
               </button>
             ) : null}
             <UploadButton folderID={currentFolderID} onUploaded={() => refresh()} />
@@ -126,25 +129,25 @@ export default function FileBrowserPage() {
               <Link
                 to={`/drive/folder/${currentFolderID}/documents`}
                 style={{ ...btn, textDecoration: "none", color: "#111827" }}
-                title="Collaborative documents in this folder"
+                title={t("drive.documentsTooltip")}
               >
-                Documents
+                {t("nav.documents")}
               </Link>
             ) : null}
             <Link
               to="/drive/privacy"
               style={{ ...btn, textDecoration: "none", color: "#111827" }}
-              title="How your data is protected"
+              title={t("drive.privacyTooltip")}
             >
-              Privacy
+              {t("nav.privacy")}
             </Link>
             {isAdmin ? (
               <>
                 <Link to="/admin" style={{ ...btn, textDecoration: "none", color: "#111827" }}>
-                  Admin
+                  {t("nav.admin")}
                 </Link>
                 <Link to="/billing" style={{ ...btn, textDecoration: "none", color: "#111827" }}>
-                  Billing
+                  {t("nav.billing")}
                 </Link>
               </>
             ) : null}
@@ -155,7 +158,7 @@ export default function FileBrowserPage() {
               }}
               style={{ ...btn, marginLeft: 12 }}
             >
-              Log out
+              {t("auth.logout")}
             </button>
           </div>
         </header>
@@ -167,7 +170,7 @@ export default function FileBrowserPage() {
         {subfolders.length > 0 ? (
           <section style={{ marginBottom: 24 }}>
             <h2 style={{ fontSize: 14, color: "#6b7280", textTransform: "uppercase", margin: "8px 0" }}>
-              Folders
+              {t("drive.folders")}
             </h2>
             <ul
               style={{
@@ -236,10 +239,10 @@ export default function FileBrowserPage() {
                       onClick={() => setShareTarget({ type: "folder", value: f })}
                       style={btn}
                     >
-                      Share
+                      {t("common.share")}
                     </button>
                     <button onClick={() => handleDeleteFolder(f.id)} style={{ ...btn, color: "#b91c1c" }}>
-                      Delete
+                      {t("common.delete")}
                     </button>
                   </div>
                 </li>
@@ -250,7 +253,7 @@ export default function FileBrowserPage() {
 
         <section>
           <h2 style={{ fontSize: 14, color: "#6b7280", textTransform: "uppercase", margin: "8px 0" }}>
-            Files
+            {t("drive.files")}
           </h2>
           {selectedFiles.size > 0 ? (
             <div
@@ -264,41 +267,41 @@ export default function FileBrowserPage() {
                 borderRadius: 4,
               }}
             >
-              <span style={{ fontSize: 13 }}>{selectedFiles.size} selected</span>
+              <span style={{ fontSize: 13 }}>{t("drive.selectedCount", { count: selectedFiles.size })}</span>
               <button
                 style={btn}
                 onClick={async () => {
-                  const target = prompt("Target folder id:");
+                  const target = prompt(t("drive.targetFolderIdPrompt"));
                   if (!target) return;
                   await bulkMove({ file_ids: [...selectedFiles], target_folder_id: target });
                   setSelectedFiles(new Set());
                   refresh();
                 }}
               >
-                Move
+                {t("drive.move")}
               </button>
               <button
                 style={btn}
                 onClick={async () => {
-                  const target = prompt("Target folder id:");
+                  const target = prompt(t("drive.targetFolderIdPrompt"));
                   if (!target) return;
                   await bulkCopy({ file_ids: [...selectedFiles], target_folder_id: target });
                   setSelectedFiles(new Set());
                   refresh();
                 }}
               >
-                Copy
+                {t("drive.copy")}
               </button>
               <button
                 style={{ ...btn, color: "#b91c1c" }}
                 onClick={async () => {
-                  if (!confirm(`Delete ${selectedFiles.size} files?`)) return;
+                  if (!confirm(t("drive.bulkDeleteConfirm", { count: selectedFiles.size }))) return;
                   await bulkDelete({ file_ids: [...selectedFiles] });
                   setSelectedFiles(new Set());
                   refresh();
                 }}
               >
-                Delete
+                {t("common.delete")}
               </button>
               <button
                 style={btn}
@@ -312,10 +315,10 @@ export default function FileBrowserPage() {
                   URL.revokeObjectURL(url);
                 }}
               >
-                Download zip
+                {t("drive.downloadZip")}
               </button>
               <button style={btn} onClick={() => setSelectedFiles(new Set())}>
-                Clear
+                {t("drive.clear")}
               </button>
             </div>
           ) : null}
@@ -370,6 +373,7 @@ function CreateFolderDialog({
   onClose: () => void;
   onCreated: () => void;
 }) {
+  const { t } = useTranslation();
   const [name, setName] = useState("");
   // Reuses the EncryptionMode union exported by EncryptionBadge so the
   // dialog state, the badge prop, and the createFolder request body all
@@ -389,12 +393,12 @@ function CreateFolderDialog({
       });
       onCreated();
     } catch (e) {
-      setError(String((e as Error)?.message ?? e));
+      setError(translateApiError(e, t));
     }
   };
 
   return (
-    <Modal onClose={onClose} title="New folder">
+    <Modal onClose={onClose} title={t("folder.createTitle")}>
       <form
         onSubmit={(e) => {
           e.preventDefault();
@@ -403,11 +407,11 @@ function CreateFolderDialog({
         style={{ display: "grid", gap: 12 }}
       >
         <label style={{ display: "grid", gap: 4 }}>
-          <span>Name</span>
+          <span>{t("common.name")}</span>
           <input value={name} onChange={(e) => setName(e.target.value)} autoFocus required />
         </label>
         <fieldset style={{ border: "1px solid #e5e7eb", borderRadius: 6, padding: 12 }}>
-          <legend style={{ fontSize: 13, color: "#6b7280" }}>Privacy mode</legend>
+          <legend style={{ fontSize: 13, color: "#6b7280" }}>{t("folder.privacyMode")}</legend>
           <label style={{ display: "block", marginBottom: 8 }}>
             <input
               type="radio"
@@ -416,10 +420,7 @@ function CreateFolderDialog({
               checked={mode === "managed_encrypted"}
               onChange={() => setMode("managed_encrypted")}
             />{" "}
-            <strong>Confidential managed</strong> (recommended) &mdash; the
-            server can read plaintext in memory during request handling,
-            which is what enables previews, search, and virus scanning.
-            Encrypted at rest. <em>Not</em> zero-knowledge.
+            <Trans i18nKey="folder.managedDescription" components={{ strong: <strong />, em: <em /> }} />
           </label>
           <label style={{ display: "block" }}>
             <input
@@ -429,10 +430,7 @@ function CreateFolderDialog({
               checked={mode === "strict_zk"}
               onChange={() => setMode("strict_zk")}
             />{" "}
-            <strong>Strict zero-knowledge</strong> &mdash; end-to-end
-            encrypted, the server cannot decrypt this folder. You hold the
-            keys. Previews, full-text search, and virus scanning are
-            disabled.
+            <Trans i18nKey="folder.strictDescription" components={{ strong: <strong /> }} />
           </label>
           {/*
             Side-by-side comparison table so the user can see the
@@ -442,7 +440,7 @@ function CreateFolderDialog({
             surface ("be honest about what 'ZK' means" — docs/BRAND.md).
           */}
           <table
-            aria-label="Privacy mode comparison"
+            aria-label={t("folder.compareAria")}
             style={{
               width: "100%",
               borderCollapse: "collapse",
@@ -453,35 +451,35 @@ function CreateFolderDialog({
             <thead>
               <tr>
                 <th style={cmpTh} scope="col">&nbsp;</th>
-                <th style={cmpTh} scope="col">Confidential</th>
-                <th style={cmpTh} scope="col">Zero-knowledge</th>
+                <th style={cmpTh} scope="col">{t("folder.cmpHeaderConfidential")}</th>
+                <th style={cmpTh} scope="col">{t("folder.cmpHeaderZk")}</th>
               </tr>
             </thead>
             <tbody>
               <tr>
-                <th style={cmpRowTh} scope="row">Previews / thumbnails</th>
-                <td style={cmpTdYes}>Yes</td>
-                <td style={cmpTdNo}>No</td>
+                <th style={cmpRowTh} scope="row">{t("folder.cmpRowPreviews")}</th>
+                <td style={cmpTdYes}>{t("common.yes")}</td>
+                <td style={cmpTdNo}>{t("common.no")}</td>
               </tr>
               <tr>
-                <th style={cmpRowTh} scope="row">Full-text search</th>
-                <td style={cmpTdYes}>Yes</td>
-                <td style={cmpTdNo}>Metadata only</td>
+                <th style={cmpRowTh} scope="row">{t("folder.cmpRowSearch")}</th>
+                <td style={cmpTdYes}>{t("common.yes")}</td>
+                <td style={cmpTdNo}>{t("folder.cmpMetadataOnly")}</td>
               </tr>
               <tr>
-                <th style={cmpRowTh} scope="row">Virus / malware scanning</th>
-                <td style={cmpTdYes}>Yes</td>
-                <td style={cmpTdNo}>No</td>
+                <th style={cmpRowTh} scope="row">{t("folder.cmpRowVirus")}</th>
+                <td style={cmpTdYes}>{t("common.yes")}</td>
+                <td style={cmpTdNo}>{t("common.no")}</td>
               </tr>
               <tr>
-                <th style={cmpRowTh} scope="row">Admin recovery</th>
-                <td style={cmpTdYes}>Yes</td>
-                <td style={cmpTdNo}>No (you hold the keys)</td>
+                <th style={cmpRowTh} scope="row">{t("folder.cmpRowRecovery")}</th>
+                <td style={cmpTdYes}>{t("common.yes")}</td>
+                <td style={cmpTdNo}>{t("folder.cmpNoYouHoldKeys")}</td>
               </tr>
               <tr>
-                <th style={cmpRowTh} scope="row">Server can read plaintext</th>
-                <td style={cmpTdNo}>In memory only</td>
-                <td style={cmpTdYes}>Never</td>
+                <th style={cmpRowTh} scope="row">{t("folder.cmpRowServerRead")}</th>
+                <td style={cmpTdNo}>{t("folder.cmpInMemoryOnly")}</td>
+                <td style={cmpTdYes}>{t("folder.cmpNever")}</td>
               </tr>
             </tbody>
           </table>
@@ -498,9 +496,7 @@ function CreateFolderDialog({
                 borderRadius: 4,
               }}
             >
-              Strict-ZK is irreversible once the folder has content: there is
-              no server-side migration path back to confidential mode because
-              the server never had the plaintext to begin with.
+              {t("folder.strictWarning")}
             </div>
           ) : null}
           <p style={{ fontSize: 12, color: "#6b7280", margin: "8px 0 0" }}>
@@ -518,16 +514,16 @@ function CreateFolderDialog({
               target="_blank"
               rel="noopener noreferrer"
             >
-              Learn how each mode works &rarr;
+              {t("folder.learnMoreArrow")}
             </a>
           </p>
         </fieldset>
         {error ? <p style={{ color: "#b91c1c" }}>{error}</p> : null}
         <div style={{ display: "flex", justifyContent: "flex-end", gap: 8 }}>
           <button type="button" onClick={onClose}>
-            Cancel
+            {t("common.cancel")}
           </button>
-          <button type="submit">Create</button>
+          <button type="submit">{t("common.create")}</button>
         </div>
       </form>
     </Modal>
@@ -541,6 +537,7 @@ function TemplateDialog({
   onClose: () => void;
   onCreated: (folderID: string) => void;
 }) {
+  const { t } = useTranslation();
   const [templates, setTemplates] = useState<ClientRoomTemplate[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
@@ -550,27 +547,28 @@ function TemplateDialog({
       try {
         setTemplates(await fetchClientRoomTemplates());
       } catch (e) {
-        setError(String((e as Error)?.message ?? e));
+        setError(translateApiError(e, t));
       } finally {
         setLoading(false);
       }
     })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const pick = async (name: string) => {
-    const clientName = prompt("Client name for this room:");
+    const clientName = prompt(t("drive.clientNamePrompt"));
     if (!clientName || !clientName.trim()) return;
     try {
       const r = await createClientRoomFromTemplate(name, clientName.trim());
       onCreated(r.folder_id);
     } catch (e) {
-      setError(String((e as Error)?.message ?? e));
+      setError(translateApiError(e, t));
     }
   };
 
   return (
-    <Modal onClose={onClose} title="Create from template">
-      {loading ? <p>Loading…</p> : null}
+    <Modal onClose={onClose} title={t("drive.createFromTemplate")}>
+      {loading ? <p>{t("common.loading")}</p> : null}
       {error ? <p style={{ color: "#b91c1c" }}>{error}</p> : null}
       <div
         style={{
@@ -579,10 +577,10 @@ function TemplateDialog({
           gridTemplateColumns: "repeat(auto-fill, minmax(200px, 1fr))",
         }}
       >
-        {templates.map((t) => (
+        {templates.map((tpl) => (
           <button
-            key={t.name}
-            onClick={() => pick(t.name)}
+            key={tpl.name}
+            onClick={() => pick(tpl.name)}
             style={{
               textAlign: "left",
               padding: 12,
@@ -592,9 +590,9 @@ function TemplateDialog({
               cursor: "pointer",
             }}
           >
-            <div style={{ fontWeight: 600, textTransform: "capitalize" }}>{t.name}</div>
+            <div style={{ fontWeight: 600, textTransform: "capitalize" }}>{tpl.name}</div>
             <ul style={{ margin: "8px 0 0 16px", padding: 0, fontSize: 12, color: "#4b5563" }}>
-              {t.sub_folders.map((s) => (
+              {tpl.sub_folders.map((s) => (
                 <li key={s}>{s}</li>
               ))}
             </ul>
@@ -645,6 +643,7 @@ function Modal({
 }
 
 function Breadcrumb({ folder }: { folder: Folder | null }) {
+  const { t } = useTranslation();
   // Split the materialized path into clickable segments. The API stores
   // paths like "/Engineering/Backend/" so trimming empty parts keeps the
   // display clean.
@@ -658,7 +657,7 @@ function Breadcrumb({ folder }: { folder: Folder | null }) {
   const parts = folder?.path?.split("/").filter(Boolean) ?? [];
   return (
     <nav style={{ fontSize: 14, display: "flex", alignItems: "center", gap: 8 }}>
-      <Link to="/drive">Drive</Link>
+      <Link to="/drive">{t("drive.rootBreadcrumb")}</Link>
       {parts.map((p, i) => (
         <span key={i}>
           <span style={{ margin: "0 6px", color: "#9ca3af" }}>/</span>
