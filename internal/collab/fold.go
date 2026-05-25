@@ -72,31 +72,42 @@ func OpaqueConcatFold(currentState, _currentStateVector []byte, tail []*document
 }
 
 // FoldFor returns the appropriate FoldFunc for a folder's
-// capability. Today both managed_encrypted and strict_zk route to
-// OpaqueConcatFold; when YjsMergeFold ships this switch grows
-// a case for ServerSnapshotAllowed=true so managed_encrypted gets
-// the optimized merge path.
+// capability. The routing is:
 //
-// Returns nil when ServerSnapshotAllowed is false on a folder
-// whose policy explicitly forbids server-side snapshot work — the
-// caller should skip compaction entirely for such rooms (no fold
-// runs). Today strict_zk is the only such mode but the gating is
-// kept policy-driven so future modes (e.g. a PublicDistribution
-// collab feature) inherit the same behaviour without code change.
+//   - ServerSnapshotAllowed=false (strict_zk): returns nil — no
+//     server-side fold runs. OpaqueConcatFold would compile but
+//     doesn't reduce payload size for strict_zk (the server can't
+//     decrypt to merge), and y_state would grow linearly with
+//     tail. The hub skips compaction entirely for these rooms.
+//
+//   - ServerSnapshotAllowed=true with a YjsRuntime (managed_-
+//     encrypted, primary path): returns YjsMergeFold backed by
+//     the runtime. The wasm-side yrs CRDT merges the current
+//     state + tail into a single compact update, which is the
+//     production-grade compaction we ultimately want.
+//
+//   - ServerSnapshotAllowed=true without a YjsRuntime (degraded
+//     mode): returns OpaqueConcatFold as a defensive fallback.
+//     This branch is only reachable if the wasm runtime failed
+//     to initialise at boot, which cmd/server/main.go treats as
+//     a hard error today. We keep the branch so a future config
+//     flag (e.g. ZKDRIVE_DISABLE_YJS_WASM) can opt out without
+//     code churn.
 //
 // We don't read folder.EncryptionMode here because the hub already
 // resolved capability at connect time — passing the bool through
 // avoids a second lookup AND avoids importing the folder package
 // from the fold layer.
-func FoldFor(cap Capability) document.FoldFunc {
+//
+// rt may be nil in tests and in pre-wasm legacy deployments. The
+// nil path is documented above and exercised by
+// TestFoldFor_NilRuntimeFallsBackToOpaqueConcat.
+func FoldFor(cap Capability, rt *YjsRuntime) document.FoldFunc {
 	if !cap.ServerSnapshotAllowed {
-		// strict_zk: while OpaqueConcatFold technically works
-		// (it doesn't decrypt), the resulting compaction does
-		// not save space — y_state grows by exactly the sum of
-		// tail payloads. The hub policy is "don't auto-compact
-		// strict_zk rooms"; an admin can still force compaction
-		// via a future endpoint.
 		return nil
+	}
+	if rt != nil {
+		return YjsMergeFold(rt)
 	}
 	return OpaqueConcatFold
 }

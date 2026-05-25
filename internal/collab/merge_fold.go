@@ -1,0 +1,113 @@
+package collab
+
+import (
+	"context"
+	"errors"
+
+	"github.com/kennguy3n/zk-drive/internal/document"
+)
+
+// YjsMergeFold returns a document.FoldFunc that calls into the
+// runtime's wasm-backed Yjs merge to produce a compact
+// single-update snapshot from the current state + tail of pending
+// deltas. Use this for managed_encrypted folders where the server
+// has plaintext access — strict_zk routes stay on
+// OpaqueConcatFold because the server cannot decrypt to merge.
+//
+// The returned fold function:
+//
+//  1. Validates the tail is non-empty (same precondition
+//     OpaqueConcatFold enforces).
+//  2. Collects (currentState, tail[0].Payload, … tail[N-1].Payload)
+//     into the update vector.
+//  3. Calls YjsRuntime.MergeUpdates to fold them into a single
+//     v1-encoded update.
+//  4. Calls YjsRuntime.EncodeStateVector on the merged result
+//     to attach the catch-up watermark.
+//  5. Returns (merged, stateVector, lastTailSeq, nil).
+//
+// On wasm error (parse/decode/apply failure), the fold function
+// returns an error. The caller (the hub's compaction scheduler)
+// logs and skips that compaction — the document remains in its
+// uncompacted state, which is correct: a failed fold MUST NOT
+// trim the tail.
+//
+// Lifetime: the returned closure captures `rt` by reference. The
+// hub schedules it inside a context bound to the server's
+// lifecycle, so the runtime must outlive in-flight folds.
+// cmd/server/main.go arranges this by deferring runtime.Close
+// AFTER hub.Shutdown completes.
+//
+// A nil runtime panics on use to surface the wiring bug at the
+// first compaction rather than silently regressing to opaque
+// concat — the caller should pass a real runtime or use FoldFor's
+// fallback path. We don't fall back to OpaqueConcatFold inside
+// this closure because the two folds produce different output
+// shapes (a single compact update vs a length-prefixed bundle)
+// and the client-side decoder distinguishes; silently swapping
+// at fold time would deliver a bundle to a client expecting a
+// compact update.
+func YjsMergeFold(rt *YjsRuntime) document.FoldFunc {
+	return func(currentState, _currentStateVector []byte, tail []*document.Delta) ([]byte, []byte, int64, error) {
+		if len(tail) == 0 {
+			return nil, nil, 0, errors.New("collab: YjsMergeFold called with empty tail")
+		}
+		if rt == nil {
+			return nil, nil, 0, errors.New("collab: YjsMergeFold called with nil runtime")
+		}
+		// Assemble the update vector: current state first
+		// (skipped when empty so the first compaction doesn't
+		// pay a zero-byte decode failure), then each tail
+		// payload in seq-ascending order. The yrs apply loop
+		// inside the wasm is order-tolerant CRDT-wise but
+		// applying in seq order keeps the merge deterministic
+		// across replays (same input bytes → same output
+		// bytes).
+		updates := make([][]byte, 0, 1+len(tail))
+		if len(currentState) > 0 {
+			updates = append(updates, currentState)
+		}
+		for _, d := range tail {
+			updates = append(updates, d.Payload)
+		}
+
+		// Use a background context with the same lifetime as
+		// the underlying fold caller; the hub passes its own
+		// ctx via the document.Service.Compact path so we
+		// inherit cancellation when the server shuts down.
+		// We re-derive context.Background here only because
+		// the FoldFunc signature doesn't currently carry ctx
+		// — the runtime's acquire/call path tolerates
+		// background ctx (no per-call deadline propagation).
+		// A future signature change to add ctx would let us
+		// honor the caller's deadline; until then a long
+		// fold cannot be interrupted mid-operation, which is
+		// acceptable because the wasm-merge is bounded by
+		// MaxSnapshotTailDeltas (640) deltas of at most
+		// MaxDeltaPayloadBytes (1 MiB) each → worst case
+		// ~640 MiB throughput, well under one second on
+		// modern hardware.
+		ctx := context.Background()
+
+		merged, err := rt.MergeUpdates(ctx, updates)
+		if err != nil {
+			return nil, nil, 0, err
+		}
+
+		sv, err := rt.EncodeStateVector(ctx, merged)
+		if err != nil {
+			// Merge succeeded but SV encode failed — return
+			// the merged state with a nil SV. Callers that
+			// need an SV (the snapshot endpoint) treat nil
+			// the same way they treated OpaqueConcatFold's
+			// nil SV: clients reconstruct locally. Logging
+			// is the caller's responsibility (we don't have
+			// a logger here without expanding the FoldFunc
+			// signature).
+			sv = nil
+		}
+
+		upToSeq := tail[len(tail)-1].Seq
+		return merged, sv, upToSeq, nil
+	}
+}

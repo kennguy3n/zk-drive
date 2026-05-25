@@ -21,6 +21,7 @@ require (
 	github.com/redis/go-redis/extra/redisotel/v9 v9.19.0
 	github.com/redis/go-redis/v9 v9.19.0
 	github.com/stripe/stripe-go/v81 v81.4.0
+	github.com/tetratelabs/wazero v1.11.0
 	github.com/xuri/excelize/v2 v2.10.1
 	go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp v0.68.0
 	go.opentelemetry.io/otel v1.43.0

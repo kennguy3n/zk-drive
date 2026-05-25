@@ -152,10 +152,32 @@ func newRoom() *room {
 	return &room{clients: make(map[*DocumentClient]struct{})}
 }
 
+// CollabRelayPublisher is the abstraction the hub uses to push a
+// frame onto a multi-replica fan-out channel (typically Redis
+// pub/sub). The concrete implementation lives in redis_relay.go;
+// nil is treated as "single-replica mode" and the hub skips the
+// publish call entirely.
+//
+// PublishFrame is called from the hub AFTER a successful local
+// broadcast. The relay receives the same fully-framed payload
+// and ships it to every replica. Each replica's relay subscribe
+// loop then calls hub.BroadcastFromRelay to fan out to local
+// clients in that document's room (if any).
+//
+// The interface keeps the hub agnostic of Redis — tests can
+// supply a synchronous in-memory implementation and verify the
+// publish-then-broadcast wiring without needing a Redis
+// container.
+type CollabRelayPublisher interface {
+	PublishFrame(ctx context.Context, documentID uuid.UUID, payload []byte) error
+}
+
 // DocumentHub fans collab frames to per-document rooms. It is
-// goroutine-safe and operates entirely in-memory — multi-replica
-// fan-out is deferred to P2e (the same Redis-pub/sub blueprint
-// api/ws's changefeed publisher uses will land here too).
+// goroutine-safe. For single-replica deployments it operates
+// entirely in-memory; for multi-replica deployments
+// (CollabRelayPublisher wired) it also publishes every locally-
+// broadcast frame to Redis pub/sub so every other replica's hub
+// can fan the frame out to its local clients.
 //
 // The hub doesn't own the document.Service directly; instead, the
 // HTTP layer hands the hub an inbound frame plus the necessary
@@ -184,6 +206,14 @@ type DocumentHub struct {
 	// when unset, compaction-due signals are dropped silently and
 	// the next caller will retry.
 	scheduleCompaction func(workspaceID, documentID uuid.UUID)
+
+	// relay is the multi-replica fan-out publisher. nil for
+	// single-replica deployments (no REDIS_URL configured). When
+	// set, every successful local broadcast also publishes the
+	// frame to Redis under `collab:{documentID}`, where the
+	// other replicas' subscribe loops pick it up and fan out
+	// locally via BroadcastFromRelay.
+	relay CollabRelayPublisher
 
 	// compactWG tracks in-flight compaction goroutines so
 	// Shutdown can drain them before the server returns and the
@@ -223,6 +253,20 @@ func NewDocumentHub(docs *document.Service) *DocumentHub {
 // receiver for fluent chaining.
 func (h *DocumentHub) WithCompactionScheduler(fn func(workspaceID, documentID uuid.UUID)) *DocumentHub {
 	h.scheduleCompaction = fn
+	return h
+}
+
+// WithRelay installs a multi-replica fan-out publisher. After
+// every successful local broadcast (sync update or awareness),
+// the hub also calls relay.PublishFrame so other replicas can
+// fan the same frame out to their local clients. Returns the
+// receiver for fluent chaining.
+//
+// A nil relay is permitted and disables multi-replica fan-out
+// (single-replica mode). The hub never panics on a nil relay; it
+// simply skips the PublishFrame call.
+func (h *DocumentHub) WithRelay(relay CollabRelayPublisher) *DocumentHub {
+	h.relay = relay
 	return h
 }
 
@@ -481,6 +525,24 @@ func (h *DocumentHub) handleSyncUpdate(ctx context.Context, c *DocumentClient, p
 	frame := EncodeSyncUpdate(payload)
 	h.broadcastExcept(c, frame)
 
+	// Multi-replica fan-out: after local broadcast, publish the
+	// frame to Redis so any other replica with clients in this
+	// document's room can fan it out locally too. The other
+	// replicas have no concept of "originating client" — they
+	// deliver to every member of their local room via
+	// BroadcastFromRelay.
+	//
+	// We use the request ctx so a server shutdown that cancels
+	// readPumps also cancels in-flight relay publishes; a Redis
+	// outage that would otherwise block here is bounded by the
+	// underlying redis.Client default timeouts (3 s read/write
+	// by default).
+	if h.relay != nil {
+		if err := h.relay.PublishFrame(ctx, c.DocumentID, frame); err != nil {
+			c.logger.Warn("collab: relay publish failed; multi-replica fan-out skipped for this frame", "err", err)
+		}
+	}
+
 	// Compaction-due signal: only schedule on ServerSnapshotAllowed
 	// folders. For strict_zk rooms, OpaqueConcatFold doesn't
 	// reduce payload size — the y_state grows monotonically — so
@@ -535,7 +597,67 @@ func (h *DocumentHub) handleAwareness(c *DocumentClient, f Frame) error {
 	}
 	frame := EncodeAwareness(f.Payload)
 	h.broadcastExcept(c, frame)
+	if h.relay != nil {
+		// Awareness frames are short-lived presence info. We
+		// don't have a ctx in handleAwareness's signature so
+		// we use Background; a Redis outage falls through with
+		// a warn-log (we don't want a publish failure to break
+		// the user's typing experience).
+		if err := h.relay.PublishFrame(context.Background(), c.DocumentID, frame); err != nil {
+			c.logger.Warn("collab: relay publish failed for awareness frame", "err", err)
+		}
+	}
 	return nil
+}
+
+// BroadcastFromRelay fans `payload` to every client in `documentID`'s
+// room. It is called by the Redis collab relay's subscribe loop when
+// another replica publishes a SyncUpdate or Awareness frame for a
+// document any of our local clients is editing.
+//
+// Crucially, this DOES NOT re-publish to Redis — the relay caller is
+// the canonical "incoming from Redis" path, and re-publishing would
+// create an infinite fan-out loop across replicas. The local
+// handleSyncUpdate / handleAwareness paths handle the
+// publish-to-Redis side of the wiring (via the relay's Publish
+// method invoked from the hub).
+//
+// All clients in the room receive the frame, including the original
+// author on the other replica. This matches the local-broadcast
+// behaviour seen from the editing replica's perspective: the local
+// broadcastExcept skips the originating client; the Redis relay
+// path on the other replicas has no "originating client" to skip,
+// so every local member receives the frame.
+//
+// Slow consumers (full outbound buffer) are unregistered to match
+// the local broadcastExcept policy. The room lock is held for the
+// minimum window required to snapshot the recipient set; the
+// deliverTo calls happen outside the lock to avoid stalling
+// concurrent Register / Unregister calls.
+//
+// payload is expected to be a fully-framed collab.Frame (i.e.
+// EncodeSyncUpdate / EncodeAwareness output). The relay does NOT
+// re-frame on Subscribe receive — the publisher framed it on its
+// way out.
+func (h *DocumentHub) BroadcastFromRelay(documentID uuid.UUID, payload []byte) {
+	h.mu.RLock()
+	r := h.rooms[documentID]
+	h.mu.RUnlock()
+	if r == nil {
+		// No local clients in this room — nothing to do. This
+		// is the common case for any document not being edited
+		// on this replica.
+		return
+	}
+	r.mu.RLock()
+	targets := make([]*DocumentClient, 0, len(r.clients))
+	for c := range r.clients {
+		targets = append(targets, c)
+	}
+	r.mu.RUnlock()
+	for _, c := range targets {
+		h.deliverTo(c, payload)
+	}
 }
 
 // broadcastExcept fans `payload` to every client in `from`'s room
