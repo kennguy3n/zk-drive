@@ -266,35 +266,45 @@ export default function DocumentEditorPage() {
     if (editor) editor.setEditable(writable);
   }, [editor, writable]);
 
-  // renameInFlight pins the rename callback against double-fire: the
-  // rename <input> wires both onSubmit (Enter key) AND onBlur to the
-  // same handler so a click-outside also commits, but pressing Enter
-  // triggers both events in quick succession (submit calls setRenaming
-  // (false) inside the finally block, which unmounts the input, which
-  // fires onBlur). Without this guard the onBlur invocation captures a
-  // stale closure where doc.name is still the pre-rename value, so the
-  // `next === doc.name` short-circuit fails and we send a duplicate
-  // PATCH. A ref (not state) avoids triggering an extra render between
-  // the two events.
-  const renameInFlight = useRef(false);
+  // renameSubmitted dedupes the commit path of the rename input. The
+  // <input> wires both onSubmit (Enter key) AND onBlur to the same
+  // handler so a click-outside also commits; pressing Enter then fires
+  // submit, which sets renaming=false in finally, which unmounts the
+  // input, which fires the blur synchronously during DOM detach. The
+  // previous "renameInFlight reset in finally" guard was insufficient:
+  // by the time React commits the unmount the ref has already flipped
+  // back to false, so the blur-triggered second invocation sailed past
+  // the in-flight check and sent a duplicate PATCH (Devin Review
+  // BUG_pr-review-job-d387c.._0001).
+  //
+  // The correct shape is to gate on "has this rename attempt already
+  // dispatched a commit" rather than "is the network call still in
+  // flight". renameSubmitted is set to true on the first invocation
+  // and stays true until the user re-opens the rename input (the
+  // useEffect below clears it on the renaming=true edge), so the
+  // synchronous unmount-blur cycle is a no-op.
+  const renameSubmitted = useRef(false);
+  useEffect(() => {
+    if (renaming) renameSubmitted.current = false;
+  }, [renaming]);
   const onRenameSubmit = useCallback(
     async (e: React.FormEvent) => {
       e.preventDefault();
-      if (renameInFlight.current) return;
+      if (renameSubmitted.current) return;
       if (!doc || !id) return;
       const next = renameValue.trim();
       if (!next || next === doc.name) {
+        renameSubmitted.current = true;
         setRenaming(false);
         return;
       }
-      renameInFlight.current = true;
+      renameSubmitted.current = true;
       try {
         const updated = await renameDocument(id, next);
         setDoc(updated);
       } catch (err) {
         setLoadError(String((err as Error)?.message ?? err));
       } finally {
-        renameInFlight.current = false;
         setRenaming(false);
       }
     },
@@ -466,6 +476,7 @@ export default function DocumentEditorPage() {
               onChange={onChangeMode}
               allowedModes={doc.allowed_collab_modes}
               encryptionMode={doc.encryption_mode}
+              disabled={modeSwitching}
             />
             {modeSwitchError && (
               <p style={{ color: "#991b1b", fontSize: 13 }}>{modeSwitchError}</p>

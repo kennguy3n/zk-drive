@@ -331,14 +331,24 @@ export class CollabProvider {
       return;
     }
     this.setStatus("reconnecting");
-    // Exponential backoff with cap. The cap keeps tab-suspended
-    // sessions from melting the server when 1,000 paused tabs all
-    // wake up at the same time.
+    // Exponential backoff with cap, plus ±20% uniform jitter. The cap
+    // alone is insufficient against thundering herd: if a backend
+    // restart drops 1,000 connections at the same instant, every
+    // client without jitter wakes at the SAME multiplied delay (500,
+    // 1000, 2000 …) and re-stampedes the server in lockstep. Adding
+    // jitter to the per-attempt delay smears the wake-up window so
+    // reconnect traffic arrives spread across a 40% band of the
+    // nominal delay. The jitter is symmetric (multiplier ∈ [0.8,
+    // 1.2]) so the long-run mean stays close to the configured
+    // backoff schedule; we don't decorrelate further (full jitter)
+    // because that hurts the p99 reconnect time without much
+    // additional herd-smoothing benefit at our connection counts.
+    const jittered = this.reconnectMs * (0.8 + Math.random() * 0.4);
     this.reconnectTimer = window.setTimeout(() => {
       this.reconnectTimer = null;
       this.reconnectMs = Math.min(this.reconnectMs * 2, this.maxReconnectMs);
       this.connect();
-    }, this.reconnectMs);
+    }, jittered);
   }
 
   private sendFrame(frame: Uint8Array): void {

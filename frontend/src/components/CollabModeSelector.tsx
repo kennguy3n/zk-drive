@@ -48,6 +48,13 @@ export interface CollabModeSelectorProps {
   encryptionMode?: EncryptionMode;
   // id is forwarded to the underlying radio group for ARIA wiring.
   id?: string;
+  // disabled forces every radio off, regardless of allowedModes. The
+  // editor's settings dropdown sets this while a setCollabMode PATCH
+  // is in flight so the user can't rapid-click a second mode-change
+  // before the first one resolves (Devin Review
+  // ANALYSIS_pr-review-job-d387c.._0004). Defaults to false so
+  // existing call sites (new-doc dialog) are unaffected.
+  disabled?: boolean;
 }
 
 // disabledExplanation returns the tooltip text shown when a mode
@@ -69,6 +76,7 @@ export default function CollabModeSelector({
   allowedModes,
   encryptionMode,
   id,
+  disabled = false,
 }: CollabModeSelectorProps) {
   return (
     <fieldset
@@ -84,9 +92,14 @@ export default function CollabModeSelector({
         Editor experience
       </legend>
       {MODES.map((m) => {
-        const allowed = allowedModes.includes(m.value);
+        const allowedByPolicy = allowedModes.includes(m.value);
+        const radioDisabled = !allowedByPolicy || disabled;
         const checked = value === m.value;
-        const tooltip = allowed ? m.description : disabledExplanation(m.value, encryptionMode);
+        const tooltip = !allowedByPolicy
+          ? disabledExplanation(m.value, encryptionMode)
+          : disabled
+            ? "Saving\u2026"
+            : m.description;
         return (
           <label
             key={m.value}
@@ -96,8 +109,8 @@ export default function CollabModeSelector({
               alignItems: "flex-start",
               gap: 8,
               padding: "6px 0",
-              cursor: allowed ? "pointer" : "not-allowed",
-              opacity: allowed ? 1 : 0.5,
+              cursor: radioDisabled ? "not-allowed" : "pointer",
+              opacity: radioDisabled ? 0.5 : 1,
             }}
           >
             <input
@@ -105,8 +118,8 @@ export default function CollabModeSelector({
               name={`collab-mode-${id ?? "default"}`}
               value={m.value}
               checked={checked}
-              disabled={!allowed}
-              onChange={() => allowed && onChange(m.value)}
+              disabled={radioDisabled}
+              onChange={() => !radioDisabled && onChange(m.value)}
               style={{ marginTop: 3 }}
             />
             <span>
