@@ -34,6 +34,7 @@ client.interceptors.response.use(
     if (err?.response?.status === 401) {
       localStorage.removeItem(TOKEN_STORAGE_KEY);
       localStorage.removeItem(WORKSPACE_STORAGE_KEY);
+      localStorage.removeItem(ROLE_STORAGE_KEY);
       localStorage.removeItem(USER_STORAGE_KEY);
       if (window.location.pathname !== "/login") {
         window.location.href = "/login";

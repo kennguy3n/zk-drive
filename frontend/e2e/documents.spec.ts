@@ -107,7 +107,8 @@ test.describe("documents", () => {
     );
     await dialog.getByRole("button", { name: /^create$/i }).click();
     const resp = await createResp;
-    expect(resp.status(), `create failed: ${await resp.text()}`).toBe(200);
+    // The create handler writes http.StatusCreated (201) on success.
+    expect(resp.status(), `create failed: ${await resp.text()}`).toBe(201);
     const created = (await resp.json()) as { id: string; collab_mode: string };
     expect(created.collab_mode).toBe("rich_presence");
 
