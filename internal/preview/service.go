@@ -6,12 +6,9 @@ import (
 	"errors"
 	"fmt"
 	"image"
-	_ "image/gif"  // register GIF decoder
-	_ "image/jpeg" // register JPEG decoder
 	"image/png"
 	"io"
 	"net/http"
-	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -69,29 +66,22 @@ func NewService(pool *pgxpool.Pool, storage PresignClient, repo Repository) *Ser
 // client wired by NewService.
 func (s *Service) SetHTTPClient(c *http.Client) { s.httpc = c }
 
-// IsSupportedMime reports whether the preview service can render a
-// given mime type today. This powers the "Has preview?" hint the
-// frontend shows next to files in strict-ZK mode or for types we
-// haven't wired yet.
-func IsSupportedMime(mime string) bool {
-	m := strings.ToLower(strings.TrimSpace(mime))
-	switch m {
-	case "image/png", "image/jpeg", "image/jpg", "image/gif",
-		"application/pdf":
-		return true
-	}
-	return false
-}
-
 // Generate renders a preview for (fileID, versionID) and persists the
-// result. Returns ErrUnsupportedMime when the source is not an image
-// the current backend knows how to render.
+// result. Returns ErrUnsupportedMime when the source MIME has no
+// registered Renderer (e.g. the format is not wired, or the external
+// binary the renderer needs is not installed on this host).
+//
+// The dispatch is a registry lookup (see Renderer / Register in
+// renderer.go) — each format lives in its own file with its own
+// init() block, so adding a new format does not require editing this
+// function.
 func (s *Service) Generate(ctx context.Context, fileID, versionID uuid.UUID) (*Preview, error) {
 	meta, err := s.fetchVersionMeta(ctx, fileID, versionID)
 	if err != nil {
 		return nil, err
 	}
-	if !IsSupportedMime(meta.mimeType) {
+	r := lookup(meta.mimeType)
+	if r == nil {
 		return nil, fmt.Errorf("%w: %q", ErrUnsupportedMime, meta.mimeType)
 	}
 
@@ -100,18 +90,9 @@ func (s *Service) Generate(ctx context.Context, fileID, versionID uuid.UUID) (*P
 		return nil, fmt.Errorf("download source: %w", err)
 	}
 
-	var img image.Image
-	switch strings.ToLower(strings.TrimSpace(meta.mimeType)) {
-	case "application/pdf":
-		img, err = renderPDFFirstPage(ctx, srcBytes)
-		if err != nil {
-			return nil, err
-		}
-	default:
-		img, _, err = image.Decode(bytes.NewReader(srcBytes))
-		if err != nil {
-			return nil, fmt.Errorf("decode source: %w", err)
-		}
+	img, err := r.Render(ctx, srcBytes)
+	if err != nil {
+		return nil, err
 	}
 
 	thumb := resize(img, ThumbnailSize, ThumbnailSize)
