@@ -47,7 +47,7 @@ type sessionURLResponse struct {
 // upserts the plan row.
 func (h *Handler) CreateCheckoutSession(w http.ResponseWriter, r *http.Request) {
 	if h.stripe == nil || h.billing == nil {
-		middleware.RespondError(w, http.StatusNotImplemented, middleware.ErrCodeUnsupportedOp, "stripe billing not configured")
+		middleware.RespondError(w, http.StatusNotImplemented, middleware.ErrCodeStripeNotConfigured, "stripe billing not configured")
 		return
 	}
 	workspaceID, ok := middleware.WorkspaceIDFromContext(r.Context())
@@ -75,7 +75,7 @@ func (h *Handler) CreateCheckoutSession(w http.ResponseWriter, r *http.Request) 
 	if err != nil {
 		switch {
 		case errors.Is(err, billing.ErrStripeNotConfigured):
-			middleware.RespondError(w, http.StatusNotImplemented, middleware.ErrCodeUnsupportedOp, "stripe not configured")
+			middleware.RespondError(w, http.StatusNotImplemented, middleware.ErrCodeStripeNotConfigured, "stripe not configured")
 		case errors.Is(err, billing.ErrStripePriceNotMapped):
 			middleware.RespondError(w, http.StatusBadRequest, middleware.ErrCodeBadRequest, err.Error())
 		default:
@@ -97,7 +97,7 @@ func (h *Handler) CreateCheckoutSession(w http.ResponseWriter, r *http.Request) 
 // to the returned URL; on return the user lands at return_url.
 func (h *Handler) CreatePortalSession(w http.ResponseWriter, r *http.Request) {
 	if h.stripe == nil || h.billing == nil {
-		middleware.RespondError(w, http.StatusNotImplemented, middleware.ErrCodeUnsupportedOp, "stripe billing not configured")
+		middleware.RespondError(w, http.StatusNotImplemented, middleware.ErrCodeStripeNotConfigured, "stripe billing not configured")
 		return
 	}
 	workspaceID, ok := middleware.WorkspaceIDFromContext(r.Context())
@@ -130,7 +130,7 @@ func (h *Handler) CreatePortalSession(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		switch {
 		case errors.Is(err, billing.ErrStripeNotConfigured):
-			middleware.RespondError(w, http.StatusNotImplemented, middleware.ErrCodeUnsupportedOp, "stripe not configured")
+			middleware.RespondError(w, http.StatusNotImplemented, middleware.ErrCodeStripeNotConfigured, "stripe not configured")
 		case errors.Is(err, billing.ErrStripeNoCustomer):
 			middleware.RespondError(w, http.StatusPreconditionFailed, middleware.ErrCodeBillingNotConfigured, err.Error())
 		default:

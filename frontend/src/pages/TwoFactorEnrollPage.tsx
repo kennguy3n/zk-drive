@@ -174,6 +174,7 @@ export default function TwoFactorEnrollPage() {
   return (
     <div className="auth-page">
       <h1>{t("auth.mfaEnrollTitle")}</h1>
+      {enrollToken && <p>{t("auth.mfaForcedEnrollmentExplanation")}</p>}
       {!challenge && <p>{t("common.loading")}</p>}
       {challenge && (
         <>

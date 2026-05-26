@@ -56,6 +56,10 @@ const backendCodes = [
   "SHARE_LINK_EXHAUSTED",
   // Billing / payments (402 / 412 distinct from internal).
   "BILLING_NOT_CONFIGURED",
+  // Stripe-backed billing not wired up at deployment level (501,
+  // distinct from UNSUPPORTED_OPERATION so BillingPage shows
+  // Stripe-specific remediation instead of generic copy).
+  "STRIPE_NOT_CONFIGURED",
   // Service-level failures (5xx).
   "INTERNAL_ERROR",
   "UPSTREAM_FAILED",

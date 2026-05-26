@@ -120,6 +120,7 @@ func TestErrorCodes_DistinctValues(t *testing.T) {
 		ErrCodeSharePasswordRequired,
 		ErrCodeShareLinkExhausted,
 		ErrCodeBillingNotConfigured,
+		ErrCodeStripeNotConfigured,
 		ErrCodeInternal,
 		ErrCodeUpstream,
 		ErrCodeMaintenance,

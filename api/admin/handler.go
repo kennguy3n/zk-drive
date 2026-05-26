@@ -233,17 +233,17 @@ type searchLanguageResponse struct {
 // duplicate constant on the frontend.
 func (h *Handler) GetSearchLanguage(w http.ResponseWriter, r *http.Request) {
 	if h.workspaces == nil {
-		http.Error(w, "workspace service not wired", http.StatusNotImplemented)
+		middleware.RespondError(w, http.StatusNotImplemented, middleware.ErrCodeUnsupportedOp, "workspace service not wired")
 		return
 	}
 	workspaceID, ok := middleware.WorkspaceIDFromContext(r.Context())
 	if !ok {
-		http.Error(w, "workspace not in context", http.StatusInternalServerError)
+		middleware.RespondError(w, http.StatusInternalServerError, middleware.ErrCodeInternal, "workspace not in context")
 		return
 	}
 	lang, err := h.workspaces.GetSearchLanguage(r.Context(), workspaceID)
 	if err != nil {
-		http.Error(w, "get search language: "+err.Error(), http.StatusInternalServerError)
+		middleware.RespondInternalError(w, r, "get search language", err)
 		return
 	}
 	writeJSON(w, http.StatusOK, searchLanguageResponse{
@@ -259,23 +259,23 @@ func (h *Handler) GetSearchLanguage(w http.ResponseWriter, r *http.Request) {
 // without consulting the source.
 func (h *Handler) UpdateSearchLanguage(w http.ResponseWriter, r *http.Request) {
 	if h.workspaces == nil {
-		http.Error(w, "workspace service not wired", http.StatusNotImplemented)
+		middleware.RespondError(w, http.StatusNotImplemented, middleware.ErrCodeUnsupportedOp, "workspace service not wired")
 		return
 	}
 	workspaceID, ok := middleware.WorkspaceIDFromContext(r.Context())
 	if !ok {
-		http.Error(w, "workspace not in context", http.StatusInternalServerError)
+		middleware.RespondError(w, http.StatusInternalServerError, middleware.ErrCodeInternal, "workspace not in context")
 		return
 	}
 	actorID, _ := middleware.UserIDFromContext(r.Context())
 
 	var req searchLanguageRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "invalid json body", http.StatusBadRequest)
+		middleware.RespondError(w, http.StatusBadRequest, middleware.ErrCodeBadRequest, "invalid json body")
 		return
 	}
 	if req.Language == nil {
-		http.Error(w, "language is required", http.StatusBadRequest)
+		middleware.RespondError(w, http.StatusBadRequest, middleware.ErrCodeMissingField, "language is required")
 		return
 	}
 	lang := strings.ToLower(strings.TrimSpace(*req.Language))
@@ -296,7 +296,7 @@ func (h *Handler) UpdateSearchLanguage(w http.ResponseWriter, r *http.Request) {
 			})
 			return
 		}
-		http.Error(w, "update search language: "+err.Error(), http.StatusInternalServerError)
+		middleware.RespondInternalError(w, r, "update search language", err)
 		return
 	}
 

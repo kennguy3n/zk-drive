@@ -132,6 +132,21 @@ const (
 	// frontend can prompt for upgrade / customer-onboarding flows.
 	ErrCodeBillingNotConfigured ErrorCode = "BILLING_NOT_CONFIGURED"
 
+	// Stripe-backed billing not wired up on this deployment (501).
+	// Distinct from UNSUPPORTED_OPERATION because the missing piece
+	// is a billing-specific dependency (Stripe API key / billing
+	// service), not a generic feature flag — the frontend renders
+	// Stripe-specific remediation copy ("contact your administrator
+	// to enable billing") rather than the generic "this operation
+	// is not supported". Distinct from BILLING_NOT_CONFIGURED because
+	// that code targets the workspace level (412 — the deployment
+	// supports Stripe but this workspace has no Stripe customer),
+	// while STRIPE_NOT_CONFIGURED targets the deployment level (501
+	// — Stripe is not wired up at all). Devin Review ANALYSIS_0007
+	// on commit a1dd83b flagged the symmetric BillingPage 501 case
+	// translating to the generic UNSUPPORTED_OPERATION copy.
+	ErrCodeStripeNotConfigured ErrorCode = "STRIPE_NOT_CONFIGURED"
+
 	// Service-level failures (5xx).
 	ErrCodeInternal       ErrorCode = "INTERNAL_ERROR"
 	ErrCodeUpstream       ErrorCode = "UPSTREAM_FAILED"
