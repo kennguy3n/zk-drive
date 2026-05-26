@@ -1,4 +1,5 @@
 import axios, { type AxiosInstance } from "axios";
+import { is401SoftFailure } from "./auth401";
 
 // Shared Axios instance pointed at the dev proxy (/api -> :8080). All
 // request/response types below match the Go handler JSON.
@@ -23,64 +24,6 @@ client.interceptors.request.use((config) => {
   return config;
 });
 
-// NON_SESSION_401_CODES enumerates the structured error codes that come
-// back with HTTP 401 but DO NOT indicate the user's session is dead.
-// They're "soft" auth failures — the caller needs to provide something
-// other than a new login (a share-link password, a workspace header) —
-// so we surface the error to the calling page instead of nuking auth
-// state and bouncing to /login. Without this guard, e.g. an
-// unauthenticated visitor opening a password-protected share link
-// would get redirected to /login (clearing nothing, since they had no
-// session) instead of seeing the password prompt.
-const NON_SESSION_401_CODES = new Set<string>([
-  // Share-link password challenge. The user is browsing a public share
-  // and needs to enter the link's password. Redirecting to /login would
-  // be actively wrong: they have no account here.
-  "SHARE_PASSWORD_REQUIRED",
-  // The request reached the API authenticated but without a workspace
-  // header. The session is still valid; the page just needs to retry
-  // with a workspace selected. Clearing the token here would force a
-  // re-login for a recoverable routing error.
-  "MISSING_WORKSPACE_CONTEXT",
-  // Invalid MFA code during challenge or enrollment. The mfa_token
-  // session is mid-flight (still valid for a few minutes); the user
-  // just typed the wrong 6 digits. Redirecting to /login would discard
-  // the in-progress challenge and force them to enter their password
-  // again, instead of seeing "Invalid code" and getting to retry.
-  // (AUTH_MFA_REQUIRED and MFA_ENROLL_REQUIRED are declared on the
-  // backend but currently return HTTP 200 with mfa_required:true in
-  // the body, not 401 — so they don't need to be listed here. If a
-  // future handler starts emitting either of them as 401, add them
-  // here at the same time.)
-  "AUTH_MFA_INVALID",
-  // Login-flow wrong email or password. The caller is at /login
-  // (a logged-out visitor in the normal case; a still-authenticated
-  // user who accidentally navigated back to /login in the edge case
-  // a Devin Review check on PR #83 flagged). Either way, the
-  // session-clear-and-redirect interceptor is wrong here:
-  //   - Logged-out visitor: the path-guard at line 91 prevents the
-  //     redirect (we're already at /login). localStorage clear is
-  //     a no-op (nothing to clear). Form-level error surfaces fine
-  //     either way; saying so explicitly keeps the contract clean.
-  //   - Still-authenticated user typing wrong creds on /login: we
-  //     would have nuked a fully-valid session for a typo. The
-  //     code is AUTH_INVALID_CREDENTIALS (form-level wrong
-  //     password), NOT a session-state error — there's no reason
-  //     to touch their token at all. The page's catch block
-  //     handles it; if they want a different account they can
-  //     hit "sign out" deliberately.
-  "AUTH_INVALID_CREDENTIALS",
-  // Mid-session password reverify failure (disable-2FA flow, future
-  // change-email / change-password flows). The user's session JWT
-  // is still valid — that's how they reached the handler in the
-  // first place. They just typed the wrong password on the step-up
-  // form. Redirecting to /login would discard a fully-valid session
-  // for a recoverable form-level error; the page's catch block
-  // should render "Incorrect password. Please try again." and let
-  // the user retry without losing their place.
-  "AUTH_PASSWORD_REVERIFY_FAILED",
-]);
-
 // Redirect to /login on session-expiry 401s so stale sessions don't
 // leave the UI stuck. Clear ALL auth-derived localStorage keys (token,
 // workspace, user_id) so the next login is a clean slate; otherwise a
@@ -89,18 +32,19 @@ const NON_SESSION_401_CODES = new Set<string>([
 // to filter the local user, etc.).
 //
 // We treat 401 as "session expired" UNLESS the structured error code
-// indicates a soft auth failure that the calling page should handle
-// (see NON_SESSION_401_CODES). The structured-code carve-out replaces
-// the old "always redirect on 401" behaviour that misrouted
-// password-protected share links and missing-workspace responses
-// through the login flow.
+// indicates a soft auth failure that the calling page should handle.
+// The classification lives in ./auth401 (NON_SESSION_401_CODES vs
+// SESSION_DEAD_401_CODES); a regression test there (auth401.test.ts)
+// asserts every 401-emitting backend code is explicitly classified
+// in exactly one bucket, so a contributor adding a new 401 path
+// can't accidentally land on the wrong side of the carve-out.
 client.interceptors.response.use(
   (resp) => resp,
   (err) => {
     if (err?.response?.status === 401) {
       const data = err.response.data as { code?: string } | undefined;
       const code = typeof data?.code === "string" ? data.code : null;
-      if (!code || !NON_SESSION_401_CODES.has(code)) {
+      if (!is401SoftFailure(code)) {
         localStorage.removeItem(TOKEN_STORAGE_KEY);
         localStorage.removeItem(WORKSPACE_STORAGE_KEY);
         localStorage.removeItem(ROLE_STORAGE_KEY);
