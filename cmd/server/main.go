@@ -683,17 +683,30 @@ func run() error {
 		wiring.KChatObjectKey,
 		wiring.KChatObjectKeyValidator,
 	)
-	summarySvc := ai.NewSummaryService(pool)
+	summarySvc := ai.NewSummaryService(pool).WithLanguageResolver(wsSvc)
+	// Auto-tag suggestions and query expansion share the same
+	// privacy-respecting LLM pattern: rule-based scaffold floor,
+	// optional on-device LLM refinement when OLLAMA_URL is set.
+	// All three services share the same workspace language
+	// resolver so the prompt language stays consistent across
+	// summarisation, tagging, and expansion within a workspace.
+	tagSuggestSvc := ai.NewSuggestionService(pool).WithLanguageResolver(wsSvc)
+	queryExpandSvc := ai.NewExpansionService(pool).WithLanguageResolver(wsSvc)
 	if cfg.OllamaURL != "" {
 		llm, err := ai.NewOllamaClient(cfg.OllamaURL, cfg.OllamaModel)
 		if err != nil {
 			return fmt.Errorf("ai/ollama: %w", err)
 		}
 		summarySvc = summarySvc.WithLLM(llm)
+		tagSuggestSvc = tagSuggestSvc.WithLLM(llm)
+		queryExpandSvc = queryExpandSvc.WithLLM(llm)
 		slog.Info("ai local LLM enabled", "endpoint", cfg.OllamaURL, "model", llm.Model())
 	} else {
-		slog.Info("ai OLLAMA_URL not set, AI summaries use rule-based scaffold (no external API calls)")
+		slog.Info("ai OLLAMA_URL not set, AI summaries / tag suggestions / query expansion use rule-based scaffold (no external API calls)")
 	}
+	driveHandler = driveHandler.
+		WithTagSuggester(tagSuggestSvc).
+		WithQueryExpander(queryExpandSvc)
 	kchatHandler := apikchat.NewHandler(kchatSvc, summarySvc)
 
 	// metrics owns a private prometheus.Registry, the HTTP
@@ -950,6 +963,7 @@ func run() error {
 			r.Get("/files/{id}/tags", driveHandler.ListFileTags)
 			r.Post("/files/{id}/tags", driveHandler.AddFileTag)
 			r.Delete("/files/{id}/tags/{tag}", driveHandler.RemoveFileTag)
+			r.Get("/files/{id}/tag-suggestions", driveHandler.SuggestFileTags)
 
 			r.Post("/bulk/move", driveHandler.BulkMove)
 			r.Post("/bulk/copy", driveHandler.BulkCopy)
@@ -975,6 +989,7 @@ func run() error {
 			r.Delete("/client-rooms/{id}", driveHandler.DeleteClientRoom)
 
 			r.Get("/search", driveHandler.Search)
+			r.Get("/search/expand", driveHandler.ExpandSearchQuery)
 
 			r.Get("/notifications", driveHandler.ListNotifications)
 			r.Post("/notifications/read-all", driveHandler.MarkAllNotificationsRead)

@@ -250,6 +250,41 @@ func setupEnv(t *testing.T) *testEnv {
 		WithTOTP(totpSvc).
 		WithSessionRevoker(sessionStore)
 	webhookCap := &webhookCapture{}
+	// Wire the AI tag-suggestion + query-expansion services so the
+	// integration harness exercises the same code paths that
+	// cmd/server/main.go does at lines 629-645. Without this wiring,
+	// the /files/{id}/tag-suggestions and /search/expand endpoints
+	// would respond 501 in the harness and the end-to-end pipeline
+	// (handler → SuggestionService/ExpansionService → DB → rule-
+	// based scaffold and optional LLM refinement) would only be
+	// covered by unit tests in internal/ai. Both services are
+	// language-resolver-aware (matching production wiring) so the
+	// multilingual prompt path is exercised end-to-end here too.
+	// Devin Review ANALYSIS_0002 on PR #85.
+	//
+	// A single OllamaClient is constructed up front and shared
+	// across all three AI services (tag-suggest, query-expand,
+	// summary). This mirrors cmd/server/main.go:632-638 exactly
+	// and avoids the per-service NewOllamaClient calls that an
+	// earlier iteration of this harness used. OllamaClient is
+	// stateless (just endpoint URL + http.Client) so the previous
+	// shape had no behavioural impact, but a single instance is
+	// easier to reason about and matches production verbatim.
+	// Devin Review ANALYSIS_0003 on PR #85 flagged the divergence.
+	var ollamaClient ai.LLMClient
+	if endpoint := os.Getenv("OLLAMA_URL"); endpoint != "" {
+		llm, err := ai.NewOllamaClient(endpoint, os.Getenv("OLLAMA_MODEL"))
+		if err != nil {
+			t.Fatalf("ai/ollama: %v", err)
+		}
+		ollamaClient = llm
+	}
+	tagSuggestSvc := ai.NewSuggestionService(pool).WithLanguageResolver(wsSvc)
+	queryExpandSvc := ai.NewExpansionService(pool).WithLanguageResolver(wsSvc)
+	if ollamaClient != nil {
+		tagSuggestSvc = tagSuggestSvc.WithLLM(ollamaClient)
+		queryExpandSvc = queryExpandSvc.WithLLM(ollamaClient)
+	}
 	driveHandler := drive.NewHandler(pool, wsSvc, folderSvc, fileSvc, userSvc, storageClient, permissionSvc, activitySvc).
 		WithSharing(sharingSvc).
 		WithSearch(searchSvc).
@@ -258,7 +293,9 @@ func setupEnv(t *testing.T) *testEnv {
 		WithPreviews(previewRepo).
 		WithAudit(auditSvc).
 		WithBilling(billingSvc).
-		WithWebhooks(webhookCap)
+		WithWebhooks(webhookCap).
+		WithTagSuggester(tagSuggestSvc).
+		WithQueryExpander(queryExpandSvc)
 	// Wire a Postgres-backed fabric provisioner with no console URL
 	// so admin endpoints that only need persistence (CMK) work; the
 	// FabricClient interface is left nil because no test fakes the
@@ -316,18 +353,18 @@ func setupEnv(t *testing.T) *testEnv {
 		wiring.KChatObjectKey,
 		wiring.KChatObjectKeyValidator,
 	)
-	summarySvc := ai.NewSummaryService(pool)
-	// When the test sets OLLAMA_URL via t.Setenv (e.g. against an
-	// httptest.Server) the harness mirrors cmd/server/main.go and
-	// wires the local LLM. Without it, summaries stay on the
-	// rule-based scaffold so unrelated tests don't accidentally
-	// depend on a daemon being up.
-	if endpoint := os.Getenv("OLLAMA_URL"); endpoint != "" {
-		llm, err := ai.NewOllamaClient(endpoint, os.Getenv("OLLAMA_MODEL"))
-		if err != nil {
-			t.Fatalf("ai/ollama: %v", err)
-		}
-		summarySvc = summarySvc.WithLLM(llm)
+	// Wire the workspace search-language resolver so the multilingual
+	// prompt path matches cmd/server/main.go's production wiring.
+	// Without this, the integration harness would always exercise the
+	// English-fallback branch and the workspace.SearchLanguage →
+	// PromptLanguageFor codepath would only be covered by unit tests in
+	// internal/ai. Devin Review WS6 prompt-language change.
+	//
+	// Reuses the ollamaClient built earlier so the harness has the
+	// same single-instance shape as cmd/server/main.go:632-638.
+	summarySvc := ai.NewSummaryService(pool).WithLanguageResolver(wsSvc)
+	if ollamaClient != nil {
+		summarySvc = summarySvc.WithLLM(ollamaClient)
 	}
 	kchatHandler := apikchat.NewHandler(kchatSvc, summarySvc)
 
@@ -449,6 +486,7 @@ func setupEnv(t *testing.T) *testEnv {
 			r.Get("/files/{id}/tags", driveHandler.ListFileTags)
 			r.Post("/files/{id}/tags", driveHandler.AddFileTag)
 			r.Delete("/files/{id}/tags/{tag}", driveHandler.RemoveFileTag)
+			r.Get("/files/{id}/tag-suggestions", driveHandler.SuggestFileTags)
 
 			r.Post("/bulk/move", driveHandler.BulkMove)
 			r.Post("/bulk/copy", driveHandler.BulkCopy)
@@ -467,6 +505,7 @@ func setupEnv(t *testing.T) *testEnv {
 			r.Delete("/guest-invites/{id}", driveHandler.RevokeGuestInvite)
 
 			r.Get("/search", driveHandler.Search)
+			r.Get("/search/expand", driveHandler.ExpandSearchQuery)
 
 			r.Get("/client-rooms", driveHandler.ListClientRooms)
 			r.Post("/client-rooms", driveHandler.CreateClientRoom)
