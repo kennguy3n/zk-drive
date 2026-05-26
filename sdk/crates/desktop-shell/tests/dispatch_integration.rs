@@ -406,3 +406,75 @@ async fn remove_local_cache_actually_unlinks_the_db_file() {
     assert_eq!(state.summary.total_files, 0);
     assert_eq!(state.health, SyncHealth::Stopped);
 }
+
+#[tokio::test]
+async fn resume_persisted_preserves_autostart_flag_on_disk() {
+    // Regression for the BUG flagged on PR #86:
+    //
+    // `add_workspace_at` always persists with `autostart=false`
+    // (the just-constructed binding has not yet been restored).
+    // `resume_persisted` then sets `ws.autostart = true` *in memory
+    // only*. Without a final persist, the on-disk config silently
+    // overwrites `autostart: true` to `autostart: false` for the
+    // last workspace processed -- corrupting the user's startup
+    // preference until the next config-touching command fires.
+    //
+    // This test pins the post-fix behaviour: after `resume_persisted`,
+    // the on-disk config still reflects the restored autostart flag
+    // for every workspace, including the last one.
+    let dir = tempdir().unwrap();
+    let cfg_path = dir.path().join("app.json");
+
+    // Hand-craft a persisted config with two workspaces, both
+    // autostart=true, so we exercise both the "not last" and the
+    // "last" paths in resume_persisted.
+    let id_a = Uuid::new_v4();
+    let id_b = Uuid::new_v4();
+    let root_a = dir.path().join("a");
+    let root_b = dir.path().join("b");
+    let cat_a = dir.path().join("a.sqlite");
+    let cat_b = dir.path().join("b.sqlite");
+    let seeded = AppConfig {
+        version: 1,
+        workspaces: vec![
+            zk_sync_shell::WorkspaceEntry {
+                workspace_id: id_a,
+                label: "A".into(),
+                root: root_a.clone(),
+                catalogue_path: cat_a.clone(),
+                autostart: true,
+            },
+            zk_sync_shell::WorkspaceEntry {
+                workspace_id: id_b,
+                label: "B".into(),
+                root: root_b.clone(),
+                catalogue_path: cat_b.clone(),
+                autostart: true,
+            },
+        ],
+    };
+    seeded.save(&cfg_path).unwrap();
+
+    let sink = Arc::new(BroadcastSink::new());
+    let app = App::with_config_path(sink as Arc<dyn EventSink>, cfg_path.clone());
+    app.resume_persisted().await.unwrap();
+
+    // Read the on-disk config back. Both entries must still have
+    // autostart=true. Before the fix, the *last* entry would have
+    // been corrupted to autostart=false by the redundant persist
+    // inside add_workspace_at.
+    let on_disk = AppConfig::load(&cfg_path).unwrap();
+    assert_eq!(on_disk.workspaces.len(), 2);
+    let a = on_disk
+        .workspaces
+        .iter()
+        .find(|w| w.workspace_id == id_a)
+        .expect("a present");
+    let b = on_disk
+        .workspaces
+        .iter()
+        .find(|w| w.workspace_id == id_b)
+        .expect("b present");
+    assert!(a.autostart, "autostart=true must survive resume for A");
+    assert!(b.autostart, "autostart=true must survive resume for B");
+}

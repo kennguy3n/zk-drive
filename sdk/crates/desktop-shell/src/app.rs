@@ -773,6 +773,16 @@ impl App {
                 }
             }
         }
+        // `add_workspace_at` persists each entry as it is inserted, but it
+        // always writes `autostart=false` (the just-constructed binding has
+        // not yet been restored). The autostart flag is restored above,
+        // in-memory only. Persist once at the end so the on-disk config
+        // reflects the restored autostart flags for every workspace —
+        // otherwise a crash before the next config-touching command would
+        // silently clear autostart for the *last* workspace processed
+        // (every prior workspace happens to be corrected by the next
+        // iteration's `add_workspace_at`-driven persist).
+        self.persist().await?;
         Ok(())
     }
 }
