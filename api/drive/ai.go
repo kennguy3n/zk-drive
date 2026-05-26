@@ -49,6 +49,17 @@ func (h *Handler) SuggestFileTags(w http.ResponseWriter, r *http.Request) {
 		writeTagSuggestError(w, err)
 		return
 	}
+	// Defense-in-depth: the production SuggestionService.Suggest
+	// always returns a non-nil slice (via make([]string, 0, ...)
+	// in ruleBasedSuggestions), but a third-party TagSuggester
+	// implementation could legally return (nil, nil), which would
+	// serialise as {"suggestions": null} instead of the documented
+	// {"suggestions": []}. Same rationale as the ExpandResult nil-
+	// coalesce at internal/ai/queryexp.go:194-196. Devin Review
+	// ANALYSIS_0003 on commit b4b41dd.
+	if suggestions == nil {
+		suggestions = []string{}
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"suggestions": suggestions,
 	})

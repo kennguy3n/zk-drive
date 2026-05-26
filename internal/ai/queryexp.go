@@ -186,7 +186,7 @@ LIMIT 512`, workspaceID)
 		return nil, fmt.Errorf("ai: iterate workspace tags: %w", err)
 	}
 
-	language := s.resolveLanguage(ctx, workspaceID)
+	language := resolveWorkspaceLanguage(ctx, s.languageResolver, workspaceID, "ai query expand")
 	// See the empty-query branch above for why we coalesce nil to
 	// an empty slice here — keep ExpandSearchQuery's JSON output
 	// shape stable across the rule-based, LLM-merged, and empty-
@@ -215,19 +215,6 @@ LIMIT 512`, workspaceID)
 		res.Terms = res.Terms[:queryExpansionMaxTerms]
 	}
 	return res, nil
-}
-
-func (s *ExpansionService) resolveLanguage(ctx context.Context, workspaceID uuid.UUID) string {
-	if s.languageResolver == nil {
-		return ""
-	}
-	lang, err := s.languageResolver.GetSearchLanguage(ctx, workspaceID)
-	if err != nil {
-		logging.FromContext(ctx).Warn("ai query expand: resolve workspace language failed (defaulting to English)",
-			"workspace_id", workspaceID, "err", err)
-		return ""
-	}
-	return lang
 }
 
 // Expand is the tuple-returning adapter over ExpandResult.

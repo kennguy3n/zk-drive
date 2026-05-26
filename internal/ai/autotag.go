@@ -307,7 +307,7 @@ LIMIT 256`, workspaceID)
 	// LLM refinement — best-effort, never blocks. A failure logs a
 	// breadcrumb and returns the rule-based suggestions unchanged.
 	if s.llm != nil {
-		llmSuggestions, llmErr := s.tryLLMSuggestions(ctx, name, preview, workspaceTags, s.resolveLanguage(ctx, workspaceID))
+		llmSuggestions, llmErr := s.tryLLMSuggestions(ctx, name, preview, workspaceTags, resolveWorkspaceLanguage(ctx, s.languageResolver, workspaceID, "ai tag suggest"))
 		if llmErr != nil {
 			logging.FromContext(ctx).Error("ai tag suggest: local LLM failed, returning rule-based scaffold only",
 				"model", s.llm.Model(), "err", llmErr)
@@ -320,23 +320,6 @@ LIMIT 256`, workspaceID)
 		suggestions = suggestions[:tagSuggestMaxOutput]
 	}
 	return suggestions, nil
-}
-
-// resolveLanguage mirrors SummaryService.resolveLanguage — see that
-// doc comment for the trade-offs. Errors are logged, not returned,
-// so a transient workspace lookup failure degrades to English-prompt
-// instead of 5xx-ing the suggest endpoint.
-func (s *SuggestionService) resolveLanguage(ctx context.Context, workspaceID uuid.UUID) string {
-	if s.languageResolver == nil {
-		return ""
-	}
-	lang, err := s.languageResolver.GetSearchLanguage(ctx, workspaceID)
-	if err != nil {
-		logging.FromContext(ctx).Warn("ai tag suggest: resolve workspace language failed (defaulting to English)",
-			"workspace_id", workspaceID, "err", err)
-		return ""
-	}
-	return lang
 }
 
 // tryLLMSuggestions asks the configured local model for tag

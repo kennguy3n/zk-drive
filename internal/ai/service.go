@@ -94,6 +94,36 @@ type WorkspaceLanguageResolver interface {
 	GetSearchLanguage(ctx context.Context, workspaceID uuid.UUID) (string, error)
 }
 
+// resolveWorkspaceLanguage looks up the workspace's preferred FTS
+// language via resolver, returning "" so PromptLanguageFor falls
+// back to English on a nil resolver, a transient lookup error, or
+// an empty stored value. Errors are logged at warn (not returned)
+// so AI endpoints' contract of "never 5xx because of a workspace-
+// language lookup hiccup" stays intact across all three services
+// (Summary, Suggestion, Expansion). logScope is the breadcrumb
+// prefix in the warn message — keeps the three endpoints
+// distinguishable in operator logs while sharing a single
+// implementation.
+//
+// Devin Review ANALYSIS_0005 on commit b4b41dd flagged the
+// previous per-service duplication (SummaryService.resolveLanguage,
+// SuggestionService.resolveLanguage, ExpansionService.resolveLanguage
+// all had identical bodies). Extracting here collapses three
+// near-copies into one canonical implementation; the call sites
+// pass their own resolver and log scope.
+func resolveWorkspaceLanguage(ctx context.Context, resolver WorkspaceLanguageResolver, workspaceID uuid.UUID, logScope string) string {
+	if resolver == nil {
+		return ""
+	}
+	lang, err := resolver.GetSearchLanguage(ctx, workspaceID)
+	if err != nil {
+		logging.FromContext(ctx).Warn(logScope+": resolve workspace language failed (defaulting to English)",
+			"workspace_id", workspaceID, "err", err)
+		return ""
+	}
+	return lang
+}
+
 // NewSummaryService returns a SummaryService bound to pool. A nil pool
 // is treated as a misconfiguration and panics on first use rather
 // than silently returning empty summaries.
@@ -167,7 +197,7 @@ func (s *SummaryService) Summarize(ctx context.Context, workspaceID, folderID uu
 	// is non-fatal — the fallback PromptLanguageFor("") returns
 	// English instructions, so summarisation degrades gracefully
 	// rather than 5xx-ing on a transient DB hiccup.
-	language := s.resolveLanguage(ctx, workspaceID)
+	language := resolveWorkspaceLanguage(ctx, s.languageResolver, workspaceID, "ai summary")
 
 	if s.llm != nil {
 		if out, llmErr := s.tryLLM(ctx, folderName, names, preview, language); llmErr == nil {
@@ -243,24 +273,6 @@ func (s *SummaryService) tryLLM(ctx context.Context, folderName string, names []
 		return "", errors.New("ai: llm returned empty summary")
 	}
 	return out, nil
-}
-
-// resolveLanguage returns the workspace's preferred search-language
-// dictionary. Missing resolver, empty value, or a lookup error all
-// return "" so PromptLanguageFor falls back to English
-// instructions. Errors are logged but never propagated — the
-// summary endpoint's contract is "never 5xx because of AI".
-func (s *SummaryService) resolveLanguage(ctx context.Context, workspaceID uuid.UUID) string {
-	if s.languageResolver == nil {
-		return ""
-	}
-	lang, err := s.languageResolver.GetSearchLanguage(ctx, workspaceID)
-	if err != nil {
-		logging.FromContext(ctx).Warn("ai summary: resolve workspace language failed (defaulting to English)",
-			"workspace_id", workspaceID, "err", err)
-		return ""
-	}
-	return lang
 }
 
 // ruleBasedSummary is the deterministic fallback. Format is held
