@@ -84,6 +84,27 @@ func TestParseTagLines(t *testing.T) {
 		{"reject invalid", "alpha\nfoo/bar\nbeta", []string{"alpha", "beta"}},
 		{"quoted", "\"alpha\"\n'beta'", []string{"alpha", "beta"}},
 		{"empty lines + trailing comma", "alpha,\n\nbeta,", []string{"alpha", "beta"}},
+		// Devin Review ANALYSIS_0003: a model that emits
+		// "alpha,#beta" on one line — the previous parseTagLines
+		// implementation trimmed only at line edges, so the "#"
+		// in front of "beta" leaked through to canonicalTag
+		// (which doesn't reject "#"), producing the literal
+		// "#beta" as a suggestion. The per-part trim added in
+		// this commit strips a single leading "#"/quote rune off
+		// each comma-separated piece.
+		{"hash and star on interior comma parts", "alpha,#beta,*gamma", []string{"alpha", "beta", "gamma"}},
+		{"hash and quote on interior parts", "alpha, #beta, \"gamma\"", []string{"alpha", "beta", "gamma"}},
+		// Tags that legitimately start with a hyphen used to be
+		// corrupted (".-foo-bar" became "foo-bar") because the
+		// edge trim stripped leading hyphens. Now only "- " (a
+		// space-terminated bullet) is recognised as a list
+		// marker, so a hyphen-prefixed tag survives.
+		{"hyphen-prefixed tag", "-foo-bar", []string{"-foo-bar"}},
+		// And the standard "- tag" bullet still gets stripped.
+		{"bullet tag", "- foo-bar", []string{"foo-bar"}},
+		// Numbered-list bullet should be stripped without
+		// touching internal hyphens.
+		{"numbered list", "1. q4-launch\n2. marketing-2024", []string{"q4-launch", "marketing-2024"}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -405,6 +426,45 @@ func TestRuleBasedSuggestionsShortPartUsesWordBoundary(t *testing.T) {
 		if s == "x-ray" {
 			t.Fatalf("x-ray should NOT match body containing only 'x' substrings; got %v", suggestionsX)
 		}
+	}
+}
+
+func TestRuleBasedSuggestionsRejectsAllEmptyPartsTag(t *testing.T) {
+	// Devin Review ANALYSIS_0005: a workspace tag composed entirely
+	// of separator runs (e.g. "---" or "-") splits into all-empty
+	// parts. The empty-part skip means the inner loop never fails
+	// allPresent, so before this fix the tag was suggested for
+	// every file. matchedAnyPart now gates the append on at least
+	// one non-empty part having actually matched the corpus.
+	for _, tag := range []string{"---", "-", "--", "----"} {
+		got := ruleBasedSuggestions(
+			"some-file.pdf",
+			"this is some sample body text",
+			[]string{tag},
+		)
+		for _, s := range got {
+			if s == tag {
+				t.Fatalf("ruleBasedSuggestions should NOT suggest all-separator tag %q for body without it; got %v", tag, got)
+			}
+		}
+	}
+
+	// Sanity check: a well-formed multi-part tag still matches
+	// when both parts are present as standalone tokens.
+	got := ruleBasedSuggestions(
+		"q4-launch.pdf",
+		"the q4 launch is on track and the report is in good shape",
+		[]string{"q4-launch"},
+	)
+	found := false
+	for _, s := range got {
+		if s == "q4-launch" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("ruleBasedSuggestions should still suggest well-formed multi-part tag q4-launch; got %v", got)
 	}
 }
 

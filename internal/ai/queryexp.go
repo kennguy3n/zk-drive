@@ -3,7 +3,12 @@
 // Two-tier pipeline, mirroring autotag.go:
 //
 //  1. Rule-based expansion (always runs, deterministic, cheap):
-//       - Tokenise the query into letter+digit runs (>= 3 runes).
+//       - Tokenise the query into letter+digit runs (>=
+//         queryExpansionMinRune runes; currently 2). The constant's
+//         own doc comment explains why 2 is the right floor for
+//         English-style queries: short noun-tags like "q4", "ai",
+//         "ml" survive while single-character tokens (which would
+//         match nearly every workspace tag) are filtered out.
 //       - Match each token against the workspace's existing tag
 //         vocabulary using prefix equality and hyphen-aware fuzzy
 //         (e.g. "marketing" matches the tag "marketing-q4-2024").

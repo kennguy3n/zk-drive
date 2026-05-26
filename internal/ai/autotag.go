@@ -409,12 +409,34 @@ func ruleBasedSuggestions(fileName, contentPreview string, workspaceTags []strin
 		if t == "" {
 			continue
 		}
+		// Reject degenerate tags up front: a tag with no
+		// letter or digit rune (e.g. "-", "---", "--") is
+		// noise — the literal substring check below would
+		// happily match it against any corpus containing the
+		// separator, and the parts-loop would short-circuit
+		// to "no parts to check, allPresent stays true". Both
+		// paths would then surface the tag for every file.
+		// Centralising the alnum requirement here keeps both
+		// branches honest and matches the user-facing
+		// expectation that a tag has some textual content.
+		if !hasAlnumRune(t) {
+			continue
+		}
 		if strings.Contains(corpus, t) {
 			appendTag(t)
 			continue
 		}
 		parts := strings.Split(t, "-")
 		allPresent := true
+		// matchedAnyPart guards against tags whose split is
+		// all-empty parts (e.g. starts/ends with a hyphen so
+		// the first/last part is ""). The hasAlnumRune check
+		// above already drops the pathological all-separator
+		// case, but a tag like "-foo" splits into ["", "foo"]
+		// — we still want to require that the non-empty part
+		// "foo" actually matched, not just that the empty
+		// parts didn't fail.
+		matchedAnyPart := false
 		for _, p := range parts {
 			if p == "" {
 				continue
@@ -423,8 +445,9 @@ func ruleBasedSuggestions(fileName, contentPreview string, workspaceTags []strin
 				allPresent = false
 				break
 			}
+			matchedAnyPart = true
 		}
-		if allPresent {
+		if allPresent && matchedAnyPart {
 			appendTag(t)
 		}
 	}
@@ -561,29 +584,56 @@ func canonicalTag(raw string) string {
 }
 
 // parseTagLines splits an LLM completion (one tag per line) into a
-// normalised, deduplicated slice. Commas, leading hashes, bullets,
-// and quote marks are stripped so a model that produces
-// "- #q4-launch," still yields "q4-launch". Invalid normalisations
-// (empty, too long, illegal chars) are silently dropped — same
-// principle as the rest of the pipeline: never surface LLM-shaped
-// friction to the user.
+// normalised, deduplicated slice. Bullets, hashes, and quote marks
+// are stripped so a model that produces "- #q4-launch," still yields
+// "q4-launch". Invalid normalisations (empty, too long, illegal
+// chars) are silently dropped — same principle as the rest of the
+// pipeline: never surface LLM-shaped friction to the user.
+//
+// Decoration stripping is per-part, not per-line: a line like
+// "alpha,#beta,*gamma" is split on commas FIRST, then each
+// individual piece is trimmed so the leading "#" on "#beta" and
+// "*" on "*gamma" are stripped instead of leaking through to
+// canonicalTag (which would accept "#beta" / "*gamma" verbatim).
+// Hyphens are NOT in the trim set — they're legal tag characters
+// and the prompt asks for hyphen-joined output, so stripping them
+// from edges would corrupt legitimately-formatted tags like
+// "-foo-bar" (rare but possible) and "foo-bar-" (trailing-hyphen
+// LLM output). The bullet character at the start of a list item
+// is handled by trimBulletPrefix which strips at most ONE leading
+// bullet-class rune ("-", "*", "•", numeric prefixes) — preserving
+// internal and trailing hyphens for canonicalTag to validate.
 func parseTagLines(raw string) []string {
 	seen := make(map[string]struct{}, 16)
 	out := make([]string, 0, 16)
 	for _, line := range strings.Split(raw, "\n") {
-		// Strip common decorations: bullets, hashes, quote marks,
-		// trailing commas. We do this BEFORE canonicalTag so the
-		// canonical pass sees clean text.
-		clean := strings.TrimFunc(line, func(r rune) bool {
-			return r == ' ' || r == '\t' || r == '-' || r == '*' || r == '#' || r == '"' || r == '\'' || r == ','
-		})
-		if clean == "" {
+		// Strip the line-level bullet (just one "- ", "* ",
+		// "1. ", "2) ", "• ", etc) so the rest of the line is
+		// ready to split on commas. We do NOT strip arbitrary
+		// trailing or interior hyphens here — hyphens are
+		// canonical tag characters and the trim must not
+		// corrupt them.
+		line = trimBulletPrefix(strings.TrimSpace(line))
+		if line == "" {
 			continue
 		}
 		// Some models emit "tag1, tag2, tag3" on a single line.
-		// Honour both shapes by splitting on commas after the
-		// per-line trim.
-		for _, part := range strings.Split(clean, ",") {
+		// Honour both shapes by splitting on commas, then
+		// trimming whitespace + a single leading decoration
+		// off each piece (so "alpha,#beta" yields "alpha" and
+		// "beta", not "alpha" and "#beta").
+		for _, part := range strings.Split(line, ",") {
+			part = strings.TrimSpace(part)
+			part = trimPartDecoration(part)
+			part = strings.TrimSpace(part)
+			// Strip stray trailing quote/comma but leave any
+			// trailing hyphen for canonicalTag — a trailing
+			// hyphen makes canonicalTag's output still a
+			// valid tag (file.normalizeTag accepts hyphens
+			// anywhere), and our prompt explicitly forbids
+			// "leading #" but says nothing about trailing
+			// hyphens.
+			part = strings.TrimRight(part, " \t\"'")
 			t := canonicalTag(part)
 			if t == "" {
 				continue
@@ -705,6 +755,79 @@ func corpusTokenSet(corpus string) map[string]struct{} {
 	}
 	flush()
 	return out
+}
+
+// hasAlnumRune reports whether s contains at least one Unicode
+// letter or digit. Used to reject degenerate tag values (e.g. "-",
+// "---", "/", whitespace runs) before they reach the workspace-tag
+// overlap pass — without this guard, a hyphen-only tag would be
+// suggested for every file because the substring check
+// strings.Contains(corpus, "-") trivially succeeds for any text
+// containing a hyphen (which includes most file names).
+func hasAlnumRune(s string) bool {
+	for _, r := range s {
+		if unicode.IsLetter(r) || unicode.IsDigit(r) {
+			return true
+		}
+	}
+	return false
+}
+
+// trimBulletPrefix removes a single Markdown / numbered-list
+// bullet from the start of s. The set is the common LLM bullet
+// shapes: "- ", "* ", "• ", "1. ", "23) ", "- ", followed by
+// whitespace. We only strip ONE such prefix because the rest of
+// the line is the candidate tag (which may itself begin with a
+// hyphen for some tags) — repeatedly stripping leading hyphens
+// would corrupt a tag like "-foo-bar".
+//
+// Returns s unchanged if no bullet prefix is detected.
+func trimBulletPrefix(s string) string {
+	if s == "" {
+		return s
+	}
+	// Numbered list: "1. ", "23) ", "5: " — at least one digit
+	// followed by a punctuation separator and a space.
+	i := 0
+	for i < len(s) && s[i] >= '0' && s[i] <= '9' {
+		i++
+	}
+	if i > 0 && i < len(s) && (s[i] == '.' || s[i] == ')' || s[i] == ':') {
+		j := i + 1
+		if j < len(s) && (s[j] == ' ' || s[j] == '\t') {
+			return strings.TrimLeft(s[j+1:], " \t")
+		}
+	}
+	// Bullet character: "- ", "* ", "• ". Require a trailing
+	// space so we don't strip a leading hyphen from a legitimate
+	// tag candidate like "-foo".
+	r, size := utf8.DecodeRuneInString(s)
+	if size > 0 && (r == '-' || r == '*' || r == '\u2022') {
+		rest := s[size:]
+		if rest != "" && (rest[0] == ' ' || rest[0] == '\t') {
+			return strings.TrimLeft(rest, " \t")
+		}
+	}
+	return s
+}
+
+// trimPartDecoration removes a single decoration rune from the
+// start of s. Used per-comma-part inside parseTagLines so a model
+// that emits "alpha,#beta" or "alpha,*beta" or "alpha,\"beta\""
+// yields the third token without the leading "#"/"*"/quote rune.
+// Only ONE leading rune is stripped — repeatedly stripping would
+// corrupt a tag like "##hashtag" (synthetic, rare). The decoration
+// set deliberately excludes "-" because hyphens are legal at any
+// position in a tag, including the leading position.
+func trimPartDecoration(s string) string {
+	if s == "" {
+		return s
+	}
+	r, size := utf8.DecodeRuneInString(s)
+	if size > 0 && (r == '#' || r == '*' || r == '"' || r == '\'') {
+		return s[size:]
+	}
+	return s
 }
 
 // shortPartLimit is the maximum byte length below which a
