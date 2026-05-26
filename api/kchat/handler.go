@@ -313,11 +313,21 @@ func (h *Handler) RoomSummary(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		switch {
 		case errors.Is(err, ai.ErrStrictZKForbidden):
+			// Sentinel error string is stable and known
+			// (defined in api/ai); exposing it in 403 is the
+			// rest-of-codebase convention for sentinels.
 			middleware.RespondError(w, http.StatusForbidden, middleware.ErrCodeForbidden, err.Error())
 		case errors.Is(err, ai.ErrFolderNotFound):
 			middleware.RespondError(w, http.StatusNotFound, middleware.ErrCodeNotFound, err.Error())
 		default:
-			middleware.RespondError(w, http.StatusInternalServerError, middleware.ErrCodeInternal, err.Error())
+			// Default branch: arbitrary unrecognised err from
+			// the summarisation pipeline (LLM provider 500s,
+			// timeouts, panics). Route through
+			// RespondInternalError so err is logged with op
+			// + path + method but never reaches the JSON
+			// response body. Matches the redaction contract
+			// applied to writeServiceError above.
+			middleware.RespondInternalError(w, r, "summarize room", err)
 		}
 		return
 	}

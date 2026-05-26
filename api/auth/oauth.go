@@ -214,12 +214,12 @@ func (h *OAuthHandler) callback(w http.ResponseWriter, r *http.Request, c *oauth
 		oauth2.SetAuthURLParam("code_verifier", verifier),
 	)
 	if err != nil {
-		middleware.RespondError(w, http.StatusBadGateway, middleware.ErrCodeUpstream, "token exchange: "+err.Error())
+		middleware.RespondUpstreamError(w, r, "token exchange", err)
 		return
 	}
 	email, subject, name, err := fetchUserinfo(ctx, c, tok, provider)
 	if err != nil {
-		middleware.RespondError(w, http.StatusBadGateway, middleware.ErrCodeUpstream, "userinfo: "+err.Error())
+		middleware.RespondUpstreamError(w, r, "userinfo", err)
 		return
 	}
 	email = strings.TrimSpace(strings.ToLower(email))

@@ -256,7 +256,33 @@ func (h *Handler) Create(w http.ResponseWriter, r *http.Request) {
 	}
 	// SSRF validation at create-time. The same Validator is re-run
 	// at every delivery attempt as the DNS-rebinding defence.
+	//
+	// Two error classes are surfaced very differently. ErrURLInvalid
+	// covers user-input mistakes the admin needs to see ("scheme
+	// \"ftp\" not allowed", "missing host") — those go in the
+	// response body as-is. ErrURLBlocked covers the case where the
+	// validator resolved the host and found a private/blocked IP
+	// (carrying strings like "169.254.169.254 (link-local)" or
+	// "10.4.5.6 (rfc1918)"), which is internal network topology
+	// leakage we must not return to the client. For the blocked
+	// case we log the diagnostic server-side with the full err
+	// string and op label, and surface a static 400 message that
+	// tells the admin what to fix without revealing the resolved
+	// address. Devin Review ANALYSIS_0001 on commit a71f673 flagged
+	// the SSRF validator boundary specifically as the one 400 path
+	// in the redaction contract where err.Error() does leak useful
+	// recon info to an attacker (or even a curious admin).
 	if _, err := h.validator.Validate(r.Context(), req.URL); err != nil {
+		if errors.Is(err, webhooks.ErrURLBlocked) {
+			logging.FromContext(r.Context()).Warn("webhook create rejected blocked URL",
+				"op", "ssrf validate",
+				"err", err,
+				"workspace_id", workspaceID,
+			)
+			middleware.RespondError(w, http.StatusBadRequest, middleware.ErrCodeBadRequest,
+				"URL resolves to a restricted address; webhook destinations must be publicly reachable.")
+			return
+		}
 		middleware.RespondError(w, http.StatusBadRequest, middleware.ErrCodeBadRequest, "url invalid: "+err.Error())
 		return
 	}

@@ -42,7 +42,7 @@ func (h *Handler) SuggestFileTags(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := h.assertResourceAccess(r.Context(), permission.ResourceFile, id, permission.RoleEditor); err != nil {
-		writeServiceError(w, err)
+		writeServiceError(w, r, err)
 		return
 	}
 	suggestions, err := h.tagSuggest.Suggest(r.Context(), workspaceID, id)
