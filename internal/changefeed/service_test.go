@@ -589,6 +589,7 @@ func (b *recordingBuster) snapshot() []uuid.UUID {
 // permission.create event must invalidate the perm cache or the
 // API would serve the pre-grant view for up to TTL seconds.
 func TestService_Record_BustsCacheOnPermissionMutation(t *testing.T) {
+	t.Parallel()
 	repo := newFakeRepo()
 	buster := &recordingBuster{}
 	svc := changefeed.NewService(repo).WithCacheBuster(buster)
@@ -614,6 +615,7 @@ func TestService_Record_BustsCacheOnPermissionMutation(t *testing.T) {
 // must NOT fire. Over-busting would defeat the cache on every
 // upload.
 func TestService_Record_NoBustOnFileCreate(t *testing.T) {
+	t.Parallel()
 	repo := newFakeRepo()
 	buster := &recordingBuster{}
 	svc := changefeed.NewService(repo).WithCacheBuster(buster)
@@ -636,6 +638,7 @@ func TestService_Record_NoBustOnFileCreate(t *testing.T) {
 // triggers the bust. Without this the perm cache would serve
 // pre-move answers for up to TTL seconds.
 func TestService_Record_BustsOnFolderMove(t *testing.T) {
+	t.Parallel()
 	repo := newFakeRepo()
 	buster := &recordingBuster{}
 	svc := changefeed.NewService(repo).WithCacheBuster(buster)
@@ -660,6 +663,7 @@ func TestService_Record_BustsOnFolderMove(t *testing.T) {
 // bust per workspace. Without this, a large bulk would issue N
 // redundant INCRs against Redis.
 func TestService_BatchRecord_DeduplicatesBusts(t *testing.T) {
+	t.Parallel()
 	repo := newFakeRepo()
 	buster := &recordingBuster{}
 	svc := changefeed.NewService(repo).WithCacheBuster(buster)
@@ -686,6 +690,7 @@ func TestService_BatchRecord_DeduplicatesBusts(t *testing.T) {
 // when a batch spans multiple workspaces, each unique workspace
 // is busted exactly once.
 func TestService_BatchRecord_BustsEachUniqueWorkspace(t *testing.T) {
+	t.Parallel()
 	repo := newFakeRepo()
 	buster := &recordingBuster{}
 	svc := changefeed.NewService(repo).WithCacheBuster(buster)
@@ -722,6 +727,7 @@ func TestService_BatchRecord_BustsEachUniqueWorkspace(t *testing.T) {
 // normally — the bust hook must be a true no-op when disabled
 // rather than a panic.
 func TestService_Record_NilBusterIsNoop(t *testing.T) {
+	t.Parallel()
 	repo := newFakeRepo()
 	svc := changefeed.NewService(repo)
 	if _, err := svc.Record(context.Background(), changefeed.RecordInput{

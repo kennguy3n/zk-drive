@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"reflect"
 	"time"
 
 	"github.com/google/uuid"
@@ -55,7 +56,7 @@ func NewService(repo Repository) *Service {
 //
 // Returns the same *Service for chaining.
 func (s *Service) WithCache(rdb redis.UniversalClient, ttl time.Duration, obs CacheObserver) *Service {
-	if rdb == nil || ttl <= 0 {
+	if isNilRedisClient(rdb) || ttl <= 0 {
 		return s
 	}
 	// If the repository is already a *CachedRepository we
@@ -67,6 +68,33 @@ func (s *Service) WithCache(rdb redis.UniversalClient, ttl time.Duration, obs Ca
 	}
 	s.repo = NewCachedRepository(delegate, rdb, ttl, obs)
 	return s
+}
+
+// isNilRedisClient returns true when c is either an untyped nil
+// interface value OR a typed-nil concrete pointer wrapped in an
+// interface (e.g. (*redis.Client)(nil) implicitly converted to
+// redis.UniversalClient). The plain `c == nil` comparison only
+// catches the first case; the typed-nil case is a Go interface
+// pitfall where the interface value carries a non-nil type
+// descriptor and a nil data pointer. Calling any method on such
+// a value panics with a nil-pointer dereference at the call
+// site, far from the caller that "passed nil".
+//
+// We use reflect rather than a type switch because
+// redis.UniversalClient is satisfied by multiple concrete types
+// (*redis.Client, *redis.ClusterClient, *redis.Ring,
+// *redis.SentinelClient), and listing them all out couples this
+// helper to the redis library's class hierarchy.
+func isNilRedisClient(c redis.UniversalClient) bool {
+	if c == nil {
+		return true
+	}
+	rv := reflect.ValueOf(c)
+	switch rv.Kind() {
+	case reflect.Ptr, reflect.Interface, reflect.Chan, reflect.Func, reflect.Map, reflect.Slice:
+		return rv.IsNil()
+	}
+	return false
 }
 
 // BustWorkspace invalidates every cached access-check result for

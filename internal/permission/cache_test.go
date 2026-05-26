@@ -579,6 +579,23 @@ func TestService_WithCache_NilRedisIsNoop(t *testing.T) {
 	}
 }
 
+// TestService_WithCache_TypedNilRedisIsNoop covers the Go
+// interface pitfall where a typed-nil concrete pointer wrapped
+// in an interface value is NOT == nil. A naïve `if rdb == nil`
+// check would skip the guard and a CachedRepository would be
+// constructed around a nil *redis.Client, which would panic at
+// the first GET call. The fix is to also detect typed-nil via
+// reflect; this test pins the contract.
+func TestService_WithCache_TypedNilRedisIsNoop(t *testing.T) {
+	var typedNil *redis.Client // (*redis.Client)(nil)
+	fake := &fakeRepository{inheritanceResult: true}
+	svc := NewService(fake).WithCache(typedNil, 30*time.Second, nil)
+
+	if svc.repo != fake {
+		t.Errorf("expected un-cached repo on typed-nil *redis.Client; got %T", svc.repo)
+	}
+}
+
 // TestService_WithCache_ZeroTTLIsNoop guards against an
 // accidentally-misconfigured TTL: zero ttl would translate to
 // "no expiry" on Redis, leaking entries forever. The wiring
