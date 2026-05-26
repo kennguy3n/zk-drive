@@ -220,8 +220,31 @@ func (c *CachedRepository) loadGeneration(ctx context.Context, workspaceID uuid.
 		}
 		gen = parsed
 	}
+	// Monotonic write: only overwrite the local cache if the
+	// value we fetched is at least as fresh as what's already
+	// there. The race we're guarding against:
+	//
+	//  T0: goroutine A reads c.gen[ws] is stale, RLock-released
+	//  T1: goroutine A does Redis GET, observes gen=N
+	//  T2: goroutine B INCRs Redis to gen=N+1, then takes the
+	//      genMu write lock and stores N+1 into c.gen[ws]
+	//  T3: goroutine A takes the genMu write lock — without
+	//      the monotonic guard it would clobber c.gen[ws] back
+	//      to N, then for up to generationStaleAfter (500ms)
+	//      every read on this replica composes cache keys with
+	//      the stale gen N and could serve pre-bust entries.
+	//
+	// Because the Redis counter only increases (INCR is
+	// monotonic) we always prefer the higher value. If the
+	// existing local value is somehow higher than what Redis
+	// returned (shouldn't happen unless someone DEL'd the
+	// counter and INCR rolled back to 1), we keep the local
+	// view — re-fetching on the next stale window will
+	// reconcile through Redis.
 	c.genMu.Lock()
-	c.gen[workspaceID] = &generationEntry{value: gen, fetchedAt: time.Now()}
+	if existing, ok := c.gen[workspaceID]; !ok || gen >= existing.value {
+		c.gen[workspaceID] = &generationEntry{value: gen, fetchedAt: time.Now()}
+	}
 	c.genMu.Unlock()
 	return gen, nil
 }
