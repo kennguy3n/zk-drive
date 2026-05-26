@@ -228,7 +228,7 @@ func (h *Handler) GetPlacement(w http.ResponseWriter, r *http.Request) {
 	tenantID, err := h.provisioner.LookupTenantID(r.Context(), workspaceID)
 	if err != nil {
 		if errors.Is(err, fabric.ErrNoCredentials) {
-			middleware.RespondError(w, http.StatusNotFound, middleware.ErrCodeUnsupportedOp, "workspace not provisioned with fabric")
+			middleware.RespondError(w, http.StatusNotFound, middleware.ErrCodeFabricNotProvisioned, "workspace not provisioned with fabric")
 			return
 		}
 		middleware.RespondError(w, http.StatusInternalServerError, middleware.ErrCodeInternal, "lookup tenant: "+err.Error())
@@ -268,7 +268,7 @@ func (h *Handler) PutPlacement(w http.ResponseWriter, r *http.Request) {
 	tenantID, err := h.provisioner.LookupTenantID(r.Context(), workspaceID)
 	if err != nil {
 		if errors.Is(err, fabric.ErrNoCredentials) {
-			middleware.RespondError(w, http.StatusNotFound, middleware.ErrCodeUnsupportedOp, "workspace not provisioned with fabric")
+			middleware.RespondError(w, http.StatusNotFound, middleware.ErrCodeFabricNotProvisioned, "workspace not provisioned with fabric")
 			return
 		}
 		middleware.RespondError(w, http.StatusInternalServerError, middleware.ErrCodeInternal, "lookup tenant: "+err.Error())
@@ -331,7 +331,7 @@ func (h *Handler) GetCMK(w http.ResponseWriter, r *http.Request) {
 	uri, err := h.provisioner.LookupCMK(r.Context(), workspaceID)
 	if err != nil {
 		if errors.Is(err, fabric.ErrNoCredentials) {
-			middleware.RespondError(w, http.StatusNotFound, middleware.ErrCodeUnsupportedOp, "workspace not provisioned with fabric")
+			middleware.RespondError(w, http.StatusNotFound, middleware.ErrCodeFabricNotProvisioned, "workspace not provisioned with fabric")
 			return
 		}
 		middleware.RespondError(w, http.StatusInternalServerError, middleware.ErrCodeInternal, "lookup cmk: "+err.Error())
@@ -368,7 +368,7 @@ func (h *Handler) PutCMK(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := h.provisioner.UpdateCMK(r.Context(), workspaceID, uri); err != nil {
 		if errors.Is(err, fabric.ErrNoCredentials) {
-			middleware.RespondError(w, http.StatusNotFound, middleware.ErrCodeUnsupportedOp, "workspace not provisioned with fabric")
+			middleware.RespondError(w, http.StatusNotFound, middleware.ErrCodeFabricNotProvisioned, "workspace not provisioned with fabric")
 			return
 		}
 		middleware.RespondError(w, http.StatusInternalServerError, middleware.ErrCodeInternal, "update cmk: "+err.Error())

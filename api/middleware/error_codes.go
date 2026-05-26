@@ -99,6 +99,21 @@ const (
 	ErrCodeFileTooLarge  ErrorCode = "FILE_TOO_LARGE"
 	ErrCodeVirusDetected ErrorCode = "FILE_VIRUS_DETECTED"
 
+	// Workspace storage not yet provisioned with the fabric (404).
+	// Distinct from NOT_FOUND because the admin UI needs to render
+	// remediation copy ("contact your administrator to provision
+	// storage") rather than a generic "resource not found" message.
+	// Distinct from UNSUPPORTED_OPERATION because the operation IS
+	// supported by this deployment — the *workspace* just hasn't
+	// been wired up to the storage fabric yet, which is a
+	// recoverable state. Devin Review BUG_0001 on commit 4f3b458
+	// caught the prior misuse of UNSUPPORTED_OPERATION at four
+	// admin handler call sites (GetPlacement, UpdateMFAPolicy
+	// adjacent paths, GetCMK, UpdateCMK), where the user-facing
+	// copy "This operation is not supported" misled admins into
+	// believing the feature didn't exist on the deployment.
+	ErrCodeFabricNotProvisioned ErrorCode = "FABRIC_NOT_PROVISIONED"
+
 	// Share-link auth (401 / 403). Distinct from session auth so the
 	// frontend can render a password prompt rather than a sign-in
 	// screen — see api/drive/sharing.go writeSharingError.

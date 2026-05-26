@@ -49,6 +49,7 @@ const backendCodes = [
   "WORKSPACE_QUOTA_EXCEEDED",
   "FILE_TOO_LARGE",
   "FILE_VIRUS_DETECTED",
+  "FABRIC_NOT_PROVISIONED",
   // Share-link auth (401 distinct from session auth).
   "SHARE_PASSWORD_REQUIRED",
   // Share-link download cap (429 distinct from rate-limit throttle).
