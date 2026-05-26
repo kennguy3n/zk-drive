@@ -73,7 +73,7 @@ func newPromptCapturingOllamaServer(t *testing.T, response string) *promptCaptur
 			"done":     true,
 		})
 	}))
-	t.Cleanup(c.Server.Close)
+	t.Cleanup(c.Close)
 	return c
 }
 
