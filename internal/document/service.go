@@ -310,7 +310,12 @@ func (s *Service) Snapshot(ctx context.Context, workspaceID, documentID uuid.UUI
 // persisted via ReplaceSnapshot. The fold callback receives the
 // CURRENT snapshot bytes + ordered tail deltas and returns the new
 // snapshot bytes + state vector + the seq of the last delta folded.
-type FoldFunc func(currentState, currentStateVector []byte, tail []*Delta) (newState, newStateVector []byte, upToSeq int64, err error)
+//
+// ctx carries the caller's deadline + cancellation. Folds that
+// invoke external runtimes (wasm, network) MUST honour ctx and
+// return early on cancellation so the surrounding Compact call
+// can abort cleanly during server shutdown.
+type FoldFunc func(ctx context.Context, currentState, currentStateVector []byte, tail []*Delta) (newState, newStateVector []byte, upToSeq int64, err error)
 
 // Compact runs the fold and atomically swaps the snapshot. Returns
 // the updated Document. Idempotent: re-running with an empty tail
@@ -331,7 +336,7 @@ func (s *Service) Compact(ctx context.Context, workspaceID, documentID uuid.UUID
 	if len(tail) == 0 {
 		return d, nil
 	}
-	newState, newStateVector, upToSeq, err := fold(d.YState, d.YStateVector, tail)
+	newState, newStateVector, upToSeq, err := fold(ctx, d.YState, d.YStateVector, tail)
 	if err != nil {
 		return nil, fmt.Errorf("compaction fold: %w", err)
 	}

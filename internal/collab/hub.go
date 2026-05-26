@@ -152,10 +152,32 @@ func newRoom() *room {
 	return &room{clients: make(map[*DocumentClient]struct{})}
 }
 
+// CollabRelayPublisher is the abstraction the hub uses to push a
+// frame onto a multi-replica fan-out channel (typically Redis
+// pub/sub). The concrete implementation lives in redis_relay.go;
+// nil is treated as "single-replica mode" and the hub skips the
+// publish call entirely.
+//
+// PublishFrame is called from the hub AFTER a successful local
+// broadcast. The relay receives the same fully-framed payload
+// and ships it to every replica. Each replica's relay subscribe
+// loop then calls hub.BroadcastFromRelay to fan out to local
+// clients in that document's room (if any).
+//
+// The interface keeps the hub agnostic of Redis — tests can
+// supply a synchronous in-memory implementation and verify the
+// publish-then-broadcast wiring without needing a Redis
+// container.
+type CollabRelayPublisher interface {
+	PublishFrame(ctx context.Context, documentID uuid.UUID, payload []byte) error
+}
+
 // DocumentHub fans collab frames to per-document rooms. It is
-// goroutine-safe and operates entirely in-memory — multi-replica
-// fan-out is deferred to P2e (the same Redis-pub/sub blueprint
-// api/ws's changefeed publisher uses will land here too).
+// goroutine-safe. For single-replica deployments it operates
+// entirely in-memory; for multi-replica deployments
+// (CollabRelayPublisher wired) it also publishes every locally-
+// broadcast frame to Redis pub/sub so every other replica's hub
+// can fan the frame out to its local clients.
 //
 // The hub doesn't own the document.Service directly; instead, the
 // HTTP layer hands the hub an inbound frame plus the necessary
@@ -184,6 +206,14 @@ type DocumentHub struct {
 	// when unset, compaction-due signals are dropped silently and
 	// the next caller will retry.
 	scheduleCompaction func(workspaceID, documentID uuid.UUID)
+
+	// relay is the multi-replica fan-out publisher. nil for
+	// single-replica deployments (no REDIS_URL configured). When
+	// set, every successful local broadcast also publishes the
+	// frame to Redis under `collab:{documentID}`, where the
+	// other replicas' subscribe loops pick it up and fan out
+	// locally via BroadcastFromRelay.
+	relay CollabRelayPublisher
 
 	// compactWG tracks in-flight compaction goroutines so
 	// Shutdown can drain them before the server returns and the
@@ -223,6 +253,20 @@ func NewDocumentHub(docs *document.Service) *DocumentHub {
 // receiver for fluent chaining.
 func (h *DocumentHub) WithCompactionScheduler(fn func(workspaceID, documentID uuid.UUID)) *DocumentHub {
 	h.scheduleCompaction = fn
+	return h
+}
+
+// WithRelay installs a multi-replica fan-out publisher. After
+// every successful local broadcast (sync update or awareness),
+// the hub also calls relay.PublishFrame so other replicas can
+// fan the same frame out to their local clients. Returns the
+// receiver for fluent chaining.
+//
+// A nil relay is permitted and disables multi-replica fan-out
+// (single-replica mode). The hub never panics on a nil relay; it
+// simply skips the PublishFrame call.
+func (h *DocumentHub) WithRelay(relay CollabRelayPublisher) *DocumentHub {
+	h.relay = relay
 	return h
 }
 
@@ -415,7 +459,7 @@ func (h *DocumentHub) Handle(ctx context.Context, c *DocumentClient, f Frame) er
 	case MessageSync:
 		return h.handleSync(ctx, c, f)
 	case MessageAwareness:
-		return h.handleAwareness(c, f)
+		return h.handleAwareness(ctx, c, f)
 	case MessageAuth:
 		// Reserved; ignore in P2b. A future re-auth flow will
 		// dispatch on the sub-type here.
@@ -481,6 +525,24 @@ func (h *DocumentHub) handleSyncUpdate(ctx context.Context, c *DocumentClient, p
 	frame := EncodeSyncUpdate(payload)
 	h.broadcastExcept(c, frame)
 
+	// Multi-replica fan-out: after local broadcast, publish the
+	// frame to Redis so any other replica with clients in this
+	// document's room can fan it out locally too. The other
+	// replicas have no concept of "originating client" — they
+	// deliver to every member of their local room via
+	// BroadcastFromRelay.
+	//
+	// We use the request ctx so a server shutdown that cancels
+	// readPumps also cancels in-flight relay publishes; a Redis
+	// outage that would otherwise block here is bounded by the
+	// underlying redis.Client default timeouts (3 s read/write
+	// by default).
+	if h.relay != nil {
+		if err := h.relay.PublishFrame(ctx, c.DocumentID, frame); err != nil {
+			c.logger.Warn("collab: relay publish failed; multi-replica fan-out skipped for this frame", "err", err)
+		}
+	}
+
 	// Compaction-due signal: only schedule on ServerSnapshotAllowed
 	// folders. For strict_zk rooms, OpaqueConcatFold doesn't
 	// reduce payload size — the y_state grows monotonically — so
@@ -516,7 +578,7 @@ func (h *DocumentHub) handleSyncUpdate(ctx context.Context, c *DocumentClient, p
 	return nil
 }
 
-func (h *DocumentHub) handleAwareness(c *DocumentClient, f Frame) error {
+func (h *DocumentHub) handleAwareness(ctx context.Context, c *DocumentClient, f Frame) error {
 	if !c.Capability.PresenceAllowed {
 		// strict_zk room — drop the awareness frame server-side.
 		// We don't close the connection; a TipTap client that
@@ -535,7 +597,78 @@ func (h *DocumentHub) handleAwareness(c *DocumentClient, f Frame) error {
 	}
 	frame := EncodeAwareness(f.Payload)
 	h.broadcastExcept(c, frame)
+	if h.relay != nil {
+		// Multi-replica fan-out for awareness frames. We thread
+		// the caller's ctx (same one Handle / handleSyncUpdate
+		// use) so a server shutdown that cancels readPumps also
+		// cancels any in-flight awareness publish promptly,
+		// instead of holding shutdown hostage for one Redis
+		// WriteTimeout (typically 3s) per stuck publish. A
+		// publish failure is warn-logged and dropped; awareness
+		// is best-effort presence info, not durable state, so
+		// a single dropped frame is recoverable on the client's
+		// next awareness update.
+		if err := h.relay.PublishFrame(ctx, c.DocumentID, frame); err != nil {
+			c.logger.Warn("collab: relay publish failed for awareness frame", "err", err)
+		}
+	}
 	return nil
+}
+
+// BroadcastFromRelay fans `payload` to every client in `documentID`'s
+// room. It is called by the Redis collab relay's subscribe loop when
+// ANOTHER replica publishes a SyncUpdate or Awareness frame for a
+// document any of our local clients is editing.
+//
+// Crucially, this DOES NOT re-publish to Redis — the relay caller is
+// the canonical "incoming from Redis" path, and re-publishing would
+// create an infinite fan-out loop across replicas. The local
+// handleSyncUpdate / handleAwareness paths handle the
+// publish-to-Redis side of the wiring (via the relay's Publish
+// method invoked from the hub).
+//
+// The relay's Subscribe loop drops the publishing replica's own
+// echo via the per-relay originID prefix, so this method is only
+// ever invoked for frames produced by a different replica. The
+// local handleSyncUpdate path already fanned the frame to local
+// peers (via broadcastExcept which skips the originating client);
+// this method's job is to mirror that fan-out for clients
+// connected to other replicas, NOT to round-trip frames back to
+// the originating replica.
+//
+// All local clients in the room receive the frame. There is no
+// "originating client" to skip because the originating client is
+// connected to the publishing replica, not this one.
+//
+// Slow consumers (full outbound buffer) are unregistered to match
+// the local broadcastExcept policy. The room lock is held for the
+// minimum window required to snapshot the recipient set; the
+// deliverTo calls happen outside the lock to avoid stalling
+// concurrent Register / Unregister calls.
+//
+// payload is expected to be a fully-framed collab.Frame (i.e.
+// EncodeSyncUpdate / EncodeAwareness output). The relay does NOT
+// re-frame on Subscribe receive — the publisher framed it on its
+// way out.
+func (h *DocumentHub) BroadcastFromRelay(documentID uuid.UUID, payload []byte) {
+	h.mu.RLock()
+	r := h.rooms[documentID]
+	h.mu.RUnlock()
+	if r == nil {
+		// No local clients in this room — nothing to do. This
+		// is the common case for any document not being edited
+		// on this replica.
+		return
+	}
+	r.mu.RLock()
+	targets := make([]*DocumentClient, 0, len(r.clients))
+	for c := range r.clients {
+		targets = append(targets, c)
+	}
+	r.mu.RUnlock()
+	for _, c := range targets {
+		h.deliverTo(c, payload)
+	}
 }
 
 // broadcastExcept fans `payload` to every client in `from`'s room
@@ -583,32 +716,39 @@ func (h *DocumentHub) deliverTo(c *DocumentClient, payload []byte) {
 }
 
 // Shutdown closes every active client, clears the rooms map, and
-// blocks until in-flight compaction goroutines return. Called from
-// cmd/server's graceful-shutdown path so collab connections drain
-// (and any compaction job in progress finishes) before the process
-// closes the database pool.
+// blocks until in-flight compaction goroutines return or the
+// caller-supplied ctx deadline elapses. Called from cmd/server's
+// graceful-shutdown path so collab connections drain (and any
+// compaction job in progress finishes) before the process closes
+// the database pool.
 //
 // The hub does not own the context the compaction scheduler
-// captured, so Shutdown does not cancel that context — it relies
-// on compactWG.Wait to drain in-flight jobs synchronously. The
-// typical shutdown sequence in cmd/server is:
+// captured — ctx here is the shutdown grace window, not the
+// per-compaction request ctx. Shutdown bounds the wait so a stuck
+// compaction (DB unresponsive, wasm trap mid-fn.Call) cannot hold
+// the entire process exit hostage. If ctx fires first, the
+// background compaction goroutines keep running until the process
+// terminates — the caller's subsequent cancel() will then cancel
+// their per-job ctx via the inherited tree, and the OS reaps them
+// on os.Exit. A warning is logged so operators can investigate
+// what wedged. The typical shutdown sequence in cmd/server is:
 //
 //  1. srv.Shutdown(ctx)       — stops accepting new HTTP/WS connections
-//  2. collabHub.Shutdown()    — flips shuttingDown, closes existing WS clients,
-//                              drains in-flight compactions
+//  2. collabHub.Shutdown(ctx) — flips shuttingDown, closes existing WS clients,
+//                              drains in-flight compactions up to ctx deadline
 //  3. cancel()                — fires the global ctx.Done() (caller's responsibility,
 //                              after Shutdown returns; not required for hub
 //                              correctness)
 //  4. bgGoroutines.Wait()     — drains other background goroutines
 //  5. pool.Close()            — closes the DB pool against quiescent consumers
 //
-// Shutdown sets shuttingDown=true under h.mu.Lock BEFORE calling
-// compactWG.Wait so any concurrent handleSyncUpdate that wants to
+// Shutdown sets shuttingDown=true under h.mu.Lock BEFORE waiting
+// on compactWG so any concurrent handleSyncUpdate that wants to
 // schedule a new compaction sees the flag and skips the Add. The
 // RWMutex serves both as the publication barrier for the flag and
 // as the happens-before edge that orders any in-flight Add against
 // Wait.
-func (h *DocumentHub) Shutdown() {
+func (h *DocumentHub) Shutdown(ctx context.Context) {
 	h.mu.Lock()
 	h.shuttingDown.Store(true)
 	victims := make([]*DocumentClient, 0)
@@ -630,5 +770,24 @@ func (h *DocumentHub) Shutdown() {
 	// underlying pgx pool. Add(1) calls that win the race against
 	// the shuttingDown flip are accounted for by compactWG; calls
 	// that lose the race never executed Add.
-	h.compactWG.Wait()
+	//
+	// We bound the wait on ctx so a stuck compaction cannot wedge
+	// the whole shutdown. Pattern: spawn a goroutine to call Wait
+	// and close a sentinel channel; select against ctx.Done(). On
+	// ctx-fired we log a warning and return; the caller's outer
+	// cancel() will then cancel the compaction ctx (inherited from
+	// the same parent), giving stuck compactions one more chance
+	// to observe cancellation before the process exits.
+	done := make(chan struct{})
+	go func() {
+		h.compactWG.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-ctx.Done():
+		slog.Default().Warn("collab: hub shutdown ctx fired before all compactions drained",
+			"err", ctx.Err(),
+		)
+	}
 }

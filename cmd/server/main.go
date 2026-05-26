@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -187,12 +188,46 @@ func run() error {
 	documentRepo := document.NewPostgresRepository(pool)
 	documentSvc := document.NewService(documentRepo, folderSvc)
 
+	// YjsRuntime: a pooled wazero runtime that runs the embedded
+	// Rust-compiled wasm yrs CRDT to merge collab updates into a
+	// compact single-update snapshot during compaction (the
+	// production fold for managed_encrypted folders).
+	//
+	// Failure to initialise is a hard boot error: the wasm binary
+	// is committed to the repo and compiled into the Go artefact,
+	// so the only realistic failure modes are a corrupted binary
+	// or a wazero compile bug — both of which the operator wants
+	// to see immediately at startup, not as silently-broken
+	// compaction later.
+	//
+	// Close ordering: deferred so the runtime survives every
+	// in-flight compaction. collabHub.Shutdown (called by the
+	// graceful-shutdown handler later in this function) drains
+	// in-flight compaction goroutines via its compactWG before
+	// returning, so by the time this defer runs no fold is still
+	// touching the runtime.
+	yjsRuntime, err := collab.NewYjsRuntime(ctx)
+	if err != nil {
+		return fmt.Errorf("init yjs wasm runtime: %w", err)
+	}
+	defer func() {
+		_ = yjsRuntime.Close(context.Background())
+	}()
+	slog.Info("yjs wasm runtime ready", "max_instances", collab.DefaultYjsRuntimeMaxInstances)
+
 	// Collab hub: per-document WebSocket rooms for the Yjs editor.
-	// In-memory only; multi-replica fan-out is deferred to P2e. The
-	// compaction scheduler runs documentSvc.Compact with the
-	// folder-appropriate FoldFunc (OpaqueConcatFold today; a Yjs
-	// WASM-bridge fold lands in a follow-up). Wire AFTER documentSvc
-	// so the hub captures the live service pointer.
+	// Multi-replica fan-out via Redis (see RedisCollabRelay wiring
+	// further down). The compaction scheduler runs
+	// documentSvc.Compact with the folder-appropriate FoldFunc:
+	// YjsMergeFold for managed_encrypted (real CRDT merge via
+	// wasm), nil for strict_zk (no server-side fold possible).
+	// Wire AFTER documentSvc + yjsRuntime so the hub captures
+	// the live service pointer and runtime.
+	//
+	// The relay is attached further down once the Redis client
+	// (if any) is constructed — collabHub.WithRelay is fluent so
+	// we set it post-construction. The hub treats a nil relay as
+	// single-replica mode.
 	collabHub := collab.NewDocumentHub(documentSvc).
 		WithCompactionScheduler(func(workspaceID, documentID uuid.UUID) {
 			// Detached context: the WS goroutine that triggered
@@ -205,7 +240,7 @@ func run() error {
 				slog.Warn("collab compaction lookup failed", "err", err, "document_id", documentID)
 				return
 			}
-			fold := collab.FoldFor(collab.FromDocumentCapability(document.ResolveCapability(parent.EncryptionMode)))
+			fold := collab.FoldFor(collab.FromDocumentCapability(document.ResolveCapability(parent.EncryptionMode)), yjsRuntime)
 			if fold == nil {
 				// strict_zk: no server-side compaction (see
 				// collab.FoldFor doc comment). Drop the signal.
@@ -445,7 +480,7 @@ func run() error {
 		bgGoroutines.Add(1)
 		go func() {
 			defer bgGoroutines.Done()
-			if err := rp.Subscribe(ctx, hub); err != nil && err != context.Canceled {
+			if err := rp.Subscribe(ctx, hub); err != nil && !errors.Is(err, context.Canceled) {
 				slog.Error("redis ws subscribe loop exited", "err", err)
 			}
 		}()
@@ -467,13 +502,42 @@ func run() error {
 		bgGoroutines.Add(1)
 		go func() {
 			defer bgGoroutines.Done()
-			if err := cfRP.Subscribe(ctx, hub); err != nil && err != context.Canceled {
+			if err := cfRP.Subscribe(ctx, hub); err != nil && !errors.Is(err, context.Canceled) {
 				slog.Error("redis changefeed subscribe loop exited", "err", err)
 			}
 		}()
 	}
 	changefeedSvc := changefeed.NewService(changefeed.NewPostgresRepository(pool)).
 		WithPublisher(changefeedPublisher)
+
+	// Collab relay: Redis pub/sub multi-replica fan-out for the
+	// document collab hub. Mirrors the notification / changefeed
+	// publisher pattern (PSubscribe on `collab:*`, parse the
+	// document UUID, deliver to local room members via
+	// hub.BroadcastFromRelay). When redisClient is nil, the relay
+	// constructor returns nil and the hub treats that as single-
+	// replica mode (PublishFrame is a no-op).
+	collabRelay := collab.NewRedisCollabRelay(redisClient)
+	// Guard the WithRelay call with an explicit nil check: a
+	// nil *RedisCollabRelay wrapped in the CollabRelayPublisher
+	// interface produces a non-nil interface value whose
+	// underlying pointer is nil. Without this guard the hub
+	// would observe `h.relay != nil` and call PublishFrame on
+	// every sync update, only for PublishFrame to no-op on the
+	// nil receiver path. Skipping WithRelay entirely keeps the
+	// hub's relay==nil fast path cleanly engaged in single-
+	// replica mode.
+	if collabRelay != nil {
+		collabHub.WithRelay(collabRelay)
+		bgGoroutines.Add(1)
+		go func() {
+			defer bgGoroutines.Done()
+			if err := collabRelay.Subscribe(ctx, collabHub); err != nil && !errors.Is(err, context.Canceled) {
+				slog.Error("redis collab relay subscribe loop exited", "err", err)
+			}
+		}()
+		slog.Info("collab redis relay active, multi-replica collab fan-out enabled")
+	}
 
 	// emailSvc owns transactional email delivery (guest-invite
 	// notifications today; future password-reset / MFA notices
@@ -1059,7 +1123,7 @@ func run() error {
 	//   3. The deferred bgGoroutines.Wait + pool.Close at the top of
 	//      run() finish the shutdown after we return.
 	shutdownErr := srv.Shutdown(shutdownCtx)
-	collabHub.Shutdown()
+	collabHub.Shutdown(shutdownCtx)
 	return shutdownErr
 }
 
