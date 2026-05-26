@@ -87,36 +87,6 @@ func (m *Metrics) RecordDBQuery(op string, duration time.Duration, result string
 	m.dbQueryDuration.WithLabelValues(op).Observe(duration.Seconds())
 }
 
-// ObserveDBQuery is a sugar wrapper that captures the start time
-// at call-time and emits the histogram + counter in a deferred
-// closure that reads the named-return error pointer. The typical
-// shape in a repository method is:
-//
-//	func (r *PostgresRepository) Foo(ctx context.Context) (err error) {
-//	    defer metrics.ObserveDBQuery(r.obs, "permission.foo", time.Now(), &err)
-//	    // ... body assigns to err on every error return
-//	}
-//
-// obs may be nil — the deferred record-call is a no-op on a nil
-// Metrics, so a repository running without metrics installed pays
-// only the cost of one nil-check per call.
-//
-// Note: errPtr is *expected* to be the address of a named return,
-// so the error visible AT defer time is the final value the
-// caller will see. Passing a stack-local err is a footgun (the
-// outer scope's err is what matters); the linter does not catch
-// this, hence the doc emphasis.
-func ObserveDBQuery(obs DBObserver, op string, start time.Time, errPtr *error) {
-	if obs == nil {
-		return
-	}
-	result := DBResultOK
-	if errPtr != nil && *errPtr != nil {
-		result = classifyDBError(*errPtr)
-	}
-	obs.RecordDBQuery(op, time.Since(start), result)
-}
-
 // DBObserver is the minimal surface a repository depends on to
 // emit DB query metrics. Defined here so consumers can spell out
 // the dependency without importing the full metrics package — and
@@ -124,25 +94,6 @@ func ObserveDBQuery(obs DBObserver, op string, start time.Time, errPtr *error) {
 // promauto registry plumbing.
 type DBObserver interface {
 	RecordDBQuery(op string, duration time.Duration, result string)
-}
-
-// classifyDBError maps an error returned from a Query / QueryRow
-// / Exec into the bounded DBResult* label vocabulary.
-//
-// pgx.ErrNoRows is classified as not_found rather than error
-// because a no-row outcome is an *expected* result of many
-// lookups (e.g. "is this user a member of that workspace?" —
-// usually no) and treating it as error would mask real DB
-// failures behind a constant baseline of false positives.
-//
-// We deliberately do NOT import pgx in this package to avoid the
-// transitive dependency creep into binaries that never touch
-// Postgres. Instead callers that want the not_found
-// classification pass the constant directly via
-// (*Metrics).RecordDBQuery. The default here is DBResultError so
-// the conservative classification is always available.
-func classifyDBError(_ error) string {
-	return DBResultError
 }
 
 // registerDBMetrics mounts the per-query histogram + counter on
