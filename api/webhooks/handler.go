@@ -515,10 +515,12 @@ func (h *Handler) Resume(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
+// writeJSON delegates to middleware.WriteJSON so webhook
+// success responses share the same Content-Type charset and
+// X-Content-Type-Options defence as the error responses written
+// through middleware.RespondError from the same handlers.
 func writeJSON(w http.ResponseWriter, status int, payload any) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(payload)
+	middleware.WriteJSON(w, status, payload)
 }
 
 func writeServerError(ctx context.Context, w http.ResponseWriter, op string, err error) {

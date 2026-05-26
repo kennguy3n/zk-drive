@@ -774,10 +774,12 @@ func (h *Handler) DeleteRetentionPolicy(w http.ResponseWriter, r *http.Request) 
 
 // Helpers ----------------------------------------------------------
 
+// writeJSON delegates to middleware.WriteJSON so admin success
+// responses share the same Content-Type charset and
+// X-Content-Type-Options defence as the error responses written
+// through middleware.RespondError from the same handlers.
 func writeJSON(w http.ResponseWriter, status int, payload any) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(payload)
+	middleware.WriteJSON(w, status, payload)
 }
 
 func parseIntQuery(r *http.Request, key string, def int) int {

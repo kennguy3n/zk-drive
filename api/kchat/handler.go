@@ -324,16 +324,15 @@ func (h *Handler) RoomSummary(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"summary": summary})
 }
 
-// writeJSON encodes payload to w with the given status code. Cloned
-// from api/drive/handler.go so the kchat package stays free of
-// internal cross-package helpers.
+// writeJSON delegates to middleware.WriteJSON so kchat success
+// responses share the same Content-Type charset and
+// X-Content-Type-Options defence as the error responses written
+// through middleware.RespondError from the same handlers. The
+// prior local implementation had a nil-payload early return; no
+// call site in this package passes nil (verified via grep), so
+// dropping the branch is behaviour-preserving.
 func writeJSON(w http.ResponseWriter, status int, payload any) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(status)
-	if payload == nil {
-		return
-	}
-	_ = json.NewEncoder(w).Encode(payload)
+	middleware.WriteJSON(w, status, payload)
 }
 
 // writeServiceError translates kchat / underlying service errors

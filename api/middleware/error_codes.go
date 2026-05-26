@@ -163,6 +163,30 @@ func RespondValidationError(w http.ResponseWriter, message string, details map[s
 }
 
 func respondErrorWithDetails(w http.ResponseWriter, status int, code ErrorCode, message string, details map[string]string) {
+	WriteJSON(w, status, ErrorResponse{
+		Code:    code,
+		Message: message,
+		Details: details,
+	})
+}
+
+// WriteJSON writes a JSON-encoded payload with the canonical
+// response headers used across every handler package. Prefer this
+// over hand-rolled `w.Header().Set("Content-Type", "application/json")`
+// + `json.NewEncoder(w).Encode(...)` so success responses share
+// the same Content-Type charset and the same X-Content-Type-Options
+// defence as error responses written through RespondError. Earlier
+// versions of the code had each handler package (api/auth,
+// api/admin, api/webhooks, api/drive, api/kchat) carry its own
+// writeJSON helper, and the headers drifted apart over time —
+// drive/helpers.go.writeJSON omitted charset=utf-8 and nosniff,
+// while error responses going through the same handler set both.
+// Consolidating here keeps a single source of truth.
+//
+// payload is allowed to be nil; the body is then written as
+// JSON `null` per encoding/json semantics. Callers that don't
+// want a body should call w.WriteHeader directly instead.
+func WriteJSON(w http.ResponseWriter, status int, payload any) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	// Defense-in-depth: refuse content-type sniffing so a browser
 	// that receives this body in an <img>/<script>/<iframe> context
@@ -172,15 +196,10 @@ func respondErrorWithDetails(w http.ResponseWriter, status int, code ErrorCode, 
 	// future MIME-confusion mistakes elsewhere on the response.
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	w.WriteHeader(status)
-	// We intentionally swallow the encoding error: the response
-	// has already been committed (WriteHeader fired), so there's
-	// no recovery action available. The encoder's only failure
-	// modes here are a closed connection (caller already gone) or
-	// the encoder buffering ran out of memory (process is in
-	// worse trouble than a missing error body).
-	_ = json.NewEncoder(w).Encode(ErrorResponse{
-		Code:    code,
-		Message: message,
-		Details: details,
-	})
+	// Intentionally swallow the encoding error: the response has
+	// already been committed (WriteHeader fired), so there is no
+	// recovery path. The encoder's only failure modes here are a
+	// closed connection (caller already gone) or buffer exhaustion
+	// (process is in worse trouble than a missing body).
+	_ = json.NewEncoder(w).Encode(payload)
 }

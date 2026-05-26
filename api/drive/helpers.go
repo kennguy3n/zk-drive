@@ -1,7 +1,6 @@
 package drive
 
 import (
-	"encoding/json"
 	"errors"
 	"net/http"
 	"strconv"
@@ -105,8 +104,12 @@ func writeServiceError(w http.ResponseWriter, err error) {
 	}
 }
 
+// writeJSON delegates to middleware.WriteJSON so success responses
+// share the same Content-Type charset and X-Content-Type-Options
+// defence as error responses written through middleware.RespondError.
+// Kept as a thin package-local alias so the rest of the package
+// reads the same as before (writeJSON(w, status, payload)) rather
+// than every call site importing middleware.
 func writeJSON(w http.ResponseWriter, status int, payload any) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(payload)
+	middleware.WriteJSON(w, status, payload)
 }

@@ -552,8 +552,11 @@ func writeToken(w http.ResponseWriter, secret string, userID, workspaceID uuid.U
 	})
 }
 
+// writeJSON delegates to middleware.WriteJSON so auth success
+// responses (login, signup, mfa challenge) share the same
+// Content-Type charset and X-Content-Type-Options defence as
+// the error responses written through middleware.RespondError
+// from the same handlers.
 func writeJSON(w http.ResponseWriter, status int, payload any) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(payload)
+	middleware.WriteJSON(w, status, payload)
 }

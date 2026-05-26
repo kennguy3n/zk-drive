@@ -53,6 +53,23 @@ const NON_SESSION_401_CODES = new Set<string>([
   // future handler starts emitting either of them as 401, add them
   // here at the same time.)
   "AUTH_MFA_INVALID",
+  // Login-flow wrong email or password. The caller is at /login
+  // (a logged-out visitor in the normal case; a still-authenticated
+  // user who accidentally navigated back to /login in the edge case
+  // a Devin Review check on PR #83 flagged). Either way, the
+  // session-clear-and-redirect interceptor is wrong here:
+  //   - Logged-out visitor: the path-guard at line 91 prevents the
+  //     redirect (we're already at /login). localStorage clear is
+  //     a no-op (nothing to clear). Form-level error surfaces fine
+  //     either way; saying so explicitly keeps the contract clean.
+  //   - Still-authenticated user typing wrong creds on /login: we
+  //     would have nuked a fully-valid session for a typo. The
+  //     code is AUTH_INVALID_CREDENTIALS (form-level wrong
+  //     password), NOT a session-state error — there's no reason
+  //     to touch their token at all. The page's catch block
+  //     handles it; if they want a different account they can
+  //     hit "sign out" deliberately.
+  "AUTH_INVALID_CREDENTIALS",
   // Mid-session password reverify failure (disable-2FA flow, future
   // change-email / change-password flows). The user's session JWT
   // is still valid — that's how they reached the handler in the
