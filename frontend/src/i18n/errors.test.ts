@@ -28,6 +28,7 @@ const backendCodes = [
   "ADMIN_ACCESS_REQUIRED",
   "READ_ONLY_ROLE",
   "WRONG_TENANT",
+  // Workspace-routing failure (401 distinct from session auth).
   "MISSING_WORKSPACE_CONTEXT",
   // Rate limiting (429).
   "RATE_LIMIT_EXCEEDED",

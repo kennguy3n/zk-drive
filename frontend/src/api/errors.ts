@@ -83,6 +83,24 @@ export function extractErrorMessage(err: unknown): string | null {
   return null;
 }
 
+// TranslateApiErrorOptions tunes the fallback chain on a per-call
+// basis. The default (no options) preserves the original "always
+// returns a non-empty string" contract: missing code AND missing
+// message resolve to t("common.error") ("Something went wrong").
+//
+// Callers that want a more context-specific fallback for the
+// no-code-no-message case (e.g. a network error during checkout)
+// can pass `fallback` — that string replaces the generic
+// t("common.error") slot. Use case: see BillingPage.handleCheckout
+// where "Could not start checkout" is more actionable than the
+// generic copy.
+export interface TranslateApiErrorOptions {
+  // fallback is shown when the error carries neither a translatable
+  // code nor a server-supplied message — i.e. the network failed
+  // before the request reached the API. Defaults to t("common.error").
+  fallback?: string;
+}
+
 // translateApiError is the one-call helper for UI handlers:
 //
 //   } catch (err) {
@@ -92,8 +110,21 @@ export function extractErrorMessage(err: unknown): string | null {
 // Resolution order:
 //   1. If the error carries a known code, return t(`errors.${code}`).
 //   2. Otherwise return the server-supplied message verbatim.
-//   3. Otherwise return the generic "Something went wrong" copy.
-export function translateApiError(err: unknown, t: TFunction): string {
+//   3. Otherwise return options.fallback if provided, else
+//      the generic "Something went wrong" copy.
+//
+// Devin Review BUG_0001 on commit bb909a1: the prior shape always
+// returned a non-empty string (last fallback `t("common.error")`),
+// so callers writing `translateApiError(e, t) || t("billing.X")`
+// at BillingPage.tsx:59/72 saw the right-hand side become dead
+// code. The fallback parameter replaces the generic slot directly,
+// keeping a single source of truth for the "no code, no message"
+// case while letting the call site provide page-specific copy.
+export function translateApiError(
+  err: unknown,
+  t: TFunction,
+  options: TranslateApiErrorOptions = {},
+): string {
   const code = extractErrorCode(err);
   if (code) {
     // i18next will fall back to the English file if the code is
@@ -109,6 +140,9 @@ export function translateApiError(err: unknown, t: TFunction): string {
   const msg = extractErrorMessage(err);
   if (msg) {
     return msg;
+  }
+  if (options.fallback) {
+    return options.fallback;
   }
   return t("common.error");
 }

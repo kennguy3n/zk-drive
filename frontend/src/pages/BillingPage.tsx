@@ -56,7 +56,7 @@ export default function BillingPage() {
       window.location.assign(url);
     } catch (e) {
       setBusy(null);
-      setError(translateApiError(e, t) || t("billing.checkoutFailed"));
+      setError(translateApiError(e, t, { fallback: t("billing.checkoutFailed") }));
     }
   }
 
@@ -69,7 +69,7 @@ export default function BillingPage() {
       window.location.assign(url);
     } catch (e) {
       setBusy(null);
-      setError(translateApiError(e, t) || t("billing.portalFailed"));
+      setError(translateApiError(e, t, { fallback: t("billing.portalFailed") }));
     }
   }
 
