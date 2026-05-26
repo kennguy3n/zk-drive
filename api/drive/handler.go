@@ -77,10 +77,27 @@ type Handler struct {
 }
 
 // TagSuggester is the narrow interface the drive handler needs from
-// the AI suggestion service. Declared here (not pulled from
-// internal/ai) so the api/drive package doesn't depend on
-// internal/ai directly — keeps the dependency graph one-way (ai
-// → middleware, drive → ai through an interface).
+// the AI suggestion service. Declared here so the handler depends on
+// the CONTRACT (one method, the request shape) rather than the
+// concrete *ai.SuggestionService type — meaning api/drive never
+// needs a compile-time reference to the SuggestionService struct,
+// its pool field, or any of its internal helpers. The handler's
+// With* setter takes the interface, and reflect-based typed-nil
+// detection in WithTagSuggester avoids the type-assertion that
+// would otherwise re-couple to *ai.SuggestionService.
+//
+// Caveat: api/drive/ai.go DOES import internal/ai for the error
+// sentinels (ai.ErrTagSuggestUnavailable, ai.ErrTagSuggestFileNotFound)
+// used in writeTagSuggestError's status-code mapping. The sentinels
+// are part of the ai → drive contract — they're typed values, not
+// new behaviour, so the import sits on the safer side of the
+// dependency boundary (drive consumes named errors, not concrete
+// service types). If we ever want a fully zero-import contract,
+// the sentinels could move to a shared sub-package
+// (e.g. internal/ai/aierr) — but a pure interface boundary at the
+// cost of a third package would be over-engineering for two error
+// constants. Devin Review ANALYSIS_0001 on PR #85 flagged the
+// earlier "no direct dependency" wording as overclaiming.
 type TagSuggester interface {
 	Suggest(ctx context.Context, workspaceID, fileID uuid.UUID) ([]string, error)
 }
@@ -91,6 +108,10 @@ type TagSuggester interface {
 // resolved language) — returning a tuple keeps the contract free
 // of a shared transport struct so the ai package can evolve its
 // internal shape without forcing this interface to follow.
+//
+// Same dependency caveat as TagSuggester above: the *interface*
+// avoids the concrete type, but the package still imports ai for
+// error sentinels.
 type QueryExpander interface {
 	Expand(ctx context.Context, workspaceID uuid.UUID, query string) (terms []string, llmUsed bool, language string, err error)
 }

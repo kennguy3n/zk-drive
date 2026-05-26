@@ -156,7 +156,15 @@ func NewSuggestionService(pool *pgxpool.Pool) *SuggestionService {
 
 // WithLLM wires an on-device LLM client. As with SummaryService,
 // any client error causes the LLM stage to be skipped; the rule-
-// based scaffold's output is still returned (never empty).
+// based scaffold's output is still returned. The scaffold output
+// can be empty when ALL THREE inputs are degenerate: the file has
+// an unknown extension (not in extensionTags), zero usable content
+// keywords, and zero overlap with the workspace's existing tag
+// vocabulary. The handler doc at api/drive/ai.go:24 documents
+// this empty-slice case and the frontend handles it gracefully.
+// Devin Review ANALYSIS_0004 on PR #85 flagged the earlier 'never
+// empty' claim as an overstatement — see the longer comment at
+// the call site below for the precondition list.
 func (s *SuggestionService) WithLLM(c LLMClient) *SuggestionService {
 	s.llm = c
 	return s
@@ -258,9 +266,26 @@ LIMIT 256`, workspaceID)
 	preview := truncatePreview(contentText, tagSuggestMaxFile)
 
 	// Rule-based scaffold — runs unconditionally and forms the
-	// deterministic floor. Even if the LLM stage is disabled (no
-	// daemon configured) or fails (network blip), the response is
-	// never empty.
+	// deterministic floor for the response. Even if the LLM stage
+	// is disabled (no daemon configured) or fails (network blip),
+	// the scaffold output is what comes back.
+	//
+	// Precondition for a non-empty floor: at LEAST ONE of
+	//   (a) the file's extension is in extensionTags (every common
+	//       office/data file type is covered), OR
+	//   (b) the file's name + content_text yields at least one
+	//       keyword that survives tagKeywordMinRuneCount filtering
+	//       and the structural-word denylist, OR
+	//   (c) the workspace has at least one tag whose
+	//       hyphen-bounded segment matches a token in the file.
+	//
+	// If all three preconditions miss — unknown extension, empty
+	// content_text, no workspace-tag overlap — the response is
+	// the empty slice. This is documented behaviour at
+	// api/drive/ai.go:24 ('may be empty list for a file with no
+	// extracted content + no overlapping tags') and the frontend
+	// handles it as a no-op (no chips rendered). Devin Review
+	// ANALYSIS_0004 on PR #85.
 	suggestions := ruleBasedSuggestions(name, preview, workspaceTags)
 
 	// LLM refinement — best-effort, never blocks. A failure logs a

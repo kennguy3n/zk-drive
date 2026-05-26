@@ -261,18 +261,29 @@ func setupEnv(t *testing.T) *testEnv {
 	// language-resolver-aware (matching production wiring) so the
 	// multilingual prompt path is exercised end-to-end here too.
 	// Devin Review ANALYSIS_0002 on PR #85.
-	tagSuggestSvc := ai.NewSuggestionService(pool).WithLanguageResolver(wsSvc)
-	queryExpandSvc := ai.NewExpansionService(pool).WithLanguageResolver(wsSvc)
+	//
+	// A single OllamaClient is constructed up front and shared
+	// across all three AI services (tag-suggest, query-expand,
+	// summary). This mirrors cmd/server/main.go:632-638 exactly
+	// and avoids the per-service NewOllamaClient calls that an
+	// earlier iteration of this harness used. OllamaClient is
+	// stateless (just endpoint URL + http.Client) so the previous
+	// shape had no behavioural impact, but a single instance is
+	// easier to reason about and matches production verbatim.
+	// Devin Review ANALYSIS_0003 on PR #85 flagged the divergence.
+	var ollamaClient ai.LLMClient
 	if endpoint := os.Getenv("OLLAMA_URL"); endpoint != "" {
-		// Tests opting into LLM-on path (via t.Setenv before
-		// setupEnv) get the same LLM client bound to all three
-		// AI services, mirroring cmd/server/main.go:636-638.
 		llm, err := ai.NewOllamaClient(endpoint, os.Getenv("OLLAMA_MODEL"))
 		if err != nil {
 			t.Fatalf("ai/ollama: %v", err)
 		}
-		tagSuggestSvc = tagSuggestSvc.WithLLM(llm)
-		queryExpandSvc = queryExpandSvc.WithLLM(llm)
+		ollamaClient = llm
+	}
+	tagSuggestSvc := ai.NewSuggestionService(pool).WithLanguageResolver(wsSvc)
+	queryExpandSvc := ai.NewExpansionService(pool).WithLanguageResolver(wsSvc)
+	if ollamaClient != nil {
+		tagSuggestSvc = tagSuggestSvc.WithLLM(ollamaClient)
+		queryExpandSvc = queryExpandSvc.WithLLM(ollamaClient)
 	}
 	driveHandler := drive.NewHandler(pool, wsSvc, folderSvc, fileSvc, userSvc, storageClient, permissionSvc, activitySvc).
 		WithSharing(sharingSvc).
@@ -347,19 +358,13 @@ func setupEnv(t *testing.T) *testEnv {
 	// Without this, the integration harness would always exercise the
 	// English-fallback branch and the workspace.SearchLanguage →
 	// PromptLanguageFor codepath would only be covered by unit tests in
-	// internal/ai. Devin Review ANALYSIS_0003 on PR #85.
+	// internal/ai. Devin Review WS6 prompt-language change.
+	//
+	// Reuses the ollamaClient built earlier so the harness has the
+	// same single-instance shape as cmd/server/main.go:632-638.
 	summarySvc := ai.NewSummaryService(pool).WithLanguageResolver(wsSvc)
-	// When the test sets OLLAMA_URL via t.Setenv (e.g. against an
-	// httptest.Server) the harness mirrors cmd/server/main.go and
-	// wires the local LLM. Without it, summaries stay on the
-	// rule-based scaffold so unrelated tests don't accidentally
-	// depend on a daemon being up.
-	if endpoint := os.Getenv("OLLAMA_URL"); endpoint != "" {
-		llm, err := ai.NewOllamaClient(endpoint, os.Getenv("OLLAMA_MODEL"))
-		if err != nil {
-			t.Fatalf("ai/ollama: %v", err)
-		}
-		summarySvc = summarySvc.WithLLM(llm)
+	if ollamaClient != nil {
+		summarySvc = summarySvc.WithLLM(ollamaClient)
 	}
 	kchatHandler := apikchat.NewHandler(kchatSvc, summarySvc)
 
