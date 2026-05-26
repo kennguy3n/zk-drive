@@ -5,15 +5,25 @@ members = [
     "crates/api-client",
     "crates/auth",
     "crates/sync-engine",
+    "crates/desktop-shell",
     "crates/cli",
 ]
 
 # zk-sync-sdk — Rust workspace that backs the ZK Drive desktop sync
-# agent and the future Tauri shell. The five crates are layered so
-# `cli` depends on `sync-engine`, which depends on `api-client`,
-# `auth`, and `crypto`. Each crate is independently usable from a
-# host language via UniFFI in a follow-up PR; for now the binding
-# layer is internal.
+# agent and the Tauri / Electron / native desktop shells. The six
+# crates are layered so `cli` and `desktop-shell` both depend on
+# `sync-engine`, which in turn depends on `api-client`, `auth`, and
+# `crypto`. Each crate is independently usable from a host language
+# via UniFFI in a follow-up PR; for now the binding layer is
+# internal.
+#
+# `desktop-shell` (WS7) is the embedding-friendly harness that wraps
+# the engine in a multi-workspace lifecycle, a JSON-RPC-shaped
+# Command surface, and a broadcast event bus. The Tauri / Electron
+# main binary is intentionally NOT in this workspace — it pulls
+# desktop-shell as a path dependency and adds the GUI framework on
+# top, which keeps the GUI's heavy system dependencies
+# (webkit2gtk-4.1 etc.) out of the headless CI build.
 #
 # Mapping to the Go encryption envelope:
 #   * crates/crypto must produce byte-identical ciphertext to

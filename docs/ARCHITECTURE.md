@@ -571,9 +571,10 @@ badges in the top bar.
 
 The change feed is the durable, monotonically-ordered stream of
 state-mutating operations on a workspace's files / folders /
-permissions. It is the transport the desktop sync SDK (P1a) and
-future native mobile clients use to keep a local replica in sync
-with the server.
+permissions. It is the transport the desktop sync SDK
+(`sdk/crates/sync-engine`), the embedding shell
+(`sdk/crates/desktop-shell`), and future native mobile clients use
+to keep a local replica in sync with the server.
 
 The transport has two halves:
 
