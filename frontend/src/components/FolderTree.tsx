@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
+import { useTranslation } from "react-i18next";
 import { listFolders, type Folder } from "../api/client";
 import EncryptionBadge from "./EncryptionBadge";
 
@@ -7,6 +8,7 @@ import EncryptionBadge from "./EncryptionBadge";
 // direct children of the current folder. A full recursive tree is a
 // follow-up enhancement.
 export default function FolderTree({ currentFolderID }: { currentFolderID: string | null }) {
+  const { t } = useTranslation();
   const [rootFolders, setRootFolders] = useState<Folder[]>([]);
   const [error, setError] = useState<string | null>(null);
 
@@ -35,7 +37,7 @@ export default function FolderTree({ currentFolderID }: { currentFolderID: strin
       }}
     >
       <div style={{ fontSize: 12, textTransform: "uppercase", color: "#6b7280", marginBottom: 8 }}>
-        Workspace
+        {t("nav.workspace")}
       </div>
       <Link
         to="/drive"
@@ -46,7 +48,7 @@ export default function FolderTree({ currentFolderID }: { currentFolderID: strin
           background: currentFolderID === null ? "#eef2ff" : "transparent",
         }}
       >
-        Root
+        {t("drive.rootFolder")}
       </Link>
       {error ? (
         <div style={{ color: "#b91c1c", fontSize: 12, marginTop: 8 }}>{error}</div>

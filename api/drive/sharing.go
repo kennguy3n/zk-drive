@@ -46,12 +46,12 @@ type createGuestInviteRequest struct {
 // sharing configuration is a sensitive operation.
 func (h *Handler) CreateShareLink(w http.ResponseWriter, r *http.Request) {
 	if h.sharing == nil {
-		http.Error(w, "sharing not configured", http.StatusNotImplemented)
+		middleware.RespondError(w, http.StatusNotImplemented, middleware.ErrCodeUnsupportedOp, "sharing not configured")
 		return
 	}
 	role, _ := middleware.RoleFromContext(r.Context())
 	if role != user.RoleAdmin {
-		http.Error(w, "admin role required", http.StatusForbidden)
+		middleware.RespondError(w, http.StatusForbidden, middleware.ErrCodeAdminOnly, "admin role required")
 		return
 	}
 	workspaceID, _ := middleware.WorkspaceIDFromContext(r.Context())
@@ -59,34 +59,34 @@ func (h *Handler) CreateShareLink(w http.ResponseWriter, r *http.Request) {
 
 	var req createShareLinkRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "invalid json body", http.StatusBadRequest)
+		middleware.RespondError(w, http.StatusBadRequest, middleware.ErrCodeMalformedJSON, "invalid json body")
 		return
 	}
 	if !sharing.IsValidResourceType(req.ResourceType) {
-		http.Error(w, "invalid resource_type", http.StatusBadRequest)
+		middleware.RespondError(w, http.StatusBadRequest, middleware.ErrCodeBadRequest, "invalid resource_type")
 		return
 	}
 	resourceID, err := uuid.Parse(req.ResourceID)
 	if err != nil {
-		http.Error(w, "invalid resource_id", http.StatusBadRequest)
+		middleware.RespondError(w, http.StatusBadRequest, middleware.ErrCodeBadRequest, "invalid resource_id")
 		return
 	}
 	if err := h.assertResourceInWorkspace(r.Context(), workspaceID, req.ResourceType, resourceID); err != nil {
-		writeServiceError(w, err)
+		writeServiceError(w, r, err)
 		return
 	}
 	var expiresAt *time.Time
 	if req.ExpiresAt != nil && *req.ExpiresAt != "" {
 		t, terr := time.Parse(time.RFC3339, *req.ExpiresAt)
 		if terr != nil {
-			http.Error(w, "invalid expires_at (expected RFC3339)", http.StatusBadRequest)
+			middleware.RespondError(w, http.StatusBadRequest, middleware.ErrCodeBadRequest, "invalid expires_at (expected RFC3339)")
 			return
 		}
 		expiresAt = &t
 	}
 	link, err := h.sharing.CreateShareLink(r.Context(), workspaceID, req.ResourceType, resourceID, req.Password, expiresAt, req.MaxDownloads, userID)
 	if err != nil {
-		writeSharingError(w, err)
+		writeSharingError(w, r, err)
 		return
 	}
 	h.notify(r.Context(), func(n *notification.Service) error {
@@ -102,26 +102,26 @@ func (h *Handler) CreateShareLink(w http.ResponseWriter, r *http.Request) {
 // a plain browser address bar.
 func (h *Handler) ResolveShareLink(w http.ResponseWriter, r *http.Request) {
 	if h.sharing == nil {
-		http.Error(w, "sharing not configured", http.StatusNotImplemented)
+		middleware.RespondError(w, http.StatusNotImplemented, middleware.ErrCodeUnsupportedOp, "sharing not configured")
 		return
 	}
 	token := chi.URLParam(r, "token")
 	if token == "" {
-		http.Error(w, "token is required", http.StatusBadRequest)
+		middleware.RespondError(w, http.StatusBadRequest, middleware.ErrCodeMissingField, "token is required")
 		return
 	}
 	var password string
 	if r.Method == http.MethodPost && r.ContentLength > 0 {
 		var req resolveShareLinkRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			http.Error(w, "invalid json body", http.StatusBadRequest)
+			middleware.RespondError(w, http.StatusBadRequest, middleware.ErrCodeMalformedJSON, "invalid json body")
 			return
 		}
 		password = req.Password
 	}
 	link, err := h.sharing.ResolveShareLink(r.Context(), token, password)
 	if err != nil {
-		writeSharingError(w, err)
+		writeSharingError(w, r, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, link)
@@ -130,22 +130,22 @@ func (h *Handler) ResolveShareLink(w http.ResponseWriter, r *http.Request) {
 // RevokeShareLink deletes a share link. Admin-only.
 func (h *Handler) RevokeShareLink(w http.ResponseWriter, r *http.Request) {
 	if h.sharing == nil {
-		http.Error(w, "sharing not configured", http.StatusNotImplemented)
+		middleware.RespondError(w, http.StatusNotImplemented, middleware.ErrCodeUnsupportedOp, "sharing not configured")
 		return
 	}
 	role, _ := middleware.RoleFromContext(r.Context())
 	if role != user.RoleAdmin {
-		http.Error(w, "admin role required", http.StatusForbidden)
+		middleware.RespondError(w, http.StatusForbidden, middleware.ErrCodeAdminOnly, "admin role required")
 		return
 	}
 	workspaceID, _ := middleware.WorkspaceIDFromContext(r.Context())
 	id, err := uuid.Parse(chi.URLParam(r, "id"))
 	if err != nil {
-		http.Error(w, "invalid id", http.StatusBadRequest)
+		middleware.RespondError(w, http.StatusBadRequest, middleware.ErrCodeBadRequest, "invalid id")
 		return
 	}
 	if err := h.sharing.RevokeShareLink(r.Context(), workspaceID, id); err != nil {
-		writeSharingError(w, err)
+		writeSharingError(w, r, err)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
@@ -155,12 +155,12 @@ func (h *Handler) RevokeShareLink(w http.ResponseWriter, r *http.Request) {
 // grant on the target folder. Admin-only.
 func (h *Handler) CreateGuestInvite(w http.ResponseWriter, r *http.Request) {
 	if h.sharing == nil {
-		http.Error(w, "sharing not configured", http.StatusNotImplemented)
+		middleware.RespondError(w, http.StatusNotImplemented, middleware.ErrCodeUnsupportedOp, "sharing not configured")
 		return
 	}
 	role, _ := middleware.RoleFromContext(r.Context())
 	if role != user.RoleAdmin {
-		http.Error(w, "admin role required", http.StatusForbidden)
+		middleware.RespondError(w, http.StatusForbidden, middleware.ErrCodeAdminOnly, "admin role required")
 		return
 	}
 	workspaceID, _ := middleware.WorkspaceIDFromContext(r.Context())
@@ -168,30 +168,30 @@ func (h *Handler) CreateGuestInvite(w http.ResponseWriter, r *http.Request) {
 
 	var req createGuestInviteRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "invalid json body", http.StatusBadRequest)
+		middleware.RespondError(w, http.StatusBadRequest, middleware.ErrCodeMalformedJSON, "invalid json body")
 		return
 	}
 	folderID, err := uuid.Parse(req.FolderID)
 	if err != nil {
-		http.Error(w, "invalid folder_id", http.StatusBadRequest)
+		middleware.RespondError(w, http.StatusBadRequest, middleware.ErrCodeBadRequest, "invalid folder_id")
 		return
 	}
 	if err := h.assertResourceInWorkspace(r.Context(), workspaceID, permission.ResourceFolder, folderID); err != nil {
-		writeServiceError(w, err)
+		writeServiceError(w, r, err)
 		return
 	}
 	var expiresAt *time.Time
 	if req.ExpiresAt != nil && *req.ExpiresAt != "" {
 		t, terr := time.Parse(time.RFC3339, *req.ExpiresAt)
 		if terr != nil {
-			http.Error(w, "invalid expires_at (expected RFC3339)", http.StatusBadRequest)
+			middleware.RespondError(w, http.StatusBadRequest, middleware.ErrCodeBadRequest, "invalid expires_at (expected RFC3339)")
 			return
 		}
 		expiresAt = &t
 	}
 	inv, err := h.sharing.CreateGuestInvite(r.Context(), workspaceID, req.Email, folderID, req.Role, expiresAt, userID)
 	if err != nil {
-		writeSharingError(w, err)
+		writeSharingError(w, r, err)
 		return
 	}
 	// Invitee notifications run on two parallel paths:
@@ -327,18 +327,18 @@ func (h *Handler) resolveInviterDisplayName(ctx context.Context, workspaceID, us
 // response excludes secrets, and RLS bypasses for the unauth path.
 func (h *Handler) PreviewGuestInvite(w http.ResponseWriter, r *http.Request) {
 	if h.sharing == nil {
-		http.Error(w, "sharing not configured", http.StatusNotImplemented)
+		middleware.RespondError(w, http.StatusNotImplemented, middleware.ErrCodeUnsupportedOp, "sharing not configured")
 		return
 	}
 	idStr := chi.URLParam(r, "id")
 	id, err := uuid.Parse(idStr)
 	if err != nil {
-		http.Error(w, "invalid id", http.StatusBadRequest)
+		middleware.RespondError(w, http.StatusBadRequest, middleware.ErrCodeBadRequest, "invalid id")
 		return
 	}
 	preview, err := h.sharing.GetGuestInvitePreview(r.Context(), id)
 	if err != nil {
-		writeSharingError(w, err)
+		writeSharingError(w, r, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, preview)
@@ -349,18 +349,18 @@ func (h *Handler) PreviewGuestInvite(w http.ResponseWriter, r *http.Request) {
 // (in practice the token is issued by the invite-acceptance flow).
 func (h *Handler) AcceptGuestInvite(w http.ResponseWriter, r *http.Request) {
 	if h.sharing == nil {
-		http.Error(w, "sharing not configured", http.StatusNotImplemented)
+		middleware.RespondError(w, http.StatusNotImplemented, middleware.ErrCodeUnsupportedOp, "sharing not configured")
 		return
 	}
 	workspaceID, _ := middleware.WorkspaceIDFromContext(r.Context())
 	id, err := uuid.Parse(chi.URLParam(r, "id"))
 	if err != nil {
-		http.Error(w, "invalid id", http.StatusBadRequest)
+		middleware.RespondError(w, http.StatusBadRequest, middleware.ErrCodeBadRequest, "invalid id")
 		return
 	}
 	inv, err := h.sharing.AcceptGuestInvite(r.Context(), workspaceID, id)
 	if err != nil {
-		writeSharingError(w, err)
+		writeSharingError(w, r, err)
 		return
 	}
 	h.notify(r.Context(), func(n *notification.Service) error {
@@ -372,22 +372,22 @@ func (h *Handler) AcceptGuestInvite(w http.ResponseWriter, r *http.Request) {
 // RevokeGuestInvite deletes an invite. Admin-only.
 func (h *Handler) RevokeGuestInvite(w http.ResponseWriter, r *http.Request) {
 	if h.sharing == nil {
-		http.Error(w, "sharing not configured", http.StatusNotImplemented)
+		middleware.RespondError(w, http.StatusNotImplemented, middleware.ErrCodeUnsupportedOp, "sharing not configured")
 		return
 	}
 	role, _ := middleware.RoleFromContext(r.Context())
 	if role != user.RoleAdmin {
-		http.Error(w, "admin role required", http.StatusForbidden)
+		middleware.RespondError(w, http.StatusForbidden, middleware.ErrCodeAdminOnly, "admin role required")
 		return
 	}
 	workspaceID, _ := middleware.WorkspaceIDFromContext(r.Context())
 	id, err := uuid.Parse(chi.URLParam(r, "id"))
 	if err != nil {
-		http.Error(w, "invalid id", http.StatusBadRequest)
+		middleware.RespondError(w, http.StatusBadRequest, middleware.ErrCodeBadRequest, "invalid id")
 		return
 	}
 	if err := h.sharing.RevokeGuestInvite(r.Context(), workspaceID, id); err != nil {
-		writeSharingError(w, err)
+		writeSharingError(w, r, err)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
@@ -397,26 +397,34 @@ func (h *Handler) RevokeGuestInvite(w http.ResponseWriter, r *http.Request) {
 // ErrNotFound becomes 404, invalid-input errors become 400, expired /
 // exhausted / password-related errors become 410 / 429 / 401 / 403 so
 // clients can distinguish them without parsing the error text.
-func writeSharingError(w http.ResponseWriter, err error) {
+func writeSharingError(w http.ResponseWriter, r *http.Request, err error) {
 	switch {
 	case errors.Is(err, sharing.ErrNotFound):
-		http.Error(w, err.Error(), http.StatusNotFound)
+		middleware.RespondError(w, http.StatusNotFound, middleware.ErrCodeNotFound, err.Error())
 	case errors.Is(err, sharing.ErrInvalidResourceType),
 		errors.Is(err, sharing.ErrInvalidRole),
 		errors.Is(err, sharing.ErrInvalidEmail):
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		middleware.RespondError(w, http.StatusBadRequest, middleware.ErrCodeBadRequest, err.Error())
 	case errors.Is(err, sharing.ErrLinkExpired),
 		errors.Is(err, sharing.ErrInviteExpired):
-		http.Error(w, err.Error(), http.StatusGone)
+		middleware.RespondError(w, http.StatusGone, middleware.ErrCodeGone, err.Error())
 	case errors.Is(err, sharing.ErrLinkExhausted):
-		http.Error(w, err.Error(), http.StatusTooManyRequests)
+		// Distinct from RATE_LIMIT_EXCEEDED: rate-limit is a
+		// transient throttle ("retry later"), but link-exhaustion
+		// is permanent (the link's download cap is spent and no
+		// amount of waiting will refill it). The frontend renders
+		// different remediation copy for the two cases.
+		middleware.RespondError(w, http.StatusTooManyRequests, middleware.ErrCodeShareLinkExhausted, err.Error())
 	case errors.Is(err, sharing.ErrPasswordRequired):
-		http.Error(w, err.Error(), http.StatusUnauthorized)
+		// Distinct from AUTH_MISSING_TOKEN: the user does not need
+		// to sign in, they need to enter the share-link password.
+		// The frontend renders a different prompt for this code.
+		middleware.RespondError(w, http.StatusUnauthorized, middleware.ErrCodeSharePasswordRequired, err.Error())
 	case errors.Is(err, sharing.ErrPasswordIncorrect):
-		http.Error(w, err.Error(), http.StatusForbidden)
+		middleware.RespondError(w, http.StatusForbidden, middleware.ErrCodeForbidden, err.Error())
 	case errors.Is(err, sharing.ErrInviteAlreadyUsed):
-		http.Error(w, err.Error(), http.StatusConflict)
+		middleware.RespondError(w, http.StatusConflict, middleware.ErrCodeConflict, err.Error())
 	default:
-		writeServiceError(w, err)
+		writeServiceError(w, r, err)
 	}
 }

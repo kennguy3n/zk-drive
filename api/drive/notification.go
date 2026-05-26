@@ -15,13 +15,21 @@ import (
 // newest-first). limit is capped at 100.
 func (h *Handler) ListNotifications(w http.ResponseWriter, r *http.Request) {
 	if h.notifications == nil {
-		http.Error(w, "notifications not configured", http.StatusNotImplemented)
+		middleware.RespondError(w, http.StatusNotImplemented, middleware.ErrCodeUnsupportedOp, "notifications not configured")
 		return
 	}
 	workspaceID, _ := middleware.WorkspaceIDFromContext(r.Context())
 	userID, _ := middleware.UserIDFromContext(r.Context())
-	limit := parseIntParam(r.URL.Query().Get("limit"), notification.DefaultLimit)
-	offset := parseIntParam(r.URL.Query().Get("offset"), 0)
+	limit, err := parseIntQuery(r, "limit", notification.DefaultLimit)
+	if err != nil {
+		middleware.RespondError(w, http.StatusBadRequest, middleware.ErrCodeBadRequest, "invalid limit")
+		return
+	}
+	offset, err := parseIntQuery(r, "offset", 0)
+	if err != nil {
+		middleware.RespondError(w, http.StatusBadRequest, middleware.ErrCodeBadRequest, "invalid offset")
+		return
+	}
 	// Cap at the handler layer so the response envelope echoes the
 	// clamped values back to clients. The service also clamps
 	// defensively, but echoing the pre-service limit would lie to
@@ -37,7 +45,7 @@ func (h *Handler) ListNotifications(w http.ResponseWriter, r *http.Request) {
 	}
 	items, err := h.notifications.List(r.Context(), workspaceID, userID, limit, offset)
 	if err != nil {
-		writeServiceError(w, err)
+		writeServiceError(w, r, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
@@ -50,22 +58,22 @@ func (h *Handler) ListNotifications(w http.ResponseWriter, r *http.Request) {
 // MarkNotificationRead flips a single notification to read.
 func (h *Handler) MarkNotificationRead(w http.ResponseWriter, r *http.Request) {
 	if h.notifications == nil {
-		http.Error(w, "notifications not configured", http.StatusNotImplemented)
+		middleware.RespondError(w, http.StatusNotImplemented, middleware.ErrCodeUnsupportedOp, "notifications not configured")
 		return
 	}
 	workspaceID, _ := middleware.WorkspaceIDFromContext(r.Context())
 	userID, _ := middleware.UserIDFromContext(r.Context())
 	id, err := uuid.Parse(chi.URLParam(r, "id"))
 	if err != nil {
-		http.Error(w, "invalid id", http.StatusBadRequest)
+		middleware.RespondError(w, http.StatusBadRequest, middleware.ErrCodeBadRequest, "invalid id")
 		return
 	}
 	if err := h.notifications.MarkRead(r.Context(), workspaceID, userID, id); err != nil {
 		if errors.Is(err, notification.ErrNotFound) {
-			http.Error(w, err.Error(), http.StatusNotFound)
+			middleware.RespondError(w, http.StatusNotFound, middleware.ErrCodeNotFound, err.Error())
 			return
 		}
-		writeServiceError(w, err)
+		writeServiceError(w, r, err)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
@@ -74,13 +82,13 @@ func (h *Handler) MarkNotificationRead(w http.ResponseWriter, r *http.Request) {
 // MarkAllNotificationsRead flips every unread notification for the caller.
 func (h *Handler) MarkAllNotificationsRead(w http.ResponseWriter, r *http.Request) {
 	if h.notifications == nil {
-		http.Error(w, "notifications not configured", http.StatusNotImplemented)
+		middleware.RespondError(w, http.StatusNotImplemented, middleware.ErrCodeUnsupportedOp, "notifications not configured")
 		return
 	}
 	workspaceID, _ := middleware.WorkspaceIDFromContext(r.Context())
 	userID, _ := middleware.UserIDFromContext(r.Context())
 	if err := h.notifications.MarkAllRead(r.Context(), workspaceID, userID); err != nil {
-		writeServiceError(w, err)
+		writeServiceError(w, r, err)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)

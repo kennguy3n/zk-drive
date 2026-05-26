@@ -1,4 +1,5 @@
 import { Link } from "react-router-dom";
+import { useTranslation } from "react-i18next";
 
 // EncryptionBadge renders the privacy mode of a folder as a small pill
 // next to its name. Mode strings come from the API (`encryption_mode`
@@ -85,8 +86,9 @@ export default function EncryptionBadge({
   linkToHelp = true,
   tabbable = true,
 }: EncryptionBadgeProps) {
+  const { t } = useTranslation();
   const isStrict = mode === "strict_zk";
-  const label = isStrict ? "zero-knowledge" : "confidential";
+  const label = isStrict ? t("encryption.zeroKnowledge") : t("encryption.confidential");
   // The tooltip retains the longer, technically-precise framing so a
   // user who hovers gets the full "server can read plaintext in
   // memory" disclosure. The short pill label is for at-a-glance
@@ -97,10 +99,10 @@ export default function EncryptionBadge({
   // and anywhere else that opts out of the help link, the badge is a
   // plain `<span>` and the hint would be a lie — so we suppress it.
   const body = isStrict
-    ? "Zero-knowledge: end-to-end encrypted. The server cannot decrypt this folder, so previews, full-text search, and virus scanning are disabled here."
-    : "Confidential (managed encrypted storage): encrypted at rest, but the server can read plaintext in memory during request handling — which is what enables previews, full-text search, and virus scanning. NOT zero-knowledge.";
+    ? t("encryption.strictZkTooltip")
+    : t("encryption.confidentialTooltip");
   const title = linkToHelp
-    ? `${body} Click to learn more about privacy modes.`
+    ? `${body} ${t("encryption.clickToLearnMore")}`
     : body;
   const padding = size === "header" ? "2px 10px" : "1px 6px";
   const fontSize = size === "header" ? 12 : 10;
@@ -134,7 +136,7 @@ export default function EncryptionBadge({
         // and tabbing through N identical-destination badges would be
         // noise. See the `tabbable` prop comment above.
         tabIndex={tabbable ? undefined : -1}
-        aria-label={`${label} — learn about privacy modes`}
+        aria-label={t("encryption.badgeAria", { label })}
         style={style}
       >
         {label}

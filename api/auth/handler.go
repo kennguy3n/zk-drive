@@ -131,8 +131,8 @@ func (h *Handler) JWTSecret() string { return h.jwtSecret }
 // WriteToken signs a new token and writes it as the HTTP response
 // body. Exposed so other handlers (e.g. OAuth callbacks) can complete
 // the same login flow without duplicating JWT issuance.
-func (h *Handler) WriteToken(w http.ResponseWriter, userID, workspaceID uuid.UUID, role string) {
-	writeToken(w, h.jwtSecret, userID, workspaceID, role)
+func (h *Handler) WriteToken(w http.ResponseWriter, r *http.Request, userID, workspaceID uuid.UUID, role string) {
+	writeToken(w, r, h.jwtSecret, userID, workspaceID, role)
 }
 
 type signupRequest struct {
@@ -181,20 +181,20 @@ type mfaChallengeResponse struct {
 func (h *Handler) Signup(w http.ResponseWriter, r *http.Request) {
 	var req signupRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "invalid json body", http.StatusBadRequest)
+		middleware.RespondError(w, http.StatusBadRequest, middleware.ErrCodeMalformedJSON, "invalid json body")
 		return
 	}
 	req.WorkspaceName = strings.TrimSpace(req.WorkspaceName)
 	req.Email = strings.TrimSpace(strings.ToLower(req.Email))
 	req.Name = strings.TrimSpace(req.Name)
 	if req.WorkspaceName == "" || req.Email == "" || req.Name == "" || req.Password == "" {
-		http.Error(w, "workspace_name, email, name, password are required", http.StatusBadRequest)
+		middleware.RespondError(w, http.StatusBadRequest, middleware.ErrCodeMissingField, "workspace_name, email, name, password are required")
 		return
 	}
 
 	ws, u, err := h.runSignupTx(r.Context(), req)
 	if err != nil {
-		http.Error(w, "signup: "+err.Error(), http.StatusInternalServerError)
+		middleware.RespondInternalError(w, r, "signup", err)
 		return
 	}
 
@@ -206,7 +206,7 @@ func (h *Handler) Signup(w http.ResponseWriter, r *http.Request) {
 		h.postSignup(r.Context(), ws.ID, ws.Name)
 	}
 
-	writeToken(w, h.jwtSecret, u.ID, ws.ID, u.Role)
+	writeToken(w, r, h.jwtSecret, u.ID, ws.ID, u.Role)
 }
 
 // runSignupTx performs the workspace+user+owner writes in a single
@@ -248,12 +248,12 @@ func signupInTx(ctx context.Context, tx pgx.Tx, workspaces *workspace.Service, u
 func (h *Handler) Login(w http.ResponseWriter, r *http.Request) {
 	var req loginRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "invalid json body", http.StatusBadRequest)
+		middleware.RespondError(w, http.StatusBadRequest, middleware.ErrCodeMalformedJSON, "invalid json body")
 		return
 	}
 	req.Email = strings.TrimSpace(strings.ToLower(req.Email))
 	if req.Email == "" || req.Password == "" {
-		http.Error(w, "email and password are required", http.StatusBadRequest)
+		middleware.RespondError(w, http.StatusBadRequest, middleware.ErrCodeMissingField, "email and password are required")
 		return
 	}
 
@@ -266,7 +266,7 @@ func (h *Handler) Login(w http.ResponseWriter, r *http.Request) {
 	if req.WorkspaceID != "" {
 		wsID, parseErr := uuid.Parse(req.WorkspaceID)
 		if parseErr != nil {
-			http.Error(w, "invalid workspace_id", http.StatusBadRequest)
+			middleware.RespondError(w, http.StatusBadRequest, middleware.ErrCodeBadRequest, "invalid workspace_id")
 			return
 		}
 		u, err = h.users.GetByEmail(ctx, wsID, req.Email)
@@ -275,24 +275,32 @@ func (h *Handler) Login(w http.ResponseWriter, r *http.Request) {
 	}
 	if err != nil {
 		if errors.Is(err, user.ErrNotFound) {
-			http.Error(w, "invalid credentials", http.StatusUnauthorized)
+			// Login flow: no user with that email. Distinct from
+			// AUTH_INVALID_TOKEN — there is no session/token in play;
+			// the user's credentials simply don't match. The locale
+			// renders this as "Email or password is incorrect",
+			// which is the actionable copy on the LoginPage form.
+			middleware.RespondError(w, http.StatusUnauthorized, middleware.ErrCodeAuthInvalidCredentials, "invalid credentials")
 			return
 		}
-		http.Error(w, "login: "+err.Error(), http.StatusInternalServerError)
+		middleware.RespondInternalError(w, r, "login", err)
 		return
 	}
 	if err := h.users.VerifyPassword(u, req.Password); err != nil {
 		h.logAudit(ctx, u.WorkspaceID, &u.ID, audit.ActionLogin, r, map[string]any{
 			"result": "password_mismatch",
 		})
-		http.Error(w, "invalid credentials", http.StatusUnauthorized)
+		// Same code as user-not-found above: deliberately conflate
+		// the two so login response timing doesn't expose whether
+		// an email is registered.
+		middleware.RespondError(w, http.StatusUnauthorized, middleware.ErrCodeAuthInvalidCredentials, "invalid credentials")
 		return
 	}
 	if u.DeactivatedAt != nil {
 		h.logAudit(ctx, u.WorkspaceID, &u.ID, audit.ActionLogin, r, map[string]any{
 			"result": "deactivated",
 		})
-		http.Error(w, "account deactivated", http.StatusForbidden)
+		middleware.RespondError(w, http.StatusForbidden, middleware.ErrCodeForbidden, "account deactivated")
 		return
 	}
 	// Rehash-on-login: if the stored hash was created at a lower
@@ -323,7 +331,7 @@ func (h *Handler) Login(w http.ResponseWriter, r *http.Request) {
 	if h.totp != nil {
 		mfaResp, mfaErr := h.maybeIssueMFAChallenge(ctx, u, r)
 		if mfaErr != nil {
-			http.Error(w, "mfa: "+mfaErr.Error(), http.StatusInternalServerError)
+			middleware.RespondInternalError(w, r, "mfa", mfaErr)
 			return
 		}
 		if mfaResp != nil {
@@ -345,7 +353,7 @@ func (h *Handler) Login(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 
-	writeToken(w, h.jwtSecret, u.ID, u.WorkspaceID, u.Role)
+	writeToken(w, r, h.jwtSecret, u.ID, u.WorkspaceID, u.Role)
 }
 
 // maybeIssueMFAChallenge runs after a successful password verify
@@ -486,7 +494,7 @@ func (h *Handler) Logout(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) Refresh(w http.ResponseWriter, r *http.Request) {
 	claims, ok := middleware.ClaimsFromContext(r.Context())
 	if !ok {
-		http.Error(w, "unauthenticated", http.StatusUnauthorized)
+		middleware.RespondError(w, http.StatusUnauthorized, middleware.ErrCodeAuthMissingToken, "unauthenticated")
 		return
 	}
 	if h.sessions != nil {
@@ -501,7 +509,7 @@ func (h *Handler) Refresh(w http.ResponseWriter, r *http.Request) {
 		// directly in tests) would otherwise mint a fresh
 		// long-lived JWT without a revocation check.
 		if claims.IssuedAt == nil {
-			http.Error(w, "token missing iat", http.StatusUnauthorized)
+			middleware.RespondError(w, http.StatusUnauthorized, middleware.ErrCodeAuthMissingIat, "token missing iat")
 			return
 		}
 		// Bound the IsRevoked call the same way AuthMiddleware
@@ -518,21 +526,21 @@ func (h *Handler) Refresh(w http.ResponseWriter, r *http.Request) {
 			// Fail closed: a Refresh that cannot verify revocation
 			// status must not mint a longer-lived token. The client
 			// can retry once the store recovers.
-			http.Error(w, "revocation check failed", http.StatusUnauthorized)
+			middleware.RespondError(w, http.StatusUnauthorized, middleware.ErrCodeRevocationCheck, "revocation check failed")
 			return
 		}
 		if revoked {
-			http.Error(w, "token revoked", http.StatusUnauthorized)
+			middleware.RespondError(w, http.StatusUnauthorized, middleware.ErrCodeAuthRevokedToken, "token revoked")
 			return
 		}
 	}
-	writeToken(w, h.jwtSecret, claims.UserID, claims.WorkspaceID, claims.Role)
+	writeToken(w, r, h.jwtSecret, claims.UserID, claims.WorkspaceID, claims.Role)
 }
 
-func writeToken(w http.ResponseWriter, secret string, userID, workspaceID uuid.UUID, role string) {
+func writeToken(w http.ResponseWriter, r *http.Request, secret string, userID, workspaceID uuid.UUID, role string) {
 	token, exp, err := middleware.IssueToken(secret, userID, workspaceID, role, middleware.TokenTTL)
 	if err != nil {
-		http.Error(w, "issue token: "+err.Error(), http.StatusInternalServerError)
+		middleware.RespondInternalError(w, r, "issue token", err)
 		return
 	}
 	writeJSON(w, http.StatusOK, tokenResponse{
@@ -544,8 +552,11 @@ func writeToken(w http.ResponseWriter, secret string, userID, workspaceID uuid.U
 	})
 }
 
+// writeJSON delegates to middleware.WriteJSON so auth success
+// responses (login, signup, mfa challenge) share the same
+// Content-Type charset and X-Content-Type-Options defence as
+// the error responses written through middleware.RespondError
+// from the same handlers.
 func writeJSON(w http.ResponseWriter, status int, payload any) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(payload)
+	middleware.WriteJSON(w, status, payload)
 }

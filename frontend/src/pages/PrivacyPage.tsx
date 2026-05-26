@@ -1,174 +1,123 @@
 import { Link } from "react-router-dom";
+import { Trans, useTranslation } from "react-i18next";
 import EncryptionBadge from "../components/EncryptionBadge";
 
 // PrivacyPage is the customer-facing explainer for ZK Drive's two
-// per-folder privacy modes. It is deliberately written to avoid the
-// "zero-knowledge by default" framing that docs/PRODUCT.md
-// calls out as misleading:
-//
-//   > Business Secure (managed) is **not** strict zero-knowledge. The
-//   > zk-object-fabric gateway can read plaintext in memory during
-//   > request handling. This is the right default for most SME use
-//   > cases ... but it **must be called "confidential managed
-//   > storage," not "zero-knowledge,"** in customer-facing UI.
-//
-// The page lives at /drive/privacy, behind RequireAuth, so we can link
-// to it from the CreateFolderDialog and the FileBrowserPage header —
-// the two points where a customer is actually making (or living with)
-// a privacy-mode choice. The content is intentionally static (no API
-// calls): no plaintext leaves the SPA, and the page works offline as
-// part of the PWA shell.
+// per-folder privacy modes. All long-form copy is sourced from the
+// i18n "privacy" namespace so translators can localize without
+// touching component JSX. Inline elements that must remain literal
+// (the privacy badges, the github link) are rendered via <Trans>
+// with named slot placeholders for translator-safe interpolation.
 export default function PrivacyPage() {
+  const { t } = useTranslation();
   return (
     <div style={{ maxWidth: 880, margin: "0 auto", padding: 24, fontSize: 15, lineHeight: 1.55 }}>
       <header style={{ marginBottom: 16, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-        <h1 style={{ fontSize: 24, margin: 0 }}>How your data is protected</h1>
-        <Link to="/drive" style={backLink}>&larr; Back to Drive</Link>
+        <h1 style={{ fontSize: 24, margin: 0 }}>{t("privacy.pageTitle")}</h1>
+        <Link to="/drive" style={backLink}>&larr; {t("privacy.backToDrive")}</Link>
       </header>
 
       <p style={{ color: "#374151" }}>
-        ZK Drive lets each folder pick one of two privacy modes. The
-        choice is made when the folder is created and is surfaced
-        everywhere a folder is shown (sidebar, file list, breadcrumb)
-        via a coloured badge:
-        {" "}
-        <EncryptionBadge mode="managed_encrypted" linkToHelp={false} />
-        {" "}or{" "}
-        <EncryptionBadge mode="strict_zk" linkToHelp={false} />.
-        We try to be honest about the trade-offs rather than market
-        both modes as "zero-knowledge" — most providers do that and it
-        is not accurate for either one.
+        <Trans
+          i18nKey="privacy.intro"
+          components={{
+            badgeManaged: <EncryptionBadge mode="managed_encrypted" linkToHelp={false} />,
+            badgeStrict: <EncryptionBadge mode="strict_zk" linkToHelp={false} />,
+          }}
+        />
       </p>
 
       <section style={section} aria-labelledby="brand-heading">
         <h2 id="brand-heading" style={h2}>
-          What does "ZK" mean in ZK Drive?
+          {t("privacy.brandHeading")}
         </h2>
-        <p>
-          "ZK" describes a <em>capability</em> the platform offers, not
-          a claim about every file you store. Every workspace ships
-          with confidential managed storage by default — that is the
-          right trade-off for most teams because it powers previews,
-          search, and virus scanning. Strict zero-knowledge is opt-in
-          at the folder level for the content where you want the
-          server out of the loop entirely.
-        </p>
+        <p>{t("privacy.brandBody")}</p>
         <ul style={{ paddingLeft: 20, margin: "8px 0 0" }}>
           <li>
-            <strong>Confidential managed</strong> is encrypted at rest
-            but server-readable in memory. It is the default. It is{" "}
-            <em>not</em> zero-knowledge and we never call it that.
+            <Trans i18nKey="privacy.brandPointManaged" components={{ strong: <strong />, em: <em /> }} />
           </li>
           <li>
-            <strong>Strict zero-knowledge</strong> is end-to-end
-            encrypted with keys the server never sees. Opt in
-            per-folder. Losing the trade-offs (previews, search, virus
-            scan) is the honest cost of the guarantee.
+            <Trans i18nKey="privacy.brandPointStrict" components={{ strong: <strong /> }} />
           </li>
         </ul>
       </section>
 
       <section style={section} aria-labelledby="managed-heading">
         <h2 id="managed-heading" style={h2}>
-          <EncryptionBadge mode="managed_encrypted" size="header" linkToHelp={false} /> Confidential managed
-          <span style={muted}> &nbsp;&middot;&nbsp; the default</span>
+          <EncryptionBadge mode="managed_encrypted" size="header" linkToHelp={false} /> {t("privacy.managedHeading")}
+          <span style={muted}> &nbsp;&middot;&nbsp; {t("privacy.theDefault")}</span>
         </h2>
         <p>
-          Files are encrypted at rest by the zk-object-fabric storage
-          gateway. The encryption keys live on the gateway, not on
-          customer devices, so the server <strong>can</strong> read
-          plaintext in memory during a request. That is what enables
-          previews, full-text search, virus scanning, and admin recovery
-          paths. This is the right default for most SMEs &mdash; but it
-          is <em>not</em> zero-knowledge, and we say so plainly.
+          <Trans i18nKey="privacy.managedBody" components={{ strong: <strong />, em: <em /> }} />
         </p>
         <table style={table}>
           <tbody>
-            <tr><th style={th}>Server can read plaintext</th><td style={td}>Yes, in memory during request handling</td></tr>
-            <tr><th style={th}>Previews / thumbnails</th><td style={td}>Available</td></tr>
-            <tr><th style={th}>Full-text search</th><td style={td}>Available</td></tr>
-            <tr><th style={th}>Virus / malware scanning</th><td style={td}>Available</td></tr>
-            <tr><th style={th}>Admin recovery if a user loses access</th><td style={td}>Available</td></tr>
-            <tr><th style={th}>At-rest encryption</th><td style={td}>Yes, gateway-side (zk-object-fabric ManagedEncrypted)</td></tr>
-            <tr><th style={th}>Honest name</th><td style={td}>Confidential managed storage. <strong>Not</strong> zero-knowledge.</td></tr>
+            <tr><th style={th}>{t("privacy.tableServerRead")}</th><td style={td}>{t("privacy.managedServerRead")}</td></tr>
+            <tr><th style={th}>{t("privacy.tablePreviews")}</th><td style={td}>{t("privacy.available")}</td></tr>
+            <tr><th style={th}>{t("privacy.tableSearch")}</th><td style={td}>{t("privacy.available")}</td></tr>
+            <tr><th style={th}>{t("privacy.tableVirus")}</th><td style={td}>{t("privacy.available")}</td></tr>
+            <tr><th style={th}>{t("privacy.tableAdminRecovery")}</th><td style={td}>{t("privacy.available")}</td></tr>
+            <tr><th style={th}>{t("privacy.tableAtRest")}</th><td style={td}>{t("privacy.managedAtRest")}</td></tr>
+            <tr><th style={th}>{t("privacy.tableHonestName")}</th><td style={td}>
+              <Trans i18nKey="privacy.managedHonestName" components={{ strong: <strong /> }} />
+            </td></tr>
           </tbody>
         </table>
       </section>
 
       <section style={section} aria-labelledby="strict-heading">
         <h2 id="strict-heading" style={h2}>
-          <EncryptionBadge mode="strict_zk" size="header" linkToHelp={false} /> Strict zero-knowledge
-          <span style={muted}> &nbsp;&middot;&nbsp; opt-in, per folder</span>
+          <EncryptionBadge mode="strict_zk" size="header" linkToHelp={false} /> {t("privacy.strictHeading")}
+          <span style={muted}> &nbsp;&middot;&nbsp; {t("privacy.optInPerFolder")}</span>
         </h2>
         <p>
-          Files are encrypted on your device with keys the server never
-          sees. The gateway only ever stores opaque ciphertext for these
-          folders. Because the server cannot decrypt the contents,
-          previews, search, virus scanning, and admin password-reset
-          recovery are all <strong>disabled</strong> for content in
-          these folders &mdash; that is the honest cost of the
-          guarantee. Choose this mode only for content where that
-          trade-off is worth it.
+          <Trans i18nKey="privacy.strictBody" components={{ strong: <strong /> }} />
         </p>
         <table style={table}>
           <tbody>
-            <tr><th style={th}>Server can read plaintext</th><td style={td}>No, ever</td></tr>
-            <tr><th style={th}>Previews / thumbnails</th><td style={td}>Disabled (server has no plaintext)</td></tr>
-            <tr><th style={th}>Full-text search</th><td style={td}>Disabled (metadata-only search still works)</td></tr>
-            <tr><th style={th}>Virus / malware scanning</th><td style={td}>Disabled (cannot scan what we cannot read)</td></tr>
-            <tr><th style={th}>Admin recovery if a user loses access</th><td style={td}>Not possible &mdash; keys live on the client only</td></tr>
-            <tr><th style={th}>At-rest encryption</th><td style={td}>Yes, end-to-end via the client SDK</td></tr>
-            <tr><th style={th}>Reversibility</th><td style={td}>One-way: a folder cannot be downgraded back to managed once it has strict-ZK content, because the server never had the plaintext</td></tr>
+            <tr><th style={th}>{t("privacy.tableServerRead")}</th><td style={td}>{t("privacy.strictServerRead")}</td></tr>
+            <tr><th style={th}>{t("privacy.tablePreviews")}</th><td style={td}>{t("privacy.strictPreviews")}</td></tr>
+            <tr><th style={th}>{t("privacy.tableSearch")}</th><td style={td}>{t("privacy.strictSearch")}</td></tr>
+            <tr><th style={th}>{t("privacy.tableVirus")}</th><td style={td}>{t("privacy.strictVirus")}</td></tr>
+            <tr><th style={th}>{t("privacy.tableAdminRecovery")}</th><td style={td}>{t("privacy.strictAdminRecovery")}</td></tr>
+            <tr><th style={th}>{t("privacy.tableAtRest")}</th><td style={td}>{t("privacy.strictAtRest")}</td></tr>
+            <tr><th style={th}>{t("privacy.tableReversibility")}</th><td style={td}>{t("privacy.strictReversibility")}</td></tr>
           </tbody>
         </table>
       </section>
 
       <section style={section} aria-labelledby="picking-heading">
-        <h2 id="picking-heading" style={h2}>Which one should this folder be?</h2>
+        <h2 id="picking-heading" style={h2}>{t("privacy.pickingHeading")}</h2>
         <ul style={{ paddingLeft: 20 }}>
           <li>
-            <strong>Default to confidential managed</strong> for everyday
-            documents, project workspaces, client deliverables, and
-            anything you want to find by typing into search.
+            <Trans i18nKey="privacy.pickingDefault" components={{ strong: <strong /> }} />
           </li>
           <li>
-            <strong>Use strict zero-knowledge</strong> for legal hold,
-            HR-investigation evidence, M&amp;A diligence rooms, source
-            code repos under NDA, customer credentials &mdash; anywhere
-            losing the trade-off (previews, search, virus scan) is the
-            right price for keeping the server out of the loop.
+            <Trans i18nKey="privacy.pickingStrict" components={{ strong: <strong /> }} />
           </li>
           <li>
-            <strong>Pick per folder, not per workspace.</strong> The
-            choice is at the folder level so you can mix sensitive and
-            non-sensitive content in the same workspace without giving
-            up either mode.
+            <Trans i18nKey="privacy.pickingPerFolder" components={{ strong: <strong /> }} />
           </li>
         </ul>
       </section>
 
       <section style={section} aria-labelledby="audit-heading">
-        <h2 id="audit-heading" style={h2}>What the server logs</h2>
+        <h2 id="audit-heading" style={h2}>{t("privacy.auditHeading")}</h2>
         <p>
-          Both modes record the same audit metadata: who created the
-          folder, when, parent folder, and the chosen privacy mode.
-          File-level metadata (name, size, type, version, modification
-          time, who shared it with whom) is also recorded in both modes
-          &mdash; this is what lets share-links, retention policies,
-          guest invitations, and billing work. For strict-zero-knowledge
-          folders <em>nothing else</em> is recorded: no thumbnails, no
-          extracted text, no scan verdict, no preview cache.
+          <Trans i18nKey="privacy.auditBody" components={{ em: <em /> }} />
         </p>
       </section>
 
       <p style={{ color: "#6b7280", fontSize: 13, marginTop: 24 }}>
-        Operator note: the underlying storage layer is{" "}
-        <a href="https://github.com/kennguy3n/zk-object-fabric" rel="noreferrer">
-          zk-object-fabric
-        </a>
-        . Mode mapping: confidential managed = <code>ManagedEncrypted</code>;
-        strict zero-knowledge = <code>StrictZK</code>. See the README
-        and PROPOSAL §3.3 for the full threat model.
+        <Trans
+          i18nKey="privacy.operatorNote"
+          components={{
+            fabricLink: (
+              <a href="https://github.com/kennguy3n/zk-object-fabric" rel="noreferrer" />
+            ),
+            code: <code />,
+          }}
+        />
       </p>
     </div>
   );
@@ -189,39 +138,39 @@ const section: React.CSSProperties = {
 };
 
 const h2: React.CSSProperties = {
+  margin: "0 0 8px",
   fontSize: 18,
-  margin: "0 0 12px",
   display: "flex",
   alignItems: "center",
   gap: 8,
-  flexWrap: "wrap",
 };
 
 const muted: React.CSSProperties = {
   fontSize: 13,
+  fontWeight: 400,
   color: "#6b7280",
-  fontWeight: "normal",
 };
 
 const table: React.CSSProperties = {
   width: "100%",
   borderCollapse: "collapse",
   fontSize: 14,
+  marginTop: 8,
 };
 
 const th: React.CSSProperties = {
   textAlign: "left",
-  padding: "6px 10px",
-  borderBottom: "1px solid #f3f4f6",
-  width: "40%",
+  padding: "6px 8px",
+  borderTop: "1px solid #f3f4f6",
   color: "#374151",
-  fontWeight: 500,
+  width: "40%",
   verticalAlign: "top",
+  fontWeight: 500,
 };
 
 const td: React.CSSProperties = {
-  padding: "6px 10px",
-  borderBottom: "1px solid #f3f4f6",
-  color: "#111827",
+  padding: "6px 8px",
+  borderTop: "1px solid #f3f4f6",
   verticalAlign: "top",
+  color: "#1f2937",
 };

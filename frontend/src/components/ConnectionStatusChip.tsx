@@ -10,6 +10,7 @@
 //                    in that case so the chip is only seen briefly
 
 import type { CSSProperties } from "react";
+import { useTranslation } from "react-i18next";
 import type { ConnectionStatus } from "../collab/provider";
 
 const COLORS: Record<ConnectionStatus, { bg: string; fg: string; dot: string }> = {
@@ -19,11 +20,11 @@ const COLORS: Record<ConnectionStatus, { bg: string; fg: string; dot: string }> 
   disconnected: { bg: "#fee2e2", fg: "#991b1b", dot: "#dc2626" },
 };
 
-const LABELS: Record<ConnectionStatus, string> = {
-  connecting: "Connecting",
-  connected: "Live",
-  reconnecting: "Reconnecting",
-  disconnected: "Disconnected",
+const LABEL_KEYS: Record<ConnectionStatus, string> = {
+  connecting: "collab.statusConnecting",
+  connected: "collab.statusConnected",
+  reconnecting: "collab.statusReconnecting",
+  disconnected: "collab.statusDisconnected",
 };
 
 export interface ConnectionStatusChipProps {
@@ -40,25 +41,27 @@ export default function ConnectionStatusChip({
   status,
   readOnly,
 }: ConnectionStatusChipProps) {
+  const { t } = useTranslation();
   if (readOnly) {
     return (
       <span
-        title="You have view-only access to this document."
+        title={t("collab.readOnlyTooltip")}
         style={chipStyle("#e5e7eb", "#374151")}
       >
         <span style={{ ...dotStyle, background: "#6b7280" }} />
-        Read-only
+        {t("collab.readOnly")}
       </span>
     );
   }
   const c = COLORS[status];
+  const label = t(LABEL_KEYS[status]);
   return (
     <span
-      title={`Collab connection: ${LABELS[status].toLowerCase()}`}
+      title={t("collab.statusTooltip", { status: label.toLowerCase() })}
       style={chipStyle(c.bg, c.fg)}
     >
       <span style={{ ...dotStyle, background: c.dot }} />
-      {LABELS[status]}
+      {label}
     </span>
   );
 }

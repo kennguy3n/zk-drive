@@ -598,6 +598,23 @@ func TestParseIntQuery_NegativeClipsToDefault(t *testing.T) {
 	}
 }
 
+// TestParseInt64Query_NegativeClipsToDefault pins the symmetry between
+// parseInt64Query and parseIntQuery — negative values clip to def, not
+// to hardcoded 0. All current call sites pass def=0, so this test
+// guards against a future caller that passes a non-zero def silently
+// snapping to 0 (Devin Review ANALYSIS_0002 on commit 0ef1a82).
+func TestParseInt64Query_NegativeClipsToDefault(t *testing.T) {
+	t.Parallel()
+	req := httptest.NewRequest(http.MethodGet, "/api/changes?cursor=-1", nil)
+	v, err := parseInt64Query(req, "cursor", 42)
+	if err != nil {
+		t.Fatalf("parseInt64Query returned error: %v", err)
+	}
+	if v != 42 {
+		t.Fatalf("negative cursor should clip to default 42, got %d", v)
+	}
+}
+
 // itoa avoids importing strconv just for one int formatting call.
 func itoa(v int64) string {
 	if v == 0 {

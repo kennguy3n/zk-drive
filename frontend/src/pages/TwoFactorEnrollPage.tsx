@@ -1,5 +1,6 @@
 import { useEffect, useState, type FormEvent } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
+import { useTranslation } from "react-i18next";
 import {
   totpEnrollBegin,
   totpEnrollBeginRequired,
@@ -9,6 +10,7 @@ import {
   type TOTPEnrollBeginResponse,
   type TOTPStatus,
 } from "../api/client";
+import { translateApiError } from "../api/errors";
 
 // TwoFactorEnrollPage handles BOTH:
 //
@@ -26,6 +28,7 @@ import {
 export default function TwoFactorEnrollPage() {
   const nav = useNavigate();
   const loc = useLocation();
+  const { t } = useTranslation();
   const enrollState = (loc.state as EnrollState | null) ?? null;
   const enrollToken = enrollState?.enrollToken ?? null;
 
@@ -61,12 +64,13 @@ export default function TwoFactorEnrollPage() {
           if (!cancelled) setChallenge(ch);
         }
       } catch (e) {
-        if (!cancelled) setError(extractErr(e));
+        if (!cancelled) setError(translateApiError(e, t));
       }
     })();
     return () => {
       cancelled = true;
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [enrollToken]);
 
   const onFinalize = async (e: FormEvent) => {
@@ -86,7 +90,7 @@ export default function TwoFactorEnrollPage() {
         setStatus(await totpStatus());
       }
     } catch (err) {
-      setError(extractErr(err));
+      setError(translateApiError(err, t));
     } finally {
       setBusy(false);
     }
@@ -99,11 +103,9 @@ export default function TwoFactorEnrollPage() {
   if (recovery) {
     return (
       <div className="auth-page">
-        <h1>Two-factor authentication enabled</h1>
+        <h1>{t("auth.mfaEnrolledTitle")}</h1>
         <p className="recovery-warning">
-          <strong>Save these recovery codes now.</strong> Each one can be used
-          once if you lose access to your authenticator. You will not see them
-          again.
+          <strong>{t("auth.mfaRecoveryWarning")}</strong>
         </p>
         <pre className="recovery-codes">{recovery.join("\n")}</pre>
         <button
@@ -120,7 +122,7 @@ export default function TwoFactorEnrollPage() {
             URL.revokeObjectURL(url);
           }}
         >
-          Download codes
+          {t("auth.mfaDownloadCodes")}
         </button>
         <button
           type="button"
@@ -137,7 +139,7 @@ export default function TwoFactorEnrollPage() {
           }}
           style={{ marginLeft: "1rem" }}
         >
-          {enrollToken ? "Sign in again" : "Done"}
+          {enrollToken ? t("auth.signInAgain") : t("common.done")}
         </button>
       </div>
     );
@@ -146,30 +148,25 @@ export default function TwoFactorEnrollPage() {
   if (status?.enabled && !enrollToken) {
     return (
       <div className="auth-page">
-        <h1>Two-factor authentication is on</h1>
-        <p>
-          You enrolled on{" "}
-          {status.activated_at
-            ? new Date(status.activated_at).toLocaleString()
-            : "an earlier date"}
-          .
-        </p>
-        <p>
-          {status.recovery_codes_remaining} recovery code
-          {status.recovery_codes_remaining === 1 ? "" : "s"} remaining.
-        </p>
-        {status.recovery_codes_remaining <= 2 && (
-          <p className="warning">
-            You are running low on recovery codes. Disable and re-enroll to
-            generate a fresh set.
+        <h1>{t("auth.mfaAlreadyEnrolled")}</h1>
+        {status.activated_at && (
+          <p>
+            {t("auth.mfaEnrolledAt", {
+              date: new Date(status.activated_at).toLocaleString(),
+            })}
           </p>
         )}
         <p>
-          To replace your authenticator or generate new recovery codes,
-          disable 2FA first.
+          {t("auth.mfaRecoveryCodesRemaining", {
+            count: status.recovery_codes_remaining,
+          })}
         </p>
+        {status.recovery_codes_remaining <= 2 && (
+          <p className="warning">{t("auth.mfaRecoveryCodesLowWarning")}</p>
+        )}
+        <p>{t("auth.mfaReEnrollInstruction")}</p>
         <button type="button" onClick={() => nav("/drive")}>
-          Back
+          {t("common.back")}
         </button>
       </div>
     );
@@ -177,34 +174,25 @@ export default function TwoFactorEnrollPage() {
 
   return (
     <div className="auth-page">
-      <h1>Set up two-factor authentication</h1>
-      {enrollToken && (
-        <p>
-          Your workspace requires every member to enroll a second factor
-          before signing in.
-        </p>
-      )}
-      {!challenge && <p>Loading…</p>}
+      <h1>{t("auth.mfaEnrollTitle")}</h1>
+      {enrollToken && <p>{t("auth.mfaForcedEnrollmentExplanation")}</p>}
+      {!challenge && <p>{t("common.loading")}</p>}
       {challenge && (
         <>
-          <p>
-            Scan this QR code with your authenticator app (Google
-            Authenticator, 1Password, Authy, etc.) or paste the secret
-            manually.
-          </p>
+          <p>{t("auth.mfaEnrollPrompt")}</p>
           <img
             src={`data:image/png;base64,${challenge.qr_code_png}`}
-            alt="otpauth QR code"
+            alt={t("auth.mfaQrAlt")}
             width={200}
             height={200}
           />
           <p>
+            <small>{t("auth.mfaSecretLabel")}</small>
+            <br />
             <code>{challenge.secret}</code>
           </p>
           <form onSubmit={onFinalize}>
-            <label htmlFor="totp-code">
-              Enter the 6-digit code from your app to confirm
-            </label>
+            <label htmlFor="totp-code">{t("auth.mfaCodeInput")}</label>
             <input
               id="totp-code"
               type="text"
@@ -216,7 +204,7 @@ export default function TwoFactorEnrollPage() {
               placeholder="123456"
             />
             <button type="submit" disabled={busy || code.trim() === ""}>
-              {busy ? "Verifying…" : "Enable 2FA"}
+              {busy ? t("common.verifying") : t("auth.mfaEnable")}
             </button>
           </form>
         </>
@@ -229,9 +217,4 @@ export default function TwoFactorEnrollPage() {
 interface EnrollState {
   enrollToken?: string;
   expiresAt?: string;
-}
-
-function extractErr(e: unknown): string {
-  const maybe = e as { response?: { data?: string }; message?: string };
-  return maybe.response?.data || maybe.message || "Something went wrong";
 }

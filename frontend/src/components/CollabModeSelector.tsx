@@ -10,6 +10,7 @@
 //   2. Document settings dropdown on DocumentEditorPage
 //      (change-collab-mode action)
 
+import { useTranslation } from "react-i18next";
 import type { CollabMode, EncryptionMode } from "../api/client";
 
 // MODES is the public ordering: least → most feature-rich. We
@@ -17,21 +18,21 @@ import type { CollabMode, EncryptionMode } from "../api/client";
 // the tombstone state is server-set on privacy regression (which is
 // currently impossible since folder mode is immutable) and is not
 // a thing the user picks.
-const MODES: { value: CollabMode; title: string; description: string }[] = [
+const MODES: { value: CollabMode; titleKey: string; descriptionKey: string }[] = [
   {
     value: "markdown",
-    title: "Markdown",
-    description: "Headings, lists, basic text. Allowed in every privacy mode.",
+    titleKey: "collab.markdown",
+    descriptionKey: "collab.markdownDesc",
   },
   {
     value: "rich",
-    title: "Rich",
-    description: "Tables, images, embeds. Requires confidential folders.",
+    titleKey: "collab.rich",
+    descriptionKey: "collab.richDesc",
   },
   {
     value: "rich_presence",
-    title: "Rich + presence",
-    description: "Live cursors and online users. Requires confidential folders.",
+    titleKey: "collab.richPresence",
+    descriptionKey: "collab.richPresenceDesc",
   },
 ];
 
@@ -61,13 +62,15 @@ export interface CollabModeSelectorProps {
 // is greyed out. The encryptionMode determines the specific
 // rationale (strict_zk has no server-side merge → no rich).
 function disabledExplanation(
+  t: (k: string, opts?: Record<string, unknown>) => string,
   mode: CollabMode,
   encryptionMode?: EncryptionMode,
 ): string {
+  const modeName = mode === "rich" ? t("collab.rich") : t("collab.richPresence");
   if (encryptionMode === "strict_zk") {
-    return `${mode === "rich" ? "Rich" : "Rich + presence"} requires the server to merge document updates, which is not possible in zero-knowledge folders where the server cannot read the document. Choose Markdown for this folder.`;
+    return t("collab.disabledStrictZk", { mode: modeName });
   }
-  return `${mode === "rich" ? "Rich" : "Rich + presence"} is not allowed for this document's folder.`;
+  return t("collab.disabledOther", { mode: modeName });
 }
 
 export default function CollabModeSelector({
@@ -78,6 +81,7 @@ export default function CollabModeSelector({
   id,
   disabled = false,
 }: CollabModeSelectorProps) {
+  const { t } = useTranslation();
   return (
     <fieldset
       id={id}
@@ -89,17 +93,17 @@ export default function CollabModeSelector({
       }}
     >
       <legend style={{ fontSize: 13, color: "#374151", padding: "0 6px" }}>
-        Editor experience
+        {t("collab.editorExperience")}
       </legend>
       {MODES.map((m) => {
         const allowedByPolicy = allowedModes.includes(m.value);
         const radioDisabled = !allowedByPolicy || disabled;
         const checked = value === m.value;
         const tooltip = !allowedByPolicy
-          ? disabledExplanation(m.value, encryptionMode)
+          ? disabledExplanation(t, m.value, encryptionMode)
           : disabled
-            ? "Saving\u2026"
-            : m.description;
+            ? t("common.saving")
+            : t(m.descriptionKey);
         return (
           <label
             key={m.value}
@@ -123,7 +127,7 @@ export default function CollabModeSelector({
               style={{ marginTop: 3 }}
             />
             <span>
-              <span style={{ fontWeight: 500 }}>{m.title}</span>
+              <span style={{ fontWeight: 500 }}>{t(m.titleKey)}</span>
               <span
                 style={{
                   display: "block",
@@ -131,7 +135,7 @@ export default function CollabModeSelector({
                   color: "#6b7280",
                 }}
               >
-                {m.description}
+                {t(m.descriptionKey)}
               </span>
             </span>
           </label>

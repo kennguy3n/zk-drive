@@ -1,4 +1,5 @@
 import axios, { type AxiosInstance } from "axios";
+import { is401SoftFailure } from "./auth401";
 
 // Shared Axios instance pointed at the dev proxy (/api -> :8080). All
 // request/response types below match the Go handler JSON.
@@ -23,21 +24,34 @@ client.interceptors.request.use((config) => {
   return config;
 });
 
-// Redirect to /login on 401 so expired sessions don't leave the UI stuck.
-// Clear ALL auth-derived localStorage keys (token, workspace, user_id) so
-// the next login is a clean slate; otherwise a stale user_id could persist
-// into a different user's session and break presence (cursor colors keyed
-// on the wrong id, PresenceChips failing to filter the local user, etc.).
+// Redirect to /login on session-expiry 401s so stale sessions don't
+// leave the UI stuck. Clear ALL auth-derived localStorage keys (token,
+// workspace, user_id) so the next login is a clean slate; otherwise a
+// stale user_id could persist into a different user's session and break
+// presence (cursor colors keyed on the wrong id, PresenceChips failing
+// to filter the local user, etc.).
+//
+// We treat 401 as "session expired" UNLESS the structured error code
+// indicates a soft auth failure that the calling page should handle.
+// The classification lives in ./auth401 (NON_SESSION_401_CODES vs
+// SESSION_DEAD_401_CODES); a regression test there (auth401.test.ts)
+// asserts every 401-emitting backend code is explicitly classified
+// in exactly one bucket, so a contributor adding a new 401 path
+// can't accidentally land on the wrong side of the carve-out.
 client.interceptors.response.use(
   (resp) => resp,
   (err) => {
     if (err?.response?.status === 401) {
-      localStorage.removeItem(TOKEN_STORAGE_KEY);
-      localStorage.removeItem(WORKSPACE_STORAGE_KEY);
-      localStorage.removeItem(ROLE_STORAGE_KEY);
-      localStorage.removeItem(USER_STORAGE_KEY);
-      if (window.location.pathname !== "/login") {
-        window.location.href = "/login";
+      const data = err.response.data as { code?: string } | undefined;
+      const code = typeof data?.code === "string" ? data.code : null;
+      if (!is401SoftFailure(code)) {
+        localStorage.removeItem(TOKEN_STORAGE_KEY);
+        localStorage.removeItem(WORKSPACE_STORAGE_KEY);
+        localStorage.removeItem(ROLE_STORAGE_KEY);
+        localStorage.removeItem(USER_STORAGE_KEY);
+        if (window.location.pathname !== "/login") {
+          window.location.href = "/login";
+        }
       }
     }
     return Promise.reject(err);

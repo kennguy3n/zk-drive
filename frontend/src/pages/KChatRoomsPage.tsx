@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { Link } from "react-router-dom";
+import { useTranslation } from "react-i18next";
 import {
   createKChatRoom,
   deleteKChatRoom,
@@ -7,6 +8,7 @@ import {
   syncKChatMembers,
   type KChatRoom,
 } from "../api/client";
+import { translateApiError } from "../api/errors";
 import { useAuth } from "../hooks/useAuth";
 
 // KChatRoomsPage lets admins manage KChat room → folder mappings:
@@ -15,6 +17,7 @@ import { useAuth } from "../hooks/useAuth";
 // folder's permission grants.
 export default function KChatRoomsPage() {
   const { isAdmin } = useAuth();
+  const { t } = useTranslation();
   const [rooms, setRooms] = useState<KChatRoom[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [newRoomID, setNewRoomID] = useState("");
@@ -25,8 +28,9 @@ export default function KChatRoomsPage() {
     try {
       setRooms(await fetchKChatRooms());
     } catch (e) {
-      setError(errMessage(e));
+      setError(translateApiError(e, t));
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   useEffect(() => {
@@ -36,10 +40,9 @@ export default function KChatRoomsPage() {
   if (!isAdmin) {
     return (
       <div style={{ padding: 32 }}>
-        <h2>Admin only</h2>
+        <h2>{t("admin.adminOnly")}</h2>
         <p>
-          This page is restricted to workspace administrators.{" "}
-          <Link to="/drive">Back to drive</Link>
+          {t("admin.adminOnlyDescription")} <Link to="/drive">{t("admin.backToDrive")}</Link>
         </p>
       </div>
     );
@@ -55,8 +58,8 @@ export default function KChatRoomsPage() {
           marginBottom: 16,
         }}
       >
-        <h1 style={{ margin: 0 }}>KChat rooms</h1>
-        <Link to="/admin">Back to admin</Link>
+        <h1 style={{ margin: 0 }}>{t("kchat.title")}</h1>
+        <Link to="/admin">{t("admin.backToAdmin")}</Link>
       </header>
       {error ? <p style={{ color: "#b91c1c" }}>{error}</p> : null}
 
@@ -69,27 +72,27 @@ export default function KChatRoomsPage() {
             setNewRoomID("");
             refresh();
           } catch (err) {
-            setError(errMessage(err));
+            setError(translateApiError(err, t));
           }
         }}
         style={{ display: "flex", gap: 8, marginBottom: 16 }}
       >
         <input
-          placeholder="KChat room id"
+          placeholder={t("kchat.roomIdPlaceholder")}
           value={newRoomID}
           onChange={(e) => setNewRoomID(e.target.value)}
           required
         />
-        <button type="submit">Create</button>
+        <button type="submit">{t("common.create")}</button>
       </form>
 
       <table style={{ width: "100%", borderCollapse: "collapse" }}>
         <thead>
           <tr style={{ textAlign: "left", borderBottom: "1px solid #e5e7eb" }}>
-            <th style={th}>KChat Room ID</th>
-            <th style={th}>Folder ID</th>
-            <th style={th}>Created At</th>
-            <th style={th}>Actions</th>
+            <th style={th}>{t("kchat.roomIdColumn")}</th>
+            <th style={th}>{t("kchat.folderIdColumn")}</th>
+            <th style={th}>{t("kchat.createdAtColumn")}</th>
+            <th style={th}>{t("common.actions")}</th>
           </tr>
         </thead>
         <tbody>
@@ -103,21 +106,22 @@ export default function KChatRoomsPage() {
                   onClick={() => setSyncTarget(r)}
                   style={{ marginRight: 8 }}
                 >
-                  Sync
+                  {t("kchat.sync")}
                 </button>
                 <button
                   style={{ color: "#b91c1c" }}
                   onClick={async () => {
-                    if (!confirm(`Delete mapping for ${r.kchat_room_id}?`)) return;
+                    if (!confirm(t("kchat.deleteMappingPrompt", { id: r.kchat_room_id })))
+                      return;
                     try {
                       await deleteKChatRoom(r.id);
                       refresh();
                     } catch (err) {
-                      setError(errMessage(err));
+                      setError(translateApiError(err, t));
                     }
                   }}
                 >
-                  Delete
+                  {t("common.delete")}
                 </button>
               </td>
             </tr>
@@ -150,6 +154,7 @@ function SyncDialog({
   onClose: () => void;
   onError: (m: string) => void;
 }) {
+  const { t } = useTranslation();
   const [members, setMembers] = useState<MemberDraft[]>([{ user_id: "", role: "viewer" }]);
   const [info, setInfo] = useState<string | null>(null);
 
@@ -182,19 +187,15 @@ function SyncDialog({
           maxWidth: 600,
         }}
       >
-        <h3 style={{ marginTop: 0 }}>Sync members for {room.kchat_room_id}</h3>
-        <p style={{ fontSize: 13, color: "#6b7280" }}>
-          The supplied list is the complete membership snapshot. Missing
-          grants are revoked, new ones are added, and differing roles are
-          updated.
-        </p>
+        <h3 style={{ marginTop: 0 }}>{t("kchat.syncTitle", { id: room.kchat_room_id })}</h3>
+        <p style={{ fontSize: 13, color: "#6b7280" }}>{t("kchat.syncDescription")}</p>
         {info ? <p style={{ color: "#047857" }}>{info}</p> : null}
         <div style={{ display: "grid", gap: 8 }}>
           {members.map((m, idx) => (
             <div key={idx} style={{ display: "flex", gap: 8 }}>
               <input
                 style={{ flex: 1 }}
-                placeholder="user id (uuid)"
+                placeholder={t("kchat.userIdPlaceholder")}
                 value={m.user_id}
                 onChange={(e) => setRow(idx, { user_id: e.target.value })}
               />
@@ -202,9 +203,9 @@ function SyncDialog({
                 value={m.role}
                 onChange={(e) => setRow(idx, { role: e.target.value })}
               >
-                <option value="viewer">viewer</option>
-                <option value="editor">editor</option>
-                <option value="admin">admin</option>
+                <option value="viewer">{t("share.roleViewer")}</option>
+                <option value="editor">{t("share.roleEditor")}</option>
+                <option value="admin">{t("share.roleAdmin")}</option>
               </select>
               <button onClick={() => removeRow(idx)} type="button">
                 −
@@ -214,7 +215,7 @@ function SyncDialog({
         </div>
         <div style={{ display: "flex", gap: 8, marginTop: 16 }}>
           <button onClick={addRow} type="button">
-            Add row
+            {t("kchat.addRow")}
           </button>
           <button
             onClick={async () => {
@@ -223,18 +224,18 @@ function SyncDialog({
                 .map((m) => ({ user_id: m.user_id.trim(), role: m.role }));
               try {
                 const r = await syncKChatMembers(room.id, payload);
-                setInfo(`Synced ${r.synced} members.`);
+                setInfo(t("kchat.syncedCount", { count: r.synced }));
               } catch (err) {
-                onError(errMessage(err));
+                onError(translateApiError(err, t));
                 onClose();
               }
             }}
             type="button"
           >
-            Sync
+            {t("kchat.sync")}
           </button>
           <button onClick={onClose} type="button" style={{ marginLeft: "auto" }}>
-            Close
+            {t("common.close")}
           </button>
         </div>
       </div>
@@ -242,12 +243,7 @@ function SyncDialog({
   );
 }
 
-function errMessage(e: unknown): string {
-  if (e && typeof e === "object" && "message" in e) {
-    return String((e as { message: unknown }).message);
-  }
-  return String(e);
-}
+
 
 const th: React.CSSProperties = {
   padding: "8px 12px",

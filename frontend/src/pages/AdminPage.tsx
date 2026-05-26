@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { Link } from "react-router-dom";
+import { useTranslation } from "react-i18next";
 import {
   deactivateUser,
   deleteRetentionPolicy,
@@ -15,24 +16,27 @@ import {
   type RetentionPolicy,
   type StorageUsage,
 } from "../api/client";
+import { translateApiError } from "../api/errors";
 import { useAuth } from "../hooks/useAuth";
 
 type Tab = "users" | "audit" | "retention" | "storage";
 
 // AdminPage is the single-page admin console. Sub-views are tab-switched
 // inline (rather than separate routes) because the underlying data sets
-// are small and the user almost always wants to flip between them.
+// are small and the user almost always wants to flip between them. All
+// user-facing copy is sourced from the "admin" i18n namespace so the
+// console localizes alongside the rest of the SPA.
 export default function AdminPage() {
   const { isAdmin, logout } = useAuth();
+  const { t } = useTranslation();
   const [tab, setTab] = useState<Tab>("users");
 
   if (!isAdmin) {
     return (
       <div style={{ padding: 32 }}>
-        <h2>Admin only</h2>
+        <h2>{t("admin.adminOnly")}</h2>
         <p>
-          This page is restricted to workspace administrators.{" "}
-          <Link to="/drive">Back to drive</Link>
+          {t("admin.adminOnlyDescription")} <Link to="/drive">{t("admin.backToDrive")}</Link>
         </p>
       </div>
     );
@@ -48,24 +52,24 @@ export default function AdminPage() {
           marginBottom: 16,
         }}
       >
-        <h1 style={{ margin: 0 }}>Admin</h1>
+        <h1 style={{ margin: 0 }}>{t("nav.admin")}</h1>
         <div>
           <Link to="/admin/placement" style={{ marginRight: 16 }}>
-            Placement
+            {t("admin.placement")}
           </Link>
           <Link to="/admin/encryption" style={{ marginRight: 16 }}>
-            Encryption
+            {t("admin.encryption")}
           </Link>
           <Link to="/admin/kchat" style={{ marginRight: 16 }}>
-            KChat Rooms
+            {t("nav.kchatRooms")}
           </Link>
           <Link to="/billing" style={{ marginRight: 16 }}>
-            Billing
+            {t("nav.billing")}
           </Link>
           <Link to="/drive" style={{ marginRight: 16 }}>
-            Back to drive
+            {t("admin.backToDrive")}
           </Link>
-          <button onClick={logout}>Log out</button>
+          <button onClick={logout}>{t("auth.logout")}</button>
         </div>
       </header>
       <nav
@@ -76,19 +80,19 @@ export default function AdminPage() {
           marginBottom: 16,
         }}
       >
-        {(["users", "audit", "retention", "storage"] as Tab[]).map((t) => (
+        {(["users", "audit", "retention", "storage"] as Tab[]).map((id) => (
           <button
-            key={t}
-            onClick={() => setTab(t)}
+            key={id}
+            onClick={() => setTab(id)}
             style={{
               padding: "8px 12px",
-              background: tab === t ? "#eff6ff" : "transparent",
+              background: tab === id ? "#eff6ff" : "transparent",
               border: "none",
-              borderBottom: tab === t ? "2px solid #2563eb" : "2px solid transparent",
+              borderBottom: tab === id ? "2px solid #2563eb" : "2px solid transparent",
               cursor: "pointer",
             }}
           >
-            {t.charAt(0).toUpperCase() + t.slice(1)}
+            {t(`admin.tab.${id}`)}
           </button>
         ))}
       </nav>
@@ -101,6 +105,7 @@ export default function AdminPage() {
 }
 
 function UsersTab() {
+  const { t } = useTranslation();
   const [users, setUsers] = useState<AdminUser[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [form, setForm] = useState({ email: "", name: "", password: "", role: "member" });
@@ -108,15 +113,16 @@ function UsersTab() {
     try {
       setUsers(await fetchUsers());
     } catch (e) {
-      setError(errMessage(e));
+      setError(translateApiError(e, t));
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
   useEffect(() => {
     refresh();
   }, [refresh]);
   return (
     <section>
-      <h2>Users</h2>
+      <h2>{t("admin.users")}</h2>
       {error && <p style={{ color: "#b91c1c" }}>{error}</p>}
       <form
         onSubmit={async (e) => {
@@ -126,44 +132,44 @@ function UsersTab() {
             setForm({ email: "", name: "", password: "", role: "member" });
             await refresh();
           } catch (err) {
-            setError(errMessage(err));
+            setError(translateApiError(err, t));
           }
         }}
         style={{ display: "flex", gap: 8, marginBottom: 16 }}
       >
         <input
-          placeholder="email"
+          placeholder={t("admin.emailPlaceholder")}
           value={form.email}
           onChange={(e) => setForm({ ...form, email: e.target.value })}
           required
         />
         <input
-          placeholder="name"
+          placeholder={t("admin.namePlaceholder")}
           value={form.name}
           onChange={(e) => setForm({ ...form, name: e.target.value })}
           required
         />
         <input
-          placeholder="temp password"
+          placeholder={t("admin.tempPasswordPlaceholder")}
           type="password"
           value={form.password}
           onChange={(e) => setForm({ ...form, password: e.target.value })}
           required
         />
         <select value={form.role} onChange={(e) => setForm({ ...form, role: e.target.value })}>
-          <option value="member">member</option>
-          <option value="admin">admin</option>
+          <option value="member">{t("admin.roleMember")}</option>
+          <option value="admin">{t("admin.roleAdmin")}</option>
         </select>
-        <button type="submit">Invite</button>
+        <button type="submit">{t("admin.invite")}</button>
       </form>
       <table style={{ width: "100%", borderCollapse: "collapse" }}>
         <thead>
           <tr style={{ textAlign: "left", borderBottom: "1px solid #e5e7eb" }}>
-            <th style={th}>Email</th>
-            <th style={th}>Name</th>
-            <th style={th}>Role</th>
-            <th style={th}>Status</th>
-            <th style={th}>Actions</th>
+            <th style={th}>{t("admin.colEmail")}</th>
+            <th style={th}>{t("admin.colName")}</th>
+            <th style={th}>{t("admin.colRole")}</th>
+            <th style={th}>{t("admin.colStatus")}</th>
+            <th style={th}>{t("common.actions")}</th>
           </tr>
         </thead>
         <tbody>
@@ -179,29 +185,29 @@ function UsersTab() {
                       await updateUserRole(u.id, e.target.value);
                       await refresh();
                     } catch (err) {
-                      setError(errMessage(err));
+                      setError(translateApiError(err, t));
                     }
                   }}
                 >
-                  <option value="member">member</option>
-                  <option value="admin">admin</option>
+                  <option value="member">{t("admin.roleMember")}</option>
+                  <option value="admin">{t("admin.roleAdmin")}</option>
                 </select>
               </td>
-              <td style={td}>{u.deactivated_at ? "deactivated" : "active"}</td>
+              <td style={td}>{u.deactivated_at ? t("admin.statusDeactivated") : t("admin.statusActive")}</td>
               <td style={td}>
                 {!u.deactivated_at && (
                   <button
                     onClick={async () => {
-                      if (!confirm(`Deactivate ${u.email}?`)) return;
+                      if (!confirm(t("admin.deactivateConfirm", { email: u.email }))) return;
                       try {
                         await deactivateUser(u.id);
                         await refresh();
                       } catch (err) {
-                        setError(errMessage(err));
+                        setError(translateApiError(err, t));
                       }
                     }}
                   >
-                    Deactivate
+                    {t("admin.deactivate")}
                   </button>
                 )}
               </td>
@@ -214,6 +220,7 @@ function UsersTab() {
 }
 
 function AuditTab() {
+  const { t } = useTranslation();
   const [entries, setEntries] = useState<AuditEntry[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [action, setAction] = useState<string>("");
@@ -225,28 +232,33 @@ function AuditTab() {
       try {
         setEntries(await fetchAuditLog({ action: action || undefined, offset, limit }));
       } catch (e) {
-        setError(errMessage(e));
+        setError(translateApiError(e, t));
       }
     })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [action, offset]);
 
   return (
     <section>
-      <h2>Audit log</h2>
+      <h2>{t("admin.auditLog")}</h2>
       {error && <p style={{ color: "#b91c1c" }}>{error}</p>}
       <div style={{ marginBottom: 12 }}>
         <label>
-          Filter action:{" "}
-          <input value={action} onChange={(e) => setAction(e.target.value)} placeholder="e.g. file.upload" />
+          {t("admin.filterAction")}{" "}
+          <input
+            value={action}
+            onChange={(e) => setAction(e.target.value)}
+            placeholder={t("admin.filterActionPlaceholder")}
+          />
         </label>
       </div>
       <table style={{ width: "100%", borderCollapse: "collapse" }}>
         <thead>
           <tr style={{ textAlign: "left", borderBottom: "1px solid #e5e7eb" }}>
-            <th style={th}>Time</th>
-            <th style={th}>Actor</th>
-            <th style={th}>Action</th>
-            <th style={th}>Resource</th>
+            <th style={th}>{t("admin.colTime")}</th>
+            <th style={th}>{t("admin.colActor")}</th>
+            <th style={th}>{t("admin.colAction")}</th>
+            <th style={th}>{t("admin.colResource")}</th>
           </tr>
         </thead>
         <tbody>
@@ -264,10 +276,10 @@ function AuditTab() {
       </table>
       <div style={{ marginTop: 12 }}>
         <button onClick={() => setOffset(Math.max(0, offset - limit))} disabled={offset === 0}>
-          Prev
+          {t("common.prev")}
         </button>{" "}
         <button onClick={() => setOffset(offset + limit)} disabled={entries.length < limit}>
-          Next
+          {t("common.next")}
         </button>
       </div>
     </section>
@@ -275,6 +287,7 @@ function AuditTab() {
 }
 
 function RetentionTab() {
+  const { t } = useTranslation();
   const [policies, setPolicies] = useState<RetentionPolicy[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [form, setForm] = useState<{
@@ -286,8 +299,9 @@ function RetentionTab() {
     try {
       setPolicies(await fetchRetentionPolicies());
     } catch (e) {
-      setError(errMessage(e));
+      setError(translateApiError(e, t));
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
   useEffect(() => {
     refresh();
@@ -298,14 +312,15 @@ function RetentionTab() {
   };
   const summarise = (p: RetentionPolicy): string => {
     const parts: string[] = [];
-    if (p.max_versions != null) parts.push(`${p.max_versions} versions`);
-    if (p.max_age_days != null) parts.push(`${p.max_age_days}d max age`);
-    if (p.archive_after_days != null) parts.push(`archive after ${p.archive_after_days}d`);
-    return parts.length === 0 ? "no limits configured" : parts.join(", ");
+    if (p.max_versions != null) parts.push(t("admin.retentionVersions", { count: p.max_versions }));
+    if (p.max_age_days != null) parts.push(t("admin.retentionMaxAge", { count: p.max_age_days }));
+    if (p.archive_after_days != null)
+      parts.push(t("admin.retentionArchiveAfter", { count: p.archive_after_days }));
+    return parts.length === 0 ? t("admin.retentionNoLimits") : parts.join(", ");
   };
   return (
     <section>
-      <h2>Retention policies</h2>
+      <h2>{t("admin.retentionPolicies")}</h2>
       {error && <p style={{ color: "#b91c1c" }}>{error}</p>}
       <form
         onSubmit={async (e) => {
@@ -318,59 +333,62 @@ function RetentionTab() {
             });
             await refresh();
           } catch (err) {
-            setError(errMessage(err));
+            setError(translateApiError(err, t));
           }
         }}
         style={{ display: "flex", gap: 8, marginBottom: 16, flexWrap: "wrap" }}
       >
         <label>
-          Max versions{" "}
+          {t("admin.maxVersions")}{" "}
           <input
             type="number"
             min={1}
-            placeholder="unset"
+            placeholder={t("admin.unsetPlaceholder")}
             value={form.max_versions}
             onChange={(e) => setForm({ ...form, max_versions: e.target.value })}
           />
         </label>
         <label>
-          Max age (days){" "}
+          {t("admin.maxAgeDays")}{" "}
           <input
             type="number"
             min={1}
-            placeholder="unset"
+            placeholder={t("admin.unsetPlaceholder")}
             value={form.max_age_days}
             onChange={(e) => setForm({ ...form, max_age_days: e.target.value })}
           />
         </label>
         <label>
-          Archive after (days){" "}
+          {t("admin.archiveAfterDays")}{" "}
           <input
             type="number"
             min={1}
-            placeholder="unset"
+            placeholder={t("admin.unsetPlaceholder")}
             value={form.archive_after_days}
             onChange={(e) => setForm({ ...form, archive_after_days: e.target.value })}
           />
         </label>
-        <button type="submit">Save policy</button>
+        <button type="submit">{t("admin.savePolicy")}</button>
       </form>
       <ul>
         {policies.map((p) => (
           <li key={p.id} style={{ marginBottom: 8 }}>
-            {p.folder_id ? `folder ${p.folder_id}` : "workspace default"} — {summarise(p)}{" "}
+            {p.folder_id
+              ? t("admin.retentionFolderLabel", { id: p.folder_id })
+              : t("admin.retentionWorkspaceDefault")}{" "}
+            — {summarise(p)}{" "}
             <button
               onClick={async () => {
-                if (!confirm("Delete policy?")) return;
+                if (!confirm(t("admin.deletePolicyConfirm"))) return;
                 try {
                   await deleteRetentionPolicy(p.id);
                   await refresh();
                 } catch (err) {
-                  setError(errMessage(err));
+                  setError(translateApiError(err, t));
                 }
               }}
             >
-              Delete
+              {t("common.delete")}
             </button>
           </li>
         ))}
@@ -380,6 +398,7 @@ function RetentionTab() {
 }
 
 function StorageTab() {
+  const { t } = useTranslation();
   const [usage, setUsage] = useState<StorageUsage | null>(null);
   const [error, setError] = useState<string | null>(null);
   useEffect(() => {
@@ -387,23 +406,24 @@ function StorageTab() {
       try {
         setUsage(await fetchStorageUsage());
       } catch (e) {
-        setError(errMessage(e));
+        setError(translateApiError(e, t));
       }
     })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
   return (
     <section>
-      <h2>Storage</h2>
+      <h2>{t("admin.storage")}</h2>
       {error && <p style={{ color: "#b91c1c" }}>{error}</p>}
       {usage && (
         <div>
-          <p>Total: {formatBytes(usage.total_bytes)}</p>
+          <p>{t("admin.storageTotal", { bytes: formatBytes(usage.total_bytes) })}</p>
           <table style={{ width: "100%", borderCollapse: "collapse" }}>
             <thead>
               <tr style={{ textAlign: "left", borderBottom: "1px solid #e5e7eb" }}>
-                <th style={th}>User</th>
-                <th style={th}>Bytes</th>
-                <th style={th}>Share</th>
+                <th style={th}>{t("admin.colUser")}</th>
+                <th style={th}>{t("admin.colBytes")}</th>
+                <th style={th}>{t("admin.colShare")}</th>
               </tr>
             </thead>
             <tbody>
@@ -446,13 +466,6 @@ function formatBytes(n: number): string {
     i++;
   }
   return `${v.toFixed(1)} ${units[i]}`;
-}
-
-function errMessage(e: unknown): string {
-  if (e && typeof e === "object" && "message" in e) {
-    return String((e as { message: unknown }).message);
-  }
-  return String(e);
 }
 
 const th: React.CSSProperties = { padding: "8px 12px", fontSize: 12, color: "#6b7280" };

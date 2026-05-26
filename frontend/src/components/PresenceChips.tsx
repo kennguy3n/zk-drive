@@ -10,6 +10,7 @@
 // header collapses cleanly on a single-user document.
 
 import { useEffect, useState } from "react";
+import { useTranslation } from "react-i18next";
 import type { Awareness } from "y-protocols/awareness";
 
 interface AwarenessUserState {
@@ -38,6 +39,7 @@ export default function PresenceChips({
   awareness,
   localClientID,
 }: PresenceChipsProps) {
+  const { t } = useTranslation();
   const [peers, setPeers] = useState<Peer[]>([]);
 
   useEffect(() => {
@@ -54,7 +56,7 @@ export default function PresenceChips({
         if (!u) return;
         next.push({
           id: clientID,
-          name: u.name ?? "Anonymous",
+          name: u.name ?? t("collab.anonymous"),
           color: u.color ?? "#6b7280",
         });
       });
@@ -69,6 +71,9 @@ export default function PresenceChips({
     return () => {
       awareness.off("update", computePeers);
     };
+    // t is stable per i18next mount, intentionally excluded to keep
+    // peers from re-allocating on every locale-namespace warm-up.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [awareness, localClientID]);
 
   if (peers.length === 0) return null;
@@ -80,7 +85,7 @@ export default function PresenceChips({
         gap: 6,
         flexWrap: "wrap",
       }}
-      aria-label={`${peers.length} collaborator${peers.length === 1 ? "" : "s"} present`}
+      aria-label={t("collab.peersPresent", { count: peers.length })}
     >
       {peers.map((p) => (
         <span

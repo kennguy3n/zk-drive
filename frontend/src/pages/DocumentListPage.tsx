@@ -11,6 +11,8 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
+import { useTranslation } from "react-i18next";
+import type { TFunction } from "i18next";
 import {
   createDocument,
   deleteDocument,
@@ -20,6 +22,7 @@ import {
   type Document,
   type Folder,
 } from "../api/client";
+import { translateApiError } from "../api/errors";
 import { resolveAllowedCollabModes } from "../collab/capability";
 import EncryptionBadge from "../components/EncryptionBadge";
 import CollabModeSelector from "../components/CollabModeSelector";
@@ -27,6 +30,7 @@ import CollabModeSelector from "../components/CollabModeSelector";
 export default function DocumentListPage() {
   const { folderId } = useParams<{ folderId: string }>();
   const nav = useNavigate();
+  const { t } = useTranslation();
 
   const [folder, setFolder] = useState<Folder | null>(null);
   const [docs, setDocs] = useState<Document[]>([]);
@@ -54,10 +58,10 @@ export default function DocumentListPage() {
         setDocs(list);
       } catch (e) {
         if (isCancelled?.()) return;
-        setError(String((e as Error)?.message ?? e));
+        setError(translateApiError(e, t));
       }
     },
-    [folderId],
+    [folderId, t],
   );
 
   useEffect(() => {
@@ -70,21 +74,21 @@ export default function DocumentListPage() {
 
   const onDelete = useCallback(
     async (d: Document) => {
-      if (!confirm(`Delete document "${d.name}"? This cannot be undone.`)) return;
+      if (!confirm(t("docs.deleteConfirm", { name: d.name }))) return;
       try {
         await deleteDocument(d.id);
         setDocs((prev) => prev.filter((x) => x.id !== d.id));
       } catch (e) {
-        setError(String((e as Error)?.message ?? e));
+        setError(translateApiError(e, t));
       }
     },
-    [],
+    [t],
   );
 
   if (!folderId) {
     return (
       <div style={pageStyle}>
-        Missing folder id. <Link to="/drive">Back to drive</Link>
+        {t("docs.missingFolderId")} <Link to="/drive">{t("admin.backToDrive")}</Link>
       </div>
     );
   }
@@ -93,16 +97,16 @@ export default function DocumentListPage() {
     <div style={pageStyle}>
       <header style={headerStyle}>
         <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
-          <Link to={`/drive/folder/${folderId}`} style={backBtnStyle} aria-label="Back to folder">
+          <Link to={`/drive/folder/${folderId}`} style={backBtnStyle} aria-label={t("docs.backToFolderAria")}>
             ←
           </Link>
           <h1 style={{ margin: 0, fontSize: 20, fontWeight: 600 }}>
-            {folder ? folder.name : "Folder"} · Documents
+            {t("docs.headerTitle", { name: folder ? folder.name : t("docs.folderFallback") })}
           </h1>
           {folder && <EncryptionBadge mode={folder.encryption_mode} size="row" />}
         </div>
         <button onClick={() => setCreateOpen(true)} style={primaryBtn}>
-          New document
+          {t("docs.newDocument")}
         </button>
       </header>
 
@@ -111,18 +115,15 @@ export default function DocumentListPage() {
           <div style={errorBanner}>{error}</div>
         )}
         {docs.length === 0 ? (
-          <p style={{ color: "#6b7280" }}>
-            No documents in this folder yet. Click <strong>New document</strong> to start a
-            collaborative editor session.
-          </p>
+          <p style={{ color: "#6b7280" }}>{t("docs.empty")}</p>
         ) : (
           <table style={tableStyle}>
             <thead>
               <tr>
-                <th style={thStyle}>Name</th>
-                <th style={thStyle}>Mode</th>
-                <th style={thStyle}>Updated</th>
-                <th style={thStyle} aria-label="actions" />
+                <th style={thStyle}>{t("common.name")}</th>
+                <th style={thStyle}>{t("docs.mode")}</th>
+                <th style={thStyle}>{t("docs.updated")}</th>
+                <th style={thStyle} aria-label={t("common.actions")} />
               </tr>
             </thead>
             <tbody>
@@ -133,11 +134,11 @@ export default function DocumentListPage() {
                       {d.name}
                     </Link>
                   </td>
-                  <td style={tdStyle}>{collabModeLabel(d.collab_mode)}</td>
+                  <td style={tdStyle}>{collabModeLabel(t, d.collab_mode)}</td>
                   <td style={tdStyle}>{new Date(d.updated_at).toLocaleString()}</td>
                   <td style={{ ...tdStyle, textAlign: "right" }}>
                     <button onClick={() => onDelete(d)} style={dangerBtn}>
-                      Delete
+                      {t("common.delete")}
                     </button>
                   </td>
                 </tr>
@@ -168,6 +169,7 @@ interface CreateDocumentDialogProps {
 }
 
 function CreateDocumentDialog({ folder, onClose, onCreated }: CreateDocumentDialogProps) {
+  const { t } = useTranslation();
   // The folder's encryption_mode bounds the allowed collab modes.
   // We compute the allowed list client-side from the SAME resolver
   // the server uses (mirrored into src/collab/capability.ts) so the
@@ -178,7 +180,7 @@ function CreateDocumentDialog({ folder, onClose, onCreated }: CreateDocumentDial
   const [mode, setMode] = useState<CollabMode>(
     allowed[allowed.length - 1] ?? "markdown",
   );
-  const [name, setName] = useState("Untitled");
+  const [name, setName] = useState(t("docs.untitled"));
   const [submitting, setSubmitting] = useState(false);
   const [dialogError, setDialogError] = useState<string | null>(null);
 
@@ -187,7 +189,7 @@ function CreateDocumentDialog({ folder, onClose, onCreated }: CreateDocumentDial
       e.preventDefault();
       const trimmed = name.trim();
       if (!trimmed) {
-        setDialogError("Name is required");
+        setDialogError(t("docs.nameRequired"));
         return;
       }
       setSubmitting(true);
@@ -200,12 +202,12 @@ function CreateDocumentDialog({ folder, onClose, onCreated }: CreateDocumentDial
         });
         onCreated(doc);
       } catch (e2) {
-        setDialogError(String((e2 as Error)?.message ?? e2));
+        setDialogError(translateApiError(e2, t));
       } finally {
         setSubmitting(false);
       }
     },
-    [folder.id, mode, name, onCreated],
+    [folder.id, mode, name, onCreated, t],
   );
 
   return (
@@ -220,9 +222,9 @@ function CreateDocumentDialog({ folder, onClose, onCreated }: CreateDocumentDial
         style={modalCard}
         onClick={(e) => e.stopPropagation()}
       >
-        <h2 style={{ margin: 0, fontSize: 18 }}>New document in {folder.name}</h2>
+        <h2 style={{ margin: 0, fontSize: 18 }}>{t("docs.newInFolder", { name: folder.name })}</h2>
         <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-          <span style={{ fontSize: 13, color: "#374151" }}>Name</span>
+          <span style={{ fontSize: 13, color: "#374151" }}>{t("common.name")}</span>
           <input
             autoFocus
             value={name}
@@ -240,10 +242,10 @@ function CreateDocumentDialog({ folder, onClose, onCreated }: CreateDocumentDial
         {dialogError && <p style={{ color: "#991b1b", fontSize: 13 }}>{dialogError}</p>}
         <div style={{ display: "flex", justifyContent: "flex-end", gap: 8 }}>
           <button type="button" onClick={onClose} disabled={submitting} style={btnStyle}>
-            Cancel
+            {t("common.cancel")}
           </button>
           <button type="submit" disabled={submitting} style={primaryBtn}>
-            {submitting ? "Creating…" : "Create"}
+            {submitting ? t("docs.creating") : t("common.create")}
           </button>
         </div>
       </form>
@@ -251,16 +253,16 @@ function CreateDocumentDialog({ folder, onClose, onCreated }: CreateDocumentDial
   );
 }
 
-function collabModeLabel(m: CollabMode): string {
+function collabModeLabel(t: TFunction, m: CollabMode): string {
   switch (m) {
     case "markdown":
-      return "Markdown";
+      return t("collab.markdown");
     case "rich":
-      return "Rich";
+      return t("collab.rich");
     case "rich_presence":
-      return "Rich + presence";
+      return t("collab.richPresence");
     case "disabled":
-      return "Disabled";
+      return t("collab.disabled");
   }
 }
 

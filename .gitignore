@@ -5,3 +5,4 @@ frontend/playwright-report/
 bin/
 *.log
 sdk/target/
+internal/collab/wasm/ymerge/target/

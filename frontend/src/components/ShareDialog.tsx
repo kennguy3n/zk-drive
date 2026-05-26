@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { useTranslation } from "react-i18next";
 import {
   createGuestInvite,
   createShareLink,
@@ -7,6 +8,7 @@ import {
   type ShareLink,
   type GuestInvite,
 } from "../api/client";
+import { translateApiError } from "../api/errors";
 
 // ShareDialog is the single entry point for sharing a file or folder.
 // It intentionally keeps both share-link and guest-invite flows in one
@@ -25,6 +27,7 @@ interface Props {
 type Role = "viewer" | "commenter" | "editor";
 
 export default function ShareDialog({ resource, onClose }: Props) {
+  const { t } = useTranslation();
   const [tab, setTab] = useState<"link" | "invite">("link");
   const [error, setError] = useState<string | null>(null);
   const [link, setLink] = useState<ShareLink | null>(null);
@@ -64,7 +67,7 @@ export default function ShareDialog({ resource, onClose }: Props) {
       });
       setLink(created);
     } catch (err) {
-      setError(String((err as Error)?.message ?? err));
+      setError(translateApiError(err, t));
     }
   };
 
@@ -84,7 +87,7 @@ export default function ShareDialog({ resource, onClose }: Props) {
     e.preventDefault();
     setError(null);
     if (!inviteFolderID) {
-      setError("This file has no parent folder; invites must target a folder.");
+      setError(t("share.fileNoParent"));
       return;
     }
     try {
@@ -96,7 +99,7 @@ export default function ShareDialog({ resource, onClose }: Props) {
       });
       setInvite(created);
     } catch (err) {
-      setError(String((err as Error)?.message ?? err));
+      setError(translateApiError(err, t));
     }
   };
 
@@ -106,19 +109,21 @@ export default function ShareDialog({ resource, onClose }: Props) {
         <header style={header}>
           <div>
             <div style={{ fontSize: 12, color: "#6b7280", textTransform: "uppercase" }}>
-              Share {resource.type}
+              {t("share.headingFor", {
+                kind: resource.type === "folder" ? t("search.typeFolder") : t("search.typeFile"),
+              })}
             </div>
             <div style={{ fontSize: 16, fontWeight: 600 }}>{resource.value.name}</div>
           </div>
-          <button onClick={onClose} style={closeBtn} aria-label="Close">×</button>
+          <button onClick={onClose} style={closeBtn} aria-label={t("common.close")}>×</button>
         </header>
 
         <nav style={tabs}>
           <TabButton active={tab === "link"} onClick={() => setTab("link")}>
-            Share link
+            {t("share.tabLink")}
           </TabButton>
           <TabButton active={tab === "invite"} onClick={() => setTab("invite")}>
-            Invite by email
+            {t("share.tabInvite")}
           </TabButton>
         </nav>
 
@@ -126,27 +131,27 @@ export default function ShareDialog({ resource, onClose }: Props) {
 
         {tab === "link" ? (
           <form onSubmit={submitLink} style={form}>
-            <Field label="Role">
+            <Field label={t("share.role")}>
               <select
                 value={linkRole}
                 onChange={(e) => setLinkRole(e.target.value as Role)}
                 style={input}
               >
-                <option value="viewer">Viewer</option>
-                <option value="commenter">Commenter</option>
-                <option value="editor">Editor</option>
+                <option value="viewer">{t("share.roleViewer")}</option>
+                <option value="commenter">{t("share.roleCommenter")}</option>
+                <option value="editor">{t("share.roleEditor")}</option>
               </select>
             </Field>
-            <Field label="Password (optional)">
+            <Field label={t("share.passwordOptional")}>
               <input
                 type="password"
                 value={linkPassword}
                 onChange={(e) => setLinkPassword(e.target.value)}
                 style={input}
-                placeholder="Leave blank for no password"
+                placeholder={t("share.passwordPlaceholder")}
               />
             </Field>
-            <Field label="Expires at (optional)">
+            <Field label={t("share.expiresOptional")}>
               <input
                 type="datetime-local"
                 value={linkExpiresAt}
@@ -154,43 +159,43 @@ export default function ShareDialog({ resource, onClose }: Props) {
                 style={input}
               />
             </Field>
-            <Field label="Max downloads (optional)">
+            <Field label={t("share.maxDownloadsOptional")}>
               <input
                 type="number"
                 min={1}
                 value={linkMaxDownloads}
                 onChange={(e) => setLinkMaxDownloads(e.target.value)}
                 style={input}
-                placeholder="Unlimited"
+                placeholder={t("share.unlimitedPlaceholder")}
               />
             </Field>
-            <button type="submit" style={submitBtn}>Create link</button>
+            <button type="submit" style={submitBtn}>{t("share.createLink")}</button>
             {link ? <ShareLinkCard link={link} /> : null}
           </form>
         ) : (
           <form onSubmit={submitInvite} style={form}>
-            <Field label="Email">
+            <Field label={t("share.emailLabel")}>
               <input
                 type="email"
                 required
                 value={inviteEmail}
                 onChange={(e) => setInviteEmail(e.target.value)}
                 style={input}
-                placeholder="guest@example.com"
+                placeholder={t("share.emailPlaceholder")}
               />
             </Field>
-            <Field label="Role">
+            <Field label={t("share.role")}>
               <select
                 value={inviteRole}
                 onChange={(e) => setInviteRole(e.target.value as Role)}
                 style={input}
               >
-                <option value="viewer">Viewer</option>
-                <option value="commenter">Commenter</option>
-                <option value="editor">Editor</option>
+                <option value="viewer">{t("share.roleViewer")}</option>
+                <option value="commenter">{t("share.roleCommenter")}</option>
+                <option value="editor">{t("share.roleEditor")}</option>
               </select>
             </Field>
-            <Field label="Expires at (optional)">
+            <Field label={t("share.expiresOptional")}>
               <input
                 type="datetime-local"
                 value={inviteExpiresAt}
@@ -198,7 +203,7 @@ export default function ShareDialog({ resource, onClose }: Props) {
                 style={input}
               />
             </Field>
-            <button type="submit" style={submitBtn}>Send invite</button>
+            <button type="submit" style={submitBtn}>{t("share.sendInvite")}</button>
             {invite ? <GuestInviteCard invite={invite} /> : null}
           </form>
         )}
@@ -244,28 +249,30 @@ function Field({ label, children }: { label: string; children: React.ReactNode }
 }
 
 function ShareLinkCard({ link }: { link: ShareLink }) {
+  const { t } = useTranslation();
   const url = `${window.location.origin}/share/${link.token}`;
   return (
     <div style={resultBox}>
-      <div style={{ fontSize: 12, color: "#065f46" }}>Link created</div>
+      <div style={{ fontSize: 12, color: "#065f46" }}>{t("share.linkCreated")}</div>
       <div style={{ wordBreak: "break-all", fontFamily: "monospace", fontSize: 12 }}>{url}</div>
       <button
         type="button"
         onClick={() => navigator.clipboard?.writeText(url)}
         style={{ ...submitBtn, marginTop: 8, background: "#ecfdf5", color: "#065f46" }}
       >
-        Copy to clipboard
+        {t("share.copyToClipboard")}
       </button>
     </div>
   );
 }
 
 function GuestInviteCard({ invite }: { invite: GuestInvite }) {
+  const { t } = useTranslation();
   return (
     <div style={resultBox}>
-      <div style={{ fontSize: 12, color: "#065f46" }}>Invite sent</div>
+      <div style={{ fontSize: 12, color: "#065f46" }}>{t("share.inviteSent")}</div>
       <div>
-        <strong>{invite.email}</strong> as <em>{invite.role}</em>
+        <strong>{invite.email}</strong> {t("share.as")} <em>{invite.role}</em>
       </div>
     </div>
   );

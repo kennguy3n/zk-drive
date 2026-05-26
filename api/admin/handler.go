@@ -177,29 +177,29 @@ type updateMFAPolicyResponse struct {
 // workspace policy.
 func (h *Handler) UpdateMFAPolicy(w http.ResponseWriter, r *http.Request) {
 	if h.workspaces == nil {
-		http.Error(w, "workspace service not wired", http.StatusNotImplemented)
+		middleware.RespondError(w, http.StatusNotImplemented, middleware.ErrCodeUnsupportedOp, "workspace service not wired")
 		return
 	}
 	workspaceID, ok := middleware.WorkspaceIDFromContext(r.Context())
 	if !ok {
-		http.Error(w, "workspace not in context", http.StatusInternalServerError)
+		middleware.RespondError(w, http.StatusInternalServerError, middleware.ErrCodeInternal, "workspace not in context")
 		return
 	}
 	actorID, _ := middleware.UserIDFromContext(r.Context())
 
 	var req updateMFAPolicyRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "invalid json body", http.StatusBadRequest)
+		middleware.RespondError(w, http.StatusBadRequest, middleware.ErrCodeMalformedJSON, "invalid json body")
 		return
 	}
 	if req.MFARequired == nil {
-		http.Error(w, "mfa_required is required", http.StatusBadRequest)
+		middleware.RespondError(w, http.StatusBadRequest, middleware.ErrCodeMissingField, "mfa_required is required")
 		return
 	}
 
 	prev, err := h.workspaces.SetMFARequired(r.Context(), workspaceID, *req.MFARequired)
 	if err != nil {
-		http.Error(w, "update mfa policy: "+err.Error(), http.StatusInternalServerError)
+		middleware.RespondInternalError(w, r, "update mfa policy", err)
 		return
 	}
 
@@ -233,17 +233,17 @@ type searchLanguageResponse struct {
 // duplicate constant on the frontend.
 func (h *Handler) GetSearchLanguage(w http.ResponseWriter, r *http.Request) {
 	if h.workspaces == nil {
-		http.Error(w, "workspace service not wired", http.StatusNotImplemented)
+		middleware.RespondError(w, http.StatusNotImplemented, middleware.ErrCodeUnsupportedOp, "workspace service not wired")
 		return
 	}
 	workspaceID, ok := middleware.WorkspaceIDFromContext(r.Context())
 	if !ok {
-		http.Error(w, "workspace not in context", http.StatusInternalServerError)
+		middleware.RespondError(w, http.StatusInternalServerError, middleware.ErrCodeInternal, "workspace not in context")
 		return
 	}
 	lang, err := h.workspaces.GetSearchLanguage(r.Context(), workspaceID)
 	if err != nil {
-		http.Error(w, "get search language: "+err.Error(), http.StatusInternalServerError)
+		middleware.RespondInternalError(w, r, "get search language", err)
 		return
 	}
 	writeJSON(w, http.StatusOK, searchLanguageResponse{
@@ -259,44 +259,43 @@ func (h *Handler) GetSearchLanguage(w http.ResponseWriter, r *http.Request) {
 // without consulting the source.
 func (h *Handler) UpdateSearchLanguage(w http.ResponseWriter, r *http.Request) {
 	if h.workspaces == nil {
-		http.Error(w, "workspace service not wired", http.StatusNotImplemented)
+		middleware.RespondError(w, http.StatusNotImplemented, middleware.ErrCodeUnsupportedOp, "workspace service not wired")
 		return
 	}
 	workspaceID, ok := middleware.WorkspaceIDFromContext(r.Context())
 	if !ok {
-		http.Error(w, "workspace not in context", http.StatusInternalServerError)
+		middleware.RespondError(w, http.StatusInternalServerError, middleware.ErrCodeInternal, "workspace not in context")
 		return
 	}
 	actorID, _ := middleware.UserIDFromContext(r.Context())
 
 	var req searchLanguageRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "invalid json body", http.StatusBadRequest)
+		middleware.RespondError(w, http.StatusBadRequest, middleware.ErrCodeMalformedJSON, "invalid json body")
 		return
 	}
 	if req.Language == nil {
-		http.Error(w, "language is required", http.StatusBadRequest)
+		middleware.RespondError(w, http.StatusBadRequest, middleware.ErrCodeMissingField, "language is required")
 		return
 	}
 	lang := strings.ToLower(strings.TrimSpace(*req.Language))
 	if !workspace.IsSupportedSearchLanguage(lang) {
-		writeJSON(w, http.StatusBadRequest, map[string]any{
-			"error":     "unsupported language",
-			"supported": workspace.SupportedSearchLanguages(),
-		})
+		// Structured envelope rather than a bespoke {"error","supported"}
+		// payload — clients that want the allow-list call GET
+		// /workspace/search-language, which is the single source of truth
+		// for it. Keeps the error response shape compatible with
+		// translateApiError on the frontend.
+		middleware.RespondError(w, http.StatusBadRequest, middleware.ErrCodeUnsupportedLanguage, "unsupported search language")
 		return
 	}
 
 	prev, err := h.workspaces.SetSearchLanguage(r.Context(), workspaceID, lang)
 	if err != nil {
 		if errors.Is(err, workspace.ErrUnsupportedSearchLanguage) {
-			writeJSON(w, http.StatusBadRequest, map[string]any{
-				"error":     "unsupported language",
-				"supported": workspace.SupportedSearchLanguages(),
-			})
+			middleware.RespondError(w, http.StatusBadRequest, middleware.ErrCodeUnsupportedLanguage, "unsupported search language")
 			return
 		}
-		http.Error(w, "update search language: "+err.Error(), http.StatusInternalServerError)
+		middleware.RespondInternalError(w, r, "update search language", err)
 		return
 	}
 
@@ -319,30 +318,30 @@ func (h *Handler) UpdateSearchLanguage(w http.ResponseWriter, r *http.Request) {
 // not configured (e.g. local-dev with no console URL).
 func (h *Handler) GetPlacement(w http.ResponseWriter, r *http.Request) {
 	if h.fabric == nil || h.provisioner == nil {
-		http.Error(w, "fabric not configured", http.StatusNotImplemented)
+		middleware.RespondError(w, http.StatusNotImplemented, middleware.ErrCodeUnsupportedOp, "fabric not configured")
 		return
 	}
 	workspaceID, ok := middleware.WorkspaceIDFromContext(r.Context())
 	if !ok {
-		http.Error(w, "unauthenticated", http.StatusUnauthorized)
+		middleware.RespondError(w, http.StatusUnauthorized, middleware.ErrCodeAuthMissingToken, "unauthenticated")
 		return
 	}
 	tenantID, err := h.provisioner.LookupTenantID(r.Context(), workspaceID)
 	if err != nil {
 		if errors.Is(err, fabric.ErrNoCredentials) {
-			http.Error(w, "workspace not provisioned with fabric", http.StatusNotFound)
+			middleware.RespondError(w, http.StatusNotFound, middleware.ErrCodeFabricNotProvisioned, "workspace not provisioned with fabric")
 			return
 		}
-		http.Error(w, "lookup tenant: "+err.Error(), http.StatusInternalServerError)
+		middleware.RespondInternalError(w, r, "lookup tenant", err)
 		return
 	}
 	policy, err := h.fabric.GetPlacement(r.Context(), tenantID)
 	if err != nil {
 		if errors.Is(err, fabric.ErrPlacementNotFound) {
-			http.Error(w, "placement policy not set", http.StatusNotFound)
+			middleware.RespondError(w, http.StatusNotFound, middleware.ErrCodeNotFound, "placement policy not set")
 			return
 		}
-		http.Error(w, "get placement: "+err.Error(), http.StatusBadGateway)
+		middleware.RespondUpstreamError(w, r, "get placement", err)
 		return
 	}
 	writeJSON(w, http.StatusOK, policy)
@@ -354,26 +353,26 @@ func (h *Handler) GetPlacement(w http.ResponseWriter, r *http.Request) {
 // data residency for fast lookups.
 func (h *Handler) PutPlacement(w http.ResponseWriter, r *http.Request) {
 	if h.fabric == nil || h.provisioner == nil {
-		http.Error(w, "fabric not configured", http.StatusNotImplemented)
+		middleware.RespondError(w, http.StatusNotImplemented, middleware.ErrCodeUnsupportedOp, "fabric not configured")
 		return
 	}
 	workspaceID, ok := middleware.WorkspaceIDFromContext(r.Context())
 	if !ok {
-		http.Error(w, "unauthenticated", http.StatusUnauthorized)
+		middleware.RespondError(w, http.StatusUnauthorized, middleware.ErrCodeAuthMissingToken, "unauthenticated")
 		return
 	}
 	var policy fabric.Policy
 	if err := json.NewDecoder(r.Body).Decode(&policy); err != nil {
-		http.Error(w, "invalid json body", http.StatusBadRequest)
+		middleware.RespondError(w, http.StatusBadRequest, middleware.ErrCodeMalformedJSON, "invalid json body")
 		return
 	}
 	tenantID, err := h.provisioner.LookupTenantID(r.Context(), workspaceID)
 	if err != nil {
 		if errors.Is(err, fabric.ErrNoCredentials) {
-			http.Error(w, "workspace not provisioned with fabric", http.StatusNotFound)
+			middleware.RespondError(w, http.StatusNotFound, middleware.ErrCodeFabricNotProvisioned, "workspace not provisioned with fabric")
 			return
 		}
-		http.Error(w, "lookup tenant: "+err.Error(), http.StatusInternalServerError)
+		middleware.RespondInternalError(w, r, "lookup tenant", err)
 		return
 	}
 	// Force the policy's tenant field to match the workspace's
@@ -381,11 +380,11 @@ func (h *Handler) PutPlacement(w http.ResponseWriter, r *http.Request) {
 	// the request body.
 	policy.Tenant = tenantID
 	if err := policy.Validate(); err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		middleware.RespondError(w, http.StatusBadRequest, middleware.ErrCodeBadRequest, err.Error())
 		return
 	}
 	if err := h.fabric.PutPlacement(r.Context(), tenantID, &policy); err != nil {
-		http.Error(w, "put placement: "+err.Error(), http.StatusBadGateway)
+		middleware.RespondUpstreamError(w, r, "put placement", err)
 		return
 	}
 	// Mirror the policy_ref into the local credentials row so the
@@ -396,7 +395,7 @@ func (h *Handler) PutPlacement(w http.ResponseWriter, r *http.Request) {
 		policyRef = "custom"
 	}
 	if err := h.provisioner.UpdatePlacement(r.Context(), workspaceID, policyRef, policy.FirstCountry()); err != nil && !errors.Is(err, fabric.ErrNoCredentials) {
-		http.Error(w, "update local placement mirror: "+err.Error(), http.StatusInternalServerError)
+		middleware.RespondInternalError(w, r, "update local placement mirror", err)
 		return
 	}
 	if h.storeFactory != nil {
@@ -422,21 +421,21 @@ type cmkResponse struct {
 // fabric-provisioned credentials row yet.
 func (h *Handler) GetCMK(w http.ResponseWriter, r *http.Request) {
 	if h.provisioner == nil {
-		http.Error(w, "fabric not configured", http.StatusNotImplemented)
+		middleware.RespondError(w, http.StatusNotImplemented, middleware.ErrCodeUnsupportedOp, "fabric not configured")
 		return
 	}
 	workspaceID, ok := middleware.WorkspaceIDFromContext(r.Context())
 	if !ok {
-		http.Error(w, "unauthenticated", http.StatusUnauthorized)
+		middleware.RespondError(w, http.StatusUnauthorized, middleware.ErrCodeAuthMissingToken, "unauthenticated")
 		return
 	}
 	uri, err := h.provisioner.LookupCMK(r.Context(), workspaceID)
 	if err != nil {
 		if errors.Is(err, fabric.ErrNoCredentials) {
-			http.Error(w, "workspace not provisioned with fabric", http.StatusNotFound)
+			middleware.RespondError(w, http.StatusNotFound, middleware.ErrCodeFabricNotProvisioned, "workspace not provisioned with fabric")
 			return
 		}
-		http.Error(w, "lookup cmk: "+err.Error(), http.StatusInternalServerError)
+		middleware.RespondInternalError(w, r, "lookup cmk", err)
 		return
 	}
 	writeJSON(w, http.StatusOK, cmkResponse{CMKURI: uri})
@@ -450,30 +449,30 @@ func (h *Handler) GetCMK(w http.ResponseWriter, r *http.Request) {
 // reconciliation will re-sync.
 func (h *Handler) PutCMK(w http.ResponseWriter, r *http.Request) {
 	if h.provisioner == nil {
-		http.Error(w, "fabric not configured", http.StatusNotImplemented)
+		middleware.RespondError(w, http.StatusNotImplemented, middleware.ErrCodeUnsupportedOp, "fabric not configured")
 		return
 	}
 	workspaceID, ok := middleware.WorkspaceIDFromContext(r.Context())
 	if !ok {
-		http.Error(w, "unauthenticated", http.StatusUnauthorized)
+		middleware.RespondError(w, http.StatusUnauthorized, middleware.ErrCodeAuthMissingToken, "unauthenticated")
 		return
 	}
 	var req cmkRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "invalid json body", http.StatusBadRequest)
+		middleware.RespondError(w, http.StatusBadRequest, middleware.ErrCodeMalformedJSON, "invalid json body")
 		return
 	}
 	uri := strings.TrimSpace(req.CMKURI)
 	if err := cryptoValidateCMKURI(uri); err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		middleware.RespondError(w, http.StatusBadRequest, middleware.ErrCodeBadRequest, err.Error())
 		return
 	}
 	if err := h.provisioner.UpdateCMK(r.Context(), workspaceID, uri); err != nil {
 		if errors.Is(err, fabric.ErrNoCredentials) {
-			http.Error(w, "workspace not provisioned with fabric", http.StatusNotFound)
+			middleware.RespondError(w, http.StatusNotFound, middleware.ErrCodeFabricNotProvisioned, "workspace not provisioned with fabric")
 			return
 		}
-		http.Error(w, "update cmk: "+err.Error(), http.StatusInternalServerError)
+		middleware.RespondInternalError(w, r, "update cmk", err)
 		return
 	}
 	// Best-effort fabric console notification: log and ignore errors
@@ -499,20 +498,28 @@ func (h *Handler) PutCMK(w http.ResponseWriter, r *http.Request) {
 // when the ?action=... query param is present.
 func (h *Handler) GetAuditLog(w http.ResponseWriter, r *http.Request) {
 	if h.audit == nil {
-		http.Error(w, "audit not configured", http.StatusNotImplemented)
+		middleware.RespondError(w, http.StatusNotImplemented, middleware.ErrCodeUnsupportedOp, "audit not configured")
 		return
 	}
 	workspaceID, ok := middleware.WorkspaceIDFromContext(r.Context())
 	if !ok {
-		http.Error(w, "unauthenticated", http.StatusUnauthorized)
+		middleware.RespondError(w, http.StatusUnauthorized, middleware.ErrCodeAuthMissingToken, "unauthenticated")
 		return
 	}
-	limit := parseIntQuery(r, "limit", 50)
-	offset := parseIntQuery(r, "offset", 0)
+	limit, err := parseIntQuery(r, "limit", 50)
+	if err != nil {
+		middleware.RespondError(w, http.StatusBadRequest, middleware.ErrCodeBadRequest, "invalid limit")
+		return
+	}
+	offset, err := parseIntQuery(r, "offset", 0)
+	if err != nil {
+		middleware.RespondError(w, http.StatusBadRequest, middleware.ErrCodeBadRequest, "invalid offset")
+		return
+	}
 	action := strings.TrimSpace(r.URL.Query().Get("action"))
 	entries, err := h.audit.List(r.Context(), workspaceID, action, limit, offset)
 	if err != nil {
-		http.Error(w, "list audit: "+err.Error(), http.StatusInternalServerError)
+		middleware.RespondInternalError(w, r, "list audit", err)
 		return
 	}
 	if entries == nil {
@@ -563,13 +570,13 @@ func toUserView(u *user.User) userView {
 // ListUsers returns every user in the caller's workspace.
 func (h *Handler) ListUsers(w http.ResponseWriter, r *http.Request) {
 	if h.users == nil {
-		http.Error(w, "users not configured", http.StatusNotImplemented)
+		middleware.RespondError(w, http.StatusNotImplemented, middleware.ErrCodeUnsupportedOp, "users not configured")
 		return
 	}
 	workspaceID, _ := middleware.WorkspaceIDFromContext(r.Context())
 	list, err := h.users.List(r.Context(), workspaceID)
 	if err != nil {
-		http.Error(w, "list users: "+err.Error(), http.StatusInternalServerError)
+		middleware.RespondInternalError(w, r, "list users", err)
 		return
 	}
 	out := make([]userView, 0, len(list))
@@ -584,14 +591,14 @@ func (h *Handler) ListUsers(w http.ResponseWriter, r *http.Request) {
 // first login.
 func (h *Handler) InviteUser(w http.ResponseWriter, r *http.Request) {
 	if h.users == nil {
-		http.Error(w, "users not configured", http.StatusNotImplemented)
+		middleware.RespondError(w, http.StatusNotImplemented, middleware.ErrCodeUnsupportedOp, "users not configured")
 		return
 	}
 	workspaceID, _ := middleware.WorkspaceIDFromContext(r.Context())
 	actor, _ := middleware.UserIDFromContext(r.Context())
 	var req inviteUserRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "invalid json body", http.StatusBadRequest)
+		middleware.RespondError(w, http.StatusBadRequest, middleware.ErrCodeMalformedJSON, "invalid json body")
 		return
 	}
 	req.Email = strings.TrimSpace(strings.ToLower(req.Email))
@@ -600,20 +607,20 @@ func (h *Handler) InviteUser(w http.ResponseWriter, r *http.Request) {
 		req.Role = user.RoleMember
 	}
 	if req.Role != user.RoleAdmin && req.Role != user.RoleMember {
-		http.Error(w, "role must be admin or member", http.StatusBadRequest)
+		middleware.RespondError(w, http.StatusBadRequest, middleware.ErrCodeValidation, "role must be admin or member")
 		return
 	}
 	if req.Email == "" || req.Name == "" || req.Password == "" {
-		http.Error(w, "email, name, password are required", http.StatusBadRequest)
+		middleware.RespondError(w, http.StatusBadRequest, middleware.ErrCodeMissingField, "email, name, password are required")
 		return
 	}
 	if err := h.billing.CheckUserQuota(r.Context(), workspaceID); err != nil {
-		writeBillingError(w, err)
+		writeBillingError(w, r, err)
 		return
 	}
 	u, err := h.users.Create(r.Context(), workspaceID, req.Email, req.Name, req.Password, req.Role)
 	if err != nil {
-		http.Error(w, "create user: "+err.Error(), http.StatusInternalServerError)
+		middleware.RespondInternalError(w, r, "create user", err)
 		return
 	}
 	if h.audit != nil {
@@ -632,14 +639,14 @@ func (h *Handler) InviteUser(w http.ResponseWriter, r *http.Request) {
 // audit log foreign-key history still resolves the actor.
 func (h *Handler) DeactivateUser(w http.ResponseWriter, r *http.Request) {
 	if h.users == nil {
-		http.Error(w, "users not configured", http.StatusNotImplemented)
+		middleware.RespondError(w, http.StatusNotImplemented, middleware.ErrCodeUnsupportedOp, "users not configured")
 		return
 	}
 	workspaceID, _ := middleware.WorkspaceIDFromContext(r.Context())
 	actor, _ := middleware.UserIDFromContext(r.Context())
 	id, err := uuid.Parse(chi.URLParam(r, "id"))
 	if err != nil {
-		http.Error(w, "invalid id", http.StatusBadRequest)
+		middleware.RespondError(w, http.StatusBadRequest, middleware.ErrCodeBadRequest, "invalid id")
 		return
 	}
 	// Snapshot before deactivate so the outbound webhook carries
@@ -649,10 +656,10 @@ func (h *Handler) DeactivateUser(w http.ResponseWriter, r *http.Request) {
 	snap, _ := h.users.GetByID(r.Context(), workspaceID, id)
 	if err := h.users.Deactivate(r.Context(), workspaceID, id, time.Now().UTC()); err != nil {
 		if errors.Is(err, user.ErrNotFound) {
-			http.Error(w, "user not found or already deactivated", http.StatusNotFound)
+			middleware.RespondError(w, http.StatusNotFound, middleware.ErrCodeNotFound, "user not found or already deactivated")
 			return
 		}
-		http.Error(w, "deactivate: "+err.Error(), http.StatusInternalServerError)
+		middleware.RespondInternalError(w, r, "deactivate", err)
 		return
 	}
 	if h.audit != nil {
@@ -689,31 +696,31 @@ func (h *Handler) publishMemberEvent(ctx context.Context, t webhooks.EventType, 
 // UpdateUserRole promotes or demotes a user.
 func (h *Handler) UpdateUserRole(w http.ResponseWriter, r *http.Request) {
 	if h.users == nil {
-		http.Error(w, "users not configured", http.StatusNotImplemented)
+		middleware.RespondError(w, http.StatusNotImplemented, middleware.ErrCodeUnsupportedOp, "users not configured")
 		return
 	}
 	workspaceID, _ := middleware.WorkspaceIDFromContext(r.Context())
 	actor, _ := middleware.UserIDFromContext(r.Context())
 	id, err := uuid.Parse(chi.URLParam(r, "id"))
 	if err != nil {
-		http.Error(w, "invalid id", http.StatusBadRequest)
+		middleware.RespondError(w, http.StatusBadRequest, middleware.ErrCodeBadRequest, "invalid id")
 		return
 	}
 	var req roleRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "invalid json body", http.StatusBadRequest)
+		middleware.RespondError(w, http.StatusBadRequest, middleware.ErrCodeMalformedJSON, "invalid json body")
 		return
 	}
 	if req.Role != user.RoleAdmin && req.Role != user.RoleMember {
-		http.Error(w, "role must be admin or member", http.StatusBadRequest)
+		middleware.RespondError(w, http.StatusBadRequest, middleware.ErrCodeValidation, "role must be admin or member")
 		return
 	}
 	if err := h.users.UpdateRole(r.Context(), workspaceID, id, req.Role); err != nil {
 		if errors.Is(err, user.ErrNotFound) {
-			http.Error(w, "user not found", http.StatusNotFound)
+			middleware.RespondError(w, http.StatusNotFound, middleware.ErrCodeNotFound, "user not found")
 			return
 		}
-		http.Error(w, "update role: "+err.Error(), http.StatusInternalServerError)
+		middleware.RespondInternalError(w, r, "update role", err)
 		return
 	}
 	if h.audit != nil {
@@ -753,7 +760,7 @@ GROUP BY u.id, u.email
 ORDER BY u.email`
 	rows, err := h.pool.Query(r.Context(), q, workspaceID)
 	if err != nil {
-		http.Error(w, "query usage: "+err.Error(), http.StatusInternalServerError)
+		middleware.RespondInternalError(w, r, "query usage", err)
 		return
 	}
 	defer rows.Close()
@@ -761,7 +768,7 @@ ORDER BY u.email`
 	for rows.Next() {
 		var entry userUsageEntry
 		if err := rows.Scan(&entry.UserID, &entry.Email, &entry.TotalBytes, &entry.FileCount); err != nil {
-			http.Error(w, "scan usage: "+err.Error(), http.StatusInternalServerError)
+			middleware.RespondInternalError(w, r, "scan usage", err)
 			return
 		}
 		resp.TotalBytes += entry.TotalBytes
@@ -782,13 +789,13 @@ type retentionPolicyRequest struct {
 // ListRetentionPolicies returns every policy in the caller's workspace.
 func (h *Handler) ListRetentionPolicies(w http.ResponseWriter, r *http.Request) {
 	if h.retention == nil {
-		http.Error(w, "retention not configured", http.StatusNotImplemented)
+		middleware.RespondError(w, http.StatusNotImplemented, middleware.ErrCodeUnsupportedOp, "retention not configured")
 		return
 	}
 	workspaceID, _ := middleware.WorkspaceIDFromContext(r.Context())
 	list, err := h.retention.List(r.Context(), workspaceID)
 	if err != nil {
-		http.Error(w, "list: "+err.Error(), http.StatusInternalServerError)
+		middleware.RespondInternalError(w, r, "list", err)
 		return
 	}
 	if list == nil {
@@ -801,14 +808,14 @@ func (h *Handler) ListRetentionPolicies(w http.ResponseWriter, r *http.Request) 
 // (workspace, folder).
 func (h *Handler) UpsertRetentionPolicy(w http.ResponseWriter, r *http.Request) {
 	if h.retention == nil {
-		http.Error(w, "retention not configured", http.StatusNotImplemented)
+		middleware.RespondError(w, http.StatusNotImplemented, middleware.ErrCodeUnsupportedOp, "retention not configured")
 		return
 	}
 	workspaceID, _ := middleware.WorkspaceIDFromContext(r.Context())
 	actor, _ := middleware.UserIDFromContext(r.Context())
 	var req retentionPolicyRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "invalid json body", http.StatusBadRequest)
+		middleware.RespondError(w, http.StatusBadRequest, middleware.ErrCodeMalformedJSON, "invalid json body")
 		return
 	}
 	p := &retention.Policy{
@@ -824,14 +831,14 @@ func (h *Handler) UpsertRetentionPolicy(w http.ResponseWriter, r *http.Request) 
 	if req.FolderID != nil && *req.FolderID != "" {
 		fid, err := uuid.Parse(*req.FolderID)
 		if err != nil {
-			http.Error(w, "invalid folder_id", http.StatusBadRequest)
+			middleware.RespondError(w, http.StatusBadRequest, middleware.ErrCodeBadRequest, "invalid folder_id")
 			return
 		}
 		p.FolderID = &fid
 	}
 	out, err := h.retention.Upsert(r.Context(), p)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		middleware.RespondError(w, http.StatusBadRequest, middleware.ErrCodeBadRequest, err.Error())
 		return
 	}
 	if h.audit != nil {
@@ -849,22 +856,22 @@ func (h *Handler) UpsertRetentionPolicy(w http.ResponseWriter, r *http.Request) 
 // DeleteRetentionPolicy removes a policy by id.
 func (h *Handler) DeleteRetentionPolicy(w http.ResponseWriter, r *http.Request) {
 	if h.retention == nil {
-		http.Error(w, "retention not configured", http.StatusNotImplemented)
+		middleware.RespondError(w, http.StatusNotImplemented, middleware.ErrCodeUnsupportedOp, "retention not configured")
 		return
 	}
 	workspaceID, _ := middleware.WorkspaceIDFromContext(r.Context())
 	actor, _ := middleware.UserIDFromContext(r.Context())
 	id, err := uuid.Parse(chi.URLParam(r, "id"))
 	if err != nil {
-		http.Error(w, "invalid id", http.StatusBadRequest)
+		middleware.RespondError(w, http.StatusBadRequest, middleware.ErrCodeBadRequest, "invalid id")
 		return
 	}
 	if err := h.retention.Delete(r.Context(), workspaceID, id); err != nil {
 		if errors.Is(err, retention.ErrNotFound) {
-			http.Error(w, "policy not found", http.StatusNotFound)
+			middleware.RespondError(w, http.StatusNotFound, middleware.ErrCodeNotFound, "policy not found")
 			return
 		}
-		http.Error(w, "delete: "+err.Error(), http.StatusInternalServerError)
+		middleware.RespondInternalError(w, r, "delete", err)
 		return
 	}
 	if h.audit != nil {
@@ -876,22 +883,39 @@ func (h *Handler) DeleteRetentionPolicy(w http.ResponseWriter, r *http.Request) 
 
 // Helpers ----------------------------------------------------------
 
+// writeJSON delegates to middleware.WriteJSON so admin success
+// responses share the same Content-Type charset and
+// X-Content-Type-Options defence as the error responses written
+// through middleware.RespondError from the same handlers.
 func writeJSON(w http.ResponseWriter, status int, payload any) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(payload)
+	middleware.WriteJSON(w, status, payload)
 }
 
-func parseIntQuery(r *http.Request, key string, def int) int {
+// parseIntQuery parses an integer query parameter, returning `def`
+// if the param is absent or blank, and an error if the param is
+// present but cannot be parsed. Negative values clip to `def` so
+// a deliberately-malformed `?limit=-1` and an unset limit produce
+// the same observable page (matches api/drive/changes.go's helper
+// of the same name). Devin Review on PR #83 commit 97679c2
+// flagged that the admin and drive packages had divergent
+// signatures (admin silently swallowed bad input, drive returned
+// the error); harmonising to the drive shape lets the audit-log
+// endpoint surface a 400 for malformed pagination instead of
+// silently using the default page size, which used to hide
+// frontend bugs that sent NaN limits.
+func parseIntQuery(r *http.Request, key string, def int) (int, error) {
 	s := strings.TrimSpace(r.URL.Query().Get(key))
 	if s == "" {
-		return def
+		return def, nil
 	}
 	v, err := strconv.Atoi(s)
 	if err != nil {
-		return def
+		return 0, err
 	}
-	return v
+	if v < 0 {
+		return def, nil
+	}
+	return v, nil
 }
 
 // Billing -----------------------------------------------------------
@@ -908,13 +932,13 @@ type updatePlanRequest struct {
 // counts.
 func (h *Handler) BillingUsage(w http.ResponseWriter, r *http.Request) {
 	if h.billing == nil {
-		http.Error(w, "billing not configured", http.StatusNotImplemented)
+		middleware.RespondError(w, http.StatusNotImplemented, middleware.ErrCodeUnsupportedOp, "billing not configured")
 		return
 	}
 	workspaceID, _ := middleware.WorkspaceIDFromContext(r.Context())
 	summary, err := h.billing.GetUsageSummary(r.Context(), workspaceID)
 	if err != nil {
-		http.Error(w, "billing usage: "+err.Error(), http.StatusInternalServerError)
+		middleware.RespondInternalError(w, r, "billing usage", err)
 		return
 	}
 	writeJSON(w, http.StatusOK, summary)
@@ -923,18 +947,18 @@ func (h *Handler) BillingUsage(w http.ResponseWriter, r *http.Request) {
 // UpdateBillingPlan upserts the workspace's plan row.
 func (h *Handler) UpdateBillingPlan(w http.ResponseWriter, r *http.Request) {
 	if h.billing == nil {
-		http.Error(w, "billing not configured", http.StatusNotImplemented)
+		middleware.RespondError(w, http.StatusNotImplemented, middleware.ErrCodeUnsupportedOp, "billing not configured")
 		return
 	}
 	workspaceID, _ := middleware.WorkspaceIDFromContext(r.Context())
 	actor, _ := middleware.UserIDFromContext(r.Context())
 	var req updatePlanRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "invalid json body", http.StatusBadRequest)
+		middleware.RespondError(w, http.StatusBadRequest, middleware.ErrCodeMalformedJSON, "invalid json body")
 		return
 	}
 	if !billing.IsValidTier(req.Tier) {
-		http.Error(w, "invalid tier", http.StatusBadRequest)
+		middleware.RespondError(w, http.StatusBadRequest, middleware.ErrCodeBadRequest, "invalid tier")
 		return
 	}
 	plan := &billing.Plan{
@@ -946,7 +970,7 @@ func (h *Handler) UpdateBillingPlan(w http.ResponseWriter, r *http.Request) {
 	}
 	out, err := h.billing.UpsertPlan(r.Context(), plan)
 	if err != nil {
-		http.Error(w, "upsert plan: "+err.Error(), http.StatusInternalServerError)
+		middleware.RespondInternalError(w, r, "upsert plan", err)
 		return
 	}
 	if h.audit != nil {
@@ -958,13 +982,25 @@ func (h *Handler) UpdateBillingPlan(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, out)
 }
 
-// writeBillingError maps billing.ErrQuotaExceeded to 402 Payment
-// Required so the frontend can prompt the user to upgrade their plan.
-func writeBillingError(w http.ResponseWriter, err error) {
-	switch {
-	case errors.Is(err, billing.ErrQuotaExceeded):
-		http.Error(w, err.Error(), http.StatusPaymentRequired)
-	default:
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+// writeBillingError delegates the billing-specific mapping (e.g.
+// billing.ErrQuotaExceeded -> 402 WORKSPACE_QUOTA_EXCEEDED) to
+// middleware.WriteBillingError so every handler that touches a
+// billing call returns the same code for the same condition. The
+// admin package has no service-error helper of its own — unrecognised
+// billing errors route through middleware.RespondInternalError so
+// the underlying err is logged server-side (with op, request path,
+// and method for operator diagnostics) but never appears in the
+// JSON response body. Devin Review BUG_0001 on commit a2e52fb
+// flagged the previous err.Error() leak: a billing-database
+// connection failure or stripe-call panic would have surfaced raw
+// internals in the JSON `message` field for any non-frontend
+// consumer that read response.data. Threading *http.Request was
+// the architecturally correct fix (per the rest of the WS5
+// redaction contract) rather than a static "billing check failed"
+// fallback, since the operator log line carries actionable detail.
+func writeBillingError(w http.ResponseWriter, r *http.Request, err error) {
+	if middleware.WriteBillingError(w, err) {
+		return
 	}
+	middleware.RespondInternalError(w, r, "billing check", err)
 }

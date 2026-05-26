@@ -1,10 +1,8 @@
 package drive
 
 import (
-	"encoding/json"
 	"errors"
 	"net/http"
-	"strconv"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
@@ -16,19 +14,6 @@ import (
 	"github.com/kennguy3n/zk-drive/internal/user"
 	"github.com/kennguy3n/zk-drive/internal/workspace"
 )
-
-// parseIntParam parses a query-string int with a default. Negative values
-// fall back to def so a malicious "?limit=-1" can't break the SQL.
-func parseIntParam(raw string, def int) int {
-	if raw == "" {
-		return def
-	}
-	n, err := strconv.Atoi(raw)
-	if err != nil || n < 0 {
-		return def
-	}
-	return n
-}
 
 func (h *Handler) requireWorkspaceMatch(r *http.Request) (*workspace.Workspace, error) {
 	workspaceID, _ := middleware.WorkspaceIDFromContext(r.Context())
@@ -67,21 +52,40 @@ func sameFolderEncryptionMode(a, b string) bool {
 	return a == b
 }
 
-func writeServiceError(w http.ResponseWriter, err error) {
+// writeServiceError maps a service-layer error to the canonical
+// JSON envelope. The classification matches the (mostly internal)
+// sentinel errors raised by the file / folder / workspace / user /
+// permission packages, plus the badRequestErr / forbiddenErr
+// dynamic-type carve-outs used inside drive handlers.
+//
+// The default branch — unrecognised error type — was the codebase's
+// biggest err.Error() leak vector before PR #83: every database
+// failure, context-timeout, or upstream panic that bubbled up to a
+// drive handler landed in a 500 response with the raw Go error
+// string in the JSON `message` field. The helper now takes
+// *http.Request so the default branch can route through
+// middleware.RespondInternalError, which logs the underlying err
+// to the request-scoped slog logger (operators get the diagnostic)
+// and writes a sanitised 500 envelope (clients see just
+// "drive service error"). Devin Review BUG_0002 on commit a2e52fb
+// flagged this — the new helper had to be threaded through the
+// helper rather than added as a one-line replacement because
+// writeServiceError previously had no access to *http.Request.
+func writeServiceError(w http.ResponseWriter, r *http.Request, err error) {
 	switch {
 	case errors.Is(err, folder.ErrNotFound),
 		errors.Is(err, file.ErrNotFound),
 		errors.Is(err, workspace.ErrNotFound),
 		errors.Is(err, user.ErrNotFound),
 		errors.Is(err, permission.ErrNotFound):
-		http.Error(w, err.Error(), http.StatusNotFound)
+		middleware.RespondError(w, http.StatusNotFound, middleware.ErrCodeNotFound, err.Error())
 	case errors.Is(err, folder.ErrInvalidName),
 		errors.Is(err, folder.ErrInvalidParent),
 		errors.Is(err, folder.ErrInvalidEncryptionMode),
 		errors.Is(err, file.ErrInvalidName):
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		middleware.RespondError(w, http.StatusBadRequest, middleware.ErrCodeValidation, err.Error())
 	case errors.Is(err, folder.ErrEncryptionModeMismatch):
-		http.Error(w, err.Error(), http.StatusConflict)
+		middleware.RespondError(w, http.StatusConflict, middleware.ErrCodeConflict, err.Error())
 	case errors.Is(err, file.ErrVersionConflict):
 		// Surface the generic 409 rather than err.Error() so the
 		// internal "file version conflicts with existing row" detail
@@ -89,24 +93,28 @@ func writeServiceError(w http.ResponseWriter, err error) {
 		// not leak to the client. The only way to trip this branch
 		// is a UUID forge attempt or a programming error, so a
 		// terse message is appropriate.
-		http.Error(w, "version conflict", http.StatusConflict)
+		middleware.RespondError(w, http.StatusConflict, middleware.ErrCodeConflict, "version conflict")
 	default:
 		var br badRequestErr
 		var fb forbiddenErr
 		if errors.As(err, &br) {
-			http.Error(w, err.Error(), http.StatusBadRequest)
+			middleware.RespondError(w, http.StatusBadRequest, middleware.ErrCodeBadRequest, err.Error())
 			return
 		}
 		if errors.As(err, &fb) {
-			http.Error(w, err.Error(), http.StatusForbidden)
+			middleware.RespondError(w, http.StatusForbidden, middleware.ErrCodeForbidden, err.Error())
 			return
 		}
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		middleware.RespondInternalError(w, r, "drive service error", err)
 	}
 }
 
+// writeJSON delegates to middleware.WriteJSON so success responses
+// share the same Content-Type charset and X-Content-Type-Options
+// defence as error responses written through middleware.RespondError.
+// Kept as a thin package-local alias so the rest of the package
+// reads the same as before (writeJSON(w, status, payload)) rather
+// than every call site importing middleware.
 func writeJSON(w http.ResponseWriter, status int, payload any) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(payload)
+	middleware.WriteJSON(w, status, payload)
 }

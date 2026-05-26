@@ -24,17 +24,25 @@ import (
 // without forcing every user to re-login.
 func (h *Handler) Search(w http.ResponseWriter, r *http.Request) {
 	if h.search == nil {
-		http.Error(w, "search not configured", http.StatusNotImplemented)
+		middleware.RespondError(w, http.StatusNotImplemented, middleware.ErrCodeUnsupportedOp, "search not configured")
 		return
 	}
 	workspaceID, _ := middleware.WorkspaceIDFromContext(r.Context())
 	query := strings.TrimSpace(r.URL.Query().Get("q"))
 	if query == "" {
-		http.Error(w, "q is required", http.StatusBadRequest)
+		middleware.RespondError(w, http.StatusBadRequest, middleware.ErrCodeMissingField, "q is required")
 		return
 	}
-	limit := parseIntParam(r.URL.Query().Get("limit"), search.DefaultLimit)
-	offset := parseIntParam(r.URL.Query().Get("offset"), 0)
+	limit, err := parseIntQuery(r, "limit", search.DefaultLimit)
+	if err != nil {
+		middleware.RespondError(w, http.StatusBadRequest, middleware.ErrCodeBadRequest, "invalid limit")
+		return
+	}
+	offset, err := parseIntQuery(r, "offset", 0)
+	if err != nil {
+		middleware.RespondError(w, http.StatusBadRequest, middleware.ErrCodeBadRequest, "invalid offset")
+		return
+	}
 	// Cap at the handler layer so the response envelope echoes the
 	// clamped value back to the client. The service also caps
 	// defensively, but echoing the pre-service limit would lie to
@@ -86,10 +94,10 @@ func (h *Handler) Search(w http.ResponseWriter, r *http.Request) {
 	results, err := h.search.Search(r.Context(), workspaceID, query, opts, limit, offset)
 	if err != nil {
 		if errors.Is(err, search.ErrInvalidQuery) {
-			http.Error(w, err.Error(), http.StatusBadRequest)
+			middleware.RespondError(w, http.StatusBadRequest, middleware.ErrCodeBadRequest, err.Error())
 			return
 		}
-		http.Error(w, "search: "+err.Error(), http.StatusInternalServerError)
+		middleware.RespondInternalError(w, r, "search", err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{

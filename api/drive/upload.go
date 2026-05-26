@@ -14,7 +14,6 @@ import (
 
 	"github.com/kennguy3n/zk-drive/api/middleware"
 	"github.com/kennguy3n/zk-drive/internal/activity"
-	"github.com/kennguy3n/zk-drive/internal/billing"
 	"github.com/kennguy3n/zk-drive/internal/file"
 	"github.com/kennguy3n/zk-drive/internal/permission"
 	"github.com/kennguy3n/zk-drive/internal/scan"
@@ -57,27 +56,27 @@ type downloadURLResponse struct {
 func (h *Handler) UploadURL(w http.ResponseWriter, r *http.Request) {
 	workspaceID, ok := middleware.WorkspaceIDFromContext(r.Context())
 	if !ok {
-		http.Error(w, "unauthenticated", http.StatusUnauthorized)
+		middleware.RespondError(w, http.StatusUnauthorized, middleware.ErrCodeAuthMissingToken, "unauthenticated")
 		return
 	}
 	userID, _ := middleware.UserIDFromContext(r.Context())
 
 	var req uploadURLRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "invalid json body", http.StatusBadRequest)
+		middleware.RespondError(w, http.StatusBadRequest, middleware.ErrCodeMalformedJSON, "invalid json body")
 		return
 	}
 	folderID, err := uuid.Parse(req.FolderID)
 	if err != nil {
-		http.Error(w, "invalid folder_id", http.StatusBadRequest)
+		middleware.RespondError(w, http.StatusBadRequest, middleware.ErrCodeBadRequest, "invalid folder_id")
 		return
 	}
 	if _, err := h.folders.GetByID(r.Context(), workspaceID, folderID); err != nil {
-		writeServiceError(w, err)
+		writeServiceError(w, r, err)
 		return
 	}
 	if err := h.assertResourceAccess(r.Context(), permission.ResourceFolder, folderID, permission.RoleEditor); err != nil {
-		writeServiceError(w, err)
+		writeServiceError(w, r, err)
 		return
 	}
 
@@ -87,7 +86,7 @@ func (h *Handler) UploadURL(w http.ResponseWriter, r *http.Request) {
 	// against current usage gives a good gate; the confirm-upload
 	// step will record the actual byte count.
 	if err := h.billing.CheckStorageQuota(r.Context(), workspaceID, 0); err != nil {
-		writeBillingError(w, err)
+		writeBillingError(w, r, err)
 		return
 	}
 
@@ -97,13 +96,13 @@ func (h *Handler) UploadURL(w http.ResponseWriter, r *http.Request) {
 	// has no corresponding upload URL or object.
 	store := h.resolveStorage(r.Context(), workspaceID)
 	if store == nil {
-		http.Error(w, "storage not configured", http.StatusNotImplemented)
+		middleware.RespondError(w, http.StatusNotImplemented, middleware.ErrCodeUnsupportedOp, "storage not configured")
 		return
 	}
 
 	f, err := h.files.Create(r.Context(), workspaceID, folderID, req.Filename, req.MimeType, userID)
 	if err != nil {
-		writeServiceError(w, err)
+		writeServiceError(w, r, err)
 		return
 	}
 
@@ -119,13 +118,13 @@ func (h *Handler) UploadURL(w http.ResponseWriter, r *http.Request) {
 	// column when current_version_id is advanced, so confirmed
 	// files never carry a stale key and the GC scan skips them.
 	if err := h.files.SetPendingUploadObjectKey(r.Context(), workspaceID, f.ID, objectKey); err != nil {
-		writeServiceError(w, err)
+		writeServiceError(w, r, err)
 		return
 	}
 
 	url, err := store.GenerateUploadURL(r.Context(), objectKey, req.MimeType, storage.DefaultPresignExpiry)
 	if err != nil {
-		http.Error(w, "generate upload url: "+err.Error(), http.StatusInternalServerError)
+		middleware.RespondInternalError(w, r, "generate upload url", err)
 		return
 	}
 	writeJSON(w, http.StatusOK, uploadURLResponse{
@@ -141,37 +140,37 @@ func (h *Handler) UploadURL(w http.ResponseWriter, r *http.Request) {
 // without a current version and Downloads will 404.
 func (h *Handler) ConfirmUpload(w http.ResponseWriter, r *http.Request) {
 	if h.storage == nil && h.storageFactory == nil {
-		http.Error(w, "storage not configured", http.StatusNotImplemented)
+		middleware.RespondError(w, http.StatusNotImplemented, middleware.ErrCodeUnsupportedOp, "storage not configured")
 		return
 	}
 	workspaceID, ok := middleware.WorkspaceIDFromContext(r.Context())
 	if !ok {
-		http.Error(w, "unauthenticated", http.StatusUnauthorized)
+		middleware.RespondError(w, http.StatusUnauthorized, middleware.ErrCodeAuthMissingToken, "unauthenticated")
 		return
 	}
 	userID, _ := middleware.UserIDFromContext(r.Context())
 
 	var req confirmUploadRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "invalid json body", http.StatusBadRequest)
+		middleware.RespondError(w, http.StatusBadRequest, middleware.ErrCodeMalformedJSON, "invalid json body")
 		return
 	}
 	if req.ObjectKey == "" {
-		http.Error(w, "object_key is required", http.StatusBadRequest)
+		middleware.RespondError(w, http.StatusBadRequest, middleware.ErrCodeMissingField, "object_key is required")
 		return
 	}
 	if req.SizeBytes < 0 {
-		http.Error(w, "size_bytes must be non-negative", http.StatusBadRequest)
+		middleware.RespondError(w, http.StatusBadRequest, middleware.ErrCodeValidation, "size_bytes must be non-negative")
 		return
 	}
 	fileID, err := uuid.Parse(req.FileID)
 	if err != nil {
-		http.Error(w, "invalid file_id", http.StatusBadRequest)
+		middleware.RespondError(w, http.StatusBadRequest, middleware.ErrCodeBadRequest, "invalid file_id")
 		return
 	}
 	f, err := h.files.GetByID(r.Context(), workspaceID, fileID)
 	if err != nil {
-		writeServiceError(w, err)
+		writeServiceError(w, r, err)
 		return
 	}
 
@@ -187,7 +186,7 @@ func (h *Handler) ConfirmUpload(w http.ResponseWriter, r *http.Request) {
 	// no backslashes).
 	versionID, err := storage.ValidateObjectKey(req.ObjectKey, workspaceID, f.ID)
 	if err != nil {
-		http.Error(w, "object_key does not belong to this file", http.StatusForbidden)
+		middleware.RespondError(w, http.StatusForbidden, middleware.ErrCodeForbidden, "object_key does not belong to this file")
 		return
 	}
 
@@ -241,7 +240,7 @@ func (h *Handler) ConfirmUpload(w http.ResponseWriter, r *http.Request) {
 		// Unexpected DB error during replay probe. Surfacing 500
 		// rather than silently proceeding so the caller can retry
 		// idempotently on a transient blip.
-		writeServiceError(w, vErr)
+		writeServiceError(w, r, vErr)
 		return
 	}
 
@@ -253,7 +252,7 @@ func (h *Handler) ConfirmUpload(w http.ResponseWriter, r *http.Request) {
 		// the orphan object can be reclaimed by a future GC pass — better
 		// than silently allowing unbounded overage.
 		if err := h.billing.CheckStorageQuota(r.Context(), workspaceID, req.SizeBytes); err != nil {
-			writeBillingError(w, err)
+			writeBillingError(w, r, err)
 			return
 		}
 	}
@@ -279,13 +278,13 @@ func (h *Handler) ConfirmUpload(w http.ResponseWriter, r *http.Request) {
 	}
 	fresh, err := h.files.ConfirmVersion(r.Context(), workspaceID, v)
 	if err != nil {
-		writeServiceError(w, err)
+		writeServiceError(w, r, err)
 		return
 	}
 
 	updated, err := h.files.GetByID(r.Context(), workspaceID, f.ID)
 	if err != nil {
-		writeServiceError(w, err)
+		writeServiceError(w, r, err)
 		return
 	}
 	// Side effects (activity log, billing usage event, post-upload
@@ -345,35 +344,35 @@ func (h *Handler) publishPostUploadJobs(ctx context.Context, fileID, versionID u
 // DownloadURL returns a presigned GET URL for the file's current version.
 func (h *Handler) DownloadURL(w http.ResponseWriter, r *http.Request) {
 	if h.storage == nil && h.storageFactory == nil {
-		http.Error(w, "storage not configured", http.StatusNotImplemented)
+		middleware.RespondError(w, http.StatusNotImplemented, middleware.ErrCodeUnsupportedOp, "storage not configured")
 		return
 	}
 	workspaceID, _ := middleware.WorkspaceIDFromContext(r.Context())
 	id, err := uuid.Parse(chi.URLParam(r, "id"))
 	if err != nil {
-		http.Error(w, "invalid id", http.StatusBadRequest)
+		middleware.RespondError(w, http.StatusBadRequest, middleware.ErrCodeBadRequest, "invalid id")
 		return
 	}
 	f, err := h.files.GetByID(r.Context(), workspaceID, id)
 	if err != nil {
-		writeServiceError(w, err)
+		writeServiceError(w, r, err)
 		return
 	}
 	if err := h.assertResourceAccess(r.Context(), permission.ResourceFile, f.ID, permission.RoleViewer); err != nil {
-		writeServiceError(w, err)
+		writeServiceError(w, r, err)
 		return
 	}
 	if f.CurrentVersionID == nil {
-		http.Error(w, "file has no current version", http.StatusNotFound)
+		middleware.RespondError(w, http.StatusNotFound, middleware.ErrCodeNotFound, "file has no current version")
 		return
 	}
 	current, err := h.files.GetVersionByID(r.Context(), workspaceID, *f.CurrentVersionID)
 	if err != nil {
 		if errors.Is(err, file.ErrNotFound) {
-			http.Error(w, "current version not found", http.StatusNotFound)
+			middleware.RespondError(w, http.StatusNotFound, middleware.ErrCodeNotFound, "current version not found")
 			return
 		}
-		writeServiceError(w, err)
+		writeServiceError(w, r, err)
 		return
 	}
 	// Refuse to mint a presigned URL for a version clamd has already
@@ -381,21 +380,21 @@ func (h *Handler) DownloadURL(w http.ResponseWriter, r *http.Request) {
 	// without it the scan pipeline only surfaces quarantine via the
 	// admin notification, while the infected bytes remain pullable.
 	if current.ScanStatus == scan.StatusQuarantined {
-		http.Error(w, "file version quarantined by virus scan", http.StatusForbidden)
+		middleware.RespondError(w, http.StatusForbidden, middleware.ErrCodeVirusDetected, "file version quarantined by virus scan")
 		return
 	}
 	if err := h.billing.CheckBandwidthQuota(r.Context(), workspaceID, current.SizeBytes); err != nil {
-		writeBillingError(w, err)
+		writeBillingError(w, r, err)
 		return
 	}
 	store := h.resolveStorage(r.Context(), workspaceID)
 	if store == nil {
-		http.Error(w, "storage not configured", http.StatusNotImplemented)
+		middleware.RespondError(w, http.StatusNotImplemented, middleware.ErrCodeUnsupportedOp, "storage not configured")
 		return
 	}
 	url, err := store.GenerateDownloadURL(r.Context(), current.ObjectKey, storage.DefaultPresignExpiry)
 	if err != nil {
-		http.Error(w, "generate download url: "+err.Error(), http.StatusInternalServerError)
+		middleware.RespondInternalError(w, r, "generate download url", err)
 		return
 	}
 	// Bandwidth accounting: record the version's size as a download.
@@ -412,13 +411,15 @@ func (h *Handler) DownloadURL(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// writeBillingError maps billing.ErrQuotaExceeded to 402 Payment
-// Required so the frontend can prompt the user to upgrade.
-func writeBillingError(w http.ResponseWriter, err error) {
-	switch {
-	case errors.Is(err, billing.ErrQuotaExceeded):
-		http.Error(w, err.Error(), http.StatusPaymentRequired)
-	default:
-		writeServiceError(w, err)
+// writeBillingError delegates the billing-specific mapping (e.g.
+// billing.ErrQuotaExceeded -> 402 WORKSPACE_QUOTA_EXCEEDED) to
+// middleware.WriteBillingError so every handler that touches a
+// billing call returns the same code for the same condition. Anything
+// the shared helper doesn't recognise falls through to writeServiceError
+// for the standard service-error taxonomy (storage, upstream, internal).
+func writeBillingError(w http.ResponseWriter, r *http.Request, err error) {
+	if middleware.WriteBillingError(w, err) {
+		return
 	}
+	writeServiceError(w, r, err)
 }

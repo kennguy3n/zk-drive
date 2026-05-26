@@ -3,6 +3,7 @@ package drive
 import (
 	"net/http"
 	"strconv"
+	"strings"
 
 	"github.com/kennguy3n/zk-drive/api/middleware"
 	"github.com/kennguy3n/zk-drive/internal/changefeed"
@@ -48,22 +49,22 @@ type changesResponse struct {
 func (h *Handler) ListChanges(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	if h.changefeed == nil {
-		http.Error(w, "change feed not configured", http.StatusNotImplemented)
+		middleware.RespondError(w, http.StatusNotImplemented, middleware.ErrCodeUnsupportedOp, "change feed not configured")
 		return
 	}
 	workspaceID, ok := middleware.WorkspaceIDFromContext(ctx)
 	if !ok {
-		http.Error(w, "unauthenticated", http.StatusUnauthorized)
+		middleware.RespondError(w, http.StatusUnauthorized, middleware.ErrCodeAuthMissingToken, "unauthenticated")
 		return
 	}
 	since, err := parseInt64Query(r, "since", 0)
 	if err != nil {
-		http.Error(w, "invalid since cursor", http.StatusBadRequest)
+		middleware.RespondError(w, http.StatusBadRequest, middleware.ErrCodeBadRequest, "invalid since cursor")
 		return
 	}
 	limit, err := parseIntQuery(r, "limit", changefeed.DefaultLimit)
 	if err != nil {
-		http.Error(w, "invalid limit", http.StatusBadRequest)
+		middleware.RespondError(w, http.StatusBadRequest, middleware.ErrCodeBadRequest, "invalid limit")
 		return
 	}
 	page, err := h.changefeed.Since(ctx, workspaceID, since, limit)
@@ -74,7 +75,7 @@ func (h *Handler) ListChanges(w http.ResponseWriter, r *http.Request) {
 			"limit", limit,
 			"err", err,
 		)
-		http.Error(w, "internal error", http.StatusInternalServerError)
+		middleware.RespondError(w, http.StatusInternalServerError, middleware.ErrCodeInternal, "internal error")
 		return
 	}
 	writeJSON(w, http.StatusOK, changesResponse{
@@ -93,12 +94,12 @@ func (h *Handler) ListChanges(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) LatestChange(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	if h.changefeed == nil {
-		http.Error(w, "change feed not configured", http.StatusNotImplemented)
+		middleware.RespondError(w, http.StatusNotImplemented, middleware.ErrCodeUnsupportedOp, "change feed not configured")
 		return
 	}
 	workspaceID, ok := middleware.WorkspaceIDFromContext(ctx)
 	if !ok {
-		http.Error(w, "unauthenticated", http.StatusUnauthorized)
+		middleware.RespondError(w, http.StatusUnauthorized, middleware.ErrCodeAuthMissingToken, "unauthenticated")
 		return
 	}
 	seq, err := h.changefeed.Latest(ctx, workspaceID)
@@ -107,7 +108,7 @@ func (h *Handler) LatestChange(w http.ResponseWriter, r *http.Request) {
 			"workspace_id", workspaceID,
 			"err", err,
 		)
-		http.Error(w, "internal error", http.StatusInternalServerError)
+		middleware.RespondError(w, http.StatusInternalServerError, middleware.ErrCodeInternal, "internal error")
 		return
 	}
 	writeJSON(w, http.StatusOK, struct {
@@ -118,8 +119,20 @@ func (h *Handler) LatestChange(w http.ResponseWriter, r *http.Request) {
 // parseInt64Query reads a non-negative int64 from r.URL.Query()[name].
 // An empty / missing value returns def with no error; a present but
 // unparseable value returns an error so the handler can respond 400.
+// Negative values are clipped to def so an unset and a deliberately-
+// malformed `?since=-1` produce the same observable response — the
+// caller picks the "no input" sentinel via def. Currently every call
+// site passes def=0 (since/after_seq both want "from the beginning"
+// on missing input), but threading def through means a future caller
+// like parseInt64Query(r, "cursor", lastCursorSeq) would behave as
+// the function name suggests rather than silently snapping to 0.
+//
+// TrimSpace matches the sibling parseIntQuery below so the two
+// helpers handle whitespace identically — a client passing
+// `?since=%2050` (url-encoded space + 50) parses cleanly instead
+// of returning 400 from one helper and succeeding on the other.
 func parseInt64Query(r *http.Request, name string, def int64) (int64, error) {
-	raw := r.URL.Query().Get(name)
+	raw := strings.TrimSpace(r.URL.Query().Get(name))
 	if raw == "" {
 		return def, nil
 	}
@@ -128,7 +141,7 @@ func parseInt64Query(r *http.Request, name string, def int64) (int64, error) {
 		return 0, err
 	}
 	if v < 0 {
-		return 0, nil
+		return def, nil
 	}
 	return v, nil
 }
@@ -137,15 +150,21 @@ func parseInt64Query(r *http.Request, name string, def int64) (int64, error) {
 // type matches the changefeed.Since limit parameter which is
 // constrained to MaxLimit = 500.
 //
-// Both helpers clip negative values to a sensible default for their
-// own semantic — they are NOT numerically symmetric. parseInt64Query
-// clips since=-1 to 0 ("from the beginning"), while parseIntQuery
-// clips limit=-1 to `def` ("use the default page size"). The service
+// Both helpers are now numerically symmetric: negative values clip to
+// `def` in both, matching the admin package's parseIntQuery and the
+// "negative-equals-unset" principle of least surprise. The service
 // layer also defends with `limit <= 0 -> DefaultLimit`, but clipping
 // at the edge means a negative limit and an unset limit produce the
-// same observable response — principle of least surprise.
+// same observable response. Devin Review ANALYSIS_0002 on commit
+// 0ef1a82 flagged the parseInt64Query asymmetry (was clipping to
+// hardcoded 0 instead of def); both helpers now share the same
+// negative-clipping contract.
 func parseIntQuery(r *http.Request, name string, def int) (int, error) {
-	raw := r.URL.Query().Get(name)
+	// TrimSpace matches the admin package's parseIntQuery so a
+	// client passing `?limit=%2050` (url-encoded space + 50)
+	// resolves identically against both packages. Devin Review
+	// ANALYSIS_0002 on commit d4c16d4 flagged the divergence.
+	raw := strings.TrimSpace(r.URL.Query().Get(name))
 	if raw == "" {
 		return def, nil
 	}

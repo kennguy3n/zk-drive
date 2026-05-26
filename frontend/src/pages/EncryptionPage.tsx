@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useState } from "react";
 import { Link } from "react-router-dom";
+import { useTranslation } from "react-i18next";
 import { fetchCMK, updateCMK } from "../api/client";
+import { translateApiError } from "../api/errors";
 import { useAuth } from "../hooks/useAuth";
 
 // EncryptionPage lets workspace admins set the customer-managed key
@@ -10,6 +12,7 @@ import { useAuth } from "../hooks/useAuth";
 // source.
 export default function EncryptionPage() {
   const { isAdmin } = useAuth();
+  const { t } = useTranslation();
   const [initialURI, setInitialURI] = useState("");
   const [uri, setURI] = useState("");
   const [loading, setLoading] = useState(true);
@@ -24,10 +27,14 @@ export default function EncryptionPage() {
       setInitialURI(r.cmk_uri ?? "");
       setURI(r.cmk_uri ?? "");
     } catch (e) {
-      setError(errMessage(e));
+      setError(translateApiError(e, t));
     } finally {
       setLoading(false);
     }
+    // t identity is stable per i18next mount; intentionally excluded
+    // to avoid re-running load on a language change — the user is on
+    // admin-only English copy anyway.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   useEffect(() => {
@@ -37,10 +44,9 @@ export default function EncryptionPage() {
   if (!isAdmin) {
     return (
       <div style={{ padding: 32 }}>
-        <h2>Admin only</h2>
+        <h2>{t("admin.adminOnly")}</h2>
         <p>
-          This page is restricted to workspace administrators.{" "}
-          <Link to="/drive">Back to drive</Link>
+          {t("admin.adminOnlyDescription")} <Link to="/drive">{t("admin.backToDrive")}</Link>
         </p>
       </div>
     );
@@ -51,10 +57,10 @@ export default function EncryptionPage() {
     setMessage(null);
     try {
       await updateCMK(uri.trim());
-      setMessage("CMK saved.");
+      setMessage(t("encryption.cmkSaved"));
       await load();
     } catch (e) {
-      setError(errMessage(e));
+      setError(translateApiError(e, t));
     }
   };
 
@@ -68,10 +74,10 @@ export default function EncryptionPage() {
           marginBottom: 16,
         }}
       >
-        <h1 style={{ margin: 0 }}>Encryption (CMK)</h1>
-        <Link to="/admin">Back to admin</Link>
+        <h1 style={{ margin: 0 }}>{t("encryption.pageTitle")}</h1>
+        <Link to="/admin">{t("admin.backToAdmin")}</Link>
       </header>
-      {loading ? <p>Loading…</p> : null}
+      {loading ? <p>{t("common.loading")}</p> : null}
       {error ? <p style={{ color: "#b91c1c" }}>{error}</p> : null}
       {message ? <p style={{ color: "#047857" }}>{message}</p> : null}
 
@@ -87,13 +93,7 @@ export default function EncryptionPage() {
           maxWidth: 640,
         }}
       >
-        <strong>Managed-encrypted vs strict zero-knowledge:</strong> A CMK
-        enables managed-encrypted folders where the gateway wraps per-object
-        DEKs with the customer key — the server can still stream plaintext
-        for preview, virus scan, and search. Strict-zero-knowledge folders
-        remain end-to-end encrypted regardless of this setting; the server
-        never sees plaintext there and all server-side processing is
-        disabled.
+        <strong>{t("encryption.modesHeading")}</strong> {t("encryption.modesExplanation")}
       </div>
 
       <form
@@ -104,7 +104,7 @@ export default function EncryptionPage() {
         style={{ display: "grid", gap: 12, maxWidth: 640 }}
       >
         <label style={{ display: "grid", gap: 4 }}>
-          <span>CMK URI</span>
+          <span>{t("encryption.cmkUri")}</span>
           <input
             value={uri}
             onChange={(e) => setURI(e.target.value)}
@@ -112,15 +112,13 @@ export default function EncryptionPage() {
             style={{ fontFamily: "monospace" }}
           />
           <small style={{ color: "#6b7280" }}>
-            Accepted schemes: <code>arn:aws:kms:...</code>, <code>kms://</code>,{" "}
-            <code>vault://</code>, <code>transit://</code>. Leave empty for
-            the gateway default key.
+            {t("encryption.cmkSchemesHint")}
           </small>
         </label>
         <div style={{ display: "flex", gap: 8 }}>
-          <button type="submit">Save</button>
+          <button type="submit">{t("common.save")}</button>
           <button type="button" onClick={() => setURI(initialURI)}>
-            Reset
+            {t("common.reset")}
           </button>
         </div>
       </form>
@@ -128,9 +126,4 @@ export default function EncryptionPage() {
   );
 }
 
-function errMessage(e: unknown): string {
-  if (e && typeof e === "object" && "message" in e) {
-    return String((e as { message: unknown }).message);
-  }
-  return String(e);
-}
+

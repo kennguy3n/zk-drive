@@ -1,3 +1,4 @@
+import { useTranslation } from "react-i18next";
 import { getDownloadURL, type FileItem } from "../api/client";
 import FilePreview from "./FilePreview";
 
@@ -46,9 +47,10 @@ export default function FileList({
   selectedIDs,
   onToggleSelect,
 }: FileListProps) {
+  const { t } = useTranslation();
   if (files.length === 0) {
     return (
-      <div style={{ padding: 32, color: "#6b7280" }}>No files in this folder.</div>
+      <div style={{ padding: 32, color: "#6b7280" }}>{t("drive.noFilesInFolder")}</div>
     );
   }
   const showSelection = !!onToggleSelect;
@@ -57,10 +59,10 @@ export default function FileList({
       <thead>
         <tr style={{ textAlign: "left", borderBottom: "1px solid #e5e7eb" }}>
           {showSelection ? <th style={{ padding: "8px 12px", width: 32 }}></th> : null}
-          <th style={{ padding: "8px 12px", fontSize: 12, color: "#6b7280" }}>Name</th>
-          <th style={{ padding: "8px 12px", fontSize: 12, color: "#6b7280" }}>Size</th>
-          <th style={{ padding: "8px 12px", fontSize: 12, color: "#6b7280" }}>Updated</th>
-          <th style={{ padding: "8px 12px", fontSize: 12, color: "#6b7280" }}>Actions</th>
+          <th style={{ padding: "8px 12px", fontSize: 12, color: "#6b7280" }}>{t("common.name")}</th>
+          <th style={{ padding: "8px 12px", fontSize: 12, color: "#6b7280" }}>{t("common.size")}</th>
+          <th style={{ padding: "8px 12px", fontSize: 12, color: "#6b7280" }}>{t("common.modified")}</th>
+          <th style={{ padding: "8px 12px", fontSize: 12, color: "#6b7280" }}>{t("common.actions")}</th>
         </tr>
       </thead>
       <tbody>
@@ -72,7 +74,7 @@ export default function FileList({
                   type="checkbox"
                   checked={selectedIDs?.has(f.id) ?? false}
                   onChange={() => onToggleSelect?.(f.id)}
-                  aria-label={`select ${f.name}`}
+                  aria-label={t("drive.selectAria", { name: f.name })}
                 />
               </td>
             ) : null}
@@ -90,29 +92,30 @@ export default function FileList({
             </td>
             <td style={{ padding: "8px 12px" }}>
               <button onClick={() => handleDownload(f.id)} style={actionBtn}>
-                Download
+                {t("common.download")}
               </button>
               <button
                 onClick={() => {
-                  const name = prompt("Rename file to:", f.name);
+                  const name = prompt(t("drive.renamePrompt"), f.name);
                   if (name && name.trim()) onRename(f.id, name.trim());
                 }}
                 style={actionBtn}
               >
-                Rename
+                {t("common.rename")}
               </button>
               {onShare ? (
                 <button onClick={() => onShare(f)} style={actionBtn}>
-                  Share
+                  {t("common.share")}
                 </button>
               ) : null}
               <button
                 onClick={() => {
-                  if (confirm(`Delete "${f.name}"?`)) onDelete(f.id);
+                  if (confirm(t("drive.deleteFilePrompt", { name: f.name })))
+                    onDelete(f.id);
                 }}
                 style={{ ...actionBtn, color: "#b91c1c" }}
               >
-                Delete
+                {t("common.delete")}
               </button>
             </td>
           </tr>

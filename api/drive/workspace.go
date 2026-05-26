@@ -27,12 +27,12 @@ type updateWorkspaceRequest struct {
 func (h *Handler) ListWorkspaces(w http.ResponseWriter, r *http.Request) {
 	userID, ok := middleware.UserIDFromContext(r.Context())
 	if !ok {
-		http.Error(w, "unauthenticated", http.StatusUnauthorized)
+		middleware.RespondError(w, http.StatusUnauthorized, middleware.ErrCodeAuthMissingToken, "unauthenticated")
 		return
 	}
 	list, err := h.workspaces.ListForUser(r.Context(), userID)
 	if err != nil {
-		http.Error(w, "list workspaces: "+err.Error(), http.StatusInternalServerError)
+		middleware.RespondInternalError(w, r, "list workspaces", err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"workspaces": list})
@@ -55,21 +55,21 @@ func (h *Handler) ListWorkspaces(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) CreateWorkspace(w http.ResponseWriter, r *http.Request) {
 	userID, ok := middleware.UserIDFromContext(r.Context())
 	if !ok {
-		http.Error(w, "unauthenticated", http.StatusUnauthorized)
+		middleware.RespondError(w, http.StatusUnauthorized, middleware.ErrCodeAuthMissingToken, "unauthenticated")
 		return
 	}
 	role, _ := middleware.RoleFromContext(r.Context())
 	if role != user.RoleAdmin {
-		http.Error(w, "admin role required", http.StatusForbidden)
+		middleware.RespondError(w, http.StatusForbidden, middleware.ErrCodeAdminOnly, "admin role required")
 		return
 	}
 	var req createWorkspaceRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "invalid json body", http.StatusBadRequest)
+		middleware.RespondError(w, http.StatusBadRequest, middleware.ErrCodeMalformedJSON, "invalid json body")
 		return
 	}
 	if req.Name == "" {
-		http.Error(w, "name is required", http.StatusBadRequest)
+		middleware.RespondError(w, http.StatusBadRequest, middleware.ErrCodeMissingField, "name is required")
 		return
 	}
 
@@ -78,13 +78,13 @@ func (h *Handler) CreateWorkspace(w http.ResponseWriter, r *http.Request) {
 	currentWSID, _ := middleware.WorkspaceIDFromContext(r.Context())
 	current, err := h.users.GetByID(r.Context(), currentWSID, userID)
 	if err != nil {
-		http.Error(w, "load current user: "+err.Error(), http.StatusInternalServerError)
+		middleware.RespondInternalError(w, r, "load current user", err)
 		return
 	}
 
 	ws, err := h.createWorkspaceTx(r.Context(), req.Name, current)
 	if err != nil {
-		http.Error(w, "create workspace: "+err.Error(), http.StatusInternalServerError)
+		middleware.RespondInternalError(w, r, "create workspace", err)
 		return
 	}
 	// Audit the privileged action so a security review can answer
@@ -141,7 +141,7 @@ func (h *Handler) createWorkspaceTx(ctx context.Context, name string, current *u
 func (h *Handler) GetWorkspace(w http.ResponseWriter, r *http.Request) {
 	ws, err := h.requireWorkspaceMatch(r)
 	if err != nil {
-		writeServiceError(w, err)
+		writeServiceError(w, r, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, ws)
@@ -151,17 +151,17 @@ func (h *Handler) GetWorkspace(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) UpdateWorkspace(w http.ResponseWriter, r *http.Request) {
 	role, _ := middleware.RoleFromContext(r.Context())
 	if role != user.RoleAdmin {
-		http.Error(w, "admin role required", http.StatusForbidden)
+		middleware.RespondError(w, http.StatusForbidden, middleware.ErrCodeAdminOnly, "admin role required")
 		return
 	}
 	ws, err := h.requireWorkspaceMatch(r)
 	if err != nil {
-		writeServiceError(w, err)
+		writeServiceError(w, r, err)
 		return
 	}
 	var req updateWorkspaceRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "invalid json body", http.StatusBadRequest)
+		middleware.RespondError(w, http.StatusBadRequest, middleware.ErrCodeMalformedJSON, "invalid json body")
 		return
 	}
 	if req.Name != nil {
@@ -174,7 +174,7 @@ func (h *Handler) UpdateWorkspace(w http.ResponseWriter, r *http.Request) {
 		ws.StorageQuotaBytes = *req.StorageQuotaBytes
 	}
 	if err := h.workspaces.Update(r.Context(), ws); err != nil {
-		http.Error(w, "update workspace: "+err.Error(), http.StatusInternalServerError)
+		middleware.RespondInternalError(w, r, "update workspace", err)
 		return
 	}
 	wsID := ws.ID

@@ -1,4 +1,5 @@
 import { useState, type FormEvent } from "react";
+import { useTranslation } from "react-i18next";
 
 export interface AuthFormField {
   name: string;
@@ -27,6 +28,7 @@ export default function AuthForm({
   error,
   footer,
 }: AuthFormProps) {
+  const { t } = useTranslation();
   const [values, setValues] = useState<Record<string, string>>(() =>
     Object.fromEntries(fields.map((f) => [f.name, ""])),
   );
@@ -98,7 +100,7 @@ export default function AuthForm({
           opacity: busy ? 0.6 : 1,
         }}
       >
-        {busy ? "Working..." : submitLabel}
+        {busy ? t("common.working") : submitLabel}
       </button>
       {footer ? <div style={{ marginTop: 16, fontSize: 13 }}>{footer}</div> : null}
     </form>

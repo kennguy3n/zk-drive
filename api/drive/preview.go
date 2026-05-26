@@ -22,13 +22,13 @@ import (
 // that case.
 func (h *Handler) PreviewURL(w http.ResponseWriter, r *http.Request) {
 	if h.previews == nil || (h.storage == nil && h.storageFactory == nil) {
-		http.Error(w, "previews not configured", http.StatusNotImplemented)
+		middleware.RespondError(w, http.StatusNotImplemented, middleware.ErrCodeUnsupportedOp, "previews not configured")
 		return
 	}
 	workspaceID, _ := middleware.WorkspaceIDFromContext(r.Context())
 	id, err := uuid.Parse(chi.URLParam(r, "id"))
 	if err != nil {
-		http.Error(w, "invalid id", http.StatusBadRequest)
+		middleware.RespondError(w, http.StatusBadRequest, middleware.ErrCodeBadRequest, "invalid id")
 		return
 	}
 	// Bind the file id to the caller's workspace before any permission
@@ -37,11 +37,11 @@ func (h *Handler) PreviewURL(w http.ResponseWriter, r *http.Request) {
 	// workspace B and get a presigned URL to B's preview.
 	f, err := h.files.GetByID(r.Context(), workspaceID, id)
 	if err != nil {
-		writeServiceError(w, err)
+		writeServiceError(w, r, err)
 		return
 	}
 	if err := h.assertResourceAccess(r.Context(), permission.ResourceFile, id, permission.RoleViewer); err != nil {
-		writeServiceError(w, err)
+		writeServiceError(w, r, err)
 		return
 	}
 	// Refuse to serve a preview for a quarantined version for the
@@ -54,40 +54,40 @@ func (h *Handler) PreviewURL(w http.ResponseWriter, r *http.Request) {
 	if f.CurrentVersionID != nil {
 		current, verr := h.files.GetVersionByID(r.Context(), workspaceID, *f.CurrentVersionID)
 		if verr != nil && !errors.Is(verr, file.ErrNotFound) {
-			writeServiceError(w, verr)
+			writeServiceError(w, r, verr)
 			return
 		}
 		if current != nil && current.ScanStatus == scan.StatusQuarantined {
-			http.Error(w, "file version quarantined by virus scan", http.StatusForbidden)
+			middleware.RespondError(w, http.StatusForbidden, middleware.ErrCodeVirusDetected, "file version quarantined by virus scan")
 			return
 		}
 	}
 	p, err := h.previews.GetLatestByFile(r.Context(), id)
 	if err != nil {
 		if errors.Is(err, preview.ErrNotFound) {
-			http.Error(w, "no preview available", http.StatusNotFound)
+			middleware.RespondError(w, http.StatusNotFound, middleware.ErrCodeNotFound, "no preview available")
 			return
 		}
-		writeServiceError(w, err)
+		writeServiceError(w, r, err)
 		return
 	}
 	previewVersion, verr := h.files.GetVersionByID(r.Context(), workspaceID, p.VersionID)
 	if verr != nil && !errors.Is(verr, file.ErrNotFound) {
-		writeServiceError(w, verr)
+		writeServiceError(w, r, verr)
 		return
 	}
 	if previewVersion != nil && previewVersion.ScanStatus == scan.StatusQuarantined {
-		http.Error(w, "file version quarantined by virus scan", http.StatusForbidden)
+		middleware.RespondError(w, http.StatusForbidden, middleware.ErrCodeVirusDetected, "file version quarantined by virus scan")
 		return
 	}
 	store := h.resolveStorage(r.Context(), workspaceID)
 	if store == nil {
-		http.Error(w, "storage not configured", http.StatusNotImplemented)
+		middleware.RespondError(w, http.StatusNotImplemented, middleware.ErrCodeUnsupportedOp, "storage not configured")
 		return
 	}
 	url, err := store.GenerateDownloadURL(r.Context(), p.ObjectKey, storage.DefaultPresignExpiry)
 	if err != nil {
-		http.Error(w, "preview url: "+err.Error(), http.StatusInternalServerError)
+		middleware.RespondInternalError(w, r, "preview url", err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{

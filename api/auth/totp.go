@@ -95,7 +95,7 @@ type totpStatusResponse struct {
 func (h *TOTPHandler) EnrollBegin(w http.ResponseWriter, r *http.Request) {
 	claims, ok := middleware.ClaimsFromContext(r.Context())
 	if !ok {
-		http.Error(w, "unauthenticated", http.StatusUnauthorized)
+		middleware.RespondError(w, http.StatusUnauthorized, middleware.ErrCodeAuthMissingToken, "unauthenticated")
 		return
 	}
 
@@ -105,16 +105,16 @@ func (h *TOTPHandler) EnrollBegin(w http.ResponseWriter, r *http.Request) {
 	// glance.
 	u, err := h.h.users.GetByID(r.Context(), claims.WorkspaceID, claims.UserID)
 	if err != nil {
-		http.Error(w, "lookup user: "+err.Error(), http.StatusInternalServerError)
+		middleware.RespondInternalError(w, r, "lookup user", err)
 		return
 	}
 	challenge, err := h.h.totp.BeginEnrollment(r.Context(), claims.UserID, u.Email)
 	if err != nil {
 		if errors.Is(err, totp.ErrAlreadyActivated) {
-			http.Error(w, "2FA already enrolled; disable first to re-enroll", http.StatusConflict)
+			middleware.RespondError(w, http.StatusConflict, middleware.ErrCodeConflict, "2FA already enrolled; disable first to re-enroll")
 			return
 		}
-		http.Error(w, "begin enrollment: "+err.Error(), http.StatusInternalServerError)
+		middleware.RespondInternalError(w, r, "begin enrollment", err)
 		return
 	}
 
@@ -137,17 +137,17 @@ func (h *TOTPHandler) EnrollBegin(w http.ResponseWriter, r *http.Request) {
 func (h *TOTPHandler) EnrollFinalize(w http.ResponseWriter, r *http.Request) {
 	claims, ok := middleware.ClaimsFromContext(r.Context())
 	if !ok {
-		http.Error(w, "unauthenticated", http.StatusUnauthorized)
+		middleware.RespondError(w, http.StatusUnauthorized, middleware.ErrCodeAuthMissingToken, "unauthenticated")
 		return
 	}
 	var req totpFinalizeRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "invalid json body", http.StatusBadRequest)
+		middleware.RespondError(w, http.StatusBadRequest, middleware.ErrCodeMalformedJSON, "invalid json body")
 		return
 	}
 	req.Code = strings.TrimSpace(req.Code)
 	if req.Code == "" {
-		http.Error(w, "code is required", http.StatusBadRequest)
+		middleware.RespondError(w, http.StatusBadRequest, middleware.ErrCodeMissingField, "code is required")
 		return
 	}
 
@@ -155,13 +155,13 @@ func (h *TOTPHandler) EnrollFinalize(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		switch {
 		case errors.Is(err, totp.ErrNotEnrolled):
-			http.Error(w, "no pending enrollment", http.StatusConflict)
+			middleware.RespondError(w, http.StatusConflict, middleware.ErrCodeConflict, "no pending enrollment")
 		case errors.Is(err, totp.ErrAlreadyActivated):
-			http.Error(w, "credential already activated", http.StatusConflict)
+			middleware.RespondError(w, http.StatusConflict, middleware.ErrCodeConflict, "credential already activated")
 		case errors.Is(err, totp.ErrInvalidCode):
-			http.Error(w, "invalid code", http.StatusUnauthorized)
+			middleware.RespondError(w, http.StatusUnauthorized, middleware.ErrCodeMFAInvalid, "invalid code")
 		default:
-			http.Error(w, "finalize: "+err.Error(), http.StatusInternalServerError)
+			middleware.RespondInternalError(w, r, "finalize", err)
 		}
 		return
 	}
@@ -191,7 +191,7 @@ func (h *TOTPHandler) EnrollFinalize(w http.ResponseWriter, r *http.Request) {
 func (h *TOTPHandler) Verify(w http.ResponseWriter, r *http.Request) {
 	claims, ok := middleware.ClaimsFromContext(r.Context())
 	if !ok {
-		http.Error(w, "unauthenticated", http.StatusUnauthorized)
+		middleware.RespondError(w, http.StatusUnauthorized, middleware.ErrCodeAuthMissingToken, "unauthenticated")
 		return
 	}
 	if claims.Purpose != middleware.PurposeMFAChallenge {
@@ -200,18 +200,18 @@ func (h *TOTPHandler) Verify(w http.ResponseWriter, r *http.Request) {
 		// branch is unreachable. Belt-and-braces in case a
 		// future router change accidentally drops the
 		// middleware.
-		http.Error(w, "wrong token purpose", http.StatusUnauthorized)
+		middleware.RespondError(w, http.StatusUnauthorized, middleware.ErrCodeAuthBadPurpose, "wrong token purpose")
 		return
 	}
 
 	var req totpVerifyRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "invalid json body", http.StatusBadRequest)
+		middleware.RespondError(w, http.StatusBadRequest, middleware.ErrCodeMalformedJSON, "invalid json body")
 		return
 	}
 	req.Code = strings.TrimSpace(req.Code)
 	if req.Code == "" {
-		http.Error(w, "code is required", http.StatusBadRequest)
+		middleware.RespondError(w, http.StatusBadRequest, middleware.ErrCodeMissingField, "code is required")
 		return
 	}
 
@@ -220,10 +220,10 @@ func (h *TOTPHandler) Verify(w http.ResponseWriter, r *http.Request) {
 	u, err := h.h.users.GetByID(r.Context(), claims.WorkspaceID, claims.UserID)
 	if err != nil {
 		if errors.Is(err, user.ErrNotFound) {
-			http.Error(w, "invalid credentials", http.StatusUnauthorized)
+			middleware.RespondError(w, http.StatusUnauthorized, middleware.ErrCodeAuthInvalidToken, "invalid credentials")
 			return
 		}
-		http.Error(w, "lookup user: "+err.Error(), http.StatusInternalServerError)
+		middleware.RespondInternalError(w, r, "lookup user", err)
 		return
 	}
 	if u.DeactivatedAt != nil {
@@ -233,7 +233,7 @@ func (h *TOTPHandler) Verify(w http.ResponseWriter, r *http.Request) {
 		h.h.logAudit(r.Context(), u.WorkspaceID, &u.ID, audit.ActionLogin, r, map[string]any{
 			"result": "deactivated_at_mfa",
 		})
-		http.Error(w, "account deactivated", http.StatusForbidden)
+		middleware.RespondError(w, http.StatusForbidden, middleware.ErrCodeForbidden, "account deactivated")
 		return
 	}
 
@@ -251,7 +251,7 @@ func (h *TOTPHandler) Verify(w http.ResponseWriter, r *http.Request) {
 			h.h.logAudit(r.Context(), u.WorkspaceID, &u.ID, audit.ActionMFAVerify, r, map[string]any{
 				"result": "invalid_code",
 			})
-			http.Error(w, "invalid code", http.StatusUnauthorized)
+			middleware.RespondError(w, http.StatusUnauthorized, middleware.ErrCodeMFAInvalid, "invalid code")
 			return
 		}
 		usedRecovery = true
@@ -280,7 +280,7 @@ func (h *TOTPHandler) Verify(w http.ResponseWriter, r *http.Request) {
 		"factor": factorLabel(usedRecovery),
 	})
 
-	writeToken(w, h.h.jwtSecret, u.ID, u.WorkspaceID, u.Role)
+	writeToken(w, r, h.h.jwtSecret, u.ID, u.WorkspaceID, u.Role)
 }
 
 func factorLabel(usedRecovery bool) string {
@@ -296,22 +296,22 @@ func factorLabel(usedRecovery bool) string {
 func (h *TOTPHandler) Disable(w http.ResponseWriter, r *http.Request) {
 	claims, ok := middleware.ClaimsFromContext(r.Context())
 	if !ok {
-		http.Error(w, "unauthenticated", http.StatusUnauthorized)
+		middleware.RespondError(w, http.StatusUnauthorized, middleware.ErrCodeAuthMissingToken, "unauthenticated")
 		return
 	}
 	var req totpDisableRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "invalid json body", http.StatusBadRequest)
+		middleware.RespondError(w, http.StatusBadRequest, middleware.ErrCodeMalformedJSON, "invalid json body")
 		return
 	}
 	if req.Password == "" {
-		http.Error(w, "password is required", http.StatusBadRequest)
+		middleware.RespondError(w, http.StatusBadRequest, middleware.ErrCodeMissingField, "password is required")
 		return
 	}
 
 	u, err := h.h.users.GetByID(r.Context(), claims.WorkspaceID, claims.UserID)
 	if err != nil {
-		http.Error(w, "lookup user: "+err.Error(), http.StatusInternalServerError)
+		middleware.RespondInternalError(w, r, "lookup user", err)
 		return
 	}
 	if err := h.h.users.VerifyPassword(u, req.Password); err != nil {
@@ -320,12 +320,20 @@ func (h *TOTPHandler) Disable(w http.ResponseWriter, r *http.Request) {
 		h.h.logAudit(r.Context(), u.WorkspaceID, &u.ID, audit.ActionMFADisable, r, map[string]any{
 			"result": "password_mismatch",
 		})
-		http.Error(w, "invalid credentials", http.StatusUnauthorized)
+		// Distinct from AUTH_INVALID_TOKEN: the user IS authenticated
+		// (session JWT is valid; that's how they reached this handler),
+		// they just typed the wrong password on the step-up reverify.
+		// Using AUTH_INVALID_TOKEN here would trigger the frontend's
+		// session-clear-and-redirect interceptor and log them out
+		// entirely — discarding a valid session for a recoverable
+		// form-level error. AUTH_PASSWORD_REVERIFY_FAILED is in
+		// NON_SESSION_401_CODES so the page's catch block handles it.
+		middleware.RespondError(w, http.StatusUnauthorized, middleware.ErrCodeAuthPasswordReverify, "invalid credentials")
 		return
 	}
 
 	if err := h.h.totp.Disable(r.Context(), claims.UserID); err != nil {
-		http.Error(w, "disable: "+err.Error(), http.StatusInternalServerError)
+		middleware.RespondInternalError(w, r, "disable", err)
 		return
 	}
 
@@ -342,12 +350,12 @@ func (h *TOTPHandler) Disable(w http.ResponseWriter, r *http.Request) {
 func (h *TOTPHandler) Status(w http.ResponseWriter, r *http.Request) {
 	claims, ok := middleware.ClaimsFromContext(r.Context())
 	if !ok {
-		http.Error(w, "unauthenticated", http.StatusUnauthorized)
+		middleware.RespondError(w, http.StatusUnauthorized, middleware.ErrCodeAuthMissingToken, "unauthenticated")
 		return
 	}
 	st, err := h.h.totp.Status(r.Context(), claims.UserID)
 	if err != nil {
-		http.Error(w, "status: "+err.Error(), http.StatusInternalServerError)
+		middleware.RespondInternalError(w, r, "status", err)
 		return
 	}
 	writeJSON(w, http.StatusOK, totpStatusResponse{

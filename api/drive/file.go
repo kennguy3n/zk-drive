@@ -36,25 +36,25 @@ func (h *Handler) CreateFile(w http.ResponseWriter, r *http.Request) {
 	userID, _ := middleware.UserIDFromContext(r.Context())
 	var req createFileRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "invalid json body", http.StatusBadRequest)
+		middleware.RespondError(w, http.StatusBadRequest, middleware.ErrCodeMalformedJSON, "invalid json body")
 		return
 	}
 	folderID, err := uuid.Parse(req.FolderID)
 	if err != nil {
-		http.Error(w, "invalid folder_id", http.StatusBadRequest)
+		middleware.RespondError(w, http.StatusBadRequest, middleware.ErrCodeBadRequest, "invalid folder_id")
 		return
 	}
 	if _, err := h.folders.GetByID(r.Context(), workspaceID, folderID); err != nil {
-		writeServiceError(w, err)
+		writeServiceError(w, r, err)
 		return
 	}
 	if err := h.assertResourceAccess(r.Context(), permission.ResourceFolder, folderID, permission.RoleEditor); err != nil {
-		writeServiceError(w, err)
+		writeServiceError(w, r, err)
 		return
 	}
 	f, err := h.files.Create(r.Context(), workspaceID, folderID, req.Name, req.MimeType, userID)
 	if err != nil {
-		writeServiceError(w, err)
+		writeServiceError(w, r, err)
 		return
 	}
 	h.logActivity(r.Context(), activity.ActionFileCreate, permission.ResourceFile, f.ID, map[string]any{
@@ -69,16 +69,16 @@ func (h *Handler) GetFile(w http.ResponseWriter, r *http.Request) {
 	workspaceID, _ := middleware.WorkspaceIDFromContext(r.Context())
 	id, err := uuid.Parse(chi.URLParam(r, "id"))
 	if err != nil {
-		http.Error(w, "invalid id", http.StatusBadRequest)
+		middleware.RespondError(w, http.StatusBadRequest, middleware.ErrCodeBadRequest, "invalid id")
 		return
 	}
 	f, err := h.files.GetByID(r.Context(), workspaceID, id)
 	if err != nil {
-		writeServiceError(w, err)
+		writeServiceError(w, r, err)
 		return
 	}
 	if err := h.assertResourceAccess(r.Context(), permission.ResourceFile, f.ID, permission.RoleViewer); err != nil {
-		writeServiceError(w, err)
+		writeServiceError(w, r, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, f)
@@ -89,21 +89,21 @@ func (h *Handler) UpdateFile(w http.ResponseWriter, r *http.Request) {
 	workspaceID, _ := middleware.WorkspaceIDFromContext(r.Context())
 	id, err := uuid.Parse(chi.URLParam(r, "id"))
 	if err != nil {
-		http.Error(w, "invalid id", http.StatusBadRequest)
+		middleware.RespondError(w, http.StatusBadRequest, middleware.ErrCodeBadRequest, "invalid id")
 		return
 	}
 	var req updateFileRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "invalid json body", http.StatusBadRequest)
+		middleware.RespondError(w, http.StatusBadRequest, middleware.ErrCodeMalformedJSON, "invalid json body")
 		return
 	}
 	if err := h.assertResourceAccess(r.Context(), permission.ResourceFile, id, permission.RoleEditor); err != nil {
-		writeServiceError(w, err)
+		writeServiceError(w, r, err)
 		return
 	}
 	f, err := h.files.Rename(r.Context(), workspaceID, id, req.Name)
 	if err != nil {
-		writeServiceError(w, err)
+		writeServiceError(w, r, err)
 		return
 	}
 	h.logActivity(r.Context(), activity.ActionFileRename, permission.ResourceFile, f.ID, map[string]any{
@@ -117,11 +117,11 @@ func (h *Handler) DeleteFile(w http.ResponseWriter, r *http.Request) {
 	workspaceID, _ := middleware.WorkspaceIDFromContext(r.Context())
 	id, err := uuid.Parse(chi.URLParam(r, "id"))
 	if err != nil {
-		http.Error(w, "invalid id", http.StatusBadRequest)
+		middleware.RespondError(w, http.StatusBadRequest, middleware.ErrCodeBadRequest, "invalid id")
 		return
 	}
 	if err := h.assertResourceAccess(r.Context(), permission.ResourceFile, id, permission.RoleEditor); err != nil {
-		writeServiceError(w, err)
+		writeServiceError(w, r, err)
 		return
 	}
 	// Snapshot the row BEFORE delete so the outbound webhook can
@@ -132,7 +132,7 @@ func (h *Handler) DeleteFile(w http.ResponseWriter, r *http.Request) {
 	// degrades to FileID-only on the publish-time nil check.
 	snapshot, _ := h.files.GetByID(r.Context(), workspaceID, id)
 	if err := h.files.Delete(r.Context(), workspaceID, id); err != nil {
-		writeServiceError(w, err)
+		writeServiceError(w, r, err)
 		return
 	}
 	h.logActivity(r.Context(), activity.ActionFileDelete, permission.ResourceFile, id, nil)
@@ -147,30 +147,30 @@ func (h *Handler) MoveFile(w http.ResponseWriter, r *http.Request) {
 	workspaceID, _ := middleware.WorkspaceIDFromContext(r.Context())
 	id, err := uuid.Parse(chi.URLParam(r, "id"))
 	if err != nil {
-		http.Error(w, "invalid id", http.StatusBadRequest)
+		middleware.RespondError(w, http.StatusBadRequest, middleware.ErrCodeBadRequest, "invalid id")
 		return
 	}
 	var req moveFileRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "invalid json body", http.StatusBadRequest)
+		middleware.RespondError(w, http.StatusBadRequest, middleware.ErrCodeMalformedJSON, "invalid json body")
 		return
 	}
 	folderID, err := uuid.Parse(req.FolderID)
 	if err != nil {
-		http.Error(w, "invalid folder_id", http.StatusBadRequest)
+		middleware.RespondError(w, http.StatusBadRequest, middleware.ErrCodeBadRequest, "invalid folder_id")
 		return
 	}
 	dstFolder, err := h.folders.GetByID(r.Context(), workspaceID, folderID)
 	if err != nil {
-		writeServiceError(w, err)
+		writeServiceError(w, r, err)
 		return
 	}
 	if err := h.assertResourceAccess(r.Context(), permission.ResourceFile, id, permission.RoleEditor); err != nil {
-		writeServiceError(w, err)
+		writeServiceError(w, r, err)
 		return
 	}
 	if err := h.assertResourceAccess(r.Context(), permission.ResourceFolder, folderID, permission.RoleEditor); err != nil {
-		writeServiceError(w, err)
+		writeServiceError(w, r, err)
 		return
 	}
 	// Cross-mode moves require re-upload because the underlying objects
@@ -178,21 +178,21 @@ func (h *Handler) MoveFile(w http.ResponseWriter, r *http.Request) {
 	// metadata-level move with 409 Conflict before touching files.Move.
 	srcFile, err := h.files.GetByID(r.Context(), workspaceID, id)
 	if err != nil {
-		writeServiceError(w, err)
+		writeServiceError(w, r, err)
 		return
 	}
 	srcFolder, err := h.folders.GetByID(r.Context(), workspaceID, srcFile.FolderID)
 	if err != nil {
-		writeServiceError(w, err)
+		writeServiceError(w, r, err)
 		return
 	}
 	if !sameFolderEncryptionMode(srcFolder.EncryptionMode, dstFolder.EncryptionMode) {
-		writeServiceError(w, folder.ErrEncryptionModeMismatch)
+		writeServiceError(w, r, folder.ErrEncryptionModeMismatch)
 		return
 	}
 	f, err := h.files.Move(r.Context(), workspaceID, id, folderID)
 	if err != nil {
-		writeServiceError(w, err)
+		writeServiceError(w, r, err)
 		return
 	}
 	h.logActivity(r.Context(), activity.ActionFileMove, permission.ResourceFile, f.ID, map[string]any{
@@ -206,16 +206,16 @@ func (h *Handler) ListFileVersions(w http.ResponseWriter, r *http.Request) {
 	workspaceID, _ := middleware.WorkspaceIDFromContext(r.Context())
 	id, err := uuid.Parse(chi.URLParam(r, "id"))
 	if err != nil {
-		http.Error(w, "invalid id", http.StatusBadRequest)
+		middleware.RespondError(w, http.StatusBadRequest, middleware.ErrCodeBadRequest, "invalid id")
 		return
 	}
 	if err := h.assertResourceAccess(r.Context(), permission.ResourceFile, id, permission.RoleViewer); err != nil {
-		writeServiceError(w, err)
+		writeServiceError(w, r, err)
 		return
 	}
 	versions, err := h.files.ListVersions(r.Context(), workspaceID, id)
 	if err != nil {
-		writeServiceError(w, err)
+		writeServiceError(w, r, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"versions": versions})
