@@ -138,7 +138,7 @@ export default function TwoFactorEnrollPage() {
           }}
           style={{ marginLeft: "1rem" }}
         >
-          {enrollToken ? t("auth.mfaCancelAndSignIn") : t("common.done")}
+          {enrollToken ? t("auth.signInAgain") : t("common.done")}
         </button>
       </div>
     );

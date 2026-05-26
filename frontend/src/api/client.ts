@@ -23,21 +23,54 @@ client.interceptors.request.use((config) => {
   return config;
 });
 
-// Redirect to /login on 401 so expired sessions don't leave the UI stuck.
-// Clear ALL auth-derived localStorage keys (token, workspace, user_id) so
-// the next login is a clean slate; otherwise a stale user_id could persist
-// into a different user's session and break presence (cursor colors keyed
-// on the wrong id, PresenceChips failing to filter the local user, etc.).
+// NON_SESSION_401_CODES enumerates the structured error codes that come
+// back with HTTP 401 but DO NOT indicate the user's session is dead.
+// They're "soft" auth failures — the caller needs to provide something
+// other than a new login (a share-link password, a workspace header) —
+// so we surface the error to the calling page instead of nuking auth
+// state and bouncing to /login. Without this guard, e.g. an
+// unauthenticated visitor opening a password-protected share link
+// would get redirected to /login (clearing nothing, since they had no
+// session) instead of seeing the password prompt.
+const NON_SESSION_401_CODES = new Set<string>([
+  // Share-link password challenge. The user is browsing a public share
+  // and needs to enter the link's password. Redirecting to /login would
+  // be actively wrong: they have no account here.
+  "SHARE_PASSWORD_REQUIRED",
+  // The request reached the API authenticated but without a workspace
+  // header. The session is still valid; the page just needs to retry
+  // with a workspace selected. Clearing the token here would force a
+  // re-login for a recoverable routing error.
+  "MISSING_WORKSPACE_CONTEXT",
+]);
+
+// Redirect to /login on session-expiry 401s so stale sessions don't
+// leave the UI stuck. Clear ALL auth-derived localStorage keys (token,
+// workspace, user_id) so the next login is a clean slate; otherwise a
+// stale user_id could persist into a different user's session and break
+// presence (cursor colors keyed on the wrong id, PresenceChips failing
+// to filter the local user, etc.).
+//
+// We treat 401 as "session expired" UNLESS the structured error code
+// indicates a soft auth failure that the calling page should handle
+// (see NON_SESSION_401_CODES). The structured-code carve-out replaces
+// the old "always redirect on 401" behaviour that misrouted
+// password-protected share links and missing-workspace responses
+// through the login flow.
 client.interceptors.response.use(
   (resp) => resp,
   (err) => {
     if (err?.response?.status === 401) {
-      localStorage.removeItem(TOKEN_STORAGE_KEY);
-      localStorage.removeItem(WORKSPACE_STORAGE_KEY);
-      localStorage.removeItem(ROLE_STORAGE_KEY);
-      localStorage.removeItem(USER_STORAGE_KEY);
-      if (window.location.pathname !== "/login") {
-        window.location.href = "/login";
+      const data = err.response.data as { code?: string } | undefined;
+      const code = typeof data?.code === "string" ? data.code : null;
+      if (!code || !NON_SESSION_401_CODES.has(code)) {
+        localStorage.removeItem(TOKEN_STORAGE_KEY);
+        localStorage.removeItem(WORKSPACE_STORAGE_KEY);
+        localStorage.removeItem(ROLE_STORAGE_KEY);
+        localStorage.removeItem(USER_STORAGE_KEY);
+        if (window.location.pathname !== "/login") {
+          window.location.href = "/login";
+        }
       }
     }
     return Promise.reject(err);

@@ -14,7 +14,6 @@ import (
 
 	"github.com/kennguy3n/zk-drive/api/middleware"
 	"github.com/kennguy3n/zk-drive/internal/activity"
-	"github.com/kennguy3n/zk-drive/internal/billing"
 	"github.com/kennguy3n/zk-drive/internal/file"
 	"github.com/kennguy3n/zk-drive/internal/permission"
 	"github.com/kennguy3n/zk-drive/internal/scan"
@@ -412,16 +411,15 @@ func (h *Handler) DownloadURL(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// writeBillingError maps billing.ErrQuotaExceeded to 402 Payment
-// Required with the actionable WORKSPACE_QUOTA_EXCEEDED code so the
-// frontend can prompt the user to upgrade. Anything else falls
-// through to writeServiceError for the standard service-error
-// taxonomy (storage, upstream, internal).
+// writeBillingError delegates the billing-specific mapping (e.g.
+// billing.ErrQuotaExceeded -> 402 WORKSPACE_QUOTA_EXCEEDED) to
+// middleware.WriteBillingError so every handler that touches a
+// billing call returns the same code for the same condition. Anything
+// the shared helper doesn't recognise falls through to writeServiceError
+// for the standard service-error taxonomy (storage, upstream, internal).
 func writeBillingError(w http.ResponseWriter, err error) {
-	switch {
-	case errors.Is(err, billing.ErrQuotaExceeded):
-		middleware.RespondError(w, http.StatusPaymentRequired, middleware.ErrCodeQuotaExceeded, err.Error())
-	default:
-		writeServiceError(w, err)
+	if middleware.WriteBillingError(w, err) {
+		return
 	}
+	writeServiceError(w, err)
 }

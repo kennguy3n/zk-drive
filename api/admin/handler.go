@@ -856,15 +856,15 @@ func (h *Handler) UpdateBillingPlan(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, out)
 }
 
-// writeBillingError maps billing.ErrQuotaExceeded to 402 Payment
-// Required with the actionable WORKSPACE_QUOTA_EXCEEDED code so the
-// frontend can prompt the user to upgrade their plan. Other billing
-// errors fall through to a generic 500.
+// writeBillingError delegates the billing-specific mapping (e.g.
+// billing.ErrQuotaExceeded -> 402 WORKSPACE_QUOTA_EXCEEDED) to
+// middleware.WriteBillingError so every handler that touches a
+// billing call returns the same code for the same condition. The
+// admin package has no service-error helper of its own — unrecognised
+// billing errors fall through to a generic 500.
 func writeBillingError(w http.ResponseWriter, err error) {
-	switch {
-	case errors.Is(err, billing.ErrQuotaExceeded):
-		middleware.RespondError(w, http.StatusPaymentRequired, middleware.ErrCodeQuotaExceeded, err.Error())
-	default:
-		middleware.RespondError(w, http.StatusInternalServerError, middleware.ErrCodeInternal, err.Error())
+	if middleware.WriteBillingError(w, err) {
+		return
 	}
+	middleware.RespondError(w, http.StatusInternalServerError, middleware.ErrCodeInternal, err.Error())
 }

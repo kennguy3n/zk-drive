@@ -55,6 +55,7 @@
     "mfaCodePlaceholder": "123456 or xb-4q-9z-pm-tk",
     "mfaVerify": "Verify",
     "mfaCancelAndSignIn": "Cancel and sign in again",
+    "signInAgain": "Sign in again",
     "mfaEnrolledTitle": "Two-factor authentication enabled",
     "mfaRecoveryWarning": "Save these recovery codes now. Each one can be used once if you lose access to your authenticator. You will not see them again.",
     "mfaDownloadCodes": "Download codes",
