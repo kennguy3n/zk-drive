@@ -14,6 +14,7 @@ import (
 	"context"
 
 	"net/http"
+	"reflect"
 
 	"github.com/kennguy3n/zk-drive/internal/logging"
 
@@ -194,13 +195,54 @@ func (h *Handler) WithSearch(s *search.Service) *Handler {
 	return h
 }
 
+// isTypedNil reports whether v is an interface value that holds a
+// nil concrete pointer/map/chan/func/slice. A vanilla `v == nil`
+// comparison on an interface returns false when the type slot is
+// set (even if the value slot is nil) — this helper closes that
+// gap without coupling the handler to specific concrete types.
+// Used by the With* setters that take interface params so a
+// (*ai.SuggestionService)(nil) wrapped in TagSuggester (or any
+// equivalent typed-nil) is normalised to a nil interface here
+// instead of NPE'ing at first method call inside the request
+// handler.
+func isTypedNil(v any) bool {
+	if v == nil {
+		return true
+	}
+	rv := reflect.ValueOf(v)
+	switch rv.Kind() {
+	case reflect.Pointer, reflect.Map, reflect.Chan, reflect.Func, reflect.Slice, reflect.Interface:
+		return rv.IsNil()
+	}
+	return false
+}
+
 // WithTagSuggester wires the AI tag-suggestion service so the
 // /api/files/{id}/tag-suggestions endpoint stops responding 501.
 // A nil suggester keeps the endpoint disabled. The service is
 // non-load-bearing for the file plane — actual tag writes go
 // through file.Service.AddTag regardless of whether suggestions
 // are wired.
+//
+// The typed-nil guard mirrors WithWebhooks above: a caller passing
+// a (*ai.SuggestionService)(nil) wrapped in the TagSuggester
+// interface would slip past a vanilla `s == nil` check (interfaces
+// compare != nil when the type slot is set), and the subsequent
+// s.Suggest call in ai.go would NPE on s.pool. Production wiring
+// at cmd/server/main.go:629 always constructs a non-nil service so
+// this guard is defence-in-depth — it costs nothing and removes a
+// future-conditional-wiring footgun (which is exactly the failure
+// mode WithWebhooks already absorbs for *webhooks.Publisher).
+//
+// isTypedNil uses reflection rather than a `s.(*ai.SuggestionService)`
+// type assertion so api/drive doesn't have to import internal/ai —
+// preserving the one-way dependency described on the TagSuggester
+// interface above (ai → middleware, drive → ai via interface only).
 func (h *Handler) WithTagSuggester(s TagSuggester) *Handler {
+	if isTypedNil(s) {
+		h.tagSuggest = nil
+		return h
+	}
 	h.tagSuggest = s
 	return h
 }
@@ -209,7 +251,16 @@ func (h *Handler) WithTagSuggester(s TagSuggester) *Handler {
 // /api/search/expand endpoint stops responding 501. As with
 // WithTagSuggester, a nil expander keeps the endpoint disabled and
 // doesn't affect the primary /api/search endpoint.
+//
+// The typed-nil guard matches WithTagSuggester / WithWebhooks: a
+// (*ai.ExpansionService)(nil) wrapped in the QueryExpander
+// interface would NPE in Expand at runtime. Production never wires
+// a nil concrete pointer, but the guard keeps the contract honest.
 func (h *Handler) WithQueryExpander(e QueryExpander) *Handler {
+	if isTypedNil(e) {
+		h.queryExpand = nil
+		return h
+	}
 	h.queryExpand = e
 	return h
 }
