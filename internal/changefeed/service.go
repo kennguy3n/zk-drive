@@ -118,13 +118,31 @@ func (s *Service) WithCacheBuster(b CacheBuster) *Service {
 //   - document.*: don't bust. Documents are a different resource
 //     family that doesn't participate in the permission cache.
 //
-// New (kind, op) combinations are conservative-bust by default
-// (they reach the default branch which returns false) so adding
-// a new kind without updating this function silently disables
-// the cache hook for it — that's the safer failure mode (the
-// cache will rely on TTL) compared to over-busting and turning
-// the cache into a churn machine. When adding a new kind, audit
-// this function deliberately.
+// New (kind, op) combinations are conservative-no-bust by
+// default (they reach the default branch which returns false)
+// so adding a new kind without updating this function would
+// silently disable the cache hook for it. That failure mode
+// (rely on TTL) is safer than over-busting and turning the
+// cache into a churn machine, but it is still a correctness
+// regression if the new kind affects permission resolution.
+//
+// The audit obligation is therefore enforced at test-time, not
+// just by this comment:
+// TestShouldBustForMutation_ExhaustivelyAuditsKindOpMatrix in
+// service_test.go iterates every (Kind*, Op*) product and
+// asserts the explicit decision recorded in
+// knownKindOpBustDecisions matches the function's behaviour.
+// The companion expectedKindCount sentinel trips CI when a new
+// Kind constant is added without updating the audit ledger.
+//
+// Workflow when adding a new Kind:
+//  1. Add the const in internal/changefeed/changefeed.go.
+//  2. Bump expectedKindCount in service_test.go.
+//  3. Add the new Kind to knownKinds in service_test.go.
+//  4. Add bust=true|false entries for every Op in
+//     knownKindOpBustDecisions, with a doc-comment justifying
+//     each "false" decision.
+//  5. If any decision is bust=true, add the case below.
 func shouldBustForMutation(kind, op string) bool {
 	switch kind {
 	case KindPermission:

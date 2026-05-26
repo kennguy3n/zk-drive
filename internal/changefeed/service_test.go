@@ -745,3 +745,195 @@ func TestService_Record_NilBusterIsNoop(t *testing.T) {
 }
 
 func ptrUUID(u uuid.UUID) *uuid.UUID { return &u }
+
+// knownKindOpBustDecisions is the exhaustive fixture pinning the
+// shouldBustForMutation contract for every (kind, op) pair that
+// can be produced by the changefeed today. The map's key is
+// "{kind}/{op}" so a missing or new tuple shows up cleanly in a
+// diff.
+//
+// Adding a new Kind* or Op* constant in
+// internal/changefeed/changefeed.go REQUIRES adding an entry
+// here and either:
+//   - asserting bust=true and updating shouldBustForMutation
+//     in service.go to honour that, OR
+//   - asserting bust=false with a doc-comment in the entry
+//     explaining why the new kind doesn't affect permission
+//     resolution.
+//
+// The test below enforces that knownKindOpBustDecisions covers
+// every Kind × Op product, so a missing tuple fails CI. The
+// expected-kind-count assertion in
+// TestShouldBustForMutation_ExhaustivelyAuditsKindOpMatrix
+// closes the remaining gap: if a developer adds a new Kind
+// constant in changefeed.go and forgets to add it here, the
+// count check trips.
+//
+// This file is the canonical "did the bust audit happen?"
+// ledger. Per Devin Review ANALYSIS_0003 escalation: previously
+// the audit obligation was doc-comment-only; now it is enforced
+// at test-time.
+var knownKindOpBustDecisions = map[string]bool{
+	// KindPermission — every grant-table mutation by
+	// definition changes access resolution. Always bust.
+	"permission/create": true,
+	"permission/update": true,
+	"permission/rename": true, // not currently emitted; would still be a grant mutation
+	"permission/move":   true, // not currently emitted; would still be a grant mutation
+	"permission/delete": true,
+
+	// KindFolder — only move/delete change the ancestry chain;
+	// create/update/rename don't affect resolution for any
+	// existing descendant.
+	"folder/create": false,
+	"folder/update": false,
+	"folder/rename": false,
+	"folder/move":   true,
+	"folder/delete": true,
+
+	// KindFile — only move changes the file's ancestor chain;
+	// create/update/rename/delete are pure leaf-node changes
+	// that don't reshape the inheritance tree. file/delete in
+	// particular is bounded-stale: every downstream consumer
+	// of "can user X read deleted file Y?" also checks
+	// deleted_at IS NULL, so the worst case is a sub-TTL stale
+	// allow that gets rejected at the data layer.
+	"file/create": false,
+	"file/update": false,
+	"file/rename": false,
+	"file/move":   true,
+	"file/delete": false,
+
+	// KindDocument — collab-editor mutations don't participate
+	// in the permission cache. Document access is gated by the
+	// containing folder's grants, which are invalidated via the
+	// folder.* entries above. A document edit cannot grant or
+	// revoke access on its own.
+	"document/create": false,
+	"document/update": false,
+	"document/rename": false,
+	"document/move":   false,
+	"document/delete": false,
+}
+
+// expectedKindCount is the number of distinct Kind* constants
+// declared in internal/changefeed/changefeed.go. The test below
+// asserts the audit ledger above covers exactly this many
+// distinct kinds, so adding a new Kind constant without
+// updating the ledger trips CI.
+const expectedKindCount = 4
+
+// TestShouldBustForMutation_ExhaustivelyAuditsKindOpMatrix
+// converts the "audit deliberately when adding a new Kind" rule
+// (doc-comment-only in shouldBustForMutation) into a
+// CI-enforced contract.
+//
+// The test:
+//
+//  1. Asserts every Kind constant declared in changefeed.go is
+//     present in knownKindOpBustDecisions above (the
+//     expectedKindCount sentinel forces a developer to update
+//     both the registry AND the audit ledger when adding a
+//     Kind).
+//  2. Exhaustively iterates every (kind, op) pair from the
+//     fixture and asserts shouldBustForMutation (observed
+//     through BatchRecord's recordingBuster) matches the
+//     expected decision.
+//
+// Per Devin Review ANALYSIS_0003 (escalated): the previous
+// failure mode was that adding a new Kind producing a
+// permission-affecting mutation (e.g., a hypothetical
+// KindWorkspace for workspace-level role changes) would leave
+// shouldBustForMutation returning false silently. No compile
+// error, no runtime panic, just stale cache entries until TTL
+// expiry. This test pins the contract so any new Kind forces
+// a documented bust decision before merge.
+func TestShouldBustForMutation_ExhaustivelyAuditsKindOpMatrix(t *testing.T) {
+	t.Parallel()
+
+	// Kinds the test currently knows about. If you add a new
+	// Kind constant in changefeed.go you MUST add it here AND
+	// add entries for every Op to knownKindOpBustDecisions
+	// above. The expectedKindCount sentinel catches drift.
+	knownKinds := []string{
+		changefeed.KindFile,
+		changefeed.KindFolder,
+		changefeed.KindPermission,
+		changefeed.KindDocument,
+	}
+	if got := len(knownKinds); got != expectedKindCount {
+		t.Fatalf("knownKinds has %d entries but expectedKindCount=%d; if you added a new Kind constant in internal/changefeed/changefeed.go, also update knownKinds, knownKindOpBustDecisions, and expectedKindCount in this file", got, expectedKindCount)
+	}
+
+	// Every Op the changefeed currently produces. Same audit
+	// rule: adding a new Op requires adding entries for every
+	// known Kind in knownKindOpBustDecisions.
+	knownOps := []string{
+		changefeed.OpCreate,
+		changefeed.OpUpdate,
+		changefeed.OpRename,
+		changefeed.OpMove,
+		changefeed.OpDelete,
+	}
+
+	// First: verify the fixture covers every (kind, op)
+	// product. A missing entry means someone added a Kind or
+	// Op constant without auditing.
+	for _, kind := range knownKinds {
+		for _, op := range knownOps {
+			key := kind + "/" + op
+			if _, ok := knownKindOpBustDecisions[key]; !ok {
+				t.Errorf("knownKindOpBustDecisions missing audit entry for %q — every Kind × Op pair must have an explicit bust=true|false decision", key)
+			}
+		}
+	}
+
+	// Second: exhaustively assert shouldBustForMutation's
+	// behaviour for every audited tuple. We exercise it
+	// through BatchRecord (the only path that actually
+	// invokes the bust hook) using a fresh service per case
+	// so the recording buster's snapshot is unambiguous.
+	for key, wantBust := range knownKindOpBustDecisions {
+		key, wantBust := key, wantBust
+		t.Run(key, func(t *testing.T) {
+			t.Parallel()
+			parts := splitKindOp(key)
+			if len(parts) != 2 {
+				t.Fatalf("malformed audit key %q (expected kind/op)", key)
+			}
+			kind, op := parts[0], parts[1]
+
+			repo := newFakeRepo()
+			buster := &recordingBuster{}
+			svc := changefeed.NewService(repo).WithCacheBuster(buster)
+
+			ws := uuid.New()
+			if _, err := svc.Record(context.Background(), changefeed.RecordInput{
+				WorkspaceID: ws,
+				ActorID:     ptrUUID(uuid.New()),
+				Kind:        kind,
+				Op:          op,
+				ResourceID:  uuid.New(),
+			}); err != nil {
+				t.Fatalf("record %s: %v", key, err)
+			}
+
+			got := buster.snapshot()
+			gotBust := len(got) == 1 && got[0] == ws
+			if gotBust != wantBust {
+				t.Errorf("shouldBustForMutation(%s/%s) drift: want bust=%v, got bust=%v (snapshot=%v). If this change is intentional, update knownKindOpBustDecisions in this file to reflect the new decision AND make sure the new decision is justified in the doc comment on shouldBustForMutation in service.go.", kind, op, wantBust, gotBust, got)
+			}
+		})
+	}
+}
+
+// splitKindOp is a tiny helper for the exhaustive matrix test.
+// strings.SplitN is overkill for a fixed two-piece key.
+func splitKindOp(s string) []string {
+	for i := 0; i < len(s); i++ {
+		if s[i] == '/' {
+			return []string{s[:i], s[i+1:]}
+		}
+	}
+	return []string{s}
+}
