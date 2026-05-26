@@ -413,19 +413,26 @@ func (c *CachedRepository) bustWorkspace(ctx context.Context, workspaceID uuid.U
 		c.obs.RecordCacheOp(layerPerm, opBust, resultError)
 		return
 	}
-	// Apply a TTL so the counter itself eventually self-cleans
-	// for workspaces that go quiet. The TTL is two windows of
-	// the entry TTL so a counter increment always outlives
-	// every entry it could invalidate. (If the counter expired
-	// before some surviving entry, that entry would become
-	// reachable again at gen=0 after the counter resets — a
-	// stale-read window we explicitly want to avoid.)
-	if expErr := c.rdb.Expire(ctx, generationKey(workspaceID), c.ttl*2).Err(); expErr != nil {
-		logging.FromContext(ctx).Debug("permission cache: expire generation failed",
-			"workspace_id", workspaceID,
-			"err", expErr,
-		)
-	}
+	// The generation counter has no TTL.
+	//
+	// An earlier version expired the counter at 2× the entry
+	// TTL on the theory that it would self-clean for quiet
+	// workspaces. That permits a narrow but real stale-read
+	// race: if read traffic continues (refreshing entries via
+	// SET on every miss) but no busts happen, the counter
+	// expires while entries from gen=N are still alive. A
+	// subsequent INCR sets the counter back to 1 (Redis INCR
+	// on a missing key yields 1), and surviving entries
+	// originally written under gen=1 become reachable again
+	// for the remainder of their TTL. Removing the counter
+	// TTL eliminates the race entirely.
+	//
+	// Memory cost: one int64 per workspace. At 10k workspaces
+	// that's ~60KB of Redis state — negligible. Workspaces
+	// that are deleted should DEL the counter as part of
+	// their teardown (out of scope for this PR; the cache
+	// safely ignores leaked counters because the keyspace is
+	// keyed by workspaceID).
 	// Update the local cache so subsequent reads on THIS
 	// replica observe the new generation immediately. Other
 	// replicas pick up the new value within

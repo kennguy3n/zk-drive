@@ -290,8 +290,10 @@ func TestCachedRepository_TTLExpiry(t *testing.T) {
 	if _, err := c.CheckAccessWithInheritance(ctx, ws, ResourceFile, res, GranteeUser, user, RoleViewer); err != nil {
 		t.Fatalf("first call: %v", err)
 	}
-	// Advance miniredis past the entry TTL but not past the
-	// gen-counter TTL.
+	// Advance miniredis past the entry TTL. The generation
+	// counter has no TTL (see cache.go bustWorkspace doc) so
+	// only the entry expires here, which is the behaviour
+	// this test pins.
 	mr.FastForward(200 * time.Millisecond)
 
 	if _, err := c.CheckAccessWithInheritance(ctx, ws, ResourceFile, res, GranteeUser, user, RoleViewer); err != nil {
