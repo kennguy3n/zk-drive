@@ -5,6 +5,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // Config holds runtime configuration for the zk-drive server and worker
@@ -263,6 +264,45 @@ type Config struct {
 	// writes multiple JSONL.gz objects with distinct UUID
 	// suffixes — the restore tool joins them transparently.
 	AuditArchiveMaxRowsPerBatch int
+
+	// PerformanceCacheEnabled toggles the Redis-backed read-through
+	// cache in front of permission resolution (and, in future
+	// iterations, listing endpoints). Default true. The cache is a
+	// pure read accelerator over the live Postgres tables — every
+	// entry self-expires within PerformanceCacheTTL and is
+	// proactively busted on permission and folder-topology
+	// mutations via the permission service's BustWorkspace hook,
+	// so operating with the cache off is identical in observable
+	// behaviour to operating with it on (just slower). Setting it
+	// false is the safe rollback knob if the cache layer ever
+	// misbehaves in production.
+	//
+	// Requires REDIS_URL to be configured: when REDIS_URL is
+	// empty, the wiring code logs a single startup warning and
+	// silently falls back to the un-cached repository regardless
+	// of this flag (the in-memory single-replica fallback for
+	// sessions / rate limit already lives without Redis; the
+	// permission cache deliberately does NOT add an in-memory
+	// fallback because that would let a multi-replica deployment
+	// drift per-replica and the resulting confusion is worse than
+	// the lost cache hits).
+	PerformanceCacheEnabled bool
+	// PerformanceCacheTTL is the TTL written on every cache entry.
+	// Sized so that even when the proactive bust hook misses a
+	// mutation (e.g. an admin SQL-level change made outside the
+	// service layer), stale grants self-expire within seconds.
+	// Defaults to 30s — long enough for the common request burst
+	// (a folder browse session typically reads the same resource
+	// dozens of times within a few seconds) to enjoy the cache,
+	// short enough that a forgotten admin change is behaviourally
+	// indistinguishable from "not cached" after half a minute.
+	// Set via PERFORMANCE_CACHE_TTL accepting the usual
+	// time.ParseDuration syntax (e.g. "60s", "5m"). Values outside
+	// [1s, 5m] are clamped by clampPerformanceCacheTTL so a typo
+	// can't disable the TTL (0 -> no expiry would leak entries
+	// forever) or force-expire on every read (sub-second TTLs
+	// busy-loop the cache without serving hits).
+	PerformanceCacheTTL time.Duration
 }
 
 // Load reads configuration from environment variables and returns a populated
@@ -370,6 +410,9 @@ func buildConfigFromEnv() *Config {
 		AuditArchivePrefix:          normaliseArchivePrefix(getEnvDefault("AUDIT_LOG_ARCHIVE_PREFIX", "audit-archive/")),
 		AuditArchiveBucket:          strings.TrimSpace(os.Getenv("AUDIT_LOG_ARCHIVE_BUCKET")),
 		AuditArchiveMaxRowsPerBatch: clampAuditMaxRowsPerBatch(parseIntDefault(os.Getenv("AUDIT_LOG_ARCHIVE_MAX_ROWS_PER_BATCH"), defaultAuditArchiveMaxRowsPerBatch)),
+
+		PerformanceCacheEnabled: parseBoolDefault(os.Getenv("PERFORMANCE_CACHE_ENABLED"), defaultPerformanceCacheEnabled),
+		PerformanceCacheTTL:     clampPerformanceCacheTTL(parseDurationDefault(os.Getenv("PERFORMANCE_CACHE_TTL"), defaultPerformanceCacheTTL)),
 	}
 }
 
@@ -564,6 +607,69 @@ func clampAuditMaxRowsPerBatch(n int) int {
 		return maxAuditArchiveMaxRowsPerBatch
 	}
 	return n
+}
+
+// defaultPerformanceCacheEnabled is the default for the
+// PERFORMANCE_CACHE_ENABLED flag. We default to true so a fresh
+// deployment gets the perf win automatically; operators can set
+// PERFORMANCE_CACHE_ENABLED=false to roll back to the un-cached
+// path without re-deploying a different image.
+const defaultPerformanceCacheEnabled = true
+
+// defaultPerformanceCacheTTL is the default TTL written on every
+// permission-cache entry. See the doc on Config.PerformanceCacheTTL
+// for the rationale behind 30 seconds; see clampPerformanceCacheTTL
+// for the legal range.
+const defaultPerformanceCacheTTL = 30 * time.Second
+
+// minPerformanceCacheTTL / maxPerformanceCacheTTL bound the legal
+// range. The lower bound (1s) prevents a typo from busy-looping
+// the cache (a 100ms TTL would re-fetch from Postgres on every
+// keystroke of a folder browse and is worse than no cache at
+// all). The upper bound (5m) prevents a typo from making the
+// cache effectively permanent — even with proactive busting,
+// admins making changes directly in psql have no path back to
+// the application layer so a forgotten entry must self-expire
+// in a window short enough that operators don't reach for
+// FLUSHDB.
+const (
+	minPerformanceCacheTTL = time.Second
+	maxPerformanceCacheTTL = 5 * time.Minute
+)
+
+// clampPerformanceCacheTTL bounds PERFORMANCE_CACHE_TTL at
+// [minPerformanceCacheTTL, maxPerformanceCacheTTL]. Values below
+// the floor or non-positive clamp to defaultPerformanceCacheTTL
+// (assume the operator forgot to set the value rather than
+// intentionally configured a TTL that breaks the cache). Values
+// above the ceiling clamp to maxPerformanceCacheTTL so a stale
+// entry can never linger longer than the operator's mental
+// "I just changed that" window.
+func clampPerformanceCacheTTL(d time.Duration) time.Duration {
+	if d < minPerformanceCacheTTL {
+		return defaultPerformanceCacheTTL
+	}
+	if d > maxPerformanceCacheTTL {
+		return maxPerformanceCacheTTL
+	}
+	return d
+}
+
+// parseDurationDefault parses a time.Duration env value (e.g.
+// "30s", "5m", "1h"). Empty input and parse failures fall through
+// to def — keeping with the rest of the parseFooDefault family
+// where a typo silently uses the documented default rather than
+// failing the boot.
+func parseDurationDefault(s string, def time.Duration) time.Duration {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return def
+	}
+	d, err := time.ParseDuration(s)
+	if err != nil {
+		return def
+	}
+	return d
 }
 
 // normaliseArchivePrefix ensures the prefix ends with exactly one

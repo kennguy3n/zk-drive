@@ -19,10 +19,36 @@ const (
 )
 
 // ResourceType values recognized for a permission grant.
+//
+// IMPORTANT: every Resource* constant declared here MUST also be
+// listed in AllResourceTypes below. Downstream consumers
+// (notably the changefeed cache-invalidation matrix in
+// internal/changefeed/service.go's shouldBustForMutation)
+// iterate AllResourceTypes to enforce audit coverage. Per Devin
+// Review ANALYSIS_0003: the previous failure mode was that
+// adding a new resource type here without updating the bust
+// matrix would leave stale cache entries when that resource's
+// container changed — caught now by
+// TestPermissionResourceTypesCoupleToChangefeedKinds in
+// internal/changefeed/permission_coupling_test.go.
 const (
 	ResourceFolder = "folder"
 	ResourceFile   = "file"
 )
+
+// AllResourceTypes is the closed enumeration of every valid
+// resource type a permission grant may target. This slice is the
+// canonical iteration registry — isValidResourceType derives
+// from it, and downstream cross-package tests (e.g., the
+// changefeed bust-matrix coupling test) consume it to detect
+// audit gaps when a new ResourceType is added.
+//
+// CONTRACT: if you add a new Resource* constant above, you MUST
+// append it here too. The companion test
+// TestAllResourceTypesIsComplete in models_test.go pins the
+// count so the registry can't silently drift from the const
+// block.
+var AllResourceTypes = []string{ResourceFolder, ResourceFile}
 
 // GranteeType values recognized for a permission grant.
 const (
@@ -66,9 +92,17 @@ func isValidRole(role string) bool {
 }
 
 // isValidResourceType reports whether t is one of the recognized resource
-// type strings.
+// type strings. Derives from AllResourceTypes so a future Resource*
+// addition flows through automatically once the registry is updated
+// — no double-edit hazard between the const block, this function,
+// and the cross-package coupling test.
 func isValidResourceType(t string) bool {
-	return t == ResourceFolder || t == ResourceFile
+	for _, rt := range AllResourceTypes {
+		if t == rt {
+			return true
+		}
+	}
+	return false
 }
 
 // isValidGranteeType reports whether t is one of the recognized grantee

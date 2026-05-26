@@ -227,6 +227,38 @@ type Metrics struct {
 	// labelled by outcome so operators can plot p99 success
 	// latency separately from net_error timeouts.
 	webhookDeliveryDuration *prometheus.HistogramVec
+
+	// dbQueriesTotal counts every Postgres query issued by the
+	// hot-path repositories, partitioned by op (closed
+	// vocabulary in internal/metrics/db.go) and result
+	// ('ok'/'error'/'not_found'). 'not_found' is a deliberate
+	// third label rather than rolled into 'error' so the
+	// (frequent, expected) ErrNoRows outcome doesn't poison
+	// the dashboards' error-rate signal.
+	dbQueriesTotal *prometheus.CounterVec
+
+	// dbQueryDuration observes wall time per query, partitioned
+	// only by op (not result — successes and errors typically
+	// have similar cost, splitting them doubles cardinality
+	// without operational benefit). Operators join with
+	// dbQueriesTotal for per-result rates.
+	dbQueryDuration *prometheus.HistogramVec
+
+	// cacheOpsTotal counts every operation against the
+	// application-level caches in front of Postgres, partitioned
+	// by layer ('perm' today; 'listing' once that cache lands),
+	// op ('read'/'write'/'bust') and result
+	// ('hit'/'miss'/'negative_hit'/'bust'/'ok'/'error'). The
+	// theoretical cardinality bound is 1 layer × 3 ops × 6
+	// results = 18 series per layer, but the emit-set is
+	// sparse: read emits hit/miss/negative_hit/error (4),
+	// write emits ok/error (2), bust emits bust/error (2) —
+	// 8 distinct (op, result) tuples in production. The
+	// canonical result vocabulary lives in
+	// internal/metrics/cache.go (CacheResult* const block);
+	// adding a new layer adds a constant in the same file so
+	// the cardinality bound stays documented at the type.
+	cacheOpsTotal *prometheus.CounterVec
 }
 
 // New constructs a Metrics with a fresh private registry and the
@@ -343,6 +375,8 @@ func New() *Metrics {
 	m.registerEmailMetrics(reg)
 	m.registerAuditArchiveMetrics(reg)
 	m.registerWebhookMetrics(reg)
+	m.registerDBMetrics(reg)
+	m.registerCacheMetrics(reg)
 
 	return m
 }

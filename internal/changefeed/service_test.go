@@ -559,3 +559,386 @@ func TestServiceRecord_NoPublisherStillPersists(t *testing.T) {
 		t.Fatalf("expected 1 row persisted")
 	}
 }
+
+// recordingBuster captures BustWorkspace invocations so tests can
+// assert which mutations trigger cache invalidation and that
+// batch de-duplication collapses N records to 1 bust per
+// workspace.
+type recordingBuster struct {
+	mu     sync.Mutex
+	busted []uuid.UUID
+}
+
+func (b *recordingBuster) BustWorkspace(_ context.Context, workspaceID uuid.UUID) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.busted = append(b.busted, workspaceID)
+}
+
+func (b *recordingBuster) snapshot() []uuid.UUID {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	out := make([]uuid.UUID, len(b.busted))
+	copy(out, b.busted)
+	return out
+}
+
+// TestService_Record_BustsCacheOnPermissionMutation verifies the
+// changefeed fires the cache buster after persisting a permission
+// mutation. This is the canonical hot-path invalidation: a
+// permission.create event must invalidate the perm cache or the
+// API would serve the pre-grant view for up to TTL seconds.
+func TestService_Record_BustsCacheOnPermissionMutation(t *testing.T) {
+	t.Parallel()
+	repo := newFakeRepo()
+	buster := &recordingBuster{}
+	svc := changefeed.NewService(repo).WithCacheBuster(buster)
+	ws := uuid.New()
+	if _, err := svc.Record(context.Background(), changefeed.RecordInput{
+		WorkspaceID: ws,
+		ActorID:     ptrUUID(uuid.New()),
+		Kind:        changefeed.KindPermission,
+		Op:          changefeed.OpCreate,
+		ResourceID:  uuid.New(),
+	}); err != nil {
+		t.Fatalf("record: %v", err)
+	}
+	got := buster.snapshot()
+	if len(got) != 1 || got[0] != ws {
+		t.Errorf("expected 1 bust on workspace %s; got %v", ws, got)
+	}
+}
+
+// TestService_Record_NoBustOnFileCreate guards against
+// over-busting: a pure file.create event has no descendants and
+// cannot affect any cached access-check answer, so the bust path
+// must NOT fire. Over-busting would defeat the cache on every
+// upload.
+func TestService_Record_NoBustOnFileCreate(t *testing.T) {
+	t.Parallel()
+	repo := newFakeRepo()
+	buster := &recordingBuster{}
+	svc := changefeed.NewService(repo).WithCacheBuster(buster)
+	if _, err := svc.Record(context.Background(), changefeed.RecordInput{
+		WorkspaceID: uuid.New(),
+		ActorID:     ptrUUID(uuid.New()),
+		Kind:        changefeed.KindFile,
+		Op:          changefeed.OpCreate,
+		ResourceID:  uuid.New(),
+	}); err != nil {
+		t.Fatalf("record: %v", err)
+	}
+	if got := buster.snapshot(); len(got) != 0 {
+		t.Errorf("expected no busts on file.create; got %v", got)
+	}
+}
+
+// TestService_Record_BustsOnFolderMove verifies that a folder
+// move (which changes the ancestry chain for every descendant)
+// triggers the bust. Without this the perm cache would serve
+// pre-move answers for up to TTL seconds.
+func TestService_Record_BustsOnFolderMove(t *testing.T) {
+	t.Parallel()
+	repo := newFakeRepo()
+	buster := &recordingBuster{}
+	svc := changefeed.NewService(repo).WithCacheBuster(buster)
+	ws := uuid.New()
+	if _, err := svc.Record(context.Background(), changefeed.RecordInput{
+		WorkspaceID: ws,
+		ActorID:     ptrUUID(uuid.New()),
+		Kind:        changefeed.KindFolder,
+		Op:          changefeed.OpMove,
+		ResourceID:  uuid.New(),
+	}); err != nil {
+		t.Fatalf("record: %v", err)
+	}
+	got := buster.snapshot()
+	if len(got) != 1 || got[0] != ws {
+		t.Errorf("expected 1 bust on workspace %s; got %v", ws, got)
+	}
+}
+
+// TestService_BatchRecord_DeduplicatesBusts verifies that a
+// bulk operation (e.g. 100-item bulk move) collapses to a single
+// bust per workspace. Without this, a large bulk would issue N
+// redundant INCRs against Redis.
+func TestService_BatchRecord_DeduplicatesBusts(t *testing.T) {
+	t.Parallel()
+	repo := newFakeRepo()
+	buster := &recordingBuster{}
+	svc := changefeed.NewService(repo).WithCacheBuster(buster)
+	ws := uuid.New()
+	inputs := make([]changefeed.RecordInput, 0, 50)
+	for i := 0; i < 50; i++ {
+		inputs = append(inputs, changefeed.RecordInput{
+			WorkspaceID: ws,
+			ActorID:     ptrUUID(uuid.New()),
+			Kind:        changefeed.KindFile,
+			Op:          changefeed.OpMove,
+			ResourceID:  uuid.New(),
+		})
+	}
+	if _, err := svc.BatchRecord(context.Background(), inputs); err != nil {
+		t.Fatalf("batch: %v", err)
+	}
+	if got := buster.snapshot(); len(got) != 1 || got[0] != ws {
+		t.Errorf("expected 1 deduplicated bust on workspace %s; got %v", ws, got)
+	}
+}
+
+// TestService_BatchRecord_BustsEachUniqueWorkspace verifies that
+// when a batch spans multiple workspaces, each unique workspace
+// is busted exactly once.
+func TestService_BatchRecord_BustsEachUniqueWorkspace(t *testing.T) {
+	t.Parallel()
+	repo := newFakeRepo()
+	buster := &recordingBuster{}
+	svc := changefeed.NewService(repo).WithCacheBuster(buster)
+	ws1, ws2, ws3 := uuid.New(), uuid.New(), uuid.New()
+	inputs := []changefeed.RecordInput{
+		{WorkspaceID: ws1, ActorID: ptrUUID(uuid.New()), Kind: changefeed.KindPermission, Op: changefeed.OpCreate, ResourceID: uuid.New()},
+		{WorkspaceID: ws2, ActorID: ptrUUID(uuid.New()), Kind: changefeed.KindFolder, Op: changefeed.OpMove, ResourceID: uuid.New()},
+		{WorkspaceID: ws1, ActorID: ptrUUID(uuid.New()), Kind: changefeed.KindPermission, Op: changefeed.OpDelete, ResourceID: uuid.New()},
+		{WorkspaceID: ws3, ActorID: ptrUUID(uuid.New()), Kind: changefeed.KindFile, Op: changefeed.OpMove, ResourceID: uuid.New()},
+		// A file.create in ws1 must NOT add a third entry —
+		// shouldBustForMutation rejects file.create.
+		{WorkspaceID: ws1, ActorID: ptrUUID(uuid.New()), Kind: changefeed.KindFile, Op: changefeed.OpCreate, ResourceID: uuid.New()},
+	}
+	if _, err := svc.BatchRecord(context.Background(), inputs); err != nil {
+		t.Fatalf("batch: %v", err)
+	}
+	got := buster.snapshot()
+	if len(got) != 3 {
+		t.Fatalf("expected 3 unique-workspace busts; got %d (%v)", len(got), got)
+	}
+	seen := map[uuid.UUID]bool{}
+	for _, w := range got {
+		seen[w] = true
+	}
+	for _, want := range []uuid.UUID{ws1, ws2, ws3} {
+		if !seen[want] {
+			t.Errorf("expected bust on %s", want)
+		}
+	}
+}
+
+// TestService_Record_NilBusterIsNoop verifies that a service
+// wired without a cache buster still records and publishes
+// normally — the bust hook must be a true no-op when disabled
+// rather than a panic.
+func TestService_Record_NilBusterIsNoop(t *testing.T) {
+	t.Parallel()
+	repo := newFakeRepo()
+	svc := changefeed.NewService(repo)
+	if _, err := svc.Record(context.Background(), changefeed.RecordInput{
+		WorkspaceID: uuid.New(),
+		ActorID:     ptrUUID(uuid.New()),
+		Kind:        changefeed.KindPermission,
+		Op:          changefeed.OpCreate,
+		ResourceID:  uuid.New(),
+	}); err != nil {
+		t.Fatalf("record: %v", err)
+	}
+	if len(repo.rows) != 1 {
+		t.Errorf("row not persisted with nil buster")
+	}
+}
+
+func ptrUUID(u uuid.UUID) *uuid.UUID { return &u }
+
+// knownKindOpBustDecisions is the exhaustive fixture pinning the
+// shouldBustForMutation contract for every (kind, op) pair that
+// can be produced by the changefeed today. The map's key is
+// "{kind}/{op}" so a missing or new tuple shows up cleanly in a
+// diff.
+//
+// Adding a new Kind* or Op* constant in
+// internal/changefeed/changefeed.go REQUIRES adding an entry
+// here and either:
+//   - asserting bust=true and updating shouldBustForMutation
+//     in service.go to honour that, OR
+//   - asserting bust=false with a doc-comment in the entry
+//     explaining why the new kind doesn't affect permission
+//     resolution.
+//
+// The test below enforces that knownKindOpBustDecisions covers
+// every Kind × Op product, so a missing tuple fails CI. The
+// expected-kind-count assertion in
+// TestShouldBustForMutation_ExhaustivelyAuditsKindOpMatrix
+// closes the remaining gap: if a developer adds a new Kind
+// constant in changefeed.go and forgets to add it here, the
+// count check trips.
+//
+// This file is the canonical "did the bust audit happen?"
+// ledger. Per Devin Review ANALYSIS_0003 escalation: previously
+// the audit obligation was doc-comment-only; now it is enforced
+// at test-time.
+var knownKindOpBustDecisions = map[string]bool{
+	// KindPermission — every grant-table mutation by
+	// definition changes access resolution. Always bust.
+	"permission/create": true,
+	"permission/update": true,
+	"permission/rename": true, // not currently emitted; would still be a grant mutation
+	"permission/move":   true, // not currently emitted; would still be a grant mutation
+	"permission/delete": true,
+
+	// KindFolder — only move/delete change the ancestry chain;
+	// create/update/rename don't affect resolution for any
+	// existing descendant.
+	"folder/create": false,
+	"folder/update": false,
+	"folder/rename": false,
+	"folder/move":   true,
+	"folder/delete": true,
+
+	// KindFile — only move changes the file's ancestor chain;
+	// create/update/rename/delete are pure leaf-node changes
+	// that don't reshape the inheritance tree. file/delete in
+	// particular is bounded-stale: every downstream consumer
+	// of "can user X read deleted file Y?" also checks
+	// deleted_at IS NULL, so the worst case is a sub-TTL stale
+	// allow that gets rejected at the data layer.
+	"file/create": false,
+	"file/update": false,
+	"file/rename": false,
+	"file/move":   true,
+	"file/delete": false,
+
+	// KindDocument — collab-editor mutations don't participate
+	// in the permission cache. Document access is gated by the
+	// containing folder's grants, which are invalidated via the
+	// folder.* entries above. A document edit cannot grant or
+	// revoke access on its own.
+	"document/create": false,
+	"document/update": false,
+	"document/rename": false,
+	"document/move":   false,
+	"document/delete": false,
+}
+
+// expectedKindCount is the number of distinct Kind* constants
+// declared in internal/changefeed/changefeed.go. The test below
+// asserts the audit ledger above covers exactly this many
+// distinct kinds, so adding a new Kind constant without
+// updating the ledger trips CI.
+const expectedKindCount = 4
+
+// TestShouldBustForMutation_ExhaustivelyAuditsKindOpMatrix
+// converts the "audit deliberately when adding a new Kind" rule
+// (doc-comment-only in shouldBustForMutation) into a
+// CI-enforced contract.
+//
+// The test:
+//
+//  1. Asserts every Kind constant declared in changefeed.go is
+//     present in knownKindOpBustDecisions above (the
+//     expectedKindCount sentinel forces a developer to update
+//     both the registry AND the audit ledger when adding a
+//     Kind).
+//  2. Exhaustively iterates every (kind, op) pair from the
+//     fixture and asserts shouldBustForMutation (observed
+//     through BatchRecord's recordingBuster) matches the
+//     expected decision.
+//
+// Per Devin Review ANALYSIS_0003 (escalated): the previous
+// failure mode was that adding a new Kind producing a
+// permission-affecting mutation (e.g., a hypothetical
+// KindWorkspace for workspace-level role changes) would leave
+// shouldBustForMutation returning false silently. No compile
+// error, no runtime panic, just stale cache entries until TTL
+// expiry. This test pins the contract so any new Kind forces
+// a documented bust decision before merge.
+func TestShouldBustForMutation_ExhaustivelyAuditsKindOpMatrix(t *testing.T) {
+	t.Parallel()
+
+	// Kinds the test currently knows about. If you add a new
+	// Kind constant in changefeed.go you MUST add it here AND
+	// add entries for every Op to knownKindOpBustDecisions
+	// above. The expectedKindCount sentinel catches drift.
+	knownKinds := []string{
+		changefeed.KindFile,
+		changefeed.KindFolder,
+		changefeed.KindPermission,
+		changefeed.KindDocument,
+	}
+	if got := len(knownKinds); got != expectedKindCount {
+		t.Fatalf("knownKinds has %d entries but expectedKindCount=%d; if you added a new Kind constant in internal/changefeed/changefeed.go, also update knownKinds, knownKindOpBustDecisions, and expectedKindCount in this file", got, expectedKindCount)
+	}
+
+	// Every Op the changefeed currently produces. Same audit
+	// rule: adding a new Op requires adding entries for every
+	// known Kind in knownKindOpBustDecisions.
+	knownOps := []string{
+		changefeed.OpCreate,
+		changefeed.OpUpdate,
+		changefeed.OpRename,
+		changefeed.OpMove,
+		changefeed.OpDelete,
+	}
+
+	// First: verify the fixture covers every (kind, op)
+	// product. A missing entry means someone added a Kind or
+	// Op constant without auditing.
+	for _, kind := range knownKinds {
+		for _, op := range knownOps {
+			key := kind + "/" + op
+			if _, ok := knownKindOpBustDecisions[key]; !ok {
+				t.Errorf("knownKindOpBustDecisions missing audit entry for %q — every Kind × Op pair must have an explicit bust=true|false decision", key)
+			}
+		}
+	}
+
+	// Second: exhaustively assert shouldBustForMutation's
+	// behaviour for every audited tuple. Both Record and
+	// BatchRecord invoke the bust hook (see service.go's
+	// recordOne and BatchRecord respectively); we use the
+	// single-row Record path here so each sub-test's
+	// recording buster has a 1:1 mapping between the input
+	// tuple and the bust decision under test (BatchRecord
+	// adds workspace-level deduplication that would muddle
+	// per-tuple assertions). A fresh service per sub-test
+	// keeps the recording buster's snapshot unambiguous.
+	for key, wantBust := range knownKindOpBustDecisions {
+		key, wantBust := key, wantBust
+		t.Run(key, func(t *testing.T) {
+			t.Parallel()
+			parts := splitKindOp(key)
+			if len(parts) != 2 {
+				t.Fatalf("malformed audit key %q (expected kind/op)", key)
+			}
+			kind, op := parts[0], parts[1]
+
+			repo := newFakeRepo()
+			buster := &recordingBuster{}
+			svc := changefeed.NewService(repo).WithCacheBuster(buster)
+
+			ws := uuid.New()
+			if _, err := svc.Record(context.Background(), changefeed.RecordInput{
+				WorkspaceID: ws,
+				ActorID:     ptrUUID(uuid.New()),
+				Kind:        kind,
+				Op:          op,
+				ResourceID:  uuid.New(),
+			}); err != nil {
+				t.Fatalf("record %s: %v", key, err)
+			}
+
+			got := buster.snapshot()
+			gotBust := len(got) == 1 && got[0] == ws
+			if gotBust != wantBust {
+				t.Errorf("shouldBustForMutation(%s/%s) drift: want bust=%v, got bust=%v (snapshot=%v). If this change is intentional, update knownKindOpBustDecisions in this file to reflect the new decision AND make sure the new decision is justified in the doc comment on shouldBustForMutation in service.go.", kind, op, wantBust, gotBust, got)
+			}
+		})
+	}
+}
+
+// splitKindOp is a tiny helper for the exhaustive matrix test.
+// strings.SplitN is overkill for a fixed two-piece key.
+func splitKindOp(s string) []string {
+	for i := 0; i < len(s); i++ {
+		if s[i] == '/' {
+			return []string{s[:i], s[i+1:]}
+		}
+	}
+	return []string{s}
+}

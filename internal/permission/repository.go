@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -26,15 +27,80 @@ type Repository interface {
 	CheckAccessWithInheritance(ctx context.Context, workspaceID uuid.UUID, resourceType string, resourceID uuid.UUID, granteeType string, granteeID uuid.UUID, minRole string) (bool, error)
 }
 
-// PostgresRepository implements Repository against Postgres.
+// DBObserver is the minimal surface PostgresRepository depends on
+// to emit per-query duration / count metrics. Defined here so the
+// repository does not import internal/metrics directly — the
+// dependency is metrics-implements-observer, not metrics-is-
+// imported-everywhere. A nil DBObserver is permitted; the
+// deferred-record helpers no-op on nil.
+type DBObserver interface {
+	RecordDBQuery(op string, duration time.Duration, result string)
+}
+
+// PostgresRepository implements Repository against Postgres. The
+// obs field, when non-nil, is consulted on every query exit to
+// emit the zkdrive_db_query_duration_seconds histogram and
+// zkdrive_db_queries_total counter under a stable per-method op
+// label (DBOpPermission*).
 type PostgresRepository struct {
 	pool *pgxpool.Pool
+	obs  DBObserver
 }
 
 // NewPostgresRepository returns a PostgresRepository using the supplied pool.
 func NewPostgresRepository(pool *pgxpool.Pool) *PostgresRepository {
 	return &PostgresRepository{pool: pool}
 }
+
+// WithObserver returns the same repository with the supplied
+// observer installed for DB query instrumentation. Fluent setter
+// pattern (mirrors permission.Service.WithCache) so the metrics
+// surface — which is constructed later in cmd/server/main.go —
+// can be wired without reconstructing the repository. Nil obs
+// silently disables instrumentation.
+func (r *PostgresRepository) WithObserver(obs DBObserver) *PostgresRepository {
+	r.obs = obs
+	return r
+}
+
+// observeQuery records the per-query duration + result counter
+// for a single repository call. Designed to be invoked via defer
+// at the top of the method:
+//
+//	defer r.observeQuery("permission.check_access_with_inheritance", time.Now(), &err)
+//
+// errPtr is the address of the named return so the deferred call
+// observes the final value before unwinding. The classifier maps
+// pgx.ErrNoRows to "not_found" (an expected absence, not an
+// error) so dashboards alerting on result=error are not poisoned
+// by lookups that legitimately return no rows.
+func (r *PostgresRepository) observeQuery(op string, start time.Time, errPtr *error) {
+	if r == nil || r.obs == nil {
+		return
+	}
+	result := "ok"
+	if errPtr != nil && *errPtr != nil {
+		if errors.Is(*errPtr, ErrNotFound) || errors.Is(*errPtr, pgx.ErrNoRows) {
+			result = "not_found"
+		} else {
+			result = "error"
+		}
+	}
+	r.obs.RecordDBQuery(op, time.Since(start), result)
+}
+
+// Per-method op labels. Mirrors the constants in
+// internal/metrics/db.go (DBOpPermission*); declared here as
+// well to avoid the import cycle that would arise from referring
+// to internal/metrics from internal/permission. Both sites must
+// stay in sync; the test
+// TestDBOpLabelsMirrorMetricsPackage in db_label_pin_test.go
+// pins the equality at compile-time so a future rename of one
+// constant without the other fails CI.
+const (
+	dbOpCheckAccess                = "permission.check_access"
+	dbOpCheckAccessWithInheritance = "permission.check_access_with_inheritance"
+)
 
 const permColumns = "id, workspace_id, resource_type, resource_id, grantee_type, grantee_id, role, created_at, expires_at"
 
@@ -120,10 +186,20 @@ func (r *PostgresRepository) Delete(ctx context.Context, workspaceID, permID uui
 // resource. Role hierarchy: admin > editor > viewer. Expired grants
 // (expires_at <= now()) are ignored. Inheritance from parent folders
 // is a follow-up; today each grant is scoped to a single resource.
-func (r *PostgresRepository) CheckAccess(ctx context.Context, workspaceID uuid.UUID, resourceType string, resourceID uuid.UUID, granteeType string, granteeID uuid.UUID, minRole string) (bool, error) {
+func (r *PostgresRepository) CheckAccess(ctx context.Context, workspaceID uuid.UUID, resourceType string, resourceID uuid.UUID, granteeType string, granteeID uuid.UUID, minRole string) (allowed bool, err error) {
 	if !isValidRole(minRole) {
 		return false, fmt.Errorf("invalid min role %q", minRole)
 	}
+	// Defer the DB-query observer AFTER input validation: a
+	// rejected role / resource type is a caller-side error and
+	// did not consume any Postgres round-trip. Recording it in
+	// the histogram would pollute the duration buckets, and
+	// recording it as result="error" in the counter would
+	// conflate validation failures with real DB errors. The
+	// timer start is also captured here so the histogram
+	// excludes the validation latency (which is constant-time
+	// regardless).
+	defer r.observeQuery(dbOpCheckAccess, time.Now(), &err)
 	const q = `
 SELECT role FROM permissions
 WHERE workspace_id = $1
@@ -161,20 +237,26 @@ WHERE workspace_id = $1
 // resourceType may be "file" or "folder". For a file we look up its
 // containing folder_id once and then use the same ancestor walk as the
 // folder case. Expired grants (expires_at <= now()) are ignored.
-func (r *PostgresRepository) CheckAccessWithInheritance(ctx context.Context, workspaceID uuid.UUID, resourceType string, resourceID uuid.UUID, granteeType string, granteeID uuid.UUID, minRole string) (bool, error) {
+func (r *PostgresRepository) CheckAccessWithInheritance(ctx context.Context, workspaceID uuid.UUID, resourceType string, resourceID uuid.UUID, granteeType string, granteeID uuid.UUID, minRole string) (allowed bool, err error) {
 	if !isValidRole(minRole) {
 		return false, fmt.Errorf("invalid min role %q", minRole)
 	}
 	if !isValidResourceType(resourceType) {
 		return false, fmt.Errorf("invalid resource type %q", resourceType)
 	}
+	// Defer the DB-query observer AFTER input validation: see
+	// CheckAccess for the rationale (validation failures are
+	// caller-side, did not consume a Postgres round-trip, and
+	// must not pollute the result="error" counter or the
+	// duration histogram).
+	defer r.observeQuery(dbOpCheckAccessWithInheritance, time.Now(), &err)
 
 	// Step 1: direct grants on the resource. If any grant exists at this
 	// level, the most-specific rule says this level wins — return true
 	// iff some direct grant meets minRole.
-	direct, directAny, err := maxRoleForResource(ctx, r.pool, workspaceID, resourceType, resourceID, granteeType, granteeID)
-	if err != nil {
-		return false, err
+	direct, directAny, mErr := maxRoleForResource(ctx, r.pool, workspaceID, resourceType, resourceID, granteeType, granteeID)
+	if mErr != nil {
+		return false, mErr
 	}
 	if directAny {
 		return roleRank(direct) >= roleRank(minRole), nil
@@ -188,24 +270,24 @@ func (r *PostgresRepository) CheckAccessWithInheritance(ctx context.Context, wor
 	switch resourceType {
 	case ResourceFile:
 		var folderID uuid.UUID
-		err := r.pool.QueryRow(ctx, `SELECT folder_id FROM files WHERE workspace_id = $1 AND id = $2 AND deleted_at IS NULL`,
+		qerr := r.pool.QueryRow(ctx, `SELECT folder_id FROM files WHERE workspace_id = $1 AND id = $2 AND deleted_at IS NULL`,
 			workspaceID, resourceID).Scan(&folderID)
-		if err != nil {
-			if errors.Is(err, pgx.ErrNoRows) {
+		if qerr != nil {
+			if errors.Is(qerr, pgx.ErrNoRows) {
 				return false, nil
 			}
-			return false, fmt.Errorf("lookup file folder: %w", err)
+			return false, fmt.Errorf("lookup file folder: %w", qerr)
 		}
 		startFolder = &folderID
 	case ResourceFolder:
 		var parent *uuid.UUID
-		err := r.pool.QueryRow(ctx, `SELECT parent_folder_id FROM folders WHERE workspace_id = $1 AND id = $2 AND deleted_at IS NULL`,
+		qerr := r.pool.QueryRow(ctx, `SELECT parent_folder_id FROM folders WHERE workspace_id = $1 AND id = $2 AND deleted_at IS NULL`,
 			workspaceID, resourceID).Scan(&parent)
-		if err != nil {
-			if errors.Is(err, pgx.ErrNoRows) {
+		if qerr != nil {
+			if errors.Is(qerr, pgx.ErrNoRows) {
 				return false, nil
 			}
-			return false, fmt.Errorf("lookup folder parent: %w", err)
+			return false, fmt.Errorf("lookup folder parent: %w", qerr)
 		}
 		startFolder = parent
 	}

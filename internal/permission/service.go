@@ -4,9 +4,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"reflect"
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/redis/go-redis/v9"
 )
 
 // ErrInvalidRole is returned when a caller supplies a role string outside
@@ -31,6 +33,87 @@ type Service struct {
 // NewService returns a Service backed by the given repository.
 func NewService(repo Repository) *Service {
 	return &Service{repo: repo}
+}
+
+// WithCache wraps the underlying Repository with a Redis-backed
+// read-through CachedRepository. Returns the same *Service for
+// fluent chaining at wiring time. Idempotent: calling twice
+// replaces the previous cache layer (the second call's rdb / ttl
+// / obs win).
+//
+// rdb may be nil — when REDIS_URL is unset the wiring code calls
+// this with a nil client and we silently leave the un-cached
+// repository in place. The decision to skip caching when Redis
+// is unavailable lives at the wiring site (cmd/server/main.go);
+// the service layer is the no-op pass-through.
+//
+// ttl is the per-entry expiry written on every cache fill.
+// Callers should source it from config.Config.PerformanceCacheTTL
+// so the clamp is applied centrally.
+//
+// obs may be nil; the cache layer substitutes a no-op observer
+// internally.
+//
+// Returns the same *Service for chaining.
+func (s *Service) WithCache(rdb redis.UniversalClient, ttl time.Duration, obs CacheObserver) *Service {
+	if isNilRedisClient(rdb) || ttl <= 0 {
+		return s
+	}
+	// If the repository is already a *CachedRepository we
+	// rewrap its underlying delegate so a second WithCache
+	// call doesn't double-decorate.
+	delegate := s.repo
+	if existing, ok := delegate.(*CachedRepository); ok {
+		delegate = existing.Underlying()
+	}
+	s.repo = NewCachedRepository(delegate, rdb, ttl, obs)
+	return s
+}
+
+// isNilRedisClient returns true when c is either an untyped nil
+// interface value OR a typed-nil concrete pointer wrapped in an
+// interface (e.g. (*redis.Client)(nil) implicitly converted to
+// redis.UniversalClient). The plain `c == nil` comparison only
+// catches the first case; the typed-nil case is a Go interface
+// pitfall where the interface value carries a non-nil type
+// descriptor and a nil data pointer. Calling any method on such
+// a value panics with a nil-pointer dereference at the call
+// site, far from the caller that "passed nil".
+//
+// We use reflect rather than a type switch because
+// redis.UniversalClient is satisfied by multiple concrete types
+// (*redis.Client, *redis.ClusterClient, *redis.Ring,
+// *redis.SentinelClient), and listing them all out couples this
+// helper to the redis library's class hierarchy.
+func isNilRedisClient(c redis.UniversalClient) bool {
+	if c == nil {
+		return true
+	}
+	rv := reflect.ValueOf(c)
+	switch rv.Kind() {
+	case reflect.Ptr, reflect.Interface, reflect.Chan, reflect.Func, reflect.Map, reflect.Slice:
+		return rv.IsNil()
+	}
+	return false
+}
+
+// BustWorkspace invalidates every cached access-check result for
+// the workspace when the underlying repository is a
+// CachedRepository. No-op otherwise. Exposed so service callers
+// in other packages (folder.Service.Move, file.Service.Move) can
+// invalidate the cache when an ancestry-mutating event happens
+// outside the permission service itself.
+//
+// The bust is best-effort and never returns an error: cache
+// invalidation failures are a perf concern, not a correctness
+// concern (entries self-expire via TTL), so we explicitly do not
+// surface them to callers — every Move / Delete call site
+// already has its own error path that must not be polluted by
+// cache plumbing.
+func (s *Service) BustWorkspace(ctx context.Context, workspaceID uuid.UUID) {
+	if c, ok := s.repo.(*CachedRepository); ok {
+		c.BustWorkspace(ctx, workspaceID)
+	}
 }
 
 // Grant creates a new permission grant on a resource. All arguments are

@@ -4,6 +4,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/kennguy3n/zk-drive/internal/audit"
 )
@@ -68,6 +69,17 @@ func requireEnv(t *testing.T, envs map[string]string) {
 		"SMTP_FROM_ADDRESS", "SMTP_FROM_NAME",
 		"SMTP_TLS_MODE", "SMTP_TLS_SERVER_NAME",
 		"SMTP_TLS_INSECURE_SKIP_VERIFY",
+		// Permission-cache (WS8) env vars. Same convention as
+		// the OTEL / audit / SMTP blocks above: any env var
+		// buildConfigFromEnv reads must live in this list so a
+		// CI runner with e.g. PERFORMANCE_CACHE_ENABLED=false
+		// exported doesn't bleed into tests that exercise the
+		// "cache on by default" path. The two config fields
+		// (PerformanceCacheEnabled, PerformanceCacheTTL) feed
+		// the cmd/server wiring of permission.Service.WithCache,
+		// and tests asserting on the default-on / clamped-TTL
+		// behaviour MUST see the production "unset" state.
+		"PERFORMANCE_CACHE_ENABLED", "PERFORMANCE_CACHE_TTL",
 	}
 	// WORKER_METRICS_ADDR is intentionally NOT included in the keys
 	// list above. t.Setenv(k, "") makes os.LookupEnv return
@@ -626,5 +638,122 @@ func TestLoadErrorIsStdError(t *testing.T) {
 	// will work.
 	if err.Error() == "" {
 		t.Fatalf("expected non-empty error string")
+	}
+}
+
+// TestClampPerformanceCacheTTL exercises every branch of the
+// permission-cache TTL clamp. The bounds are load-bearing:
+//
+//   - The lower bound (1s) prevents a typo from busy-looping
+//     the cache. A 100ms TTL would re-fetch from Postgres on
+//     every keystroke of a folder browse and would be
+//     strictly worse than no cache at all (it would add a
+//     redis round-trip on top of the Postgres query).
+//
+//   - The upper bound (5m) prevents a typo from making the
+//     cache effectively permanent. Even with proactive
+//     busting, admins making direct psql changes have no path
+//     back to the application layer, so a forgotten entry
+//     must self-expire in a window short enough that
+//     operators don't reach for FLUSHDB to recover.
+//
+// Devin Review ANALYSIS_0005 flagged the missing tests; this
+// suite pins the contract so future refactors can't silently
+// loosen the bounds.
+func TestClampPerformanceCacheTTL(t *testing.T) {
+	cases := []struct {
+		name  string
+		input time.Duration
+		want  time.Duration
+	}{
+		{"negative falls back to default", -5 * time.Second, defaultPerformanceCacheTTL},
+		{"zero falls back to default", 0, defaultPerformanceCacheTTL},
+		{"below floor falls back to default", 500 * time.Millisecond, defaultPerformanceCacheTTL},
+		{"at floor passes through", minPerformanceCacheTTL, minPerformanceCacheTTL},
+		{"valid passes through", 30 * time.Second, 30 * time.Second},
+		{"default passes through", defaultPerformanceCacheTTL, defaultPerformanceCacheTTL},
+		{"near ceiling passes through", 4 * time.Minute, 4 * time.Minute},
+		{"at ceiling passes through", maxPerformanceCacheTTL, maxPerformanceCacheTTL},
+		{"above ceiling clamps to max", maxPerformanceCacheTTL + time.Second, maxPerformanceCacheTTL},
+		{"far above ceiling clamps to max", time.Hour, maxPerformanceCacheTTL},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := clampPerformanceCacheTTL(tc.input)
+			if got != tc.want {
+				t.Errorf("clampPerformanceCacheTTL(%v) = %v, want %v", tc.input, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestParseDurationDefault exercises every code path in the
+// duration env-var parser. The "empty / parse failure → def"
+// behaviour is consistent with the rest of the parseFooDefault
+// family — a typo silently uses the documented default rather
+// than failing the boot. Operators see the default value in
+// logs / debug endpoints and can correct the typo at leisure.
+//
+// Composition with clampPerformanceCacheTTL: parseDurationDefault
+// can return a value below the clamp's floor (e.g. "500ms"
+// parses successfully but clamps to default). The pipeline is
+// parse-then-clamp; the clamp is the safety net.
+func TestParseDurationDefault(t *testing.T) {
+	def := 30 * time.Second
+	cases := []struct {
+		name  string
+		input string
+		want  time.Duration
+	}{
+		{"empty falls back to default", "", def},
+		{"only whitespace falls back to default", "   ", def},
+		{"valid seconds", "10s", 10 * time.Second},
+		{"valid minutes", "5m", 5 * time.Minute},
+		{"valid hours", "1h", time.Hour},
+		{"valid composite", "1h30m", 90 * time.Minute},
+		{"valid sub-second", "500ms", 500 * time.Millisecond},
+		{"valid negative parses", "-5s", -5 * time.Second},
+		{"unparseable falls back", "not-a-duration", def},
+		{"missing unit falls back", "30", def},
+		{"trailing junk falls back", "10s blah", def},
+		{"with surrounding whitespace parses", "  10s  ", 10 * time.Second},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := parseDurationDefault(tc.input, def)
+			if got != tc.want {
+				t.Errorf("parseDurationDefault(%q, %v) = %v, want %v", tc.input, def, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestParseAndClampPerformanceCacheTTLPipeline exercises the
+// composition that the actual config Load() path uses:
+// parseDurationDefault → clampPerformanceCacheTTL. The
+// integration matters because a sub-second valid duration
+// (e.g. "500ms") parses successfully but must still be clamped
+// to the default at the consumer.
+func TestParseAndClampPerformanceCacheTTLPipeline(t *testing.T) {
+	cases := []struct {
+		name  string
+		input string
+		want  time.Duration
+	}{
+		{"empty env uses default", "", defaultPerformanceCacheTTL},
+		{"valid in-range value passes through", "45s", 45 * time.Second},
+		{"sub-second value parses then clamps to default", "500ms", defaultPerformanceCacheTTL},
+		{"above ceiling clamps to max", "1h", maxPerformanceCacheTTL},
+		{"unparseable uses default", "garbage", defaultPerformanceCacheTTL},
+		{"negative parses then clamps to default", "-30s", defaultPerformanceCacheTTL},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			parsed := parseDurationDefault(tc.input, defaultPerformanceCacheTTL)
+			got := clampPerformanceCacheTTL(parsed)
+			if got != tc.want {
+				t.Errorf("pipeline(%q) = %v (parsed=%v); want %v", tc.input, got, parsed, tc.want)
+			}
+		})
 	}
 }

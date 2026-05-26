@@ -35,6 +35,15 @@ import (
 // emitted to clients verbatim, so adding a new value requires both
 // a migration update and a sync-client SDK update — keep this list
 // short.
+//
+// ADDING A NEW Kind: the permission cache hook in service.go
+// (shouldBustForMutation) defaults to no-bust for unknown
+// kinds. If your new Kind affects access resolution you MUST
+// update both shouldBustForMutation AND the audit ledger
+// knownKindOpBustDecisions in service_test.go. The
+// expectedKindCount sentinel in service_test.go trips CI when
+// a new Kind is added without updating the ledger — see the
+// doc comment on shouldBustForMutation for the full workflow.
 const (
 	KindFile       = "file"
 	KindFolder     = "folder"

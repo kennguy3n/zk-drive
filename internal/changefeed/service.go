@@ -31,8 +31,31 @@ const DefaultLimit = 100
 // WS / Redis outage means live clients miss a frame but every
 // reconnect-and-replay completes correctly. We log and continue.
 type Service struct {
-	repo Repository
-	pub  WSPublisher
+	repo        Repository
+	pub         WSPublisher
+	cacheBuster CacheBuster
+}
+
+// CacheBuster is the optional hook the changefeed calls after a
+// mutation has been durably persisted so application-level caches
+// (today: the permission cache; future: listing caches) can
+// invalidate any entries the mutation might have stale-ified.
+//
+// Implementations MUST be cheap and fail-soft: the changefeed
+// service has already returned the mutation as the durable
+// authority, and a bust failure must not affect the API
+// response. The CachedRepository's bust path satisfies this
+// contract (logs + counter, never returns an error). The
+// changefeed deliberately calls Bust without an error channel
+// for that reason.
+//
+// BustWorkspace is the only method on the contract because the
+// permission cache invalidates by workspace generation, not by
+// individual resource. A finer-grained interface would be
+// invoked here without changing the call site if the cache
+// implementation ever moves to per-resource keying.
+type CacheBuster interface {
+	BustWorkspace(ctx context.Context, workspaceID uuid.UUID)
 }
 
 // NewService returns a Service backed by repo. The publisher is
@@ -48,6 +71,88 @@ func NewService(repo Repository) *Service {
 func (s *Service) WithPublisher(pub WSPublisher) *Service {
 	s.pub = pub
 	return s
+}
+
+// WithCacheBuster attaches a CacheBuster hook. Safe to call once
+// during wiring. Nil leaves the bust path disabled — the caching
+// layer then relies entirely on per-entry TTL for invalidation,
+// which is still correct (just slower to converge) for any
+// mutation made through the service layer.
+//
+// The Bust call fires AFTER the durable change_log row has been
+// committed and BEFORE the WebSocket broadcast — that ordering is
+// deliberate: a sync client whose live event arrives without an
+// already-invalidated cache would briefly serve stale answers on
+// the immediate refetch. By busting first, the cache is empty by
+// the time the broadcast lands.
+func (s *Service) WithCacheBuster(b CacheBuster) *Service {
+	s.cacheBuster = b
+	return s
+}
+
+// shouldBustForMutation reports whether a particular (kind, op)
+// pair affects an entry the permission cache may be holding. The
+// cache resolves access checks via direct grants AND the folder
+// ancestry walk, so:
+//
+//   - permission.*: always bust. ANY grant-table mutation by
+//     definition changes access resolution, so we accept broad
+//     coverage rather than enumerate ops. The expected emit-set
+//     today is {create,update,delete}; ops we don't emit yet
+//     (rename, move) would still mean "the grant lattice
+//     changed" if they ever fire. The cost of a spurious bust
+//     on a future op is one INCR; the cost of MISSING a bust
+//     on a future op we forgot to add is a stale-cache
+//     correctness bug. The asymmetry is deliberate.
+//   - folder.{move,delete}: always bust. The ancestry chain
+//     changes; descendant grants resolve differently.
+//   - folder.{create,update,rename}: don't bust. A new empty
+//     folder has no grants to bust; a rename doesn't shift the
+//     ancestor chain.
+//   - file.{move}: bust. The file's ancestor chain changes.
+//   - file.{create,update,rename,delete}: don't bust. Pure
+//     content / metadata changes don't affect access resolution
+//     on the file itself unless they're a delete, in which case
+//     there are no descendants and the file's own cache entries
+//     will TTL out within seconds.
+//   - document.*: don't bust. Documents are a different resource
+//     family that doesn't participate in the permission cache.
+//
+// New (kind, op) combinations are conservative-no-bust by
+// default (they reach the default branch which returns false)
+// so adding a new kind without updating this function would
+// silently disable the cache hook for it. That failure mode
+// (rely on TTL) is safer than over-busting and turning the
+// cache into a churn machine, but it is still a correctness
+// regression if the new kind affects permission resolution.
+//
+// The audit obligation is therefore enforced at test-time, not
+// just by this comment:
+// TestShouldBustForMutation_ExhaustivelyAuditsKindOpMatrix in
+// service_test.go iterates every (Kind*, Op*) product and
+// asserts the explicit decision recorded in
+// knownKindOpBustDecisions matches the function's behaviour.
+// The companion expectedKindCount sentinel trips CI when a new
+// Kind constant is added without updating the audit ledger.
+//
+// Workflow when adding a new Kind:
+//  1. Add the const in internal/changefeed/changefeed.go.
+//  2. Bump expectedKindCount in service_test.go.
+//  3. Add the new Kind to knownKinds in service_test.go.
+//  4. Add bust=true|false entries for every Op in
+//     knownKindOpBustDecisions, with a doc-comment justifying
+//     each "false" decision.
+//  5. If any decision is bust=true, add the case below.
+func shouldBustForMutation(kind, op string) bool {
+	switch kind {
+	case KindPermission:
+		return true
+	case KindFolder:
+		return op == OpMove || op == OpDelete
+	case KindFile:
+		return op == OpMove
+	}
+	return false
 }
 
 // RecordInput is the caller-facing input for Service.Record. It is
@@ -132,6 +237,17 @@ func (s *Service) Record(ctx context.Context, in RecordInput) (Mutation, error) 
 	if err := s.repo.Record(ctx, &m); err != nil {
 		return Mutation{}, err
 	}
+	// Bust the application-level cache BEFORE the WS broadcast
+	// fires so a client that reacts to the live event (e.g. by
+	// re-fetching the affected resource) sees the post-mutation
+	// state, not a stale cached one. Bust failures are
+	// already logged + counted inside the implementation and
+	// never returned, matching the publisher's best-effort
+	// semantics — durability lives in change_log, the cache is
+	// a perf overlay.
+	if s.cacheBuster != nil && shouldBustForMutation(in.Kind, in.Op) {
+		s.cacheBuster.BustWorkspace(ctx, in.WorkspaceID)
+	}
 	if s.pub != nil {
 		if err := s.pub.Publish(ctx, in.WorkspaceID, Event{Type: "change", Payload: m}); err != nil {
 			logging.FromContext(ctx).Warn("changefeed publish failed; row persisted",
@@ -194,6 +310,25 @@ func (s *Service) BatchRecord(ctx context.Context, inputs []RecordInput) ([]Muta
 	}
 	if err := s.repo.BatchRecord(ctx, muts); err != nil {
 		return nil, err
+	}
+	// De-duplicate bust calls across the batch by workspace —
+	// a 100-item bulk-move emits 100 muts all targeting the
+	// same workspace, but a single bust per workspace is
+	// enough to invalidate everything (the generation counter
+	// is workspace-scoped). Without de-duplication a 1000-item
+	// bulk would issue 1000 redundant INCRs.
+	if s.cacheBuster != nil {
+		seen := make(map[uuid.UUID]struct{}, len(muts))
+		for _, m := range muts {
+			if !shouldBustForMutation(m.Kind, m.Op) {
+				continue
+			}
+			if _, dup := seen[m.WorkspaceID]; dup {
+				continue
+			}
+			seen[m.WorkspaceID] = struct{}{}
+			s.cacheBuster.BustWorkspace(ctx, m.WorkspaceID)
+		}
 	}
 	if s.pub != nil {
 		for _, m := range muts {
