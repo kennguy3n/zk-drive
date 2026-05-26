@@ -95,8 +95,15 @@ func (s *Service) WithCacheBuster(b CacheBuster) *Service {
 // cache resolves access checks via direct grants AND the folder
 // ancestry walk, so:
 //
-//   - permission.{create,update,delete}: always bust. Any grant
-//     mutation directly affects the resolution outcome.
+//   - permission.*: always bust. ANY grant-table mutation by
+//     definition changes access resolution, so we accept broad
+//     coverage rather than enumerate ops. The expected emit-set
+//     today is {create,update,delete}; ops we don't emit yet
+//     (rename, move) would still mean "the grant lattice
+//     changed" if they ever fire. The cost of a spurious bust
+//     on a future op is one INCR; the cost of MISSING a bust
+//     on a future op we forgot to add is a stale-cache
+//     correctness bug. The asymmetry is deliberate.
 //   - folder.{move,delete}: always bust. The ancestry chain
 //     changes; descendant grants resolve differently.
 //   - folder.{create,update,rename}: don't bust. A new empty
