@@ -128,6 +128,34 @@ func (s *ExpansionService) ExpandResult(ctx context.Context, workspaceID uuid.UU
 		return &ExpansionResult{Terms: nil}, nil
 	}
 
+	// Workspace tag vocabulary for the rule-based expansion pass.
+	// Deliberate divergences from SuggestionService.Suggest's tag
+	// query at internal/ai/autotag.go (the "recency-biased GROUP BY"
+	// query) — flagged by Devin Review ANALYSIS_0005 as inconsistent
+	// and worth documenting:
+	//
+	//  - Ordering: alphabetical here vs. recency there. Query
+	//    expansion does NOT bias toward recently-used tags because a
+	//    user querying "marketing" wants the full vocabulary of
+	//    marketing-adjacent tags ever seen, not just last week's. The
+	//    matching pass downstream (extractExpansionTokens + scoring)
+	//    is what surfaces the relevant subset.
+	//  - Deduplication: DISTINCT here vs. GROUP BY with MAX(created_at)
+	//    there. Without a recency tie-breaker we don't need the
+	//    GROUP BY shape — DISTINCT is cheaper and the result set is
+	//    the same for our purposes.
+	//  - LIMIT: 512 here vs. 256 there. Expansion benefits from a
+	//    wider vocabulary (more chances to match the user's query
+	//    against an existing tag) while suggestion's per-file
+	//    suggestion list is naturally capped by tagSuggestMaxOutput
+	//    (12) so a smaller draw is fine.
+	//
+	// The implication — that the two services CAN see different tag
+	// subsets for workspaces with > 256 tags — is intentional and
+	// safe: suggest's job is "tag this specific file from a small
+	// pool of recently-relevant choices" while expand's job is
+	// "show synonyms across the entire tag taxonomy". Same data
+	// source, different lenses.
 	tagRows, err := s.pool.Query(ctx, `
 SELECT DISTINCT tag FROM file_tags
 WHERE workspace_id = $1

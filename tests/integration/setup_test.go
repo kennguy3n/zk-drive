@@ -316,7 +316,13 @@ func setupEnv(t *testing.T) *testEnv {
 		wiring.KChatObjectKey,
 		wiring.KChatObjectKeyValidator,
 	)
-	summarySvc := ai.NewSummaryService(pool)
+	// Wire the workspace search-language resolver so the multilingual
+	// prompt path matches cmd/server/main.go's production wiring.
+	// Without this, the integration harness would always exercise the
+	// English-fallback branch and the workspace.SearchLanguage →
+	// PromptLanguageFor codepath would only be covered by unit tests in
+	// internal/ai. Devin Review ANALYSIS_0003 on PR #85.
+	summarySvc := ai.NewSummaryService(pool).WithLanguageResolver(wsSvc)
 	// When the test sets OLLAMA_URL via t.Setenv (e.g. against an
 	// httptest.Server) the harness mirrors cmd/server/main.go and
 	// wires the local LLM. Without it, summaries stay on the

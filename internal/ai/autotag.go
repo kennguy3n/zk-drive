@@ -211,6 +211,13 @@ WHERE f.id = $1 AND f.workspace_id = $2 AND f.deleted_at IS NULL AND fo.deleted_
 	// but if it did, DISTINCT (tag, created_at) wouldn't dedupe
 	// repeated tags at all (every (tag, created_at) pair is
 	// unique).
+	//
+	// Intentional divergence from ExpansionService.ExpandResult's
+	// tag query at internal/ai/queryexp.go (alphabetical DISTINCT,
+	// LIMIT 512). The shape mismatch is by design: see the long
+	// comment in queryexp.go above its `SELECT DISTINCT tag …`
+	// query for the full rationale. Devin Review ANALYSIS_0005
+	// on PR #85 flagged the divergence as worth documenting.
 	tagRows, err := s.pool.Query(ctx, `
 SELECT tag FROM (
 	SELECT tag, MAX(created_at) AS last_used
