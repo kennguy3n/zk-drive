@@ -3,6 +3,7 @@ package ai
 import (
 	"strings"
 	"testing"
+	"unicode/utf8"
 )
 
 func TestExtensionTagOf(t *testing.T) {
@@ -296,6 +297,123 @@ func TestBuildQueryExpansionPromptLocalises(t *testing.T) {
 			t.Fatalf("prompt missing query: %s", p)
 		}
 	}
+}
+
+func TestTruncatePreviewCutsOnRuneBoundary(t *testing.T) {
+	cases := []struct {
+		name     string
+		in       string
+		maxBytes int
+		want     string
+	}{
+		{"empty input", "", 32, ""},
+		{"under budget", "hello", 32, "hello"},
+		{"exact budget", "hello", 5, "hello"},
+		{"ascii over budget", "hello world", 5, "hello"},
+		{"negative budget", "hello", -1, ""},
+		{"zero budget", "hello", 0, ""},
+		// "文" is 3 bytes in UTF-8 (U+6587 → 0xE6 0x96 0x87).
+		// Naive cut at byte 4 would split the second rune.
+		// truncatePreview must back up to byte 3 so the prefix is
+		// a complete rune.
+		{"cut mid-CJK rune", "文文文", 4, "文"},
+		{"cut at CJK boundary", "文文文", 3, "文"},
+		{"cut at CJK boundary 6", "文文文", 6, "文文"},
+		// "café" is c(1) a(1) f(1) é(2 bytes: 0xC3 0xA9) = 5 bytes.
+		// maxBytes=3 → byte 3 is 0xC3 (rune start). No backup.
+		// Result = "caf" (3 bytes).
+		{"cut at 3byte boundary in 'café'", "café", 3, "caf"},
+		// maxBytes=4 → byte 4 is 0xA9 (continuation byte).
+		// Must back up to byte 3 (the 0xC3 rune-start) → "caf".
+		{"cut mid-é continuation byte", "café", 4, "caf"},
+		// maxBytes=5 → exact full-string length, no truncation.
+		{"cut at full length", "café", 5, "café"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := truncatePreview(tc.in, tc.maxBytes)
+			if got != tc.want {
+				t.Fatalf("truncatePreview(%q, %d) = %q (%d bytes), want %q (%d bytes)",
+					tc.in, tc.maxBytes, got, len(got), tc.want, len(tc.want))
+			}
+			if !utf8.ValidString(got) {
+				t.Fatalf("truncatePreview returned invalid UTF-8 for input %q, maxBytes=%d: %q", tc.in, tc.maxBytes, got)
+			}
+		})
+	}
+}
+
+func TestCorpusTokenSetSplitsOnNonAlnum(t *testing.T) {
+	got := corpusTokenSet("hello, world! q4-2024 plan")
+	for _, want := range []string{"hello", "world", "q4", "2024", "plan"} {
+		if _, ok := got[want]; !ok {
+			t.Fatalf("corpusTokenSet missing %q in %v", want, keysOf(got))
+		}
+	}
+	// Hyphenated forms should NOT appear as a single token — the
+	// hyphen splits them.
+	if _, ok := got["q4-2024"]; ok {
+		t.Fatalf("corpusTokenSet contained hyphenated token (should be split): %v", keysOf(got))
+	}
+}
+
+func TestRuleBasedSuggestionsShortPartUsesWordBoundary(t *testing.T) {
+	// Tag "ai-fast" splits into ["ai", "fast"]. Naive substring
+	// matching would say "ai" is present in "main", "explain",
+	// "again", etc. — false positive. Word-boundary matching
+	// requires the corpus to contain "ai" as a standalone token.
+	//
+	// Negative case: body text contains "main" and "rain" but no
+	// standalone "ai" → ai-fast must NOT be suggested.
+	suggestionsNeg := ruleBasedSuggestions(
+		"general-notes.pdf",
+		"The main highway during the rain was again congested.",
+		[]string{"ai-fast"},
+	)
+	for _, s := range suggestionsNeg {
+		if s == "ai-fast" {
+			t.Fatalf("ai-fast should NOT match body without standalone 'ai' token; got suggestions %v", suggestionsNeg)
+		}
+	}
+
+	// Positive case: body contains "ai" as a standalone word →
+	// ai-fast suggested as expected.
+	suggestionsPos := ruleBasedSuggestions(
+		"ai-roadmap.pdf",
+		"The team's AI strategy this quarter is to ship fast.",
+		[]string{"ai-fast"},
+	)
+	found := false
+	for _, s := range suggestionsPos {
+		if s == "ai-fast" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("ai-fast should match body with standalone 'ai' and 'fast' tokens; got suggestions %v", suggestionsPos)
+	}
+
+	// Also verify "x-ray" doesn't trigger on every document
+	// containing the letter "x" — same false-positive class.
+	suggestionsX := ruleBasedSuggestions(
+		"text-export.pdf",
+		"This export contains example text, next steps, and extra context.",
+		[]string{"x-ray"},
+	)
+	for _, s := range suggestionsX {
+		if s == "x-ray" {
+			t.Fatalf("x-ray should NOT match body containing only 'x' substrings; got %v", suggestionsX)
+		}
+	}
+}
+
+func keysOf(m map[string]struct{}) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	return out
 }
 
 func slicesEqual(a, b []string) bool {

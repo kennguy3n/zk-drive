@@ -41,6 +41,7 @@ import (
 	"sort"
 	"strings"
 	"unicode"
+	"unicode/utf8"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -235,10 +236,7 @@ LIMIT 256`, workspaceID)
 		return nil, fmt.Errorf("ai: iterate workspace tags: %w", err)
 	}
 
-	preview := contentText
-	if len(preview) > tagSuggestMaxFile {
-		preview = preview[:tagSuggestMaxFile]
-	}
+	preview := truncatePreview(contentText, tagSuggestMaxFile)
 
 	// Rule-based scaffold — runs unconditionally and forms the
 	// deterministic floor. Even if the LLM stage is disabled (no
@@ -380,6 +378,33 @@ func ruleBasedSuggestions(fileName, contentPreview string, workspaceTags []strin
 	//     coincidentally uses the canonical tag ("see marketing-q4-2024")
 	//     still matches with a single comparison.
 	corpus := strings.ToLower(fileName + " " + contentPreview)
+	// Lazily-built word-set for the corpus, used to validate
+	// short (≤ shortPartLimit byte) tag segments as standalone
+	// words instead of arbitrary substrings. Substring matching
+	// for a 1-2 character segment (e.g. tag "x-ray" split at "-"
+	// → "x" + "ray", or "ai-fast" → "ai" + "fast") triggers on
+	// almost any English text — "x" appears in "text", "example",
+	// "next"; "ai" appears in "main", "rain", "again". Word-set
+	// membership keeps the cheap substring path for ≥ 4 character
+	// segments (where collisions are rare enough that the
+	// downstream user-confirmation filter handles them) while
+	// promoting short segments to exact-word semantics. Built
+	// once per Suggest() call so the per-tag inner loop stays
+	// O(parts).
+	var corpusWords map[string]struct{}
+	corpusWordSet := func() map[string]struct{} {
+		if corpusWords == nil {
+			corpusWords = corpusTokenSet(corpus)
+		}
+		return corpusWords
+	}
+	partMatches := func(p string) bool {
+		if len(p) <= shortPartLimit {
+			_, ok := corpusWordSet()[p]
+			return ok
+		}
+		return strings.Contains(corpus, p)
+	}
 	for _, t := range workspaceTags {
 		if t == "" {
 			continue
@@ -394,7 +419,7 @@ func ruleBasedSuggestions(fileName, contentPreview string, workspaceTags []strin
 			if p == "" {
 				continue
 			}
-			if !strings.Contains(corpus, p) {
+			if !partMatches(p) {
 				allPresent = false
 				break
 			}
@@ -604,3 +629,86 @@ func mergeSuggestions(ruleBased, llm []string) []string {
 	}
 	return out
 }
+
+// truncatePreview clamps s to at most maxBytes bytes while
+// preserving UTF-8 validity at the cut point. A naive
+// `s[:maxBytes]` slice can split a multi-byte rune in half,
+// producing an invalid 0xEF 0xBF 0xBD-replacement-character
+// when the prompt is rendered by the LLM tokenizer (which is
+// at best wasted prompt budget and at worst a confusing
+// "tag with a question mark" suggestion). Walking back to
+// the nearest rune boundary is O(1) in the common case
+// (1–3 byte step) and bounded by utf8.UTFMax in the worst.
+//
+// Behaviour:
+//   - if len(s) <= maxBytes, return s unchanged.
+//   - otherwise, cut at maxBytes, then back up to the start
+//     of the rune that crosses the boundary (so the returned
+//     prefix is byte-aligned to a complete rune sequence).
+//   - if maxBytes <= 0, return "" — no caller currently does
+//     this but the guard makes the function safe under
+//     refactors that move maxBytes into a config field.
+//
+// The byte-budget interface (rather than rune-budget) is
+// deliberate: token-budget proxies like Ollama's context
+// window measure in bytes-of-prompt, and matching that
+// interface keeps the math straight when we later compose
+// the system + user halves of the prompt against the model
+// context.
+func truncatePreview(s string, maxBytes int) string {
+	if maxBytes <= 0 {
+		return ""
+	}
+	if len(s) <= maxBytes {
+		return s
+	}
+	cut := maxBytes
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	return s[:cut]
+}
+
+// corpusTokenSet splits a lowercase corpus into a set of
+// "word" tokens — runs of letters/digits separated by any
+// non-letter-or-digit codepoint. Used by the workspace-tag
+// overlap pass to validate short (≤ 3 character) tag
+// segments as standalone words rather than as arbitrary
+// substrings. Without this, a tag like "x-ray" would
+// match any document containing the letter "x" (~every
+// English document), and "ai-fast" would match "main",
+// "again", "explain", etc. The substring-anywhere strategy
+// is fine for ≥ 4 character segments — collisions there
+// are rare enough that the resulting noise is below the
+// "user confirmation required before AddTag" filter — but
+// short segments need word-boundary semantics to be
+// useful. Threshold of 3 is empirical: it admits common
+// short tags like "q4", "ai", "ml", "v2" via the word-set
+// path while keeping the cheap substring path for the
+// long-tail of multi-character segments.
+func corpusTokenSet(corpus string) map[string]struct{} {
+	out := make(map[string]struct{}, 64)
+	var sb strings.Builder
+	flush := func() {
+		if sb.Len() == 0 {
+			return
+		}
+		out[sb.String()] = struct{}{}
+		sb.Reset()
+	}
+	for _, r := range corpus {
+		if unicode.IsLetter(r) || unicode.IsDigit(r) {
+			sb.WriteRune(r)
+		} else {
+			flush()
+		}
+	}
+	flush()
+	return out
+}
+
+// shortPartLimit is the maximum byte length below which a
+// hyphen-separated tag segment must match a corpus token
+// exactly (word-boundary semantics) rather than via
+// substring search. See corpusTokenSet for rationale.
+const shortPartLimit = 3

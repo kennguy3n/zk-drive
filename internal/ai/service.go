@@ -195,11 +195,12 @@ func (s *SummaryService) gatherFileContext(ctx context.Context, workspaceID, fol
 		}
 		names = append(names, name)
 		if content != "" {
-			snippet := content
-			if len(snippet) > previewBytesPerFile {
-				snippet = snippet[:previewBytesPerFile]
-			}
-			previewBuf.WriteString(snippet)
+			// truncatePreview cuts on a rune boundary so a multi-byte
+			// glyph at the byte boundary can't become invalid UTF-8
+			// in the LLM prompt — relevant now that WS6 ships
+			// multilingual prompting and non-ASCII content_text is
+			// expected on French/German/Chinese/etc. workspaces.
+			previewBuf.WriteString(truncatePreview(content, previewBytesPerFile))
 			previewBuf.WriteString(" ")
 		}
 	}
@@ -207,10 +208,7 @@ func (s *SummaryService) gatherFileContext(ctx context.Context, workspaceID, fol
 		return nil, "", fmt.Errorf("ai: iterate files: %w", err)
 	}
 
-	preview := strings.TrimSpace(previewBuf.String())
-	if len(preview) > previewBytesTotal {
-		preview = preview[:previewBytesTotal]
-	}
+	preview := truncatePreview(strings.TrimSpace(previewBuf.String()), previewBytesTotal)
 	return names, preview, nil
 }
 

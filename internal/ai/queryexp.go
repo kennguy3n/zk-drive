@@ -235,10 +235,11 @@ func BuildQueryExpansionPrompt(query string, workspaceTags []string, language st
 	b.WriteString(query)
 	b.WriteString("\n")
 	if len(workspaceTags) > 0 {
-		preview := strings.Join(workspaceTags, ", ")
-		if len(preview) > queryExpansionLLMMaxFile {
-			preview = preview[:queryExpansionLLMMaxFile]
-		}
+		// truncatePreview keeps the cut on a rune boundary so a
+		// multi-byte tag at the boundary (CJK, accented Latin)
+		// can't get sliced into invalid UTF-8 — same rationale
+		// as the autotag prompt builder.
+		preview := truncatePreview(strings.Join(workspaceTags, ", "), queryExpansionLLMMaxFile)
 		b.WriteString("Existing workspace tags: ")
 		b.WriteString(preview)
 		b.WriteString("\n")
