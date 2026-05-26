@@ -509,12 +509,12 @@ func (h *Handler) GetAuditLog(w http.ResponseWriter, r *http.Request) {
 	}
 	limit, err := parseIntQuery(r, "limit", 50)
 	if err != nil {
-		middleware.RespondError(w, http.StatusBadRequest, middleware.ErrCodeBadRequest, "invalid limit: "+err.Error())
+		middleware.RespondError(w, http.StatusBadRequest, middleware.ErrCodeBadRequest, "invalid limit")
 		return
 	}
 	offset, err := parseIntQuery(r, "offset", 0)
 	if err != nil {
-		middleware.RespondError(w, http.StatusBadRequest, middleware.ErrCodeBadRequest, "invalid offset: "+err.Error())
+		middleware.RespondError(w, http.StatusBadRequest, middleware.ErrCodeBadRequest, "invalid offset")
 		return
 	}
 	action := strings.TrimSpace(r.URL.Query().Get("action"))
