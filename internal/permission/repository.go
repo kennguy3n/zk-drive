@@ -93,8 +93,10 @@ func (r *PostgresRepository) observeQuery(op string, start time.Time, errPtr *er
 // internal/metrics/db.go (DBOpPermission*); declared here as
 // well to avoid the import cycle that would arise from referring
 // to internal/metrics from internal/permission. Both sites must
-// stay in sync; the test in cache_test.go pins the canonical
-// strings.
+// stay in sync; the test
+// TestDBOpLabelsMirrorMetricsPackage in db_label_pin_test.go
+// pins the equality at compile-time so a future rename of one
+// constant without the other fails CI.
 const (
 	dbOpCheckAccess                = "permission.check_access"
 	dbOpCheckAccessWithInheritance = "permission.check_access_with_inheritance"

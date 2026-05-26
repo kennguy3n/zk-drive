@@ -46,6 +46,10 @@ const (
 //   - miss:         no cache entry, fell through to delegate
 //   - negative_hit: cached deny / not-found served without DB
 //   - bust:         invalidation succeeded (counter only, no hit/miss)
+//   - ok:           cache-fill (CacheOpWrite) succeeded. Paired with
+//                   CacheResultError on the same op to let operators
+//                   alert on cache-fill failures distinct from read
+//                   misses.
 //   - error:        Redis returned an error other than redis.Nil; the
 //                   call fell through to the delegate (fail open)
 const (
@@ -53,6 +57,7 @@ const (
 	CacheResultMiss        = "miss"
 	CacheResultNegativeHit = "negative_hit"
 	CacheResultBust        = "bust"
+	CacheResultOK          = "ok"
 	CacheResultError       = "error"
 )
 

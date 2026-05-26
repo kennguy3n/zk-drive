@@ -69,6 +69,17 @@ func requireEnv(t *testing.T, envs map[string]string) {
 		"SMTP_FROM_ADDRESS", "SMTP_FROM_NAME",
 		"SMTP_TLS_MODE", "SMTP_TLS_SERVER_NAME",
 		"SMTP_TLS_INSECURE_SKIP_VERIFY",
+		// Permission-cache (WS8) env vars. Same convention as
+		// the OTEL / audit / SMTP blocks above: any env var
+		// buildConfigFromEnv reads must live in this list so a
+		// CI runner with e.g. PERFORMANCE_CACHE_ENABLED=false
+		// exported doesn't bleed into tests that exercise the
+		// "cache on by default" path. The two config fields
+		// (PerformanceCacheEnabled, PerformanceCacheTTL) feed
+		// the cmd/server wiring of permission.Service.WithCache,
+		// and tests asserting on the default-on / clamped-TTL
+		// behaviour MUST see the production "unset" state.
+		"PERFORMANCE_CACHE_ENABLED", "PERFORMANCE_CACHE_TTL",
 	}
 	// WORKER_METRICS_ADDR is intentionally NOT included in the keys
 	// list above. t.Setenv(k, "") makes os.LookupEnv return
