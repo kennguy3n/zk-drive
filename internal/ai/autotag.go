@@ -195,13 +195,29 @@ WHERE f.id = $1 AND f.workspace_id = $2 AND f.deleted_at IS NULL AND fo.deleted_
 	// mentions "q4 2024", we want to suggest it (not just suggest
 	// a synthetic "2024" token). 256 is a generous upper bound for
 	// "every tag a small workspace has ever used"; larger workspaces
-	// fall back to LIMIT 256 (sorted by created_at DESC so recent
-	// tags win — the assumption is that recent tags are more topical
-	// than legacy ones).
+	// fall back to LIMIT 256, biased toward recently-added tags
+	// because recency correlates with topicality (a tag a user
+	// added last week is probably more relevant to next week's
+	// upload than a tag last touched six months ago).
+	//
+	// Implementation: the inner SELECT picks the most-recent
+	// created_at per tag (so duplicates of the same tag across
+	// many files collapse into one row with the latest timestamp);
+	// the outer SELECT orders by that timestamp DESC and trims to
+	// 256. The double-SELECT is necessary because a plain
+	// "SELECT DISTINCT tag … ORDER BY created_at DESC" is invalid —
+	// the ORDER BY column must appear in the DISTINCT projection,
+	// but if it did, DISTINCT (tag, created_at) wouldn't dedupe
+	// repeated tags at all (every (tag, created_at) pair is
+	// unique).
 	tagRows, err := s.pool.Query(ctx, `
-SELECT DISTINCT tag FROM file_tags
-WHERE workspace_id = $1
-ORDER BY tag ASC
+SELECT tag FROM (
+	SELECT tag, MAX(created_at) AS last_used
+	FROM file_tags
+	WHERE workspace_id = $1
+	GROUP BY tag
+) recent
+ORDER BY last_used DESC
 LIMIT 256`, workspaceID)
 	if err != nil {
 		return nil, fmt.Errorf("ai: load workspace tags for suggestion: %w", err)
@@ -504,7 +520,16 @@ func canonicalTag(raw string) string {
 	if strings.ContainsAny(t, "/%") {
 		return ""
 	}
-	if len([]rune(t)) > file.MaxTagLength {
+	// Length check must use byte count to match file.Service.AddTag's
+	// validation (`len(tag) > MaxTagLength` at internal/file/
+	// service.go:180). Using rune count here would let a 60-rune CJK
+	// or other multi-byte tag pass the suggester (60 runes ≤ 64) but
+	// fail AddTag (180 bytes > 64), violating this function's
+	// documented contract that the suggest endpoint cannot ever
+	// return a value that AddTag would later reject. Particularly
+	// relevant now that WS6 ships multilingual prompting — non-ASCII
+	// suggestions are expected, not exceptional.
+	if len(t) > file.MaxTagLength {
 		return ""
 	}
 	return t

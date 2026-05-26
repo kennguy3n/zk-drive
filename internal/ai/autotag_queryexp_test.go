@@ -45,6 +45,22 @@ func TestCanonicalTag(t *testing.T) {
 		{"", ""},            // already empty
 		{strings.Repeat("a", 65), ""}, // exceeds MaxTagLength=64
 		{strings.Repeat("a", 64), strings.Repeat("a", 64)},
+		// 22 CJK characters = 66 bytes (3 bytes per char) — must
+		// be rejected because file.Service.AddTag would reject
+		// 66 > 64 even though the rune count is 22 ≤ 64. The
+		// rune-vs-byte mismatch on this very line was the bug
+		// caught by Devin Review on PR #85.
+		{strings.Repeat("文", 22), ""},
+		// 21 CJK characters = 63 bytes — fits within 64-byte
+		// budget so should pass. Note: we lowercase via
+		// strings.ToLower which is a no-op for these CJK code
+		// points, so the canonical form is identical to input.
+		{strings.Repeat("文", 21), strings.Repeat("文", 21)},
+		// Mixed multi-byte: 32 chars × 2 bytes ("é" = U+00E9 in
+		// UTF-8 is 0xC3 0xA9, 2 bytes) = 64 bytes — fits exactly.
+		{strings.Repeat("é", 32), strings.Repeat("é", 32)},
+		// 33 chars × 2 bytes = 66 bytes — must be rejected.
+		{strings.Repeat("é", 33), ""},
 	}
 	for _, tc := range cases {
 		got := canonicalTag(tc.in)
