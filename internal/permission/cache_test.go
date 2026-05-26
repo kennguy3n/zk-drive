@@ -724,3 +724,65 @@ func TestCachedRepository_GenerationCounterLocalCacheStale(t *testing.T) {
 		t.Fatal("post-stale-gen expected deny (the new gen must have invalidated the entry)")
 	}
 }
+
+// TestCachedRepository_LoadGenerationIsMonotonic pins the
+// monotonic-write invariant + the corollary: when the guard
+// kicks in (local cache is fresher than the Redis value we
+// just GET'd), loadGeneration MUST return the fresher local
+// value, not the stale Redis value.
+//
+// Devin Review BUG_0001 was the original race fix (don't
+// clobber a fresher local cache); ANALYSIS_0001 was the
+// follow-on observation that the function STILL returned the
+// stale Redis-fetched value to the caller. That meant a single
+// in-flight request could compose a cache key with the old
+// generation and serve a pre-bust entry — narrow window but
+// real. Fix: also return the fresher local value.
+//
+// Test strategy: pre-poison the local cache with gen=42, force
+// a re-fetch (age the entry past staleness), Redis has no
+// counter set so the GET returns "" and gen=0 — without the
+// fix, loadGeneration would return 0; with the fix it returns
+// 42 (the fresher local value is preserved AND returned).
+func TestCachedRepository_LoadGenerationIsMonotonic(t *testing.T) {
+	t.Parallel()
+	_, rdb := newTestRedis(t)
+	fake := &fakeRepository{inheritanceResult: true}
+	c := NewCachedRepository(fake, rdb, 30*time.Second, nil)
+
+	ws := uuid.New()
+	ctx := context.Background()
+
+	// Pre-poison the local cache with gen=42, fetchedAt
+	// arbitrarily in the past so it's "stale" enough to
+	// trigger a Redis re-fetch on the next loadGeneration
+	// call.
+	c.genMu.Lock()
+	c.gen[ws] = &generationEntry{
+		value:     42,
+		fetchedAt: time.Now().Add(-2 * generationStaleAfter),
+	}
+	c.genMu.Unlock()
+
+	// Redis has no counter set for this workspace.
+	// The Redis GET will return redis.Nil → gen=0.
+	got, err := c.loadGeneration(ctx, ws)
+	if err != nil {
+		t.Fatalf("loadGeneration: %v", err)
+	}
+	// Without the fix: got=0 (stale Redis value clobbers
+	// caller despite the monotonic guard preserving local).
+	// With the fix: got=42 (fresher local value preserved
+	// AND returned).
+	if got != 42 {
+		t.Errorf("expected returned gen=42 (fresher local value preserved); got %d", got)
+	}
+
+	// Confirm the local cache was NOT clobbered.
+	c.genMu.RLock()
+	stored := c.gen[ws].value
+	c.genMu.RUnlock()
+	if stored != 42 {
+		t.Errorf("expected local cache to remain gen=42; got %d", stored)
+	}
+}

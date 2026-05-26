@@ -244,6 +244,18 @@ func (c *CachedRepository) loadGeneration(ctx context.Context, workspaceID uuid.
 	c.genMu.Lock()
 	if existing, ok := c.gen[workspaceID]; !ok || gen >= existing.value {
 		c.gen[workspaceID] = &generationEntry{value: gen, fetchedAt: time.Now()}
+	} else {
+		// A concurrent bust observed gen=N+1 and stored it
+		// locally between our Redis GET (which saw gen=N) and
+		// this write lock. The monotonic guard kept the
+		// fresher local value — but we must ALSO return the
+		// fresher value to the caller, otherwise the caller
+		// would compose the entry key with the stale gen N
+		// and could serve a pre-bust cached entry for this
+		// one request. Reading `existing.value` is safe
+		// because we hold the write lock; the bust path also
+		// takes the same write lock before mutating.
+		gen = existing.value
 	}
 	c.genMu.Unlock()
 	return gen, nil
