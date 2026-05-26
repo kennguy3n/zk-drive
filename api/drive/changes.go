@@ -119,8 +119,13 @@ func (h *Handler) LatestChange(w http.ResponseWriter, r *http.Request) {
 // parseInt64Query reads a non-negative int64 from r.URL.Query()[name].
 // An empty / missing value returns def with no error; a present but
 // unparseable value returns an error so the handler can respond 400.
+//
+// TrimSpace matches the sibling parseIntQuery below so the two
+// helpers handle whitespace identically — a client passing
+// `?since=%2050` (url-encoded space + 50) parses cleanly instead
+// of returning 400 from one helper and succeeding on the other.
 func parseInt64Query(r *http.Request, name string, def int64) (int64, error) {
-	raw := r.URL.Query().Get(name)
+	raw := strings.TrimSpace(r.URL.Query().Get(name))
 	if raw == "" {
 		return def, nil
 	}
