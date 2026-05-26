@@ -475,26 +475,32 @@ func ruleBasedSuggestions(fileName, contentPreview string, workspaceTags []strin
 		if !hasAlnumRune(t) {
 			continue
 		}
-		// Literal-contains fast path is gated to multi-segment
-		// tags (those containing a hyphen). A single-segment tag
-		// is just one part — strings.Contains on it would bypass
-		// the per-part word-boundary check at partMatches below
-		// and re-introduce the exact false-positive class that
-		// partMatches exists to prevent: tag "ai" matching corpus
-		// "main", "rain", "again"; tag "ml" matching "html",
-		// "calmly"; tag "q4" matching "queue4dispatch". A multi-
-		// segment tag like "marketing-q4-2024" as a literal
-		// substring is highly specific (4+ separators worth of
-		// context anchoring it) so the fast path stays useful
-		// where it's safe. Devin Review BUG_0001 on commit
-		// b6164c0 caught this gap — the regression test at
-		// TestRuleBasedSuggestionsShortPartUsesWordBoundary only
-		// covered hyphenated tags, so single-segment short tags
-		// slipped through.
-		if strings.Contains(t, "-") && strings.Contains(corpus, t) {
-			appendTag(t)
-			continue
-		}
+		// We deliberately do NOT take a literal-substring fast
+		// path here, even for multi-segment hyphenated tags. The
+		// per-part loop below subsumes the literal check for every
+		// legitimate body and is the only path that correctly
+		// rejects short hyphenated tags matching coincidental
+		// substrings — e.g. tag "a-b" against body "data-base"
+		// would match the literal "a-b" substring at index 3-5
+		// (within "dat[a-b]ase") despite "a" / "b" not being
+		// standalone tokens in the corpus. The parts-loop tokens
+		// the corpus on non-alphanumeric runes and routes each
+		// short segment (≤ shortPartLimit bytes) through the
+		// word-boundary check at partMatches, so it rejects the
+		// false positive while still matching legitimate cases:
+		//   - tag "marketing-q4-2024" vs body "see marketing-q4-2024"
+		//     → parts loop: "marketing" (long) substring match,
+		//     "q4" (short) word match, "2024" (long) substring
+		//     match → all present → match.
+		//   - tag "marketing-q4-2024" vs body "the marketing
+		//     plan for Q4 2024" → same outcome.
+		// The fast path was a redundant optimisation that turned
+		// into a noise source for short hyphenated tags (e.g.
+		// "x-y", "a-b") as workspaces accrue tag vocabulary.
+		// Removing it costs at most N extra strings.Contains per
+		// tag (N = segment count, typically 2-3) — negligible vs.
+		// the 256-tag LIMIT cap on workspaceTags. Devin Review
+		// ANALYSIS_0003 on commit 020f71d.
 		parts := strings.Split(t, "-")
 		allPresent := true
 		// matchedAnyPart guards against tags whose split is

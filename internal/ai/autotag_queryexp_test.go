@@ -503,6 +503,65 @@ func TestRuleBasedSuggestionsShortPartUsesWordBoundary(t *testing.T) {
 	if !foundSingle {
 		t.Fatalf("single-segment tag 'ai' should match body with standalone 'ai' token; got suggestions %v", suggestionsSinglePos)
 	}
+
+	// Short multi-segment tag false positive — regression for
+	// Devin Review ANALYSIS_0003 on commit 020f71d. Before the
+	// fast-path removal, tag "a-b" against body "data-base"
+	// would match via the literal strings.Contains fast path
+	// (the substring "a-b" appears at index 3-5 within
+	// "dat[a-b]ase") even though neither "a" nor "b" is a
+	// standalone token in the corpus. The parts-loop subsumes
+	// the fast path and correctly rejects this case by routing
+	// short segments through corpusWordSet membership.
+	suggestionsShortMulti := ruleBasedSuggestions(
+		"schema.pdf",
+		"This document covers data-base normalisation.",
+		[]string{"a-b"},
+	)
+	for _, s := range suggestionsShortMulti {
+		if s == "a-b" {
+			t.Fatalf("tag 'a-b' should NOT match body 'data-base' via coincidental substring; got %v", suggestionsShortMulti)
+		}
+	}
+
+	// And the positive control for short multi-segment tags:
+	// when both "a" and "b" appear as standalone tokens in the
+	// corpus, the tag matches.
+	suggestionsShortMultiPos := ruleBasedSuggestions(
+		"abc.pdf",
+		"Section a then section b in the worksheet.",
+		[]string{"a-b"},
+	)
+	foundShortMulti := false
+	for _, s := range suggestionsShortMultiPos {
+		if s == "a-b" {
+			foundShortMulti = true
+			break
+		}
+	}
+	if !foundShortMulti {
+		t.Fatalf("tag 'a-b' should match body with standalone 'a' and 'b' tokens; got %v", suggestionsShortMultiPos)
+	}
+
+	// One more — tag "x-y" against body "well-known x-y phrase"
+	// where the literal x-y appears AND x/y appear as tokens.
+	// Should still match via the parts loop without the fast
+	// path.
+	suggestionsLiteralHyphen := ruleBasedSuggestions(
+		"axes.pdf",
+		"The x-y axes are labelled.",
+		[]string{"x-y"},
+	)
+	foundLiteralHyphen := false
+	for _, s := range suggestionsLiteralHyphen {
+		if s == "x-y" {
+			foundLiteralHyphen = true
+			break
+		}
+	}
+	if !foundLiteralHyphen {
+		t.Fatalf("tag 'x-y' should match body containing 'x-y' as a hyphen-joined phrase; got %v", suggestionsLiteralHyphen)
+	}
 }
 
 func TestRuleBasedSuggestionsRejectsAllEmptyPartsTag(t *testing.T) {
