@@ -30,8 +30,16 @@ func (h *Handler) ListActivity(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	limit := parseIntParam(r.URL.Query().Get("limit"), 50)
-	offset := parseIntParam(r.URL.Query().Get("offset"), 0)
+	limit, err := parseIntQuery(r, "limit", 50)
+	if err != nil {
+		middleware.RespondError(w, http.StatusBadRequest, middleware.ErrCodeBadRequest, "invalid limit")
+		return
+	}
+	offset, err := parseIntQuery(r, "offset", 0)
+	if err != nil {
+		middleware.RespondError(w, http.StatusBadRequest, middleware.ErrCodeBadRequest, "invalid offset")
+		return
+	}
 	// Keep in sync with activity.normalizePaging — the handler echoes the
 	// effective limit back to the client, so a client doing
 	// len(entries) < limit to detect end-of-stream stays correct when the
@@ -43,10 +51,7 @@ func (h *Handler) ListActivity(w http.ResponseWriter, r *http.Request) {
 		limit = activityMaxPageSize
 	}
 
-	var (
-		list []*activity.LogEntry
-		err  error
-	)
+	var list []*activity.LogEntry
 	if rt, rid := r.URL.Query().Get("resource_type"), r.URL.Query().Get("resource_id"); rt != "" && rid != "" {
 		resourceID, perr := uuid.Parse(rid)
 		if perr != nil {

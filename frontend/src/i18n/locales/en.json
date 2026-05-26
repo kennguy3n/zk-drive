@@ -67,6 +67,11 @@
     "mfaCodeInput": "Verification code",
     "mfaEnable": "Enable two-factor",
     "mfaAlreadyEnrolled": "Two-factor authentication is already enabled on this account.",
+    "mfaEnrolledAt": "You enrolled on {{date}}.",
+    "mfaRecoveryCodesRemaining_one": "{{count}} recovery code remaining.",
+    "mfaRecoveryCodesRemaining_other": "{{count}} recovery codes remaining.",
+    "mfaRecoveryCodesLowWarning": "You are running low on recovery codes. Disable and re-enroll to generate a fresh set.",
+    "mfaReEnrollInstruction": "To replace your authenticator or generate new recovery codes, disable 2FA first.",
     "mfaDisable": "Disable two-factor"
   },
   "nav": {

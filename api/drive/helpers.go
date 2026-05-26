@@ -3,7 +3,6 @@ package drive
 import (
 	"errors"
 	"net/http"
-	"strconv"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
@@ -15,19 +14,6 @@ import (
 	"github.com/kennguy3n/zk-drive/internal/user"
 	"github.com/kennguy3n/zk-drive/internal/workspace"
 )
-
-// parseIntParam parses a query-string int with a default. Negative values
-// fall back to def so a malicious "?limit=-1" can't break the SQL.
-func parseIntParam(raw string, def int) int {
-	if raw == "" {
-		return def
-	}
-	n, err := strconv.Atoi(raw)
-	if err != nil || n < 0 {
-		return def
-	}
-	return n
-}
 
 func (h *Handler) requireWorkspaceMatch(r *http.Request) (*workspace.Workspace, error) {
 	workspaceID, _ := middleware.WorkspaceIDFromContext(r.Context())

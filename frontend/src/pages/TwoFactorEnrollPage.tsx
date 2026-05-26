@@ -149,12 +149,21 @@ export default function TwoFactorEnrollPage() {
       <div className="auth-page">
         <h1>{t("auth.mfaAlreadyEnrolled")}</h1>
         {status.activated_at && (
-          <p>{new Date(status.activated_at).toLocaleString()}</p>
+          <p>
+            {t("auth.mfaEnrolledAt", {
+              date: new Date(status.activated_at).toLocaleString(),
+            })}
+          </p>
         )}
         <p>
-          {status.recovery_codes_remaining} recovery code
-          {status.recovery_codes_remaining === 1 ? "" : "s"} remaining.
+          {t("auth.mfaRecoveryCodesRemaining", {
+            count: status.recovery_codes_remaining,
+          })}
         </p>
+        {status.recovery_codes_remaining <= 2 && (
+          <p className="warning">{t("auth.mfaRecoveryCodesLowWarning")}</p>
+        )}
+        <p>{t("auth.mfaReEnrollInstruction")}</p>
         <button type="button" onClick={() => nav("/drive")}>
           {t("common.back")}
         </button>

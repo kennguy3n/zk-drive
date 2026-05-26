@@ -20,8 +20,16 @@ func (h *Handler) ListNotifications(w http.ResponseWriter, r *http.Request) {
 	}
 	workspaceID, _ := middleware.WorkspaceIDFromContext(r.Context())
 	userID, _ := middleware.UserIDFromContext(r.Context())
-	limit := parseIntParam(r.URL.Query().Get("limit"), notification.DefaultLimit)
-	offset := parseIntParam(r.URL.Query().Get("offset"), 0)
+	limit, err := parseIntQuery(r, "limit", notification.DefaultLimit)
+	if err != nil {
+		middleware.RespondError(w, http.StatusBadRequest, middleware.ErrCodeBadRequest, "invalid limit")
+		return
+	}
+	offset, err := parseIntQuery(r, "offset", 0)
+	if err != nil {
+		middleware.RespondError(w, http.StatusBadRequest, middleware.ErrCodeBadRequest, "invalid offset")
+		return
+	}
 	// Cap at the handler layer so the response envelope echoes the
 	// clamped values back to clients. The service also clamps
 	// defensively, but echoing the pre-service limit would lie to

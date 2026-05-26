@@ -27,5 +27,14 @@ if (!i18n.isInitialized) {
     // missing translation should fail loudly with a recognizable
     // identifier instead of crashing on .toString of null.
     returnNull: false,
+    // returnEmptyString=false mirrors the production config at
+    // src/i18n/index.ts:38 so the deploy-skew guard in
+    // translateApiError (`translated !== key`) is exercised by
+    // the same branch in tests as in production. Without this,
+    // `t(unknownKey, {defaultValue: ""})` would return "" in
+    // tests (the defaultValue path) but the raw key string in
+    // production (returnEmptyString rejecting ""). Devin Review
+    // ANALYSIS_0001 on commit 500a3a8 flagged the divergence.
+    returnEmptyString: false,
   });
 }
