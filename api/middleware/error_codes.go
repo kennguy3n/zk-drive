@@ -92,6 +92,15 @@ const (
 	ErrCodeUnsupportedOp        ErrorCode = "UNSUPPORTED_OPERATION"
 	ErrCodeCollabModeNotAllowed ErrorCode = "COLLAB_MODE_NOT_ALLOWED"
 
+	// 400 — the request named a search-language dictionary that is
+	// not in workspace.SupportedSearchLanguages(). Distinct from
+	// VALIDATION_FAILED (multi-field) and BAD_REQUEST (generic) so
+	// the admin UI can render a "pick from the allow-list" hint
+	// rather than a generic validation error. Clients fetch the
+	// allow-list via GET /workspace/search-language; the error
+	// payload itself stays in the standard {code,message} envelope.
+	ErrCodeUnsupportedLanguage ErrorCode = "UNSUPPORTED_SEARCH_LANGUAGE"
+
 	// Resource state (404 / 409 / 410).
 	ErrCodeNotFound      ErrorCode = "NOT_FOUND"
 	ErrCodeConflict      ErrorCode = "CONFLICT"

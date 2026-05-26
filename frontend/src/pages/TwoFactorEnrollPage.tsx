@@ -70,6 +70,7 @@ export default function TwoFactorEnrollPage() {
     return () => {
       cancelled = true;
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [enrollToken]);
 
   const onFinalize = async (e: FormEvent) => {

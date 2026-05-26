@@ -109,6 +109,7 @@ func TestErrorCodes_DistinctValues(t *testing.T) {
 		ErrCodeMissingField,
 		ErrCodeUnsupportedOp,
 		ErrCodeCollabModeNotAllowed,
+		ErrCodeUnsupportedLanguage,
 		ErrCodeNotFound,
 		ErrCodeConflict,
 		ErrCodeGone,

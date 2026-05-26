@@ -271,7 +271,7 @@ func (h *Handler) UpdateSearchLanguage(w http.ResponseWriter, r *http.Request) {
 
 	var req searchLanguageRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		middleware.RespondError(w, http.StatusBadRequest, middleware.ErrCodeBadRequest, "invalid json body")
+		middleware.RespondError(w, http.StatusBadRequest, middleware.ErrCodeMalformedJSON, "invalid json body")
 		return
 	}
 	if req.Language == nil {
@@ -280,20 +280,19 @@ func (h *Handler) UpdateSearchLanguage(w http.ResponseWriter, r *http.Request) {
 	}
 	lang := strings.ToLower(strings.TrimSpace(*req.Language))
 	if !workspace.IsSupportedSearchLanguage(lang) {
-		writeJSON(w, http.StatusBadRequest, map[string]any{
-			"error":     "unsupported language",
-			"supported": workspace.SupportedSearchLanguages(),
-		})
+		// Structured envelope rather than a bespoke {"error","supported"}
+		// payload — clients that want the allow-list call GET
+		// /workspace/search-language, which is the single source of truth
+		// for it. Keeps the error response shape compatible with
+		// translateApiError on the frontend.
+		middleware.RespondError(w, http.StatusBadRequest, middleware.ErrCodeUnsupportedLanguage, "unsupported search language")
 		return
 	}
 
 	prev, err := h.workspaces.SetSearchLanguage(r.Context(), workspaceID, lang)
 	if err != nil {
 		if errors.Is(err, workspace.ErrUnsupportedSearchLanguage) {
-			writeJSON(w, http.StatusBadRequest, map[string]any{
-				"error":     "unsupported language",
-				"supported": workspace.SupportedSearchLanguages(),
-			})
+			middleware.RespondError(w, http.StatusBadRequest, middleware.ErrCodeUnsupportedLanguage, "unsupported search language")
 			return
 		}
 		middleware.RespondInternalError(w, r, "update search language", err)
