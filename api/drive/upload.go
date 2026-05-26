@@ -124,7 +124,7 @@ func (h *Handler) UploadURL(w http.ResponseWriter, r *http.Request) {
 
 	url, err := store.GenerateUploadURL(r.Context(), objectKey, req.MimeType, storage.DefaultPresignExpiry)
 	if err != nil {
-		middleware.RespondError(w, http.StatusInternalServerError, middleware.ErrCodeInternal, "generate upload url: "+err.Error())
+		middleware.RespondInternalError(w, r, "generate upload url", err)
 		return
 	}
 	writeJSON(w, http.StatusOK, uploadURLResponse{
@@ -394,7 +394,7 @@ func (h *Handler) DownloadURL(w http.ResponseWriter, r *http.Request) {
 	}
 	url, err := store.GenerateDownloadURL(r.Context(), current.ObjectKey, storage.DefaultPresignExpiry)
 	if err != nil {
-		middleware.RespondError(w, http.StatusInternalServerError, middleware.ErrCodeInternal, "generate download url: "+err.Error())
+		middleware.RespondInternalError(w, r, "generate download url", err)
 		return
 	}
 	// Bandwidth accounting: record the version's size as a download.

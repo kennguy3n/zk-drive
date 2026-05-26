@@ -32,7 +32,7 @@ func (h *Handler) ListWorkspaces(w http.ResponseWriter, r *http.Request) {
 	}
 	list, err := h.workspaces.ListForUser(r.Context(), userID)
 	if err != nil {
-		middleware.RespondError(w, http.StatusInternalServerError, middleware.ErrCodeInternal, "list workspaces: "+err.Error())
+		middleware.RespondInternalError(w, r, "list workspaces", err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"workspaces": list})
@@ -78,13 +78,13 @@ func (h *Handler) CreateWorkspace(w http.ResponseWriter, r *http.Request) {
 	currentWSID, _ := middleware.WorkspaceIDFromContext(r.Context())
 	current, err := h.users.GetByID(r.Context(), currentWSID, userID)
 	if err != nil {
-		middleware.RespondError(w, http.StatusInternalServerError, middleware.ErrCodeInternal, "load current user: "+err.Error())
+		middleware.RespondInternalError(w, r, "load current user", err)
 		return
 	}
 
 	ws, err := h.createWorkspaceTx(r.Context(), req.Name, current)
 	if err != nil {
-		middleware.RespondError(w, http.StatusInternalServerError, middleware.ErrCodeInternal, "create workspace: "+err.Error())
+		middleware.RespondInternalError(w, r, "create workspace", err)
 		return
 	}
 	// Audit the privileged action so a security review can answer
@@ -174,7 +174,7 @@ func (h *Handler) UpdateWorkspace(w http.ResponseWriter, r *http.Request) {
 		ws.StorageQuotaBytes = *req.StorageQuotaBytes
 	}
 	if err := h.workspaces.Update(r.Context(), ws); err != nil {
-		middleware.RespondError(w, http.StatusInternalServerError, middleware.ErrCodeInternal, "update workspace: "+err.Error())
+		middleware.RespondInternalError(w, r, "update workspace", err)
 		return
 	}
 	wsID := ws.ID

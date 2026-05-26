@@ -3,6 +3,8 @@ package middleware
 import (
 	"encoding/json"
 	"net/http"
+
+	"github.com/kennguy3n/zk-drive/internal/logging"
 )
 
 // ErrorCode is a stable, locale-independent identifier for an
@@ -182,6 +184,58 @@ func respondErrorWithDetails(w http.ResponseWriter, status int, code ErrorCode, 
 		Code:    code,
 		Message: message,
 		Details: details,
+	})
+}
+
+// RespondInternalError logs the underlying error to the request-
+// scoped structured logger and writes a SANITISED 500 response.
+// The op parameter is a stable, sanitised description of what
+// the handler was doing ("list audit", "create checkout
+// session") — it appears in both the log line and the response
+// `message` field. The err is recorded in logs but NEVER
+// included in the response, preventing internal details (DB
+// driver state, filesystem paths, SQL fragments, third-party
+// service identifiers, stack frame hints) from leaking to
+// callers — particularly important on routes where the frontend
+// is not the only consumer (CLI tools, future SDKs, log
+// shippers that surface response bodies to dashboards).
+//
+// Before this helper, the codebase-wide pattern was
+//
+//	middleware.RespondError(w, http.StatusInternalServerError,
+//	    middleware.ErrCodeInternal, "list audit: "+err.Error())
+//
+// which embedded raw err.Error() in the JSON body. The
+// frontend's translateApiError correctly hides it (translates
+// INTERNAL_ERROR → "Something went wrong on our end"), but the
+// JSON `message` field still carried the leak for any other
+// consumer that read the response body. Devin Review BUG on PR
+// #83 commit 97679c2 flagged the pattern. The fix is two-fold:
+// log the err server-side with full context (request_id,
+// workspace_id, user_id, op, err.Error()), and respond with
+// just the op — operators get the diagnostic, clients get a
+// clean envelope.
+//
+// Call sites should migrate from RespondError + ErrCodeInternal
+// to this helper for any 500-class internal failure. The
+// helper deliberately takes *http.Request rather than a context,
+// so the call site is identical to RespondError (`w, r, ...`)
+// and a future audit can grep for the pattern.
+func RespondInternalError(w http.ResponseWriter, r *http.Request, op string, err error) {
+	logger := logging.FromContext(r.Context())
+	// log.Error level — these are 500s, so they always merit
+	// alert-eligible severity even if the underlying err is
+	// "context canceled" (operator can still diagnose canceled-
+	// during-shutdown patterns from the log volume).
+	logger.Error("internal error",
+		"op", op,
+		"err", err,
+		"path", r.URL.Path,
+		"method", r.Method,
+	)
+	WriteJSON(w, http.StatusInternalServerError, ErrorResponse{
+		Code:    ErrCodeInternal,
+		Message: op,
 	})
 }
 

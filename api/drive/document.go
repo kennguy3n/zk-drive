@@ -183,7 +183,7 @@ func (h *Handler) ListFolderDocuments(w http.ResponseWriter, r *http.Request) {
 	}
 	docs, err := h.documents.ListByFolder(r.Context(), workspaceID, folderID)
 	if err != nil {
-		middleware.RespondError(w, http.StatusInternalServerError, middleware.ErrCodeInternal, "list documents: "+err.Error())
+		middleware.RespondInternalError(w, r, "list documents", err)
 		return
 	}
 	out := make([]documentResponse, 0, len(docs))
@@ -449,7 +449,7 @@ func (h *Handler) ListDocumentDeltas(w http.ResponseWriter, r *http.Request) {
 	// without a second round-trip. Mirrors the ListChanges contract.
 	deltas, err := h.documents.ListDeltas(r.Context(), workspaceID, id, afterSeq, limit+1)
 	if err != nil {
-		middleware.RespondError(w, http.StatusInternalServerError, middleware.ErrCodeInternal, "list deltas: "+err.Error())
+		middleware.RespondInternalError(w, r, "list deltas", err)
 		return
 	}
 	hasMore := len(deltas) > limit

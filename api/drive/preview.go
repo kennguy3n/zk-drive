@@ -87,7 +87,7 @@ func (h *Handler) PreviewURL(w http.ResponseWriter, r *http.Request) {
 	}
 	url, err := store.GenerateDownloadURL(r.Context(), p.ObjectKey, storage.DefaultPresignExpiry)
 	if err != nil {
-		middleware.RespondError(w, http.StatusInternalServerError, middleware.ErrCodeInternal, "preview url: "+err.Error())
+		middleware.RespondInternalError(w, r, "preview url", err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{

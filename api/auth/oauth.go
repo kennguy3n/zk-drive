@@ -147,12 +147,12 @@ func (h *OAuthHandler) start(w http.ResponseWriter, r *http.Request, c *oauth2.C
 	}
 	state, err := randomString(32)
 	if err != nil {
-		middleware.RespondError(w, http.StatusInternalServerError, middleware.ErrCodeInternal, "generate state: "+err.Error())
+		middleware.RespondInternalError(w, r, "generate state", err)
 		return
 	}
 	verifier, err := randomString(48)
 	if err != nil {
-		middleware.RespondError(w, http.StatusInternalServerError, middleware.ErrCodeInternal, "generate pkce: "+err.Error())
+		middleware.RespondInternalError(w, r, "generate pkce", err)
 		return
 	}
 	challenge := pkceChallenge(verifier)
@@ -233,7 +233,7 @@ func (h *OAuthHandler) callback(w http.ResponseWriter, r *http.Request, c *oauth
 	// provider without creating a second row.
 	u, err := users.GetByAuthProvider(ctx, provider, subject)
 	if err != nil && !errors.Is(err, user.ErrNotFound) {
-		middleware.RespondError(w, http.StatusInternalServerError, middleware.ErrCodeInternal, "lookup user: "+err.Error())
+		middleware.RespondInternalError(w, r, "lookup user", err)
 		return
 	}
 	if u == nil {
@@ -246,11 +246,11 @@ func (h *OAuthHandler) callback(w http.ResponseWriter, r *http.Request, c *oauth
 				middleware.RespondError(w, http.StatusForbidden, middleware.ErrCodeForbidden, "no zk-drive account for "+email)
 				return
 			}
-			middleware.RespondError(w, http.StatusInternalServerError, middleware.ErrCodeInternal, "lookup user: "+err.Error())
+			middleware.RespondInternalError(w, r, "lookup user", err)
 			return
 		}
 		if err := users.LinkAuthProvider(ctx, u.ID, provider, subject); err != nil {
-			middleware.RespondError(w, http.StatusInternalServerError, middleware.ErrCodeInternal, "link provider: "+err.Error())
+			middleware.RespondInternalError(w, r, "link provider", err)
 			return
 		}
 		if h.audit != nil {
@@ -275,7 +275,7 @@ func (h *OAuthHandler) callback(w http.ResponseWriter, r *http.Request, c *oauth
 	if h.auth.TOTPService() != nil {
 		mfaResp, err := h.auth.maybeIssueMFAChallenge(ctx, u, r)
 		if err != nil {
-			middleware.RespondError(w, http.StatusInternalServerError, middleware.ErrCodeInternal, "mfa: "+err.Error())
+			middleware.RespondInternalError(w, r, "mfa", err)
 			return
 		}
 		if mfaResp != nil {
@@ -304,7 +304,7 @@ func (h *OAuthHandler) callback(w http.ResponseWriter, r *http.Request, c *oauth
 			"name":     name,
 		})
 	}
-	h.auth.WriteToken(w, u.ID, u.WorkspaceID, u.Role)
+	h.auth.WriteToken(w, r, u.ID, u.WorkspaceID, u.Role)
 }
 
 // fetchUserinfo hits the provider's userinfo endpoint and returns

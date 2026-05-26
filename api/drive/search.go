@@ -38,7 +38,7 @@ func (h *Handler) Search(w http.ResponseWriter, r *http.Request) {
 			middleware.RespondError(w, http.StatusBadRequest, middleware.ErrCodeBadRequest, err.Error())
 			return
 		}
-		middleware.RespondError(w, http.StatusInternalServerError, middleware.ErrCodeInternal, "search: "+err.Error())
+		middleware.RespondInternalError(w, r, "search", err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{

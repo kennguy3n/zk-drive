@@ -79,7 +79,7 @@ func (h *Handler) CreateCheckoutSession(w http.ResponseWriter, r *http.Request) 
 		case errors.Is(err, billing.ErrStripePriceNotMapped):
 			middleware.RespondError(w, http.StatusBadRequest, middleware.ErrCodeBadRequest, err.Error())
 		default:
-			middleware.RespondError(w, http.StatusInternalServerError, middleware.ErrCodeInternal, "create checkout session: "+err.Error())
+			middleware.RespondInternalError(w, r, "create checkout session", err)
 		}
 		return
 	}
@@ -134,7 +134,7 @@ func (h *Handler) CreatePortalSession(w http.ResponseWriter, r *http.Request) {
 		case errors.Is(err, billing.ErrStripeNoCustomer):
 			middleware.RespondError(w, http.StatusPreconditionFailed, middleware.ErrCodeBillingNotConfigured, err.Error())
 		default:
-			middleware.RespondError(w, http.StatusInternalServerError, middleware.ErrCodeInternal, "create portal session: "+err.Error())
+			middleware.RespondInternalError(w, r, "create portal session", err)
 		}
 		return
 	}

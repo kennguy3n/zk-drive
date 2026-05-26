@@ -197,7 +197,7 @@ func (h *Handler) UpdateMFAPolicy(w http.ResponseWriter, r *http.Request) {
 
 	prev, err := h.workspaces.SetMFARequired(r.Context(), workspaceID, *req.MFARequired)
 	if err != nil {
-		middleware.RespondError(w, http.StatusInternalServerError, middleware.ErrCodeInternal, "update mfa policy: "+err.Error())
+		middleware.RespondInternalError(w, r, "update mfa policy", err)
 		return
 	}
 
@@ -231,7 +231,7 @@ func (h *Handler) GetPlacement(w http.ResponseWriter, r *http.Request) {
 			middleware.RespondError(w, http.StatusNotFound, middleware.ErrCodeFabricNotProvisioned, "workspace not provisioned with fabric")
 			return
 		}
-		middleware.RespondError(w, http.StatusInternalServerError, middleware.ErrCodeInternal, "lookup tenant: "+err.Error())
+		middleware.RespondInternalError(w, r, "lookup tenant", err)
 		return
 	}
 	policy, err := h.fabric.GetPlacement(r.Context(), tenantID)
@@ -271,7 +271,7 @@ func (h *Handler) PutPlacement(w http.ResponseWriter, r *http.Request) {
 			middleware.RespondError(w, http.StatusNotFound, middleware.ErrCodeFabricNotProvisioned, "workspace not provisioned with fabric")
 			return
 		}
-		middleware.RespondError(w, http.StatusInternalServerError, middleware.ErrCodeInternal, "lookup tenant: "+err.Error())
+		middleware.RespondInternalError(w, r, "lookup tenant", err)
 		return
 	}
 	// Force the policy's tenant field to match the workspace's
@@ -294,7 +294,7 @@ func (h *Handler) PutPlacement(w http.ResponseWriter, r *http.Request) {
 		policyRef = "custom"
 	}
 	if err := h.provisioner.UpdatePlacement(r.Context(), workspaceID, policyRef, policy.FirstCountry()); err != nil && !errors.Is(err, fabric.ErrNoCredentials) {
-		middleware.RespondError(w, http.StatusInternalServerError, middleware.ErrCodeInternal, "update local placement mirror: "+err.Error())
+		middleware.RespondInternalError(w, r, "update local placement mirror", err)
 		return
 	}
 	if h.storeFactory != nil {
@@ -334,7 +334,7 @@ func (h *Handler) GetCMK(w http.ResponseWriter, r *http.Request) {
 			middleware.RespondError(w, http.StatusNotFound, middleware.ErrCodeFabricNotProvisioned, "workspace not provisioned with fabric")
 			return
 		}
-		middleware.RespondError(w, http.StatusInternalServerError, middleware.ErrCodeInternal, "lookup cmk: "+err.Error())
+		middleware.RespondInternalError(w, r, "lookup cmk", err)
 		return
 	}
 	writeJSON(w, http.StatusOK, cmkResponse{CMKURI: uri})
@@ -371,7 +371,7 @@ func (h *Handler) PutCMK(w http.ResponseWriter, r *http.Request) {
 			middleware.RespondError(w, http.StatusNotFound, middleware.ErrCodeFabricNotProvisioned, "workspace not provisioned with fabric")
 			return
 		}
-		middleware.RespondError(w, http.StatusInternalServerError, middleware.ErrCodeInternal, "update cmk: "+err.Error())
+		middleware.RespondInternalError(w, r, "update cmk", err)
 		return
 	}
 	// Best-effort fabric console notification: log and ignore errors
@@ -405,12 +405,20 @@ func (h *Handler) GetAuditLog(w http.ResponseWriter, r *http.Request) {
 		middleware.RespondError(w, http.StatusUnauthorized, middleware.ErrCodeAuthMissingToken, "unauthenticated")
 		return
 	}
-	limit := parseIntQuery(r, "limit", 50)
-	offset := parseIntQuery(r, "offset", 0)
+	limit, err := parseIntQuery(r, "limit", 50)
+	if err != nil {
+		middleware.RespondError(w, http.StatusBadRequest, middleware.ErrCodeBadRequest, "invalid limit: "+err.Error())
+		return
+	}
+	offset, err := parseIntQuery(r, "offset", 0)
+	if err != nil {
+		middleware.RespondError(w, http.StatusBadRequest, middleware.ErrCodeBadRequest, "invalid offset: "+err.Error())
+		return
+	}
 	action := strings.TrimSpace(r.URL.Query().Get("action"))
 	entries, err := h.audit.List(r.Context(), workspaceID, action, limit, offset)
 	if err != nil {
-		middleware.RespondError(w, http.StatusInternalServerError, middleware.ErrCodeInternal, "list audit: "+err.Error())
+		middleware.RespondInternalError(w, r, "list audit", err)
 		return
 	}
 	if entries == nil {
@@ -467,7 +475,7 @@ func (h *Handler) ListUsers(w http.ResponseWriter, r *http.Request) {
 	workspaceID, _ := middleware.WorkspaceIDFromContext(r.Context())
 	list, err := h.users.List(r.Context(), workspaceID)
 	if err != nil {
-		middleware.RespondError(w, http.StatusInternalServerError, middleware.ErrCodeInternal, "list users: "+err.Error())
+		middleware.RespondInternalError(w, r, "list users", err)
 		return
 	}
 	out := make([]userView, 0, len(list))
@@ -511,7 +519,7 @@ func (h *Handler) InviteUser(w http.ResponseWriter, r *http.Request) {
 	}
 	u, err := h.users.Create(r.Context(), workspaceID, req.Email, req.Name, req.Password, req.Role)
 	if err != nil {
-		middleware.RespondError(w, http.StatusInternalServerError, middleware.ErrCodeInternal, "create user: "+err.Error())
+		middleware.RespondInternalError(w, r, "create user", err)
 		return
 	}
 	if h.audit != nil {
@@ -550,7 +558,7 @@ func (h *Handler) DeactivateUser(w http.ResponseWriter, r *http.Request) {
 			middleware.RespondError(w, http.StatusNotFound, middleware.ErrCodeNotFound, "user not found or already deactivated")
 			return
 		}
-		middleware.RespondError(w, http.StatusInternalServerError, middleware.ErrCodeInternal, "deactivate: "+err.Error())
+		middleware.RespondInternalError(w, r, "deactivate", err)
 		return
 	}
 	if h.audit != nil {
@@ -611,7 +619,7 @@ func (h *Handler) UpdateUserRole(w http.ResponseWriter, r *http.Request) {
 			middleware.RespondError(w, http.StatusNotFound, middleware.ErrCodeNotFound, "user not found")
 			return
 		}
-		middleware.RespondError(w, http.StatusInternalServerError, middleware.ErrCodeInternal, "update role: "+err.Error())
+		middleware.RespondInternalError(w, r, "update role", err)
 		return
 	}
 	if h.audit != nil {
@@ -651,7 +659,7 @@ GROUP BY u.id, u.email
 ORDER BY u.email`
 	rows, err := h.pool.Query(r.Context(), q, workspaceID)
 	if err != nil {
-		middleware.RespondError(w, http.StatusInternalServerError, middleware.ErrCodeInternal, "query usage: "+err.Error())
+		middleware.RespondInternalError(w, r, "query usage", err)
 		return
 	}
 	defer rows.Close()
@@ -659,7 +667,7 @@ ORDER BY u.email`
 	for rows.Next() {
 		var entry userUsageEntry
 		if err := rows.Scan(&entry.UserID, &entry.Email, &entry.TotalBytes, &entry.FileCount); err != nil {
-			middleware.RespondError(w, http.StatusInternalServerError, middleware.ErrCodeInternal, "scan usage: "+err.Error())
+			middleware.RespondInternalError(w, r, "scan usage", err)
 			return
 		}
 		resp.TotalBytes += entry.TotalBytes
@@ -686,7 +694,7 @@ func (h *Handler) ListRetentionPolicies(w http.ResponseWriter, r *http.Request) 
 	workspaceID, _ := middleware.WorkspaceIDFromContext(r.Context())
 	list, err := h.retention.List(r.Context(), workspaceID)
 	if err != nil {
-		middleware.RespondError(w, http.StatusInternalServerError, middleware.ErrCodeInternal, "list: "+err.Error())
+		middleware.RespondInternalError(w, r, "list", err)
 		return
 	}
 	if list == nil {
@@ -762,7 +770,7 @@ func (h *Handler) DeleteRetentionPolicy(w http.ResponseWriter, r *http.Request) 
 			middleware.RespondError(w, http.StatusNotFound, middleware.ErrCodeNotFound, "policy not found")
 			return
 		}
-		middleware.RespondError(w, http.StatusInternalServerError, middleware.ErrCodeInternal, "delete: "+err.Error())
+		middleware.RespondInternalError(w, r, "delete", err)
 		return
 	}
 	if h.audit != nil {
@@ -782,16 +790,31 @@ func writeJSON(w http.ResponseWriter, status int, payload any) {
 	middleware.WriteJSON(w, status, payload)
 }
 
-func parseIntQuery(r *http.Request, key string, def int) int {
+// parseIntQuery parses an integer query parameter, returning `def`
+// if the param is absent or blank, and an error if the param is
+// present but cannot be parsed. Negative values clip to `def` so
+// a deliberately-malformed `?limit=-1` and an unset limit produce
+// the same observable page (matches api/drive/changes.go's helper
+// of the same name). Devin Review on PR #83 commit 97679c2
+// flagged that the admin and drive packages had divergent
+// signatures (admin silently swallowed bad input, drive returned
+// the error); harmonising to the drive shape lets the audit-log
+// endpoint surface a 400 for malformed pagination instead of
+// silently using the default page size, which used to hide
+// frontend bugs that sent NaN limits.
+func parseIntQuery(r *http.Request, key string, def int) (int, error) {
 	s := strings.TrimSpace(r.URL.Query().Get(key))
 	if s == "" {
-		return def
+		return def, nil
 	}
 	v, err := strconv.Atoi(s)
 	if err != nil {
-		return def
+		return 0, err
 	}
-	return v
+	if v < 0 {
+		return def, nil
+	}
+	return v, nil
 }
 
 // Billing -----------------------------------------------------------
@@ -814,7 +837,7 @@ func (h *Handler) BillingUsage(w http.ResponseWriter, r *http.Request) {
 	workspaceID, _ := middleware.WorkspaceIDFromContext(r.Context())
 	summary, err := h.billing.GetUsageSummary(r.Context(), workspaceID)
 	if err != nil {
-		middleware.RespondError(w, http.StatusInternalServerError, middleware.ErrCodeInternal, "billing usage: "+err.Error())
+		middleware.RespondInternalError(w, r, "billing usage", err)
 		return
 	}
 	writeJSON(w, http.StatusOK, summary)
@@ -846,7 +869,7 @@ func (h *Handler) UpdateBillingPlan(w http.ResponseWriter, r *http.Request) {
 	}
 	out, err := h.billing.UpsertPlan(r.Context(), plan)
 	if err != nil {
-		middleware.RespondError(w, http.StatusInternalServerError, middleware.ErrCodeInternal, "upsert plan: "+err.Error())
+		middleware.RespondInternalError(w, r, "upsert plan", err)
 		return
 	}
 	if h.audit != nil {

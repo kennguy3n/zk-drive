@@ -58,7 +58,7 @@ func (h *Handler) ListActivity(w http.ResponseWriter, r *http.Request) {
 		list, err = h.activity.List(r.Context(), workspaceID, limit, offset)
 	}
 	if err != nil {
-		middleware.RespondError(w, http.StatusInternalServerError, middleware.ErrCodeInternal, "list activity: "+err.Error())
+		middleware.RespondInternalError(w, r, "list activity", err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{

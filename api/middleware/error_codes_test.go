@@ -2,8 +2,10 @@ package middleware
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -129,5 +131,61 @@ func TestErrorCodes_DistinctValues(t *testing.T) {
 			t.Errorf("duplicate code %q at indexes %d and %d", c, prev, i)
 		}
 		seen[c] = i
+	}
+}
+
+// TestRespondInternalError_RedactsErr verifies that the underlying
+// err.Error() string is NEVER included in the JSON response body
+// — only the sanitised op label is exposed to the client. The
+// helper was introduced specifically to plug the err.Error() leak
+// flagged by Devin Review on PR #83 commit 97679c2; this test
+// ensures a future refactor can't accidentally reintroduce the
+// leak. Run with `go test -run TestRespondInternalError_RedactsErr
+// ./api/middleware` after any change to RespondInternalError.
+func TestRespondInternalError_RedactsErr(t *testing.T) {
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/admin/audit", nil)
+	const secretFragment = "pq: connect: connection refused (host=10.1.2.3)"
+	RespondInternalError(rec, req, "list audit", errors.New(secretFragment))
+
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("status: got %d, want %d", rec.Code, http.StatusInternalServerError)
+	}
+	body := rec.Body.String()
+	if strings.Contains(body, secretFragment) {
+		t.Fatalf("response body leaked underlying error: %q", body)
+	}
+	if strings.Contains(body, "10.1.2.3") {
+		t.Fatalf("response body leaked address fragment: %q", body)
+	}
+	var resp ErrorResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("body is not JSON: %v (body=%q)", err, body)
+	}
+	if resp.Code != ErrCodeInternal {
+		t.Fatalf("code: got %q, want %q", resp.Code, ErrCodeInternal)
+	}
+	if resp.Message != "list audit" {
+		t.Fatalf("message: got %q, want %q (op should be the only exposed string)", resp.Message, "list audit")
+	}
+}
+
+// TestRespondInternalError_SetsCanonicalHeaders verifies that the
+// helper goes through WriteJSON so internal-error 500 responses
+// share the same Content-Type charset and X-Content-Type-Options
+// defense as every other error response. Skipping these headers
+// would make INTERNAL_ERROR responses subtly inconsistent with
+// the rest of the error envelope and lose the MIME-confusion
+// defense that the rest of the contract already has.
+func TestRespondInternalError_SetsCanonicalHeaders(t *testing.T) {
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/auth/signup", nil)
+	RespondInternalError(rec, req, "signup", errors.New("workspaces.Create: deadline exceeded"))
+
+	if ct := rec.Header().Get("Content-Type"); ct != "application/json; charset=utf-8" {
+		t.Fatalf("Content-Type: got %q, want application/json; charset=utf-8", ct)
+	}
+	if nosniff := rec.Header().Get("X-Content-Type-Options"); nosniff != "nosniff" {
+		t.Fatalf("X-Content-Type-Options: got %q, want nosniff", nosniff)
 	}
 }

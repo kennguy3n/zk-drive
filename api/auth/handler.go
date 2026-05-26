@@ -131,8 +131,8 @@ func (h *Handler) JWTSecret() string { return h.jwtSecret }
 // WriteToken signs a new token and writes it as the HTTP response
 // body. Exposed so other handlers (e.g. OAuth callbacks) can complete
 // the same login flow without duplicating JWT issuance.
-func (h *Handler) WriteToken(w http.ResponseWriter, userID, workspaceID uuid.UUID, role string) {
-	writeToken(w, h.jwtSecret, userID, workspaceID, role)
+func (h *Handler) WriteToken(w http.ResponseWriter, r *http.Request, userID, workspaceID uuid.UUID, role string) {
+	writeToken(w, r, h.jwtSecret, userID, workspaceID, role)
 }
 
 type signupRequest struct {
@@ -194,7 +194,7 @@ func (h *Handler) Signup(w http.ResponseWriter, r *http.Request) {
 
 	ws, u, err := h.runSignupTx(r.Context(), req)
 	if err != nil {
-		middleware.RespondError(w, http.StatusInternalServerError, middleware.ErrCodeInternal, "signup: "+err.Error())
+		middleware.RespondInternalError(w, r, "signup", err)
 		return
 	}
 
@@ -206,7 +206,7 @@ func (h *Handler) Signup(w http.ResponseWriter, r *http.Request) {
 		h.postSignup(r.Context(), ws.ID, ws.Name)
 	}
 
-	writeToken(w, h.jwtSecret, u.ID, ws.ID, u.Role)
+	writeToken(w, r, h.jwtSecret, u.ID, ws.ID, u.Role)
 }
 
 // runSignupTx performs the workspace+user+owner writes in a single
@@ -283,7 +283,7 @@ func (h *Handler) Login(w http.ResponseWriter, r *http.Request) {
 			middleware.RespondError(w, http.StatusUnauthorized, middleware.ErrCodeAuthInvalidCredentials, "invalid credentials")
 			return
 		}
-		middleware.RespondError(w, http.StatusInternalServerError, middleware.ErrCodeInternal, "login: "+err.Error())
+		middleware.RespondInternalError(w, r, "login", err)
 		return
 	}
 	if err := h.users.VerifyPassword(u, req.Password); err != nil {
@@ -331,7 +331,7 @@ func (h *Handler) Login(w http.ResponseWriter, r *http.Request) {
 	if h.totp != nil {
 		mfaResp, mfaErr := h.maybeIssueMFAChallenge(ctx, u, r)
 		if mfaErr != nil {
-			middleware.RespondError(w, http.StatusInternalServerError, middleware.ErrCodeInternal, "mfa: "+mfaErr.Error())
+			middleware.RespondInternalError(w, r, "mfa", mfaErr)
 			return
 		}
 		if mfaResp != nil {
@@ -353,7 +353,7 @@ func (h *Handler) Login(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 
-	writeToken(w, h.jwtSecret, u.ID, u.WorkspaceID, u.Role)
+	writeToken(w, r, h.jwtSecret, u.ID, u.WorkspaceID, u.Role)
 }
 
 // maybeIssueMFAChallenge runs after a successful password verify
@@ -534,13 +534,13 @@ func (h *Handler) Refresh(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	writeToken(w, h.jwtSecret, claims.UserID, claims.WorkspaceID, claims.Role)
+	writeToken(w, r, h.jwtSecret, claims.UserID, claims.WorkspaceID, claims.Role)
 }
 
-func writeToken(w http.ResponseWriter, secret string, userID, workspaceID uuid.UUID, role string) {
+func writeToken(w http.ResponseWriter, r *http.Request, secret string, userID, workspaceID uuid.UUID, role string) {
 	token, exp, err := middleware.IssueToken(secret, userID, workspaceID, role, middleware.TokenTTL)
 	if err != nil {
-		middleware.RespondError(w, http.StatusInternalServerError, middleware.ErrCodeInternal, "issue token: "+err.Error())
+		middleware.RespondInternalError(w, r, "issue token", err)
 		return
 	}
 	writeJSON(w, http.StatusOK, tokenResponse{

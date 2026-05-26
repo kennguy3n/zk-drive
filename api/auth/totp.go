@@ -105,7 +105,7 @@ func (h *TOTPHandler) EnrollBegin(w http.ResponseWriter, r *http.Request) {
 	// glance.
 	u, err := h.h.users.GetByID(r.Context(), claims.WorkspaceID, claims.UserID)
 	if err != nil {
-		middleware.RespondError(w, http.StatusInternalServerError, middleware.ErrCodeInternal, "lookup user: "+err.Error())
+		middleware.RespondInternalError(w, r, "lookup user", err)
 		return
 	}
 	challenge, err := h.h.totp.BeginEnrollment(r.Context(), claims.UserID, u.Email)
@@ -114,7 +114,7 @@ func (h *TOTPHandler) EnrollBegin(w http.ResponseWriter, r *http.Request) {
 			middleware.RespondError(w, http.StatusConflict, middleware.ErrCodeConflict, "2FA already enrolled; disable first to re-enroll")
 			return
 		}
-		middleware.RespondError(w, http.StatusInternalServerError, middleware.ErrCodeInternal, "begin enrollment: "+err.Error())
+		middleware.RespondInternalError(w, r, "begin enrollment", err)
 		return
 	}
 
@@ -161,7 +161,7 @@ func (h *TOTPHandler) EnrollFinalize(w http.ResponseWriter, r *http.Request) {
 		case errors.Is(err, totp.ErrInvalidCode):
 			middleware.RespondError(w, http.StatusUnauthorized, middleware.ErrCodeMFAInvalid, "invalid code")
 		default:
-			middleware.RespondError(w, http.StatusInternalServerError, middleware.ErrCodeInternal, "finalize: "+err.Error())
+			middleware.RespondInternalError(w, r, "finalize", err)
 		}
 		return
 	}
@@ -223,7 +223,7 @@ func (h *TOTPHandler) Verify(w http.ResponseWriter, r *http.Request) {
 			middleware.RespondError(w, http.StatusUnauthorized, middleware.ErrCodeAuthInvalidToken, "invalid credentials")
 			return
 		}
-		middleware.RespondError(w, http.StatusInternalServerError, middleware.ErrCodeInternal, "lookup user: "+err.Error())
+		middleware.RespondInternalError(w, r, "lookup user", err)
 		return
 	}
 	if u.DeactivatedAt != nil {
@@ -280,7 +280,7 @@ func (h *TOTPHandler) Verify(w http.ResponseWriter, r *http.Request) {
 		"factor": factorLabel(usedRecovery),
 	})
 
-	writeToken(w, h.h.jwtSecret, u.ID, u.WorkspaceID, u.Role)
+	writeToken(w, r, h.h.jwtSecret, u.ID, u.WorkspaceID, u.Role)
 }
 
 func factorLabel(usedRecovery bool) string {
@@ -311,7 +311,7 @@ func (h *TOTPHandler) Disable(w http.ResponseWriter, r *http.Request) {
 
 	u, err := h.h.users.GetByID(r.Context(), claims.WorkspaceID, claims.UserID)
 	if err != nil {
-		middleware.RespondError(w, http.StatusInternalServerError, middleware.ErrCodeInternal, "lookup user: "+err.Error())
+		middleware.RespondInternalError(w, r, "lookup user", err)
 		return
 	}
 	if err := h.h.users.VerifyPassword(u, req.Password); err != nil {
@@ -333,7 +333,7 @@ func (h *TOTPHandler) Disable(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := h.h.totp.Disable(r.Context(), claims.UserID); err != nil {
-		middleware.RespondError(w, http.StatusInternalServerError, middleware.ErrCodeInternal, "disable: "+err.Error())
+		middleware.RespondInternalError(w, r, "disable", err)
 		return
 	}
 
@@ -355,7 +355,7 @@ func (h *TOTPHandler) Status(w http.ResponseWriter, r *http.Request) {
 	}
 	st, err := h.h.totp.Status(r.Context(), claims.UserID)
 	if err != nil {
-		middleware.RespondError(w, http.StatusInternalServerError, middleware.ErrCodeInternal, "status: "+err.Error())
+		middleware.RespondInternalError(w, r, "status", err)
 		return
 	}
 	writeJSON(w, http.StatusOK, totpStatusResponse{

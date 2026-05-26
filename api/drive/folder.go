@@ -90,12 +90,12 @@ func (h *Handler) GetFolder(w http.ResponseWriter, r *http.Request) {
 	}
 	children, err := h.folders.ListChildren(r.Context(), workspaceID, &id)
 	if err != nil {
-		middleware.RespondError(w, http.StatusInternalServerError, middleware.ErrCodeInternal, "list children: "+err.Error())
+		middleware.RespondInternalError(w, r, "list children", err)
 		return
 	}
 	fileList, err := h.files.ListByFolder(r.Context(), workspaceID, id)
 	if err != nil {
-		middleware.RespondError(w, http.StatusInternalServerError, middleware.ErrCodeInternal, "list files: "+err.Error())
+		middleware.RespondInternalError(w, r, "list files", err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
@@ -128,7 +128,7 @@ func (h *Handler) ListFolders(w http.ResponseWriter, r *http.Request) {
 	}
 	list, err := h.folders.ListChildren(r.Context(), workspaceID, parentID)
 	if err != nil {
-		middleware.RespondError(w, http.StatusInternalServerError, middleware.ErrCodeInternal, "list folders: "+err.Error())
+		middleware.RespondInternalError(w, r, "list folders", err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"folders": list})
