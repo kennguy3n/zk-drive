@@ -56,7 +56,7 @@ mod tray;
 pub use app::{App, AppHandle, HEALTH_POLL_INTERVAL};
 pub use command::{Command, CommandError, CommandResult};
 pub use config::{AppConfig, WorkspaceEntry};
-pub use event::{BroadcastSink, EventSink, ShellEvent};
+pub use event::{BroadcastSink, EventSink, ShellEvent, TaskKind};
 pub use state::{SyncHealth, WorkspaceState};
 pub use summary::Summary;
 pub use tray::TrayState;

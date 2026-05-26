@@ -13,7 +13,7 @@ use tempfile::tempdir;
 use uuid::Uuid;
 use zk_sync_shell::{
     App, AppConfig, BroadcastSink, Command, CommandError, CommandResult, EventSink, ShellEvent,
-    SyncHealth, TrayState,
+    SyncHealth, TaskKind, TrayState,
 };
 
 fn make_app() -> (Arc<App>, Arc<BroadcastSink>) {
@@ -477,4 +477,46 @@ async fn resume_persisted_preserves_autostart_flag_on_disk() {
         .expect("b present");
     assert!(a.autostart, "autostart=true must survive resume for A");
     assert!(b.autostart, "autostart=true must survive resume for B");
+}
+
+#[tokio::test]
+async fn mark_task_failed_does_not_clobber_user_stopped_workspace() {
+    // A stopped workspace shouldn't flip to Error if a late task
+    // failure arrives. The user already pressed Stop; treating
+    // their clean shutdown as a crash would surface a misleading
+    // notification.
+    let (app, sink) = make_app();
+    let dir = tempdir().unwrap();
+    let id = Uuid::new_v4();
+    app.dispatch(Command::AddWorkspace {
+        workspace_id: id,
+        label: "Stopped".into(),
+        root: dir.path().join("ws"),
+    })
+    .await
+    .unwrap();
+    // A freshly-added workspace is already Stopped; that's the
+    // post-stop_sync state we want to exercise.
+
+    let _ = collect_events(sink.subscribe(), 4, Duration::from_millis(100)).await;
+    let rx = sink.subscribe();
+    app.clone()
+        .mark_task_failed(id, TaskKind::Engine, "engine: late crash".into())
+        .await;
+
+    let events = collect_events(rx, 2, Duration::from_millis(100)).await;
+    assert!(
+        events.is_empty(),
+        "no events should fire for a stopped workspace, got: {events:?}"
+    );
+
+    let r = app
+        .dispatch(Command::GetStatus { workspace_id: id })
+        .await
+        .unwrap();
+    let CommandResult::Status(state) = r else {
+        panic!("expected Status reply");
+    };
+    assert_eq!(state.health, SyncHealth::Stopped);
+    assert_eq!(state.last_error, None);
 }

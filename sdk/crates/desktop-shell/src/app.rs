@@ -526,17 +526,21 @@ impl App {
             catalogue: catalogue.clone(),
             page_size: POLLER_PAGE_SIZE,
         };
-        let sink_for_poller = self.sink.clone();
+        // Capture two `Arc<App>` clones so the spawned poller and
+        // engine tasks can call back into the app's binding map and
+        // transition the workspace to `SyncHealth::Error` when they
+        // exit with a failure. Without this, the `Error` variant and
+        // its tray-aggregation / decay logic would be dead code
+        // (the only way to reach it from the running set would be a
+        // health-loop scan with no upstream signal, which the loop
+        // doesn't produce).
+        let app_for_poller = self.clone();
         let poller_task = tokio::spawn(async move {
             if let Err(e) = poller.run(remote_tx).await {
                 let msg = format!("{e:?}");
                 warn!(workspace_id = %workspace_id, "poller exited: {msg}");
-                sink_for_poller
-                    .emit(ShellEvent::TaskFailed {
-                        workspace_id,
-                        task: TaskKind::Poller,
-                        message: msg,
-                    })
+                app_for_poller
+                    .mark_task_failed(workspace_id, TaskKind::Poller, msg)
                     .await;
             }
         });
@@ -550,7 +554,18 @@ impl App {
             client,
             catalogue,
         );
-        let engine_task = tokio::spawn(async move { engine.run(local_rx, remote_rx).await });
+        let app_for_engine = self.clone();
+        let engine_task = tokio::spawn(async move {
+            let result = engine.run(local_rx, remote_rx).await;
+            if let Err(ref e) = result {
+                let msg = format!("{e:?}");
+                warn!(workspace_id = %workspace_id, "engine exited: {msg}");
+                app_for_engine
+                    .mark_task_failed(workspace_id, TaskKind::Engine, msg)
+                    .await;
+            }
+            result
+        });
 
         ws.engine_task = Some(engine_task);
         ws.poller_task = Some(poller_task);
@@ -714,6 +729,77 @@ impl App {
                     reason: None,
                 })
                 .await;
+        }
+    }
+
+    /// Transition a workspace into [`SyncHealth::Error`] in response
+    /// to one of its background tasks (poller or engine) exiting
+    /// with a failure. Called from inside the spawned task closures
+    /// in [`App::start_sync`].
+    ///
+    /// Contract:
+    /// * Does nothing if the workspace was already user-stopped
+    ///   (`Stopped`) -- the user aborted the task intentionally
+    ///   and shouldn't be told a clean shutdown was a crash.
+    /// * `TaskFailed` is always emitted, so a frontend log captures
+    ///   every failure regardless of prior health (e.g. a poller
+    ///   crash after an engine crash still surfaces both messages).
+    /// * `HealthChanged{Error}` and the tray recompute are only
+    ///   emitted on the *first* transition into `Error`; further
+    ///   failures from sibling tasks update `last_error` silently
+    ///   so the event stream isn't spammed.
+    pub async fn mark_task_failed(
+        self: Arc<Self>,
+        workspace_id: Uuid,
+        task: TaskKind,
+        message: String,
+    ) {
+        let should_emit_health;
+        {
+            let mut map = self.workspaces.lock().await;
+            let Some(ws) = map.get_mut(&workspace_id) else {
+                // Workspace was removed while we were in flight;
+                // nothing to update. Still emit TaskFailed below so
+                // the frontend log shows the failure that triggered
+                // the removal (e.g. the user clicking Remove after
+                // seeing the engine crash).
+                drop(map);
+                self.sink
+                    .emit(ShellEvent::TaskFailed {
+                        workspace_id,
+                        task,
+                        message,
+                    })
+                    .await;
+                return;
+            };
+            if ws.health == SyncHealth::Stopped {
+                return;
+            }
+            should_emit_health = ws.health != SyncHealth::Error;
+            ws.health = SyncHealth::Error;
+            ws.last_error = Some(message.clone());
+            ws.last_updated = chrono::Utc::now();
+        }
+        // Per `ShellEvent::TaskFailed` doc: emit *before* the
+        // HealthChanged so a frontend log captures the underlying
+        // reason in chronological order.
+        self.sink
+            .emit(ShellEvent::TaskFailed {
+                workspace_id,
+                task,
+                message: message.clone(),
+            })
+            .await;
+        if should_emit_health {
+            self.sink
+                .emit(ShellEvent::HealthChanged {
+                    workspace_id,
+                    health: SyncHealth::Error,
+                    reason: Some(message),
+                })
+                .await;
+            self.emit_tray_if_changed().await;
         }
     }
 
@@ -907,5 +993,161 @@ mod tests {
         // Error state must transition to Idle on its own.
         let s = Summary::default();
         assert_eq!(derive_health(SyncHealth::Error, &s), SyncHealth::Idle);
+    }
+
+    /// Build a minimal `WorkspaceBinding` directly in the workspaces
+    /// map so the unit test below can drive `mark_task_failed`
+    /// against a binding that is in a *running* state without
+    /// having to spin up a real `Client`. The integration tests in
+    /// `tests/dispatch_integration.rs` exercise the public API
+    /// (`AddWorkspace` + dispatch), but those leave the binding in
+    /// `Stopped` because no real client is available to take it
+    /// past `Starting`. The error-transition path is what we need
+    /// to pin here, so we reach inside the private binding type.
+    async fn seed_running_binding(app: &Arc<App>, workspace_id: Uuid, initial: SyncHealth) {
+        let mut map = app.workspaces.lock().await;
+        map.insert(
+            workspace_id,
+            WorkspaceBinding {
+                workspace_id,
+                label: "seeded".into(),
+                root: std::path::PathBuf::from("/tmp/seeded"),
+                catalogue_path: std::path::PathBuf::from("/tmp/seeded.db"),
+                autostart: false,
+                health: initial,
+                last_summary: Summary::default(),
+                last_error: None,
+                last_updated: chrono::Utc::now(),
+                catalogue: None,
+                engine_task: None,
+                poller_task: None,
+                watcher_task: None,
+            },
+        );
+    }
+
+    #[tokio::test]
+    async fn mark_task_failed_transitions_running_workspace_to_error() {
+        // Regression for the ANALYSIS finding on PR #86 that
+        // `SyncHealth::Error` had no producer in the running set:
+        // the poller / engine spawn closures previously emitted
+        // `TaskFailed` but never updated the binding, so the
+        // `Error` variant was dead code as far as the state
+        // machine was concerned. After the fix, `mark_task_failed`
+        // is the single entry point that:
+        //   (a) emits `ShellEvent::TaskFailed`,
+        //   (b) flips the binding's `health` to `Error`,
+        //   (c) populates `last_error`,
+        //   (d) emits `HealthChanged{Error}` on the first
+        //       transition only, suppressing subsequent
+        //       `HealthChanged` for sibling failures in the same
+        //       Error lifecycle (the `TaskFailed` event still
+        //       fires so the frontend log captures every failure).
+        let sink = Arc::new(crate::event::BroadcastSink::new());
+        let app = App::with_sink(sink.clone() as Arc<dyn EventSink>);
+        let id = Uuid::new_v4();
+        seed_running_binding(&app, id, SyncHealth::Idle).await;
+
+        let mut rx = sink.subscribe();
+        app.clone()
+            .mark_task_failed(id, TaskKind::Engine, "engine: synthetic crash".into())
+            .await;
+
+        // First event: TaskFailed.
+        let first = rx.try_recv().expect("TaskFailed should be emitted");
+        match first {
+            ShellEvent::TaskFailed {
+                workspace_id,
+                task,
+                message,
+            } => {
+                assert_eq!(workspace_id, id);
+                assert_eq!(task, TaskKind::Engine);
+                assert_eq!(message, "engine: synthetic crash");
+            }
+            other => panic!("expected TaskFailed first, got {other:?}"),
+        }
+
+        // Second event: HealthChanged{Error, reason=msg}.
+        let second = rx.try_recv().expect("HealthChanged{Error} should follow");
+        match second {
+            ShellEvent::HealthChanged {
+                workspace_id,
+                health,
+                reason,
+            } => {
+                assert_eq!(workspace_id, id);
+                assert_eq!(health, SyncHealth::Error);
+                assert_eq!(reason.as_deref(), Some("engine: synthetic crash"));
+            }
+            other => panic!("expected HealthChanged{{Error}}, got {other:?}"),
+        }
+
+        // Third event: TrayChanged (the only running workspace
+        // moved from Idle to Error, so the tray aggregate flips).
+        let third = rx.try_recv().expect("TrayChanged should follow");
+        assert!(matches!(third, ShellEvent::TrayChanged { .. }));
+
+        // Binding state pinned.
+        {
+            let map = app.workspaces.lock().await;
+            let ws = map.get(&id).expect("workspace present");
+            assert_eq!(ws.health, SyncHealth::Error);
+            assert_eq!(ws.last_error.as_deref(), Some("engine: synthetic crash"));
+        }
+
+        // Sibling failure (poller crashes right after engine):
+        // must emit TaskFailed but NOT a second HealthChanged.
+        app.clone()
+            .mark_task_failed(id, TaskKind::Poller, "poller: synthetic crash".into())
+            .await;
+        let fourth = rx.try_recv().expect("sibling TaskFailed should fire");
+        match fourth {
+            ShellEvent::TaskFailed { task, message, .. } => {
+                assert_eq!(task, TaskKind::Poller);
+                assert_eq!(message, "poller: synthetic crash");
+            }
+            other => panic!("expected sibling TaskFailed, got {other:?}"),
+        }
+        // No further HealthChanged / TrayChanged for the in-Error
+        // lifecycle.
+        assert!(
+            rx.try_recv().is_err(),
+            "no further events for in-Error workspace"
+        );
+
+        // last_error reflects the most recent failure.
+        {
+            let map = app.workspaces.lock().await;
+            let ws = map.get(&id).expect("workspace present");
+            assert_eq!(ws.last_error.as_deref(), Some("poller: synthetic crash"));
+        }
+    }
+
+    #[tokio::test]
+    async fn mark_task_failed_for_unknown_workspace_still_emits_task_failed() {
+        // The workspace was removed between the task crashing and
+        // the closure calling back into the app. We still want a
+        // log line for the failure (it explains why the task
+        // exited) but there's no binding to flip into Error.
+        let sink = Arc::new(crate::event::BroadcastSink::new());
+        let app = App::with_sink(sink.clone() as Arc<dyn EventSink>);
+        let id = Uuid::new_v4();
+        let mut rx = sink.subscribe();
+        app.clone()
+            .mark_task_failed(id, TaskKind::Engine, "engine: ghost".into())
+            .await;
+        let first = rx.try_recv().expect("TaskFailed should still fire");
+        assert!(matches!(
+            first,
+            ShellEvent::TaskFailed {
+                task: TaskKind::Engine,
+                ..
+            }
+        ));
+        assert!(
+            rx.try_recv().is_err(),
+            "nothing else fires for an unknown workspace"
+        );
     }
 }

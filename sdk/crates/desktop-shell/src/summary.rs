@@ -30,10 +30,15 @@ pub struct Summary {
 }
 
 impl Summary {
-    /// Returns the number of files that still have work pending
-    /// (anything other than UpToDate). Frontends use this as the
-    /// "still syncing" tray-icon test and as the progress-bar
-    /// denominator.
+    /// Returns the number of files that still have work pending —
+    /// anything that is neither [`SyncStatus::UpToDate`] (already
+    /// settled) nor [`SyncStatus::Evicted`] (deliberately dropped
+    /// from the local cache, no work to do until a remote change
+    /// re-enters them into the work set). Frontends use this as
+    /// the "still syncing" tray-icon test and as the progress-bar
+    /// denominator. The exclusion of `Evicted` is pinned by
+    /// [`pending_excludes_up_to_date_and_evicted`](tests::pending_excludes_up_to_date_and_evicted)
+    /// below.
     pub fn pending(self) -> u64 {
         self.local_dirty
             + self.local_deleted
