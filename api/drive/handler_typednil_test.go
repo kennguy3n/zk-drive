@@ -5,6 +5,9 @@ import (
 	"testing"
 
 	"github.com/google/uuid"
+
+	"github.com/kennguy3n/zk-drive/internal/preview"
+	"github.com/kennguy3n/zk-drive/internal/webhooks"
 )
 
 // fakeTagSuggester is a non-nil concrete TagSuggester used as the
@@ -41,6 +44,33 @@ type nilExpander struct{}
 
 func (*nilExpander) Expand(ctx context.Context, workspaceID uuid.UUID, query string) ([]string, bool, string, error) {
 	return nil, false, "", nil
+}
+
+// nilPreviewRepo is a typed-nil concrete pointer satisfying
+// preview.Repository used to exercise the WithPreviews guard.
+// Defined as part of Devin Review ANALYSIS_0002 on commit 10bd9b9
+// which flagged WithPreviews as the last interface-taking With*
+// setter without the isTypedNil guard.
+type nilPreviewRepo struct{}
+
+func (*nilPreviewRepo) Upsert(ctx context.Context, p *preview.Preview) error { return nil }
+func (*nilPreviewRepo) GetByVersion(ctx context.Context, fileID, versionID uuid.UUID) (*preview.Preview, error) {
+	return nil, nil
+}
+func (*nilPreviewRepo) GetLatestByFile(ctx context.Context, fileID uuid.UUID) (*preview.Preview, error) {
+	return nil, nil
+}
+
+// nilWebhookPublisher is the WithWebhooks analogue — pinning the
+// refactor from the old `p.(*webhooks.Publisher)` type-assertion
+// guard to the isTypedNil-based one (same Devin Review finding).
+type nilWebhookPublisher struct{}
+
+func (*nilWebhookPublisher) PublishFileEvent(ctx context.Context, t webhooks.EventType, workspaceID uuid.UUID, actorID *uuid.UUID, data webhooks.FileEventData) error {
+	return nil
+}
+func (*nilWebhookPublisher) PublishPermissionEvent(ctx context.Context, t webhooks.EventType, workspaceID uuid.UUID, actorID *uuid.UUID, data webhooks.PermissionEventData) error {
+	return nil
 }
 
 // TestIsTypedNil pins the reflect-based detection for nil concrete
@@ -117,5 +147,52 @@ func TestWithQueryExpanderNormalisesTypedNil(t *testing.T) {
 	h.WithQueryExpander(nil)
 	if h.queryExpand != nil {
 		t.Errorf("WithQueryExpander(nil) should clear h.queryExpand, got non-nil")
+	}
+}
+
+// TestWithPreviewsNormalisesTypedNil pins the WithPreviews guard
+// added per Devin Review ANALYSIS_0002 on commit 10bd9b9. Without
+// the guard, a (*preview.PostgresRepository)(nil) wrapped in
+// preview.Repository would slip past h.previews == nil and NPE
+// inside handlePreviewURL on first method call.
+func TestWithPreviewsNormalisesTypedNil(t *testing.T) {
+	h := &Handler{}
+	h.WithPreviews((*nilPreviewRepo)(nil))
+	if h.previews != nil {
+		t.Errorf("WithPreviews(typed-nil) should leave h.previews as nil interface, got non-nil")
+	}
+
+	h.WithPreviews(&nilPreviewRepo{})
+	if h.previews == nil {
+		t.Errorf("WithPreviews(non-nil) should set h.previews, got nil")
+	}
+
+	h.WithPreviews(nil)
+	if h.previews != nil {
+		t.Errorf("WithPreviews(nil) should clear h.previews, got non-nil")
+	}
+}
+
+// TestWithWebhooksNormalisesTypedNil pins the WithWebhooks refactor
+// from the old `p.(*webhooks.Publisher)` type-assertion guard to the
+// isTypedNil-based one. Same Devin Review finding (ANALYSIS_0002 on
+// commit 10bd9b9). The new guard works for any concrete pointer
+// satisfying WebhookEventPublisher, not just the *webhooks.Publisher
+// the old assertion was hard-coded to recognise.
+func TestWithWebhooksNormalisesTypedNil(t *testing.T) {
+	h := &Handler{}
+	h.WithWebhooks((*nilWebhookPublisher)(nil))
+	if h.webhooks != nil {
+		t.Errorf("WithWebhooks(typed-nil) should leave h.webhooks as nil interface, got non-nil")
+	}
+
+	h.WithWebhooks(&nilWebhookPublisher{})
+	if h.webhooks == nil {
+		t.Errorf("WithWebhooks(non-nil) should set h.webhooks, got nil")
+	}
+
+	h.WithWebhooks(nil)
+	if h.webhooks != nil {
+		t.Errorf("WithWebhooks(nil) should clear h.webhooks, got non-nil")
 	}
 }

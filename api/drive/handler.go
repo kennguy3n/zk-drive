@@ -39,7 +39,6 @@ import (
 	"github.com/kennguy3n/zk-drive/internal/sharing"
 	"github.com/kennguy3n/zk-drive/internal/storage"
 	"github.com/kennguy3n/zk-drive/internal/user"
-	"github.com/kennguy3n/zk-drive/internal/webhooks"
 	"github.com/kennguy3n/zk-drive/internal/workspace"
 )
 
@@ -162,17 +161,21 @@ func (h *Handler) WithBilling(b *billing.Service) *Handler {
 // no-op) so the metadata plane keeps working in tests / deployments
 // without NATS configured. Mirrors the WithJobs nil-safe pattern.
 func (h *Handler) WithWebhooks(p WebhookEventPublisher) *Handler {
-	// Guard against passing a typed-nil concrete *webhooks.Publisher,
+	// Guard against a typed-nil concrete pointer (e.g.
+	// (*webhooks.Publisher)(nil)) wrapped in WebhookEventPublisher,
 	// which would compare != nil under the interface comparison and
 	// then NPE inside the emit helpers. The concrete publisher's
 	// own methods are nil-safe (PublishFileEvent on a nil *Publisher
 	// returns nil) — but going through the interface here keeps the
-	// nil check at the boundary where it's obvious.
-	if p == nil {
-		h.webhooks = nil
-		return h
-	}
-	if pub, ok := p.(*webhooks.Publisher); ok && pub == nil {
+	// nil check at the boundary where it's obvious. Using isTypedNil
+	// rather than a `p.(*webhooks.Publisher)` type assertion avoids
+	// coupling this setter to the concrete type, matching the same
+	// pattern as WithTagSuggester / WithQueryExpander / WithPreviews
+	// — Devin Review ANALYSIS_0002 on commit 10bd9b9 noted the
+	// divergence (three interface-taking setters had been aligned on
+	// isTypedNil and two were stragglers). Now all four are
+	// consistent.
+	if isTypedNil(p) {
 		h.webhooks = nil
 		return h
 	}
@@ -331,7 +334,18 @@ func (h *Handler) WithEmail(s *email.Service) *Handler {
 // WithPreviews wires the preview repository so the handler can serve
 // preview download URLs without going through a service layer. A nil
 // repository causes /api/files/{id}/preview-url to respond 404.
+//
+// The typed-nil guard matches WithWebhooks / WithTagSuggester /
+// WithQueryExpander: a (*preview.PostgresRepository)(nil) wrapped
+// in preview.Repository would compare != nil under the interface
+// comparison and then NPE in handlePreviewURL's repo call. Devin
+// Review ANALYSIS_0002 on commit 10bd9b9 flagged this setter as
+// the last interface-taking setter without the guard.
 func (h *Handler) WithPreviews(r preview.Repository) *Handler {
+	if isTypedNil(r) {
+		h.previews = nil
+		return h
+	}
 	h.previews = r
 	return h
 }
