@@ -185,10 +185,19 @@ func (r *PostgresRepository) Delete(ctx context.Context, workspaceID, permID uui
 // (expires_at <= now()) are ignored. Inheritance from parent folders
 // is a follow-up; today each grant is scoped to a single resource.
 func (r *PostgresRepository) CheckAccess(ctx context.Context, workspaceID uuid.UUID, resourceType string, resourceID uuid.UUID, granteeType string, granteeID uuid.UUID, minRole string) (allowed bool, err error) {
-	defer r.observeQuery(dbOpCheckAccess, time.Now(), &err)
 	if !isValidRole(minRole) {
 		return false, fmt.Errorf("invalid min role %q", minRole)
 	}
+	// Defer the DB-query observer AFTER input validation: a
+	// rejected role / resource type is a caller-side error and
+	// did not consume any Postgres round-trip. Recording it in
+	// the histogram would pollute the duration buckets, and
+	// recording it as result="error" in the counter would
+	// conflate validation failures with real DB errors. The
+	// timer start is also captured here so the histogram
+	// excludes the validation latency (which is constant-time
+	// regardless).
+	defer r.observeQuery(dbOpCheckAccess, time.Now(), &err)
 	const q = `
 SELECT role FROM permissions
 WHERE workspace_id = $1
@@ -227,13 +236,18 @@ WHERE workspace_id = $1
 // containing folder_id once and then use the same ancestor walk as the
 // folder case. Expired grants (expires_at <= now()) are ignored.
 func (r *PostgresRepository) CheckAccessWithInheritance(ctx context.Context, workspaceID uuid.UUID, resourceType string, resourceID uuid.UUID, granteeType string, granteeID uuid.UUID, minRole string) (allowed bool, err error) {
-	defer r.observeQuery(dbOpCheckAccessWithInheritance, time.Now(), &err)
 	if !isValidRole(minRole) {
 		return false, fmt.Errorf("invalid min role %q", minRole)
 	}
 	if !isValidResourceType(resourceType) {
 		return false, fmt.Errorf("invalid resource type %q", resourceType)
 	}
+	// Defer the DB-query observer AFTER input validation: see
+	// CheckAccess for the rationale (validation failures are
+	// caller-side, did not consume a Postgres round-trip, and
+	// must not pollute the result="error" counter or the
+	// duration histogram).
+	defer r.observeQuery(dbOpCheckAccessWithInheritance, time.Now(), &err)
 
 	// Step 1: direct grants on the resource. If any grant exists at this
 	// level, the most-specific rule says this level wins — return true

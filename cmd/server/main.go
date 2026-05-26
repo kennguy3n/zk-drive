@@ -764,8 +764,24 @@ func run() error {
 	// observability lives in zkdrive_cache_ops_total (see
 	// internal/metrics/cache.go).
 	if cfg.PerformanceCacheEnabled && redisClient != nil {
+		// ORDERING DEPENDENCY: WithCache MUST precede
+		// WithCacheBuster.
+		//
+		// permissionSvc.BustWorkspace internally does
+		// s.repo.(*CachedRepository) — if WithCache hasn't yet
+		// wrapped the un-cached *PostgresRepository, the
+		// assertion fails and BustWorkspace becomes a silent
+		// no-op. The changefeed would then keep firing busts
+		// against a permissionSvc that doesn't know about the
+		// cache, leaving stale entries to expire only via TTL
+		// (~30s) — a correctness regression that produces no
+		// compile error and no runtime panic.
+		//
+		// We keep both calls inside the same `if` block so
+		// they can't be split independently, and the comment
+		// below pins the dependency for future refactors.
 		permissionSvc.WithCache(redisClient, cfg.PerformanceCacheTTL, metricsSurface)
-		changefeedSvc.WithCacheBuster(permissionSvc)
+		changefeedSvc.WithCacheBuster(permissionSvc) // must follow WithCache; see ORDERING DEPENDENCY above
 		slog.Info("permission cache enabled",
 			"ttl", cfg.PerformanceCacheTTL,
 		)
