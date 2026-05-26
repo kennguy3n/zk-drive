@@ -119,6 +119,13 @@ func (h *Handler) LatestChange(w http.ResponseWriter, r *http.Request) {
 // parseInt64Query reads a non-negative int64 from r.URL.Query()[name].
 // An empty / missing value returns def with no error; a present but
 // unparseable value returns an error so the handler can respond 400.
+// Negative values are clipped to def so an unset and a deliberately-
+// malformed `?since=-1` produce the same observable response — the
+// caller picks the "no input" sentinel via def. Currently every call
+// site passes def=0 (since/after_seq both want "from the beginning"
+// on missing input), but threading def through means a future caller
+// like parseInt64Query(r, "cursor", lastCursorSeq) would behave as
+// the function name suggests rather than silently snapping to 0.
 //
 // TrimSpace matches the sibling parseIntQuery below so the two
 // helpers handle whitespace identically — a client passing
@@ -134,7 +141,7 @@ func parseInt64Query(r *http.Request, name string, def int64) (int64, error) {
 		return 0, err
 	}
 	if v < 0 {
-		return 0, nil
+		return def, nil
 	}
 	return v, nil
 }
@@ -143,13 +150,15 @@ func parseInt64Query(r *http.Request, name string, def int64) (int64, error) {
 // type matches the changefeed.Since limit parameter which is
 // constrained to MaxLimit = 500.
 //
-// Both helpers clip negative values to a sensible default for their
-// own semantic — they are NOT numerically symmetric. parseInt64Query
-// clips since=-1 to 0 ("from the beginning"), while parseIntQuery
-// clips limit=-1 to `def` ("use the default page size"). The service
+// Both helpers are now numerically symmetric: negative values clip to
+// `def` in both, matching the admin package's parseIntQuery and the
+// "negative-equals-unset" principle of least surprise. The service
 // layer also defends with `limit <= 0 -> DefaultLimit`, but clipping
 // at the edge means a negative limit and an unset limit produce the
-// same observable response — principle of least surprise.
+// same observable response. Devin Review ANALYSIS_0002 on commit
+// 0ef1a82 flagged the parseInt64Query asymmetry (was clipping to
+// hardcoded 0 instead of def); both helpers now share the same
+// negative-clipping contract.
 func parseIntQuery(r *http.Request, name string, def int) (int, error) {
 	// TrimSpace matches the admin package's parseIntQuery so a
 	// client passing `?limit=%2050` (url-encoded space + 50)
