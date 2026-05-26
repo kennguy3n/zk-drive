@@ -250,6 +250,30 @@ func setupEnv(t *testing.T) *testEnv {
 		WithTOTP(totpSvc).
 		WithSessionRevoker(sessionStore)
 	webhookCap := &webhookCapture{}
+	// Wire the AI tag-suggestion + query-expansion services so the
+	// integration harness exercises the same code paths that
+	// cmd/server/main.go does at lines 629-645. Without this wiring,
+	// the /files/{id}/tag-suggestions and /search/expand endpoints
+	// would respond 501 in the harness and the end-to-end pipeline
+	// (handler → SuggestionService/ExpansionService → DB → rule-
+	// based scaffold and optional LLM refinement) would only be
+	// covered by unit tests in internal/ai. Both services are
+	// language-resolver-aware (matching production wiring) so the
+	// multilingual prompt path is exercised end-to-end here too.
+	// Devin Review ANALYSIS_0002 on PR #85.
+	tagSuggestSvc := ai.NewSuggestionService(pool).WithLanguageResolver(wsSvc)
+	queryExpandSvc := ai.NewExpansionService(pool).WithLanguageResolver(wsSvc)
+	if endpoint := os.Getenv("OLLAMA_URL"); endpoint != "" {
+		// Tests opting into LLM-on path (via t.Setenv before
+		// setupEnv) get the same LLM client bound to all three
+		// AI services, mirroring cmd/server/main.go:636-638.
+		llm, err := ai.NewOllamaClient(endpoint, os.Getenv("OLLAMA_MODEL"))
+		if err != nil {
+			t.Fatalf("ai/ollama: %v", err)
+		}
+		tagSuggestSvc = tagSuggestSvc.WithLLM(llm)
+		queryExpandSvc = queryExpandSvc.WithLLM(llm)
+	}
 	driveHandler := drive.NewHandler(pool, wsSvc, folderSvc, fileSvc, userSvc, storageClient, permissionSvc, activitySvc).
 		WithSharing(sharingSvc).
 		WithSearch(searchSvc).
@@ -258,7 +282,9 @@ func setupEnv(t *testing.T) *testEnv {
 		WithPreviews(previewRepo).
 		WithAudit(auditSvc).
 		WithBilling(billingSvc).
-		WithWebhooks(webhookCap)
+		WithWebhooks(webhookCap).
+		WithTagSuggester(tagSuggestSvc).
+		WithQueryExpander(queryExpandSvc)
 	// Wire a Postgres-backed fabric provisioner with no console URL
 	// so admin endpoints that only need persistence (CMK) work; the
 	// FabricClient interface is left nil because no test fakes the
@@ -455,6 +481,7 @@ func setupEnv(t *testing.T) *testEnv {
 			r.Get("/files/{id}/tags", driveHandler.ListFileTags)
 			r.Post("/files/{id}/tags", driveHandler.AddFileTag)
 			r.Delete("/files/{id}/tags/{tag}", driveHandler.RemoveFileTag)
+			r.Get("/files/{id}/tag-suggestions", driveHandler.SuggestFileTags)
 
 			r.Post("/bulk/move", driveHandler.BulkMove)
 			r.Post("/bulk/copy", driveHandler.BulkCopy)
@@ -473,6 +500,7 @@ func setupEnv(t *testing.T) *testEnv {
 			r.Delete("/guest-invites/{id}", driveHandler.RevokeGuestInvite)
 
 			r.Get("/search", driveHandler.Search)
+			r.Get("/search/expand", driveHandler.ExpandSearchQuery)
 
 			r.Get("/client-rooms", driveHandler.ListClientRooms)
 			r.Post("/client-rooms", driveHandler.CreateClientRoom)

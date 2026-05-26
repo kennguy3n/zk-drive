@@ -67,6 +67,18 @@ var ErrTagSuggestFileNotFound = errors.New("ai: file not found for tag suggestio
 // allowing room for the system prompt + few-shot exemplars.
 const tagSuggestMaxFile = 4 * 1024
 
+// tagSuggestMaxTagPreview is the LLM-prompt budget cap on the
+// serialised workspace-tag list. Matches queryexp.go's
+// queryExpansionLLMMaxFile (1 KiB) so the two AI prompts share the
+// same tag-vocabulary truncation policy. A workspace with 256 tags
+// at the file_tags.tag column's typical width (~16 bytes) already
+// fills 4 KiB; we cap at 1 KiB so the LLM context still leaves room
+// for the 4 KiB file body preview (tagSuggestMaxFile) plus the
+// system prompt half. Tags above the cap are dropped on a rune
+// boundary (truncatePreview) so multi-byte tags don't get sliced
+// into invalid UTF-8. Devin Review BUG_0001 on PR #85.
+const tagSuggestMaxTagPreview = 1024
+
 // tagSuggestMaxOutput is the upper bound on suggestions returned to
 // the client. Frontend will typically display 6-8; we cap at 12 so
 // the response stays small and an aggressive LLM can't flood the
@@ -334,8 +346,18 @@ func BuildTagSuggestPrompt(fileName, contentPreview string, workspaceTags []stri
 		b.WriteString("\n")
 	}
 	if len(workspaceTags) > 0 {
+		// truncatePreview keeps the cut on a rune boundary so a
+		// multi-byte tag at the boundary (CJK, accented Latin)
+		// can't get sliced into invalid UTF-8 — same rationale and
+		// budget shape as the query-expansion prompt builder at
+		// internal/ai/queryexp.go:271. Without this, a workspace
+		// with hundreds of tags would push the prompt past small-
+		// model context windows and the LLM call would fail
+		// silently (the SuggestionService catches the error and
+		// degrades to the rule-based scaffold).
+		preview := truncatePreview(strings.Join(workspaceTags, ", "), tagSuggestMaxTagPreview)
 		b.WriteString("Existing workspace tags: ")
-		b.WriteString(strings.Join(workspaceTags, ", "))
+		b.WriteString(preview)
 		b.WriteString("\n")
 	}
 	b.WriteString("\n")

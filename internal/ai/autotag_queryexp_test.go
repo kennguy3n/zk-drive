@@ -1,6 +1,7 @@
 package ai
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 	"unicode/utf8"
@@ -209,6 +210,43 @@ func TestBuildTagSuggestPromptLocalisesInstruction(t *testing.T) {
 		}
 		if !strings.Contains(p, "Sample content") {
 			t.Fatalf("prompt missing content preview: %s", p)
+		}
+	}
+}
+
+// TestBuildTagSuggestPromptTruncatesWorkspaceTags pins the
+// tagSuggestMaxTagPreview budget for the workspace-tag half of the
+// prompt. Without truncation, a workspace with hundreds of tags
+// could push the prompt past small-model context windows and the
+// LLM call would fail silently. Devin Review BUG_0001 on PR #85
+// flagged that BuildQueryExpansionPrompt truncates via
+// truncatePreview but BuildTagSuggestPrompt did not — the comment
+// at queryexp.go:271 references "same rationale as the autotag
+// prompt builder" so this test locks in the parity it claims.
+func TestBuildTagSuggestPromptTruncatesWorkspaceTags(t *testing.T) {
+	// Build a workspace tag list large enough to exceed
+	// tagSuggestMaxTagPreview (1 KiB). Each tag is ~22 bytes
+	// including the ", " separator, so 100 tags is ~2.2 KiB.
+	tags := make([]string, 100)
+	for i := range tags {
+		tags[i] = fmt.Sprintf("workspace-tag-%03d-foo", i)
+	}
+	prompt := BuildTagSuggestPrompt("notes.md", "Sample content", tags, "english")
+
+	// The workspace tag block in the prompt must not embed every
+	// tag verbatim. We assert on the LAST tag in the list because
+	// it sits past the budget and must be cut.
+	lastTag := tags[len(tags)-1]
+	if strings.Contains(prompt, lastTag) {
+		t.Fatalf("prompt should NOT contain last tag %q (past tagSuggestMaxTagPreview budget), got prompt with full tag list", lastTag)
+	}
+
+	// Sanity check: short tag list MUST still appear verbatim.
+	smallTags := []string{"draft", "review", "q4"}
+	smallPrompt := BuildTagSuggestPrompt("notes.md", "Sample content", smallTags, "english")
+	for _, tag := range smallTags {
+		if !strings.Contains(smallPrompt, tag) {
+			t.Fatalf("prompt missing small-list tag %q, got:\n%s", tag, smallPrompt)
 		}
 	}
 }
