@@ -562,6 +562,31 @@ func TestRuleBasedSuggestionsShortPartUsesWordBoundary(t *testing.T) {
 	if !foundLiteralHyphen {
 		t.Fatalf("tag 'x-y' should match body containing 'x-y' as a hyphen-joined phrase; got %v", suggestionsLiteralHyphen)
 	}
+
+	// Mixed-case workspace tag — regression for Devin Review
+	// ANALYSIS_0004 on commit 9b22f97. file.Service.AddTag
+	// normalises tags to lowercase, but a migration / raw-SQL
+	// insert / admin repair script could bypass that. The
+	// workspace-tag loop must normalise to lowercase before
+	// matching against the lowercased corpus, otherwise the
+	// per-part check silently misses while canonicalTag in the
+	// output path would still lowercase correctly — confusing
+	// "tag exists, body mentions it, never suggested" gap.
+	suggestionsMixedCase := ruleBasedSuggestions(
+		"plan.pdf",
+		"Marketing plan for Q4 2024.",
+		[]string{"Marketing-Q4-2024"},
+	)
+	foundMixedCase := false
+	for _, s := range suggestionsMixedCase {
+		if s == "marketing-q4-2024" {
+			foundMixedCase = true
+			break
+		}
+	}
+	if !foundMixedCase {
+		t.Fatalf("mixed-case workspace tag 'Marketing-Q4-2024' should match body 'Marketing plan for Q4 2024' (normalised to lowercase); got %v", suggestionsMixedCase)
+	}
 }
 
 func TestRuleBasedSuggestionsRejectsAllEmptyPartsTag(t *testing.T) {

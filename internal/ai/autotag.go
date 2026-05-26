@@ -462,6 +462,24 @@ func ruleBasedSuggestions(fileName, contentPreview string, workspaceTags []strin
 		if t == "" {
 			continue
 		}
+		// Defense-in-depth: file.Service.AddTag normalises tags
+		// to lowercase before insert (internal/file/service.go:180),
+		// so workspaceTags from the DB should already be lowercase
+		// — but a future migration, raw-SQL insert, or admin
+		// repair script could legitimately bypass that path and
+		// store a mixed-case tag. Without this normalisation, the
+		// per-part matching at partMatches below would
+		// case-mismatch the lowercased corpus and silently miss
+		// the tag, while the appendTag → canonicalTag output path
+		// would still lowercase it correctly — leading to a
+		// confusing "tag exists, body mentions it, but never
+		// suggested" gap. ToLower is a near-noop on already-
+		// lowercase strings (Go's strings.ToLower returns the
+		// original string when no transformation is needed via
+		// the ASCII fast path), so the overhead on the common
+		// case is negligible. Devin Review ANALYSIS_0004 on
+		// commit 9b22f97.
+		t = strings.ToLower(t)
 		// Reject degenerate tags up front: a tag with no
 		// letter or digit rune (e.g. "-", "---", "--") is
 		// noise — the literal substring check below would
