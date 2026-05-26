@@ -133,6 +133,58 @@ func TestValidatorPredicates(t *testing.T) {
 	}
 }
 
+// expectedResourceTypeCount is the number of distinct Resource*
+// constants declared in models.go. The companion test
+// TestAllResourceTypesIsComplete asserts AllResourceTypes has
+// exactly this many entries, so adding a Resource* constant
+// without appending it to AllResourceTypes trips CI.
+const expectedResourceTypeCount = 2
+
+// TestAllResourceTypesIsComplete pins the invariant that
+// AllResourceTypes covers every Resource* constant declared in
+// models.go. The cross-package coupling test in
+// internal/changefeed/permission_coupling_test.go iterates
+// AllResourceTypes to enforce that every resource type has a
+// corresponding changefeed Kind whose move/delete ops bust the
+// cache. If AllResourceTypes silently drifts from the const
+// block, that downstream enforcement gets bypassed.
+//
+// Per Devin Review ANALYSIS_0003 (escalated): the previous
+// failure mode was that adding e.g. ResourceDocument here would
+// create a stale-cache risk in the permission cache without any
+// test catching it, because the changefeed already had a
+// KindDocument that wasn't audited against the resource-type
+// vocabulary. This test (combined with the cross-package
+// coupling test) closes that gap.
+func TestAllResourceTypesIsComplete(t *testing.T) {
+	t.Parallel()
+	if got := len(AllResourceTypes); got != expectedResourceTypeCount {
+		t.Fatalf("AllResourceTypes has %d entries but expectedResourceTypeCount=%d; if you added a new Resource* constant in internal/permission/models.go, also append it to AllResourceTypes and bump expectedResourceTypeCount", got, expectedResourceTypeCount)
+	}
+	// Belt and braces: assert every entry in AllResourceTypes
+	// passes isValidResourceType. If isValidResourceType is
+	// later refactored to NOT derive from AllResourceTypes (it
+	// currently does), this catches the drift.
+	for _, rt := range AllResourceTypes {
+		if !isValidResourceType(rt) {
+			t.Errorf("AllResourceTypes contains %q but isValidResourceType rejects it — registry/validator drift", rt)
+		}
+	}
+	// Also assert the well-known constants are covered. A
+	// future rename of e.g. ResourceFolder to ResourceFolderV2
+	// without updating AllResourceTypes would slip past the
+	// count check above; this explicit check catches that.
+	seen := map[string]bool{}
+	for _, rt := range AllResourceTypes {
+		seen[rt] = true
+	}
+	for _, want := range []string{ResourceFolder, ResourceFile} {
+		if !seen[want] {
+			t.Errorf("AllResourceTypes missing well-known Resource constant %q", want)
+		}
+	}
+}
+
 // TestGrantValidates verifies that every invalid-input branch in
 // Grant short-circuits before the repository call, so a buggy or
 // malicious caller cannot smuggle an unknown enum past the service

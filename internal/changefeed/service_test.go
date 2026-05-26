@@ -889,10 +889,15 @@ func TestShouldBustForMutation_ExhaustivelyAuditsKindOpMatrix(t *testing.T) {
 	}
 
 	// Second: exhaustively assert shouldBustForMutation's
-	// behaviour for every audited tuple. We exercise it
-	// through BatchRecord (the only path that actually
-	// invokes the bust hook) using a fresh service per case
-	// so the recording buster's snapshot is unambiguous.
+	// behaviour for every audited tuple. Both Record and
+	// BatchRecord invoke the bust hook (see service.go's
+	// recordOne and BatchRecord respectively); we use the
+	// single-row Record path here so each sub-test's
+	// recording buster has a 1:1 mapping between the input
+	// tuple and the bust decision under test (BatchRecord
+	// adds workspace-level deduplication that would muddle
+	// per-tuple assertions). A fresh service per sub-test
+	// keeps the recording buster's snapshot unambiguous.
 	for key, wantBust := range knownKindOpBustDecisions {
 		key, wantBust := key, wantBust
 		t.Run(key, func(t *testing.T) {
