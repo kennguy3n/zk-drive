@@ -71,6 +71,27 @@ type Handler struct {
 	billing        *billing.Service
 	webhooks       WebhookEventPublisher
 	collab         *collab.DocumentHub
+	tagSuggest     TagSuggester
+	queryExpand    QueryExpander
+}
+
+// TagSuggester is the narrow interface the drive handler needs from
+// the AI suggestion service. Declared here (not pulled from
+// internal/ai) so the api/drive package doesn't depend on
+// internal/ai directly — keeps the dependency graph one-way (ai
+// → middleware, drive → ai through an interface).
+type TagSuggester interface {
+	Suggest(ctx context.Context, workspaceID, fileID uuid.UUID) ([]string, error)
+}
+
+// QueryExpander is the narrow interface the drive handler needs
+// from the AI query-expansion service. The handler is interested in
+// the three response fields independently (terms, llm-used flag,
+// resolved language) — returning a tuple keeps the contract free
+// of a shared transport struct so the ai package can evolve its
+// internal shape without forcing this interface to follow.
+type QueryExpander interface {
+	Expand(ctx context.Context, workspaceID uuid.UUID, query string) (terms []string, llmUsed bool, language string, err error)
 }
 
 // NewHandler constructs a Handler from the underlying services. The pool is
@@ -170,6 +191,26 @@ func (h *Handler) WithSharing(s *sharing.Service) *Handler {
 // /api/search endpoint.
 func (h *Handler) WithSearch(s *search.Service) *Handler {
 	h.search = s
+	return h
+}
+
+// WithTagSuggester wires the AI tag-suggestion service so the
+// /api/files/{id}/tag-suggestions endpoint stops responding 501.
+// A nil suggester keeps the endpoint disabled. The service is
+// non-load-bearing for the file plane — actual tag writes go
+// through file.Service.AddTag regardless of whether suggestions
+// are wired.
+func (h *Handler) WithTagSuggester(s TagSuggester) *Handler {
+	h.tagSuggest = s
+	return h
+}
+
+// WithQueryExpander wires the AI query-expansion service so the
+// /api/search/expand endpoint stops responding 501. As with
+// WithTagSuggester, a nil expander keeps the endpoint disabled and
+// doesn't affect the primary /api/search endpoint.
+func (h *Handler) WithQueryExpander(e QueryExpander) *Handler {
+	h.queryExpand = e
 	return h
 }
 

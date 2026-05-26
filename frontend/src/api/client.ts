@@ -704,6 +704,46 @@ export async function removeFileTag(fileID: string, tag: string): Promise<void> 
   await client.delete(`/files/${fileID}/tags/${encodeURIComponent(tag)}`);
 }
 
+// suggestFileTags fetches AI-suggested tags for a file. The
+// suggestions are advisory — the caller is expected to render them
+// as clickable chips and pipe a selection through addFileTag, so
+// the LLM never writes tags directly. A 409 means the file lives in
+// a strict-ZK folder (server has no plaintext); a 501 means the
+// suggestion service hasn't been wired in this deployment. Both
+// are surfaced as a thrown axios error so the calling component
+// can decide whether to hide the affordance.
+export async function suggestFileTags(fileID: string): Promise<string[]> {
+  const { data } = await client.get<{ suggestions: string[] }>(
+    `/files/${fileID}/tag-suggestions`,
+  );
+  return data.suggestions ?? [];
+}
+
+export interface SearchExpansion {
+  query: string;
+  terms: string[];
+  llm_used: boolean;
+  language: string;
+}
+
+// expandSearchQuery requests synonym / related-term suggestions for
+// a search query. The frontend renders the terms as chips next to
+// the search bar; selecting one re-issues searchFiles with the
+// expanded term. A 501 means the expansion service isn't wired —
+// the search bar should hide the expansion strip silently in that
+// case (no toast, no error UI).
+export async function expandSearchQuery(query: string): Promise<SearchExpansion> {
+  const { data } = await client.get<SearchExpansion>("/search/expand", {
+    params: { q: query },
+  });
+  return {
+    query: data.query,
+    terms: data.terms ?? [],
+    llm_used: !!data.llm_used,
+    language: data.language ?? "",
+  };
+}
+
 // --- Bulk operations ----------------------------------------------------
 
 export interface BulkResponse {

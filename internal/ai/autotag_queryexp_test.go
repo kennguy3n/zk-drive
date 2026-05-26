@@ -1,0 +1,295 @@
+package ai
+
+import (
+	"strings"
+	"testing"
+)
+
+func TestExtensionTagOf(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{"pdf lowercase", "report.pdf", "pdf"},
+		{"pdf uppercase", "REPORT.PDF", "pdf"},
+		{"xlsx", "budget.xlsx", "spreadsheet"},
+		{"odt", "memo.odt", "document"},
+		{"pptx", "deck.pptx", "presentation"},
+		{"md", "notes.md", "markdown"},
+		{"unknown extension", "file.weirdext", ""},
+		{"no extension", "README", ""},
+		{"trailing dot", "name.", ""},
+		{"dotfile not in map", ".gitignore", ""}, // unmapped extension -> ""
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := extensionTagOf(tc.in)
+			if got != tc.want {
+				t.Fatalf("extensionTagOf(%q) = %q, want %q", tc.in, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestCanonicalTag(t *testing.T) {
+	cases := []struct {
+		in   string
+		want string
+	}{
+		{"  Marketing-Q4  ", "marketing-q4"},
+		{"Q4_2024", "q4_2024"},
+		{"foo/bar", ""},     // reject path-separator
+		{"100%off", ""},     // reject %-encoded sentinel
+		{"   ", ""},         // empty after trim
+		{"", ""},            // already empty
+		{strings.Repeat("a", 65), ""}, // exceeds MaxTagLength=64
+		{strings.Repeat("a", 64), strings.Repeat("a", 64)},
+	}
+	for _, tc := range cases {
+		got := canonicalTag(tc.in)
+		if got != tc.want {
+			t.Fatalf("canonicalTag(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}
+
+func TestParseTagLines(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want []string
+	}{
+		{"clean newlines", "alpha\nbeta\ngamma", []string{"alpha", "beta", "gamma"}},
+		{"with hash + bullets", "# alpha\n* beta\n- gamma\n", []string{"alpha", "beta", "gamma"}},
+		{"comma per line", "alpha, beta\ngamma", []string{"alpha", "beta", "gamma"}},
+		{"dedupe", "alpha\nALPHA\nalpha", []string{"alpha"}},
+		{"reject invalid", "alpha\nfoo/bar\nbeta", []string{"alpha", "beta"}},
+		{"quoted", "\"alpha\"\n'beta'", []string{"alpha", "beta"}},
+		{"empty lines + trailing comma", "alpha,\n\nbeta,", []string{"alpha", "beta"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := parseTagLines(tc.in)
+			if !slicesEqual(got, tc.want) {
+				t.Fatalf("parseTagLines(%q) = %v, want %v", tc.in, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestExtractKeywords(t *testing.T) {
+	text := "The marketing team reviewed the Q4 marketing report. Marketing is critical."
+	got := extractKeywords(text, 5)
+	// Should contain "marketing" (highest freq, len >= 4).
+	found := false
+	for _, k := range got {
+		if k == "marketing" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("extractKeywords(%q) = %v, expected to contain 'marketing'", text, got)
+	}
+	// Should reject "the" (len < 4 floor).
+	for _, k := range got {
+		if k == "the" {
+			t.Fatalf("extractKeywords returned short stopword 'the'")
+		}
+	}
+	// Should reject "q4" via all-digit-rejection NOT applying (q4 has letter) — but len(q4)=2 < 4, so rejected.
+	for _, k := range got {
+		if k == "q4" {
+			t.Fatalf("extractKeywords returned too-short 'q4'")
+		}
+	}
+}
+
+func TestExtractKeywordsRejectsAllDigits(t *testing.T) {
+	text := "12345 67890 testing reporting customer"
+	got := extractKeywords(text, 5)
+	for _, k := range got {
+		if k == "12345" || k == "67890" {
+			t.Fatalf("extractKeywords returned all-digit token %q", k)
+		}
+	}
+}
+
+func TestRuleBasedSuggestions(t *testing.T) {
+	suggestions := ruleBasedSuggestions(
+		"q4-launch-plan.pdf",
+		"Marketing launch plan for Q4 2024. Customer outreach strategy.",
+		[]string{"marketing-q4-2024", "internal", "draft"},
+	)
+	if len(suggestions) == 0 {
+		t.Fatal("ruleBasedSuggestions returned empty list")
+	}
+	// First must be the extension tag (pdf).
+	if suggestions[0] != "pdf" {
+		t.Fatalf("ruleBasedSuggestions[0] = %q, want %q", suggestions[0], "pdf")
+	}
+	// Workspace overlap: "marketing-q4-2024" should appear because
+	// the body mentions "Marketing" and "Q4 2024".
+	hasOverlap := false
+	for _, s := range suggestions {
+		if s == "marketing-q4-2024" {
+			hasOverlap = true
+		}
+	}
+	if !hasOverlap {
+		t.Fatalf("expected marketing-q4-2024 in suggestions, got %v", suggestions)
+	}
+}
+
+func TestMergeSuggestions(t *testing.T) {
+	ruleBased := []string{"pdf", "marketing", "launch"}
+	llm := []string{"marketing", "outreach", "strategy"}
+	got := mergeSuggestions(ruleBased, llm)
+	want := []string{"pdf", "marketing", "launch", "outreach", "strategy"}
+	if !slicesEqual(got, want) {
+		t.Fatalf("mergeSuggestions = %v, want %v", got, want)
+	}
+}
+
+func TestBuildTagSuggestPromptLocalisesInstruction(t *testing.T) {
+	french := BuildTagSuggestPrompt("notes.md", "Sample content", []string{"draft"}, "french")
+	english := BuildTagSuggestPrompt("notes.md", "Sample content", []string{"draft"}, "english")
+	if !strings.Contains(french, "français") {
+		t.Fatalf("french prompt should contain 'français', got:\n%s", french)
+	}
+	if strings.Contains(french, "Answer in English.") {
+		t.Fatalf("french prompt should NOT contain 'Answer in English.', got:\n%s", french)
+	}
+	if !strings.Contains(english, "Answer in English.") {
+		t.Fatalf("english prompt should contain 'Answer in English.', got:\n%s", english)
+	}
+	// Both must contain the user-content half verbatim.
+	for _, p := range []string{french, english} {
+		if !strings.Contains(p, "notes.md") {
+			t.Fatalf("prompt missing filename: %s", p)
+		}
+		if !strings.Contains(p, "Sample content") {
+			t.Fatalf("prompt missing content preview: %s", p)
+		}
+	}
+}
+
+func TestExtractExpansionTokens(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want []string
+	}{
+		{"basic", "marketing launch plan", []string{"marketing", "launch", "plan"}},
+		{"deduped", "report report 2024", []string{"report", "2024"}},
+		{"single char dropped", "a x marketing", []string{"marketing"}}, // single-char tokens dropped
+		{"two char kept", "ai bi marketing", []string{"ai", "bi", "marketing"}},
+		{"mixed", "q4 launch marketing 2024", []string{"q4", "launch", "marketing", "2024"}},
+		{"punctuation split", "user-launch,plan", []string{"user", "launch", "plan"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := extractExpansionTokens(tc.in)
+			if !slicesEqual(got, tc.want) {
+				t.Fatalf("extractExpansionTokens(%q) = %v, want %v", tc.in, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestContainsHyphenSegment(t *testing.T) {
+	cases := []struct {
+		s, tok string
+		want   bool
+	}{
+		{"q4-2024", "q4", true},
+		{"q4-2024", "2024", true},
+		{"iq40-survey", "q4", false}, // not hyphen-bounded
+		{"marketing-q4-2024", "q4", true},
+		{"marketing", "marketing", true},
+		{"marketing-launch", "launch", true},
+		{"marketing-launch", "market", false}, // not segment; "market" is prefix without hyphen
+	}
+	for _, tc := range cases {
+		got := containsHyphenSegment(tc.s, tc.tok)
+		if got != tc.want {
+			t.Fatalf("containsHyphenSegment(%q,%q) = %v, want %v", tc.s, tc.tok, got, tc.want)
+		}
+	}
+}
+
+func TestRuleBasedExpansion(t *testing.T) {
+	tags := []string{"marketing-q4-2024", "marketing-q3-2024", "internal", "customer-feedback", "draft"}
+
+	t.Run("hyphen segment beats substring", func(t *testing.T) {
+		got := ruleBasedExpansion("q4 launch", tags)
+		// "marketing-q4-2024" matches "q4" as a hyphen-bounded
+		// segment (+2) so it should be ranked highest. The other
+		// tags either don't match or match weakly.
+		if len(got) == 0 || got[0] != "marketing-q4-2024" {
+			t.Fatalf("expected marketing-q4-2024 first, got %v", got)
+		}
+	})
+
+	t.Run("substring matches", func(t *testing.T) {
+		got := ruleBasedExpansion("market", tags)
+		// Both marketing tags should match by substring.
+		hasQ4 := false
+		hasQ3 := false
+		for _, t := range got {
+			if t == "marketing-q4-2024" {
+				hasQ4 = true
+			}
+			if t == "marketing-q3-2024" {
+				hasQ3 = true
+			}
+		}
+		if !hasQ4 || !hasQ3 {
+			t.Fatalf("expected both marketing tags in expansion, got %v", got)
+		}
+	})
+
+	t.Run("no match returns empty", func(t *testing.T) {
+		got := ruleBasedExpansion("completely-unrelated", tags)
+		if len(got) != 0 {
+			t.Fatalf("expected empty expansion, got %v", got)
+		}
+	})
+
+	t.Run("empty workspace tags", func(t *testing.T) {
+		got := ruleBasedExpansion("anything", nil)
+		if len(got) != 0 {
+			t.Fatalf("expected empty expansion for no workspace tags, got %v", got)
+		}
+	})
+}
+
+func TestBuildQueryExpansionPromptLocalises(t *testing.T) {
+	german := BuildQueryExpansionPrompt("marketing launch", []string{"q4"}, "german")
+	english := BuildQueryExpansionPrompt("marketing launch", []string{"q4"}, "english")
+	if !strings.Contains(german, "Deutsch") {
+		t.Fatalf("german prompt should contain 'Deutsch', got:\n%s", german)
+	}
+	if !strings.Contains(english, "Answer in English.") {
+		t.Fatalf("english prompt should contain 'Answer in English.', got:\n%s", english)
+	}
+	// User content half is identical across languages.
+	for _, p := range []string{german, english} {
+		if !strings.Contains(p, "marketing launch") {
+			t.Fatalf("prompt missing query: %s", p)
+		}
+	}
+}
+
+func slicesEqual(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
