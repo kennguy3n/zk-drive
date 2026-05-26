@@ -557,7 +557,7 @@ func TestRecordDBQuery_EmitsHistogramAndCounter(t *testing.T) {
 	m.RecordDBQuery(metrics.DBOpPermissionCheckAccessWithInheritance, 3*time.Millisecond, metrics.DBResultNotFound)
 
 	families := mustGather(t, m.Registry)
-	names := gatherNames(families)
+	names := familyNames(families)
 	wantNames := []string{"zkdrive_db_queries_total", "zkdrive_db_query_duration_seconds"}
 	for _, want := range wantNames {
 		found := false
@@ -629,7 +629,7 @@ func TestRecordCacheOp_EmitsCounter(t *testing.T) {
 		}
 	}
 	if f == nil {
-		t.Fatalf("zkdrive_cache_ops_total family missing; got %v", gatherNames(families))
+		t.Fatalf("zkdrive_cache_ops_total family missing; got %v", familyNames(families))
 	}
 	// Expect 5 distinct (layer, op, result) series — every
 	// label combination above produced its own series.
@@ -665,14 +665,3 @@ func TestRecordCacheOp_NilSafe(t *testing.T) {
 	m.RecordCacheOp(metrics.CacheLayerPerm, metrics.CacheOpRead, metrics.CacheResultHit)
 }
 
-// gatherNames returns the metric family names from a Gather
-// result. Used by the WS8 metrics tests to assert presence of
-// the new families without relying on string-search of the
-// rendered exposition format.
-func gatherNames(families []*dto.MetricFamily) []string {
-	out := make([]string, 0, len(families))
-	for _, f := range families {
-		out = append(out, f.GetName())
-	}
-	return out
-}
