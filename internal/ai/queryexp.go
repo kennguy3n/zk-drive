@@ -46,6 +46,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/kennguy3n/zk-drive/internal/logging"
+	"github.com/kennguy3n/zk-drive/internal/typednil"
 )
 
 // queryExpansionMaxTerms caps the number of expansion terms returned
@@ -96,7 +97,17 @@ func NewExpansionService(pool *pgxpool.Pool) *ExpansionService {
 // WithLLM wires an on-device LLM client. Behavior parallels
 // SummaryService.WithLLM and SuggestionService.WithLLM — any
 // client error degrades to the rule-based path only.
+//
+// The typed-nil guard mirrors the handler-level With* setters in
+// api/drive and the sibling SummaryService/SuggestionService
+// setters. A (*OllamaClient)(nil) wrapped in LLMClient would slip
+// past the s.llm != nil check inside ExpandResult and NPE at
+// Generate(). Devin Review ANALYSIS_0006 on commit 348b13d.
 func (s *ExpansionService) WithLLM(c LLMClient) *ExpansionService {
+	if typednil.IsTypedNil(c) {
+		s.llm = nil
+		return s
+	}
 	s.llm = c
 	return s
 }
@@ -104,7 +115,16 @@ func (s *ExpansionService) WithLLM(c LLMClient) *ExpansionService {
 // WithLanguageResolver wires the workspace search-language resolver
 // so the LLM prompt can be localised. Same pattern as the
 // SummaryService / SuggestionService wirings.
+//
+// Same typed-nil guard rationale as WithLLM above. A typed-nil
+// resolver wrapped in WorkspaceLanguageResolver would pass
+// resolveWorkspaceLanguage's nil-check and NPE on
+// GetSearchLanguage. Devin Review ANALYSIS_0006 on commit 348b13d.
 func (s *ExpansionService) WithLanguageResolver(r WorkspaceLanguageResolver) *ExpansionService {
+	if typednil.IsTypedNil(r) {
+		s.languageResolver = nil
+		return s
+	}
 	s.languageResolver = r
 	return s
 }

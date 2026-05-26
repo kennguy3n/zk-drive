@@ -33,6 +33,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/kennguy3n/zk-drive/internal/folder"
+	"github.com/kennguy3n/zk-drive/internal/typednil"
 )
 
 // ErrStrictZKForbidden is returned when Summarize is asked to produce
@@ -136,7 +137,24 @@ func NewSummaryService(pool *pgxpool.Pool) *SummaryService {
 // failure) the service transparently falls back to the rule-based
 // scaffold — callers see a successful 200 with a non-empty summary
 // either way.
+//
+// The typed-nil guard mirrors the handler-level With* setters in
+// api/drive (WithTagSuggester / WithQueryExpander / WithWebhooks /
+// WithPreviews). A (*OllamaClient)(nil) wrapped in the LLMClient
+// interface would slip past the s.llm != nil check inside Summarize
+// and NPE at first Generate() call. Production wires from
+// cmd/server/main.go after a successful NewOllamaClient that
+// guarantees non-nil, but the guard keeps the contract honest for
+// future wiring sites (alt deployments, test fakes). Devin Review
+// ANALYSIS_0006 on commit 348b13d flagged the asymmetry; the
+// architecturally correct fix was extracting isTypedNil to
+// internal/typednil so both api/drive and internal/ai share one
+// guard.
 func (s *SummaryService) WithLLM(c LLMClient) *SummaryService {
+	if typednil.IsTypedNil(c) {
+		s.llm = nil
+		return s
+	}
 	s.llm = c
 	return s
 }
@@ -146,7 +164,17 @@ func (s *SummaryService) WithLLM(c LLMClient) *SummaryService {
 // preferred language. A nil resolver is treated as "English
 // fallback" so legacy wiring keeps working unchanged. Returns the
 // service to support the fluent setup pattern used elsewhere.
+//
+// Same typed-nil guard rationale as WithLLM above — a typed-nil
+// concrete resolver wrapped in the WorkspaceLanguageResolver
+// interface would pass resolveWorkspaceLanguage's `if resolver ==
+// nil` check at internal/ai/service.go:115 and NPE on
+// GetSearchLanguage. Devin Review ANALYSIS_0006 on commit 348b13d.
 func (s *SummaryService) WithLanguageResolver(r WorkspaceLanguageResolver) *SummaryService {
+	if typednil.IsTypedNil(r) {
+		s.languageResolver = nil
+		return s
+	}
 	s.languageResolver = r
 	return s
 }

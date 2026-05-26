@@ -50,6 +50,7 @@ import (
 	"github.com/kennguy3n/zk-drive/internal/file"
 	"github.com/kennguy3n/zk-drive/internal/folder"
 	"github.com/kennguy3n/zk-drive/internal/logging"
+	"github.com/kennguy3n/zk-drive/internal/typednil"
 )
 
 // ErrTagSuggestUnavailable is returned when the file is in a folder
@@ -166,14 +167,32 @@ func NewSuggestionService(pool *pgxpool.Pool) *SuggestionService {
 // Devin Review ANALYSIS_0004 on PR #85 flagged the earlier 'never
 // empty' claim as an overstatement — see the longer comment at
 // the call site below for the precondition list.
+//
+// The typed-nil guard mirrors the handler-level With* setters in
+// api/drive and SummaryService.WithLLM. A (*OllamaClient)(nil)
+// wrapped in LLMClient would slip past the s.llm != nil check
+// inside Suggest and NPE at Generate(). Devin Review
+// ANALYSIS_0006 on commit 348b13d.
 func (s *SuggestionService) WithLLM(c LLMClient) *SuggestionService {
+	if typednil.IsTypedNil(c) {
+		s.llm = nil
+		return s
+	}
 	s.llm = c
 	return s
 }
 
 // WithLanguageResolver wires the workspace search-language resolver
 // so the LLM prompt can be localised. Mirrors SummaryService.
+// Same typed-nil guard rationale — a typed-nil concrete resolver
+// wrapped in WorkspaceLanguageResolver would pass
+// resolveWorkspaceLanguage's nil-check and NPE on
+// GetSearchLanguage. Devin Review ANALYSIS_0006 on commit 348b13d.
 func (s *SuggestionService) WithLanguageResolver(r WorkspaceLanguageResolver) *SuggestionService {
+	if typednil.IsTypedNil(r) {
+		s.languageResolver = nil
+		return s
+	}
 	s.languageResolver = r
 	return s
 }
@@ -427,9 +446,19 @@ func ruleBasedSuggestions(fileName, contentPreview string, workspaceTags []strin
 	//     order).
 	//   - tag "q4-2024" matches body "the Q4 2024 plan" without
 	//     needing the body to use the exact hyphen-joined form.
-	//   - we also try the literal hyphen-joined form so a body that
-	//     coincidentally uses the canonical tag ("see marketing-q4-2024")
-	//     still matches with a single comparison.
+	//   - a body that coincidentally uses the canonical tag
+	//     verbatim ("see marketing-q4-2024") still matches: the
+	//     per-part loop independently checks each segment
+	//     ("marketing", "q4", "2024") against the corpus, all three
+	//     hit, so the part-wise pass subsumes the literal-substring
+	//     case. The dedicated literal-substring fast path that used
+	//     to live here was removed because it produced false
+	//     positives on short hyphenated tags (e.g. body "iq40-survey"
+	//     contained "q4" as a non-hyphen-bounded substring); see the
+	//     longer comment on the part-matching loop below for the
+	//     full rationale. Devin Review ANALYSIS_0005 on commit
+	//     348b13d flagged the "with a single comparison" phrasing
+	//     here as documentation drift.
 	corpus := strings.ToLower(fileName + " " + contentPreview)
 	// Lazily-built word-set for the corpus, used to validate
 	// short (≤ shortPartLimit byte) tag segments as standalone

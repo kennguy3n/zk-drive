@@ -14,7 +14,6 @@ import (
 	"context"
 
 	"net/http"
-	"reflect"
 
 	"github.com/kennguy3n/zk-drive/internal/logging"
 
@@ -38,6 +37,7 @@ import (
 	"github.com/kennguy3n/zk-drive/internal/search"
 	"github.com/kennguy3n/zk-drive/internal/sharing"
 	"github.com/kennguy3n/zk-drive/internal/storage"
+	"github.com/kennguy3n/zk-drive/internal/typednil"
 	"github.com/kennguy3n/zk-drive/internal/user"
 	"github.com/kennguy3n/zk-drive/internal/workspace"
 )
@@ -219,35 +219,19 @@ func (h *Handler) WithSearch(s *search.Service) *Handler {
 	return h
 }
 
-// isTypedNil reports whether v is an interface value that holds a
-// nil concrete pointer/map/chan/func/slice. A vanilla `v == nil`
-// comparison on an interface returns false when the type slot is
-// set (even if the value slot is nil) — this helper closes that
-// gap without coupling the handler to specific concrete types.
-// Used by the With* setters that take interface params so a
-// (*ai.SuggestionService)(nil) wrapped in TagSuggester (or any
-// equivalent typed-nil) is normalised to a nil interface here
-// instead of NPE'ing at first method call inside the request
-// handler.
-func isTypedNil(v any) bool {
-	if v == nil {
-		return true
-	}
-	// reflect.ValueOf(v) on an `any` parameter unwraps the
-	// interface and returns the concrete value, so rv.Kind() can
-	// never be reflect.Interface here — the case used to appear
-	// in this switch defensively but it was dead code. Kinds that
-	// support IsNil() (per the reflect package contract) are the
-	// nilable concrete types listed below; passing any other Kind
-	// to IsNil() would panic, so the switch is also a guard. Devin
-	// Review ANALYSIS_0003 on commit b6164c0 flagged the dead arm.
-	rv := reflect.ValueOf(v)
-	switch rv.Kind() {
-	case reflect.Pointer, reflect.Map, reflect.Chan, reflect.Func, reflect.Slice:
-		return rv.IsNil()
-	}
-	return false
-}
+// isTypedNil forwards to internal/typednil.IsTypedNil. Kept as a
+// thin alias so the existing call sites in this file stay
+// readable (without renaming every With* setter call); the helper
+// itself lives in internal/typednil so the AI services in
+// internal/ai can share the same implementation via the same
+// guard semantics. Devin Review ANALYSIS_0006 on commit 348b13d
+// flagged the asymmetry between this package's handler-level
+// guards and internal/ai's service-level WithLLM /
+// WithLanguageResolver setters — extracting was the
+// architecturally correct fix because api/drive imports
+// internal/ai (not the other way around) so the helper had to
+// live below both in the dep graph.
+func isTypedNil(v any) bool { return typednil.IsTypedNil(v) }
 
 // WithTagSuggester wires the AI tag-suggestion service so the
 // /api/files/{id}/tag-suggestions endpoint stops responding 501.
