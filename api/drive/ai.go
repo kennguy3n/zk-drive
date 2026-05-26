@@ -32,13 +32,13 @@ import (
 //     daemon + no rule-based-only deployment configured).
 func (h *Handler) SuggestFileTags(w http.ResponseWriter, r *http.Request) {
 	if h.tagSuggest == nil {
-		http.Error(w, "tag suggestions not configured", http.StatusNotImplemented)
+		middleware.RespondError(w, http.StatusNotImplemented, middleware.ErrCodeUnsupportedOp, "tag suggestions not configured")
 		return
 	}
 	workspaceID, _ := middleware.WorkspaceIDFromContext(r.Context())
 	id, err := uuid.Parse(chi.URLParam(r, "id"))
 	if err != nil {
-		http.Error(w, "invalid id", http.StatusBadRequest)
+		middleware.RespondError(w, http.StatusBadRequest, middleware.ErrCodeBadRequest, "invalid id")
 		return
 	}
 	if err := h.assertResourceAccess(r.Context(), permission.ResourceFile, id, permission.RoleEditor); err != nil {
@@ -47,7 +47,7 @@ func (h *Handler) SuggestFileTags(w http.ResponseWriter, r *http.Request) {
 	}
 	suggestions, err := h.tagSuggest.Suggest(r.Context(), workspaceID, id)
 	if err != nil {
-		writeTagSuggestError(w, err)
+		writeTagSuggestError(w, r, err)
 		return
 	}
 	// Defense-in-depth: the production SuggestionService.Suggest
@@ -82,18 +82,25 @@ func (h *Handler) SuggestFileTags(w http.ResponseWriter, r *http.Request) {
 //   - 501 if the expansion service hasn't been wired.
 func (h *Handler) ExpandSearchQuery(w http.ResponseWriter, r *http.Request) {
 	if h.queryExpand == nil {
-		http.Error(w, "query expansion not configured", http.StatusNotImplemented)
+		middleware.RespondError(w, http.StatusNotImplemented, middleware.ErrCodeUnsupportedOp, "query expansion not configured")
 		return
 	}
 	workspaceID, _ := middleware.WorkspaceIDFromContext(r.Context())
 	query := strings.TrimSpace(r.URL.Query().Get("q"))
 	if query == "" {
-		http.Error(w, "q is required", http.StatusBadRequest)
+		middleware.RespondError(w, http.StatusBadRequest, middleware.ErrCodeMissingField, "q is required")
 		return
 	}
 	terms, llmUsed, language, err := h.queryExpand.Expand(r.Context(), workspaceID, query)
 	if err != nil {
-		http.Error(w, "expand: "+err.Error(), http.StatusInternalServerError)
+		// Expand() default error (LLM provider 500, timeout,
+		// rule-engine panic) is routed through
+		// RespondInternalError so err is logged with op + path
+		// + method but the response body never carries the raw
+		// Go error string. Same redaction contract as the
+		// writeServiceError default branch and the kchat
+		// RoomSummary default arm fixed in 8d0f38e.
+		middleware.RespondInternalError(w, r, "expand search query", err)
 		return
 	}
 	// Defense-in-depth: same rationale as SuggestFileTags above. The
@@ -139,13 +146,23 @@ func (h *Handler) ExpandSearchQuery(w http.ResponseWriter, r *http.Request) {
 // the typed sentinels (ai.ErrTagSuggest*) rather than string
 // matching so the contract is checked by the compiler when the ai
 // package renames a sentinel.
-func writeTagSuggestError(w http.ResponseWriter, err error) {
+func writeTagSuggestError(w http.ResponseWriter, r *http.Request, err error) {
 	switch {
 	case errors.Is(err, ai.ErrTagSuggestUnavailable):
-		http.Error(w, "tag suggestions unavailable for strict-zk content", http.StatusConflict)
+		middleware.RespondError(w, http.StatusConflict, middleware.ErrCodeConflict, "tag suggestions unavailable for strict-zk content")
 	case errors.Is(err, ai.ErrTagSuggestFileNotFound):
-		http.Error(w, "file not found", http.StatusNotFound)
+		middleware.RespondError(w, http.StatusNotFound, middleware.ErrCodeNotFound, "file not found")
 	default:
-		http.Error(w, "suggest: "+err.Error(), http.StatusInternalServerError)
+		// Default branch was 'http.Error(w, "suggest: "+
+		// err.Error(), 500)' — leaked the raw err string
+		// (LLM provider details, dependency-injection panics)
+		// in both Content-Type plain/text and the body.
+		// RespondInternalError gives us slog'd err server-side
+		// with op='suggest tags' + the structured
+		// INTERNAL_ERROR JSON envelope the frontend's
+		// translateApiError consumes. Threading *http.Request
+		// in matches writeServiceError / writeDocumentError /
+		// writeSharingError signature shape.
+		middleware.RespondInternalError(w, r, "suggest tags", err)
 	}
 }
