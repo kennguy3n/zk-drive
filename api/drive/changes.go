@@ -3,6 +3,7 @@ package drive
 import (
 	"net/http"
 	"strconv"
+	"strings"
 
 	"github.com/kennguy3n/zk-drive/api/middleware"
 	"github.com/kennguy3n/zk-drive/internal/changefeed"
@@ -145,7 +146,11 @@ func parseInt64Query(r *http.Request, name string, def int64) (int64, error) {
 // at the edge means a negative limit and an unset limit produce the
 // same observable response — principle of least surprise.
 func parseIntQuery(r *http.Request, name string, def int) (int, error) {
-	raw := r.URL.Query().Get(name)
+	// TrimSpace matches the admin package's parseIntQuery so a
+	// client passing `?limit=%2050` (url-encoded space + 50)
+	// resolves identically against both packages. Devin Review
+	// ANALYSIS_0002 on commit d4c16d4 flagged the divergence.
+	raw := strings.TrimSpace(r.URL.Query().Get(name))
 	if raw == "" {
 		return def, nil
 	}
