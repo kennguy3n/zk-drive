@@ -541,3 +541,138 @@ func familyNames(families []*dto.MetricFamily) []string {
 	}
 	return out
 }
+
+// TestRecordDBQuery_EmitsHistogramAndCounter verifies the
+// per-query observability surface emits a histogram observation
+// AND a counter increment for every recorded query, partitioned
+// by op + result. The two are deliberately split (one labels
+// op×result, the other op only) so dashboards can join them for
+// per-result rates without doubling histogram cardinality —
+// validating that BOTH are present is the contract this test
+// pins.
+func TestRecordDBQuery_EmitsHistogramAndCounter(t *testing.T) {
+	m := metrics.New()
+	m.RecordDBQuery(metrics.DBOpPermissionCheckAccessWithInheritance, 12*time.Millisecond, metrics.DBResultOK)
+	m.RecordDBQuery(metrics.DBOpPermissionCheckAccessWithInheritance, 7*time.Millisecond, metrics.DBResultError)
+	m.RecordDBQuery(metrics.DBOpPermissionCheckAccessWithInheritance, 3*time.Millisecond, metrics.DBResultNotFound)
+
+	families := mustGather(t, m.Registry)
+	names := gatherNames(families)
+	wantNames := []string{"zkdrive_db_queries_total", "zkdrive_db_query_duration_seconds"}
+	for _, want := range wantNames {
+		found := false
+		for _, n := range names {
+			if n == want {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("metric family %q missing; got names %v", want, names)
+		}
+	}
+
+	// Verify result labels split correctly. We expect three
+	// distinct {result=} series under zkdrive_db_queries_total.
+	for _, f := range families {
+		if f.GetName() != "zkdrive_db_queries_total" {
+			continue
+		}
+		seenResults := map[string]bool{}
+		for _, mtr := range f.Metric {
+			for _, lp := range mtr.Label {
+				if lp.GetName() == "result" {
+					seenResults[lp.GetValue()] = true
+				}
+			}
+		}
+		for _, want := range []string{"ok", "error", "not_found"} {
+			if !seenResults[want] {
+				t.Errorf("expected result=%s series; saw %v", want, seenResults)
+			}
+		}
+	}
+}
+
+// TestRecordDBQuery_NilSafe verifies that calling RecordDBQuery
+// on a nil *Metrics (which the cmd/migrate boot mode passes when
+// metrics aren't installed) does not panic. The recorder must be
+// usable in every binary linking the package even if the
+// histogram is never registered.
+func TestRecordDBQuery_NilSafe(t *testing.T) {
+	defer func() {
+		if r := recover(); r != nil {
+			t.Errorf("RecordDBQuery panicked on nil receiver: %v", r)
+		}
+	}()
+	var m *metrics.Metrics
+	m.RecordDBQuery(metrics.DBOpPermissionCheckAccess, time.Millisecond, metrics.DBResultOK)
+}
+
+// TestRecordCacheOp_EmitsCounter verifies the cache-ops counter
+// is mounted with the expected name and accepts the canonical
+// label set.
+func TestRecordCacheOp_EmitsCounter(t *testing.T) {
+	m := metrics.New()
+	m.RecordCacheOp(metrics.CacheLayerPerm, metrics.CacheOpRead, metrics.CacheResultHit)
+	m.RecordCacheOp(metrics.CacheLayerPerm, metrics.CacheOpRead, metrics.CacheResultMiss)
+	m.RecordCacheOp(metrics.CacheLayerPerm, metrics.CacheOpBust, metrics.CacheResultBust)
+	m.RecordCacheOp(metrics.CacheLayerPerm, metrics.CacheOpRead, metrics.CacheResultNegativeHit)
+	m.RecordCacheOp(metrics.CacheLayerPerm, metrics.CacheOpRead, metrics.CacheResultError)
+
+	families := mustGather(t, m.Registry)
+	var f *dto.MetricFamily
+	for _, fam := range families {
+		if fam.GetName() == "zkdrive_cache_ops_total" {
+			f = fam
+			break
+		}
+	}
+	if f == nil {
+		t.Fatalf("zkdrive_cache_ops_total family missing; got %v", gatherNames(families))
+	}
+	// Expect 5 distinct (layer, op, result) series — every
+	// label combination above produced its own series.
+	if got := len(f.Metric); got != 5 {
+		t.Errorf("expected 5 cache_ops series; got %d", got)
+	}
+	// Verify the result label vocabulary.
+	seen := map[string]bool{}
+	for _, mtr := range f.Metric {
+		for _, lp := range mtr.Label {
+			if lp.GetName() == "result" {
+				seen[lp.GetValue()] = true
+			}
+		}
+	}
+	for _, want := range []string{"hit", "miss", "negative_hit", "bust", "error"} {
+		if !seen[want] {
+			t.Errorf("expected result=%s series; saw %v", want, seen)
+		}
+	}
+}
+
+// TestRecordCacheOp_NilSafe matches the DB nil-safety check —
+// emits no panic on a nil receiver so callers can pass a nil
+// observer in non-metrics boot modes.
+func TestRecordCacheOp_NilSafe(t *testing.T) {
+	defer func() {
+		if r := recover(); r != nil {
+			t.Errorf("RecordCacheOp panicked on nil receiver: %v", r)
+		}
+	}()
+	var m *metrics.Metrics
+	m.RecordCacheOp(metrics.CacheLayerPerm, metrics.CacheOpRead, metrics.CacheResultHit)
+}
+
+// gatherNames returns the metric family names from a Gather
+// result. Used by the WS8 metrics tests to assert presence of
+// the new families without relying on string-search of the
+// rendered exposition format.
+func gatherNames(families []*dto.MetricFamily) []string {
+	out := make([]string, 0, len(families))
+	for _, f := range families {
+		out = append(out, f.GetName())
+	}
+	return out
+}

@@ -559,3 +559,183 @@ func TestServiceRecord_NoPublisherStillPersists(t *testing.T) {
 		t.Fatalf("expected 1 row persisted")
 	}
 }
+
+// recordingBuster captures BustWorkspace invocations so tests can
+// assert which mutations trigger cache invalidation and that
+// batch de-duplication collapses N records to 1 bust per
+// workspace.
+type recordingBuster struct {
+	mu     sync.Mutex
+	busted []uuid.UUID
+}
+
+func (b *recordingBuster) BustWorkspace(_ context.Context, workspaceID uuid.UUID) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.busted = append(b.busted, workspaceID)
+}
+
+func (b *recordingBuster) snapshot() []uuid.UUID {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	out := make([]uuid.UUID, len(b.busted))
+	copy(out, b.busted)
+	return out
+}
+
+// TestService_Record_BustsCacheOnPermissionMutation verifies the
+// changefeed fires the cache buster after persisting a permission
+// mutation. This is the canonical hot-path invalidation: a
+// permission.create event must invalidate the perm cache or the
+// API would serve the pre-grant view for up to TTL seconds.
+func TestService_Record_BustsCacheOnPermissionMutation(t *testing.T) {
+	repo := newFakeRepo()
+	buster := &recordingBuster{}
+	svc := changefeed.NewService(repo).WithCacheBuster(buster)
+	ws := uuid.New()
+	if _, err := svc.Record(context.Background(), changefeed.RecordInput{
+		WorkspaceID: ws,
+		ActorID:     ptrUUID(uuid.New()),
+		Kind:        changefeed.KindPermission,
+		Op:          changefeed.OpCreate,
+		ResourceID:  uuid.New(),
+	}); err != nil {
+		t.Fatalf("record: %v", err)
+	}
+	got := buster.snapshot()
+	if len(got) != 1 || got[0] != ws {
+		t.Errorf("expected 1 bust on workspace %s; got %v", ws, got)
+	}
+}
+
+// TestService_Record_NoBustOnFileCreate guards against
+// over-busting: a pure file.create event has no descendants and
+// cannot affect any cached access-check answer, so the bust path
+// must NOT fire. Over-busting would defeat the cache on every
+// upload.
+func TestService_Record_NoBustOnFileCreate(t *testing.T) {
+	repo := newFakeRepo()
+	buster := &recordingBuster{}
+	svc := changefeed.NewService(repo).WithCacheBuster(buster)
+	if _, err := svc.Record(context.Background(), changefeed.RecordInput{
+		WorkspaceID: uuid.New(),
+		ActorID:     ptrUUID(uuid.New()),
+		Kind:        changefeed.KindFile,
+		Op:          changefeed.OpCreate,
+		ResourceID:  uuid.New(),
+	}); err != nil {
+		t.Fatalf("record: %v", err)
+	}
+	if got := buster.snapshot(); len(got) != 0 {
+		t.Errorf("expected no busts on file.create; got %v", got)
+	}
+}
+
+// TestService_Record_BustsOnFolderMove verifies that a folder
+// move (which changes the ancestry chain for every descendant)
+// triggers the bust. Without this the perm cache would serve
+// pre-move answers for up to TTL seconds.
+func TestService_Record_BustsOnFolderMove(t *testing.T) {
+	repo := newFakeRepo()
+	buster := &recordingBuster{}
+	svc := changefeed.NewService(repo).WithCacheBuster(buster)
+	ws := uuid.New()
+	if _, err := svc.Record(context.Background(), changefeed.RecordInput{
+		WorkspaceID: ws,
+		ActorID:     ptrUUID(uuid.New()),
+		Kind:        changefeed.KindFolder,
+		Op:          changefeed.OpMove,
+		ResourceID:  uuid.New(),
+	}); err != nil {
+		t.Fatalf("record: %v", err)
+	}
+	got := buster.snapshot()
+	if len(got) != 1 || got[0] != ws {
+		t.Errorf("expected 1 bust on workspace %s; got %v", ws, got)
+	}
+}
+
+// TestService_BatchRecord_DeduplicatesBusts verifies that a
+// bulk operation (e.g. 100-item bulk move) collapses to a single
+// bust per workspace. Without this, a large bulk would issue N
+// redundant INCRs against Redis.
+func TestService_BatchRecord_DeduplicatesBusts(t *testing.T) {
+	repo := newFakeRepo()
+	buster := &recordingBuster{}
+	svc := changefeed.NewService(repo).WithCacheBuster(buster)
+	ws := uuid.New()
+	inputs := make([]changefeed.RecordInput, 0, 50)
+	for i := 0; i < 50; i++ {
+		inputs = append(inputs, changefeed.RecordInput{
+			WorkspaceID: ws,
+			ActorID:     ptrUUID(uuid.New()),
+			Kind:        changefeed.KindFile,
+			Op:          changefeed.OpMove,
+			ResourceID:  uuid.New(),
+		})
+	}
+	if _, err := svc.BatchRecord(context.Background(), inputs); err != nil {
+		t.Fatalf("batch: %v", err)
+	}
+	if got := buster.snapshot(); len(got) != 1 || got[0] != ws {
+		t.Errorf("expected 1 deduplicated bust on workspace %s; got %v", ws, got)
+	}
+}
+
+// TestService_BatchRecord_BustsEachUniqueWorkspace verifies that
+// when a batch spans multiple workspaces, each unique workspace
+// is busted exactly once.
+func TestService_BatchRecord_BustsEachUniqueWorkspace(t *testing.T) {
+	repo := newFakeRepo()
+	buster := &recordingBuster{}
+	svc := changefeed.NewService(repo).WithCacheBuster(buster)
+	ws1, ws2, ws3 := uuid.New(), uuid.New(), uuid.New()
+	inputs := []changefeed.RecordInput{
+		{WorkspaceID: ws1, ActorID: ptrUUID(uuid.New()), Kind: changefeed.KindPermission, Op: changefeed.OpCreate, ResourceID: uuid.New()},
+		{WorkspaceID: ws2, ActorID: ptrUUID(uuid.New()), Kind: changefeed.KindFolder, Op: changefeed.OpMove, ResourceID: uuid.New()},
+		{WorkspaceID: ws1, ActorID: ptrUUID(uuid.New()), Kind: changefeed.KindPermission, Op: changefeed.OpDelete, ResourceID: uuid.New()},
+		{WorkspaceID: ws3, ActorID: ptrUUID(uuid.New()), Kind: changefeed.KindFile, Op: changefeed.OpMove, ResourceID: uuid.New()},
+		// A file.create in ws1 must NOT add a third entry —
+		// shouldBustForMutation rejects file.create.
+		{WorkspaceID: ws1, ActorID: ptrUUID(uuid.New()), Kind: changefeed.KindFile, Op: changefeed.OpCreate, ResourceID: uuid.New()},
+	}
+	if _, err := svc.BatchRecord(context.Background(), inputs); err != nil {
+		t.Fatalf("batch: %v", err)
+	}
+	got := buster.snapshot()
+	if len(got) != 3 {
+		t.Fatalf("expected 3 unique-workspace busts; got %d (%v)", len(got), got)
+	}
+	seen := map[uuid.UUID]bool{}
+	for _, w := range got {
+		seen[w] = true
+	}
+	for _, want := range []uuid.UUID{ws1, ws2, ws3} {
+		if !seen[want] {
+			t.Errorf("expected bust on %s", want)
+		}
+	}
+}
+
+// TestService_Record_NilBusterIsNoop verifies that a service
+// wired without a cache buster still records and publishes
+// normally — the bust hook must be a true no-op when disabled
+// rather than a panic.
+func TestService_Record_NilBusterIsNoop(t *testing.T) {
+	repo := newFakeRepo()
+	svc := changefeed.NewService(repo)
+	if _, err := svc.Record(context.Background(), changefeed.RecordInput{
+		WorkspaceID: uuid.New(),
+		ActorID:     ptrUUID(uuid.New()),
+		Kind:        changefeed.KindPermission,
+		Op:          changefeed.OpCreate,
+		ResourceID:  uuid.New(),
+	}); err != nil {
+		t.Fatalf("record: %v", err)
+	}
+	if len(repo.rows) != 1 {
+		t.Errorf("row not persisted with nil buster")
+	}
+}
+
+func ptrUUID(u uuid.UUID) *uuid.UUID { return &u }

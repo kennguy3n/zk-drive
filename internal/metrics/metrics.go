@@ -227,6 +227,33 @@ type Metrics struct {
 	// labelled by outcome so operators can plot p99 success
 	// latency separately from net_error timeouts.
 	webhookDeliveryDuration *prometheus.HistogramVec
+
+	// dbQueriesTotal counts every Postgres query issued by the
+	// hot-path repositories, partitioned by op (closed
+	// vocabulary in internal/metrics/db.go) and result
+	// ('ok'/'error'/'not_found'). 'not_found' is a deliberate
+	// third label rather than rolled into 'error' so the
+	// (frequent, expected) ErrNoRows outcome doesn't poison
+	// the dashboards' error-rate signal.
+	dbQueriesTotal *prometheus.CounterVec
+
+	// dbQueryDuration observes wall time per query, partitioned
+	// only by op (not result — successes and errors typically
+	// have similar cost, splitting them doubles cardinality
+	// without operational benefit). Operators join with
+	// dbQueriesTotal for per-result rates.
+	dbQueryDuration *prometheus.HistogramVec
+
+	// cacheOpsTotal counts every operation against the
+	// application-level caches in front of Postgres, partitioned
+	// by layer ('perm' today; 'listing' once that cache lands),
+	// op ('read'/'write'/'bust') and result
+	// ('hit'/'miss'/'negative_hit'/'bust'/'error'). Cardinality
+	// is intentionally capped at 1 layer × 3 ops × 5 results =
+	// 15 series per layer; adding a new layer adds a constant in
+	// internal/metrics/cache.go so the cardinality bound is
+	// documented at the type.
+	cacheOpsTotal *prometheus.CounterVec
 }
 
 // New constructs a Metrics with a fresh private registry and the
@@ -343,6 +370,8 @@ func New() *Metrics {
 	m.registerEmailMetrics(reg)
 	m.registerAuditArchiveMetrics(reg)
 	m.registerWebhookMetrics(reg)
+	m.registerDBMetrics(reg)
+	m.registerCacheMetrics(reg)
 
 	return m
 }

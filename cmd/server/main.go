@@ -292,7 +292,17 @@ func run() error {
 		slog.Info("fabric console URL not set, signup will skip tenant provisioning")
 	}
 
-	permissionSvc := permission.NewService(permission.NewPostgresRepository(pool))
+	// permRepo is constructed once and held so we can attach
+	// the DB observer to it (for the zkdrive_db_query_duration
+	// histogram) AFTER metricsSurface is built below, without
+	// reconstructing the service. The cache layer wraps this
+	// same repo via permissionSvc.WithCache, so the
+	// observer is attached to the un-cached delegate — i.e. it
+	// fires only on cache misses, which is exactly what
+	// operators want to measure (the histogram answers "how
+	// slow is the post-cache fall-through?").
+	permRepo := permission.NewPostgresRepository(pool)
+	permissionSvc := permission.NewService(permRepo)
 	activitySvc := activity.NewService(activity.NewPostgresRepository(pool))
 	defer activitySvc.Close()
 
@@ -727,6 +737,44 @@ func run() error {
 	// would be a no-op staticcheck/SA4006 (same pointer comes back),
 	// so we keep the discard form.
 	emailSvc.WithMetrics(metricsSurface)
+
+	// Install DB query observer on the permission repository
+	// for the zkdrive_db_query_duration_seconds histogram +
+	// zkdrive_db_queries_total counter. The observer is on
+	// the *un-cached* delegate (held in permRepo above), so
+	// every recorded query corresponds to a cache miss when
+	// the cache is enabled — letting operators measure the
+	// effective hit ratio by comparing
+	// zkdrive_cache_ops_total{op="read",result="miss"} against
+	// zkdrive_db_queries_total{op="permission.check_access_with_inheritance"}.
+	permRepo.WithObserver(metricsSurface)
+
+	// Wire the Redis-backed read-through cache in front of
+	// permission resolution. Default-on in production
+	// (cfg.PerformanceCacheEnabled defaults to true) but
+	// silently no-ops when REDIS_URL is unset — a multi-
+	// replica deployment without Redis can't safely cache
+	// permission resolutions (per-replica drift), so the
+	// safer behaviour is to skip caching altogether and serve
+	// from Postgres on every check. The cache invalidation
+	// hook is wired below via changefeedSvc.WithCacheBuster
+	// so any permission / folder-topology mutation persisted
+	// through the changefeed triggers a workspace-scoped
+	// invalidation before the WS broadcast lands. Cache
+	// observability lives in zkdrive_cache_ops_total (see
+	// internal/metrics/cache.go).
+	if cfg.PerformanceCacheEnabled && redisClient != nil {
+		permissionSvc.WithCache(redisClient, cfg.PerformanceCacheTTL, metricsSurface)
+		changefeedSvc.WithCacheBuster(permissionSvc)
+		slog.Info("permission cache enabled",
+			"ttl", cfg.PerformanceCacheTTL,
+		)
+	} else {
+		slog.Info("permission cache disabled",
+			"flag_enabled", cfg.PerformanceCacheEnabled,
+			"redis_configured", redisClient != nil,
+		)
+	}
 
 	r := chi.NewRouter()
 	// chimw.RequestID is intentionally omitted: the request_id
