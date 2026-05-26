@@ -248,11 +248,16 @@ type Metrics struct {
 	// application-level caches in front of Postgres, partitioned
 	// by layer ('perm' today; 'listing' once that cache lands),
 	// op ('read'/'write'/'bust') and result
-	// ('hit'/'miss'/'negative_hit'/'bust'/'error'). Cardinality
-	// is intentionally capped at 1 layer × 3 ops × 5 results =
-	// 15 series per layer; adding a new layer adds a constant in
-	// internal/metrics/cache.go so the cardinality bound is
-	// documented at the type.
+	// ('hit'/'miss'/'negative_hit'/'bust'/'ok'/'error'). The
+	// theoretical cardinality bound is 1 layer × 3 ops × 6
+	// results = 18 series per layer, but the emit-set is
+	// sparse: read emits hit/miss/negative_hit/error (4),
+	// write emits ok/error (2), bust emits bust/error (2) —
+	// 8 distinct (op, result) tuples in production. The
+	// canonical result vocabulary lives in
+	// internal/metrics/cache.go (CacheResult* const block);
+	// adding a new layer adds a constant in the same file so
+	// the cardinality bound stays documented at the type.
 	cacheOpsTotal *prometheus.CounterVec
 }
 
