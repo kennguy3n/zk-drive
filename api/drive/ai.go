@@ -95,6 +95,17 @@ func (h *Handler) ExpandSearchQuery(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "expand: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
+	// Defense-in-depth: same rationale as SuggestFileTags above. The
+	// production ExpansionService.ExpandResult coalesces nil internally
+	// (at internal/ai/queryexp.go:194-196), but the handler operates on
+	// the QueryExpander interface — a third-party implementation could
+	// return (nil, false, "", nil) and we'd serialise `"terms": null`
+	// instead of the documented `"terms": []`. Both sibling handlers in
+	// this file now apply the same guard. Devin Review BUG_0001 on
+	// commit 744909a.
+	if terms == nil {
+		terms = []string{}
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"query":    query,
 		"terms":    terms,
