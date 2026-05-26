@@ -549,6 +549,7 @@
     "FILE_TOO_LARGE": "This file is too large.",
     "FILE_VIRUS_DETECTED": "This file failed the virus scan.",
     "SHARE_PASSWORD_REQUIRED": "This share link requires a password.",
+    "SHARE_LINK_EXHAUSTED": "This share link has reached its download limit.",
     "BILLING_NOT_CONFIGURED": "Billing isn't set up for this workspace yet.",
     "MAINTENANCE": "This service is temporarily unavailable.",
     "UPSTREAM_FAILED": "An upstream service is unavailable.",

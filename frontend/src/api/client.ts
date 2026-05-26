@@ -42,6 +42,17 @@ const NON_SESSION_401_CODES = new Set<string>([
   // with a workspace selected. Clearing the token here would force a
   // re-login for a recoverable routing error.
   "MISSING_WORKSPACE_CONTEXT",
+  // Invalid MFA code during challenge or enrollment. The mfa_token
+  // session is mid-flight (still valid for a few minutes); the user
+  // just typed the wrong 6 digits. Redirecting to /login would discard
+  // the in-progress challenge and force them to enter their password
+  // again, instead of seeing "Invalid code" and getting to retry.
+  // (AUTH_MFA_REQUIRED and MFA_ENROLL_REQUIRED are declared on the
+  // backend but currently return HTTP 200 with mfa_required:true in
+  // the body, not 401 — so they don't need to be listed here. If a
+  // future handler starts emitting either of them as 401, add them
+  // here at the same time.)
+  "AUTH_MFA_INVALID",
 ]);
 
 // Redirect to /login on session-expiry 401s so stale sessions don't

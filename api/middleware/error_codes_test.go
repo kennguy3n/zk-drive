@@ -113,6 +113,7 @@ func TestErrorCodes_DistinctValues(t *testing.T) {
 		ErrCodeFileTooLarge,
 		ErrCodeVirusDetected,
 		ErrCodeSharePasswordRequired,
+		ErrCodeShareLinkExhausted,
 		ErrCodeBillingNotConfigured,
 		ErrCodeInternal,
 		ErrCodeUpstream,

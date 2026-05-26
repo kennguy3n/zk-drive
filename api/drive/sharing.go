@@ -409,7 +409,12 @@ func writeSharingError(w http.ResponseWriter, err error) {
 		errors.Is(err, sharing.ErrInviteExpired):
 		middleware.RespondError(w, http.StatusGone, middleware.ErrCodeGone, err.Error())
 	case errors.Is(err, sharing.ErrLinkExhausted):
-		middleware.RespondError(w, http.StatusTooManyRequests, middleware.ErrCodeRateLimit, err.Error())
+		// Distinct from RATE_LIMIT_EXCEEDED: rate-limit is a
+		// transient throttle ("retry later"), but link-exhaustion
+		// is permanent (the link's download cap is spent and no
+		// amount of waiting will refill it). The frontend renders
+		// different remediation copy for the two cases.
+		middleware.RespondError(w, http.StatusTooManyRequests, middleware.ErrCodeShareLinkExhausted, err.Error())
 	case errors.Is(err, sharing.ErrPasswordRequired):
 		// Distinct from AUTH_MISSING_TOKEN: the user does not need
 		// to sign in, they need to enter the share-link password.

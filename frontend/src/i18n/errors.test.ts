@@ -49,6 +49,8 @@ const backendCodes = [
   "FILE_VIRUS_DETECTED",
   // Share-link auth (401 distinct from session auth).
   "SHARE_PASSWORD_REQUIRED",
+  // Share-link download cap (429 distinct from rate-limit throttle).
+  "SHARE_LINK_EXHAUSTED",
   // Billing / payments (402 / 412 distinct from internal).
   "BILLING_NOT_CONFIGURED",
   // Service-level failures (5xx).

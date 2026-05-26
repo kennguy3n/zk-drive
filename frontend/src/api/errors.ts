@@ -128,12 +128,18 @@ export function translateApiError(
   const code = extractErrorCode(err);
   if (code) {
     // i18next will fall back to the English file if the code is
-    // missing from the active locale; the `defaultValue` covers
-    // the rarer case where the code is new and not yet in the
-    // English file either (deploy skew).
+    // missing from the active locale. The defaultValue:"" was
+    // intended to flag the "key not found anywhere" case (deploy
+    // skew, brand-new code that the SPA hasn't shipped a string
+    // for yet), but i18next's returnEmptyString:false config option
+    // (set in i18n/index.ts) rejects the empty default and returns
+    // the raw key instead — so without an explicit guard, a
+    // user would see "errors.SOME_NEW_CODE" on screen during deploy
+    // skew. The `translated !== key` check catches that and falls
+    // through to the server-supplied message / generic copy.
     const key = `errors.${code}`;
     const translated = t(key, { defaultValue: "" });
-    if (translated) {
+    if (translated && translated !== key) {
       return translated;
     }
   }

@@ -82,6 +82,13 @@ const (
 	// frontend can render a password prompt rather than a sign-in
 	// screen — see api/drive/sharing.go writeSharingError.
 	ErrCodeSharePasswordRequired ErrorCode = "SHARE_PASSWORD_REQUIRED"
+	// Share-link download cap reached (429). Distinct from
+	// RATE_LIMIT_EXCEEDED — rate-limit is a transient per-user
+	// throttle ("retry later" makes sense) but link-exhaustion is
+	// permanent (the link's download budget is used up; retrying
+	// will not help). The frontend renders different copy and
+	// different remediation guidance for the two cases.
+	ErrCodeShareLinkExhausted ErrorCode = "SHARE_LINK_EXHAUSTED"
 
 	// Billing / payments (402 / 412). Distinct from internal so the
 	// frontend can prompt for upgrade / customer-onboarding flows.
