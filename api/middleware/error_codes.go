@@ -41,6 +41,21 @@ const (
 	ErrCodeAdminOnly   ErrorCode = "ADMIN_ACCESS_REQUIRED"
 	ErrCodeReadOnly    ErrorCode = "READ_ONLY_ROLE"
 	ErrCodeWrongTenant ErrorCode = "WRONG_TENANT"
+
+	// Workspace-routing failure (401 Unauthorized). Distinct from the
+	// AUTH_* codes above because the user IS authenticated — we just
+	// can't route the request to a specific workspace. Lives in its
+	// own block (rather than under the 403 group above) because
+	// api/middleware/tenant.go returns it with StatusUnauthorized,
+	// matching the pre-refactor behavior of the legacy plain-text
+	// `http.Error(..., StatusUnauthorized)` call at the same site.
+	// Treating an unroutable request as 401 nudges clients to retry
+	// with a workspace selector (see frontend/src/api/client.ts
+	// interceptor) rather than show a "permission denied" screen,
+	// which is the correct UX for the missing-header case.
+	// Devin Review ANALYSIS_0002 on commit c964e26 flagged the
+	// earlier placement under the 403 group as a comment/status
+	// mismatch.
 	ErrCodeNoWorkspace ErrorCode = "MISSING_WORKSPACE_CONTEXT"
 
 	// Rate limiting (429 Too Many Requests).
