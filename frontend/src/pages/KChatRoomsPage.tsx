@@ -205,7 +205,7 @@ function SyncDialog({
               >
                 <option value="viewer">{t("share.roleViewer")}</option>
                 <option value="editor">{t("share.roleEditor")}</option>
-                <option value="admin">{t("share.permissionAdmin")}</option>
+                <option value="admin">{t("share.roleAdmin")}</option>
               </select>
               <button onClick={() => removeRow(idx)} type="button">
                 −

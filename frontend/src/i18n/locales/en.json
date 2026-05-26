@@ -301,6 +301,7 @@
     "roleViewer": "Viewer",
     "roleCommenter": "Commenter",
     "roleEditor": "Editor",
+    "roleAdmin": "Admin",
     "passwordOptional": "Password (optional)",
     "passwordPlaceholder": "Leave blank for no password",
     "expiresOptional": "Expires at (optional)",
