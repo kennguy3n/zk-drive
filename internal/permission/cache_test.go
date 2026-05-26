@@ -642,12 +642,21 @@ func TestCachedRepository_ConcurrentReadsSafe(t *testing.T) {
 	// terminates cleanly under -race. The hit-vs-miss split is
 	// observable via the observer counters but the exact ratio
 	// depends on Redis scheduling.
-	if obs.count(layerPerm, opRead, resultMiss)+obs.count(layerPerm, opRead, resultHit) != n {
-		t.Errorf("expected %d total reads; got hit=%d miss=%d (records=%d)",
-			n,
-			obs.count(layerPerm, opRead, resultHit),
-			obs.count(layerPerm, opRead, resultMiss),
-			len(obs.records),
+	// The total must cover every goroutine — hit OR miss OR
+	// resultError. Folding resultError in is defensive: under
+	// miniredis (deterministic, in-process) the error path is
+	// unreachable so empirically the count is zero, but the
+	// assertion stays valid if the test ever runs against a
+	// real Redis with intermittent timeouts under heavy CI
+	// load. The fail-open contract MUST manifest as one of
+	// the three observer outcomes; a missing record would be
+	// a real bug.
+	miss := obs.count(layerPerm, opRead, resultMiss)
+	hit := obs.count(layerPerm, opRead, resultHit)
+	errs := obs.count(layerPerm, opRead, resultError)
+	if miss+hit+errs != n {
+		t.Errorf("expected %d total reads; got hit=%d miss=%d err=%d (records=%d)",
+			n, hit, miss, errs, len(obs.records),
 		)
 	}
 }
