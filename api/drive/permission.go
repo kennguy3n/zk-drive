@@ -51,12 +51,12 @@ func (h *Handler) ListPermissions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := h.assertResourceInWorkspace(r.Context(), workspaceID, resourceType, resourceID); err != nil {
-		writeServiceError(w, err)
+		writeServiceError(w, r, err)
 		return
 	}
 	list, err := h.permissions.ListForResource(r.Context(), workspaceID, resourceType, resourceID)
 	if err != nil {
-		writeServiceError(w, err)
+		writeServiceError(w, r, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"permissions": list})
@@ -96,12 +96,12 @@ func (h *Handler) GrantPermission(w http.ResponseWriter, r *http.Request) {
 	// guessing its UUID. This is the core tenant-isolation check for the
 	// permissions API.
 	if err := h.assertResourceInWorkspace(r.Context(), workspaceID, req.ResourceType, resourceID); err != nil {
-		writeServiceError(w, err)
+		writeServiceError(w, r, err)
 		return
 	}
 	if req.GranteeType == permission.GranteeUser {
 		if err := h.assertUserInWorkspace(r.Context(), workspaceID, granteeID); err != nil {
-			writeServiceError(w, err)
+			writeServiceError(w, r, err)
 			return
 		}
 	}
@@ -118,7 +118,7 @@ func (h *Handler) GrantPermission(w http.ResponseWriter, r *http.Request) {
 
 	p, err := h.permissions.Grant(r.Context(), workspaceID, req.ResourceType, resourceID, req.GranteeType, granteeID, req.Role, expiresAt)
 	if err != nil {
-		writePermissionError(w, err)
+		writePermissionError(w, r, err)
 		return
 	}
 	h.logActivity(r.Context(), activity.ActionPermGrant, req.ResourceType, resourceID, map[string]any{
@@ -158,11 +158,11 @@ func (h *Handler) RevokePermission(w http.ResponseWriter, r *http.Request) {
 	// Fetch first so we can log the resource context on revoke.
 	p, err := h.permissions.GetByID(r.Context(), workspaceID, id)
 	if err != nil {
-		writeServiceError(w, err)
+		writeServiceError(w, r, err)
 		return
 	}
 	if err := h.permissions.Revoke(r.Context(), workspaceID, id); err != nil {
-		writeServiceError(w, err)
+		writeServiceError(w, r, err)
 		return
 	}
 	h.logActivity(r.Context(), activity.ActionPermRevoke, p.ResourceType, p.ResourceID, map[string]any{
@@ -239,13 +239,13 @@ func (h *Handler) assertUserInWorkspace(ctx context.Context, workspaceID, userID
 	return err
 }
 
-func writePermissionError(w http.ResponseWriter, err error) {
+func writePermissionError(w http.ResponseWriter, r *http.Request, err error) {
 	switch {
 	case errors.Is(err, permission.ErrInvalidRole),
 		errors.Is(err, permission.ErrInvalidResourceType),
 		errors.Is(err, permission.ErrInvalidGranteeType):
 		middleware.RespondError(w, http.StatusBadRequest, middleware.ErrCodeBadRequest, err.Error())
 	default:
-		writeServiceError(w, err)
+		writeServiceError(w, r, err)
 	}
 }

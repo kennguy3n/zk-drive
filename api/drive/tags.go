@@ -35,12 +35,12 @@ func (h *Handler) AddFileTag(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := h.assertResourceAccess(r.Context(), permission.ResourceFile, id, permission.RoleEditor); err != nil {
-		writeServiceError(w, err)
+		writeServiceError(w, r, err)
 		return
 	}
 	t, err := h.files.AddTag(r.Context(), workspaceID, id, userID, req.Tag)
 	if err != nil {
-		writeTagError(w, err)
+		writeTagError(w, r, err)
 		return
 	}
 	h.logActivity(r.Context(), activity.ActionFileTagAdd, permission.ResourceFile, id, map[string]any{
@@ -59,12 +59,12 @@ func (h *Handler) ListFileTags(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := h.assertResourceAccess(r.Context(), permission.ResourceFile, id, permission.RoleViewer); err != nil {
-		writeServiceError(w, err)
+		writeServiceError(w, r, err)
 		return
 	}
 	tags, err := h.files.ListTags(r.Context(), workspaceID, id)
 	if err != nil {
-		writeServiceError(w, err)
+		writeServiceError(w, r, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"tags": tags})
@@ -89,11 +89,11 @@ func (h *Handler) RemoveFileTag(w http.ResponseWriter, r *http.Request) {
 	// path-param round-trip is unambiguous and no further unescaping
 	// is required.
 	if err := h.assertResourceAccess(r.Context(), permission.ResourceFile, id, permission.RoleEditor); err != nil {
-		writeServiceError(w, err)
+		writeServiceError(w, r, err)
 		return
 	}
 	if err := h.files.RemoveTag(r.Context(), workspaceID, id, tag); err != nil {
-		writeTagError(w, err)
+		writeTagError(w, r, err)
 		return
 	}
 	h.logActivity(r.Context(), activity.ActionFileTagRemove, permission.ResourceFile, id, map[string]any{
@@ -103,13 +103,13 @@ func (h *Handler) RemoveFileTag(w http.ResponseWriter, r *http.Request) {
 }
 
 // writeTagError maps the file-package tag errors to HTTP statuses.
-func writeTagError(w http.ResponseWriter, err error) {
+func writeTagError(w http.ResponseWriter, r *http.Request, err error) {
 	switch {
 	case errors.Is(err, file.ErrTagAlreadyExists):
 		middleware.RespondError(w, http.StatusConflict, middleware.ErrCodeConflict, err.Error())
 	case errors.Is(err, file.ErrInvalidTag):
 		middleware.RespondError(w, http.StatusBadRequest, middleware.ErrCodeBadRequest, err.Error())
 	default:
-		writeServiceError(w, err)
+		writeServiceError(w, r, err)
 	}
 }

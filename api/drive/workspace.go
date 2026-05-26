@@ -141,7 +141,7 @@ func (h *Handler) createWorkspaceTx(ctx context.Context, name string, current *u
 func (h *Handler) GetWorkspace(w http.ResponseWriter, r *http.Request) {
 	ws, err := h.requireWorkspaceMatch(r)
 	if err != nil {
-		writeServiceError(w, err)
+		writeServiceError(w, r, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, ws)
@@ -156,7 +156,7 @@ func (h *Handler) UpdateWorkspace(w http.ResponseWriter, r *http.Request) {
 	}
 	ws, err := h.requireWorkspaceMatch(r)
 	if err != nil {
-		writeServiceError(w, err)
+		writeServiceError(w, r, err)
 		return
 	}
 	var req updateWorkspaceRequest

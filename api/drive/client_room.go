@@ -91,7 +91,7 @@ func (h *Handler) CreateClientRoom(w http.ResponseWriter, r *http.Request) {
 			middleware.RespondError(w, http.StatusBadRequest, middleware.ErrCodeBadRequest, err.Error())
 			return
 		}
-		writeSharingError(w, err)
+		writeSharingError(w, r, err)
 		return
 	}
 	writeJSON(w, http.StatusCreated, clientRoomResponse{ClientRoom: room, ShareLinkToken: link.Token})
@@ -143,7 +143,7 @@ func (h *Handler) CreateClientRoomFromTemplate(w http.ResponseWriter, r *http.Re
 			middleware.RespondError(w, http.StatusBadRequest, middleware.ErrCodeBadRequest, err.Error())
 			return
 		default:
-			writeSharingError(w, err)
+			writeSharingError(w, r, err)
 			return
 		}
 	}
@@ -178,7 +178,7 @@ func (h *Handler) ListClientRooms(w http.ResponseWriter, r *http.Request) {
 	workspaceID, _ := middleware.WorkspaceIDFromContext(r.Context())
 	rooms, err := h.clientRooms.List(r.Context(), workspaceID)
 	if err != nil {
-		writeServiceError(w, err)
+		writeServiceError(w, r, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"rooms": rooms})
@@ -198,7 +198,7 @@ func (h *Handler) GetClientRoom(w http.ResponseWriter, r *http.Request) {
 	}
 	room, err := h.clientRooms.Get(r.Context(), workspaceID, id)
 	if err != nil {
-		writeSharingError(w, err)
+		writeSharingError(w, r, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, room)
@@ -224,7 +224,7 @@ func (h *Handler) DeleteClientRoom(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := h.clientRooms.Delete(r.Context(), workspaceID, id); err != nil {
-		writeSharingError(w, err)
+		writeSharingError(w, r, err)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)

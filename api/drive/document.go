@@ -107,7 +107,7 @@ func (h *Handler) CreateDocument(w http.ResponseWriter, r *http.Request) {
 	// have at least viewer access to the folder. Editor-level is
 	// required to create — same as folders / files.
 	if err := h.assertResourceAccess(r.Context(), permission.ResourceFolder, folderID, permission.RoleEditor); err != nil {
-		writeServiceError(w, err)
+		writeServiceError(w, r, err)
 		return
 	}
 	doc, parent, err := h.documents.Create(r.Context(), document.CreateInput{
@@ -118,7 +118,7 @@ func (h *Handler) CreateDocument(w http.ResponseWriter, r *http.Request) {
 		CreatedBy:   userID,
 	})
 	if err != nil {
-		writeDocumentError(w, err)
+		writeDocumentError(w, r, err)
 		return
 	}
 	h.logActivity(r.Context(), activity.ActionDocumentCreate, resourceTypeDocument, doc.ID, map[string]any{
@@ -150,11 +150,11 @@ func (h *Handler) GetDocument(w http.ResponseWriter, r *http.Request) {
 	// GetDocumentSnapshot's pre-permission probe.
 	doc, parent, err := h.documents.GetMetadata(r.Context(), workspaceID, id)
 	if err != nil {
-		writeDocumentError(w, err)
+		writeDocumentError(w, r, err)
 		return
 	}
 	if err := h.assertResourceAccess(r.Context(), permission.ResourceFolder, doc.FolderID, permission.RoleViewer); err != nil {
-		writeServiceError(w, err)
+		writeServiceError(w, r, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, newDocumentResponse(doc, parent))
@@ -173,12 +173,12 @@ func (h *Handler) ListFolderDocuments(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := h.assertResourceAccess(r.Context(), permission.ResourceFolder, folderID, permission.RoleViewer); err != nil {
-		writeServiceError(w, err)
+		writeServiceError(w, r, err)
 		return
 	}
 	parent, err := h.folders.GetByID(r.Context(), workspaceID, folderID)
 	if err != nil {
-		writeServiceError(w, err)
+		writeServiceError(w, r, err)
 		return
 	}
 	docs, err := h.documents.ListByFolder(r.Context(), workspaceID, folderID)
@@ -217,11 +217,11 @@ func (h *Handler) RenameDocument(w http.ResponseWriter, r *http.Request) {
 	// never inspects y_state, so the binary fetch would be wasted I/O.
 	doc, parent, err := h.documents.GetMetadata(r.Context(), workspaceID, id)
 	if err != nil {
-		writeDocumentError(w, err)
+		writeDocumentError(w, r, err)
 		return
 	}
 	if err := h.assertResourceAccess(r.Context(), permission.ResourceFolder, doc.FolderID, permission.RoleEditor); err != nil {
-		writeServiceError(w, err)
+		writeServiceError(w, r, err)
 		return
 	}
 	var req renameDocumentRequest
@@ -232,7 +232,7 @@ func (h *Handler) RenameDocument(w http.ResponseWriter, r *http.Request) {
 	oldName := doc.Name
 	updated, err := h.documents.Rename(r.Context(), workspaceID, id, req.Name)
 	if err != nil {
-		writeDocumentError(w, err)
+		writeDocumentError(w, r, err)
 		return
 	}
 	// Rename doesn't change parent folder; reuse the folder fetched
@@ -273,11 +273,11 @@ func (h *Handler) SetDocumentCollabMode(w http.ResponseWriter, r *http.Request) 
 	// binary state is never touched on this path.
 	doc, parent, err := h.documents.GetMetadata(r.Context(), workspaceID, id)
 	if err != nil {
-		writeDocumentError(w, err)
+		writeDocumentError(w, r, err)
 		return
 	}
 	if err := h.assertResourceAccess(r.Context(), permission.ResourceFolder, doc.FolderID, permission.RoleEditor); err != nil {
-		writeServiceError(w, err)
+		writeServiceError(w, r, err)
 		return
 	}
 	var req setCollabModeRequest
@@ -288,7 +288,7 @@ func (h *Handler) SetDocumentCollabMode(w http.ResponseWriter, r *http.Request) 
 	oldMode := doc.CollabMode
 	updated, err := h.documents.SetCollabMode(r.Context(), workspaceID, id, req.CollabMode)
 	if err != nil {
-		writeDocumentError(w, err)
+		writeDocumentError(w, r, err)
 		return
 	}
 	// SetCollabMode doesn't change parent folder; reuse the folder
@@ -324,15 +324,15 @@ func (h *Handler) DeleteDocument(w http.ResponseWriter, r *http.Request) {
 	// binary state is irrelevant to a soft-delete.
 	doc, _, err := h.documents.GetMetadata(r.Context(), workspaceID, id)
 	if err != nil {
-		writeDocumentError(w, err)
+		writeDocumentError(w, r, err)
 		return
 	}
 	if err := h.assertResourceAccess(r.Context(), permission.ResourceFolder, doc.FolderID, permission.RoleEditor); err != nil {
-		writeServiceError(w, err)
+		writeServiceError(w, r, err)
 		return
 	}
 	if err := h.documents.Delete(r.Context(), workspaceID, id); err != nil {
-		writeDocumentError(w, err)
+		writeDocumentError(w, r, err)
 		return
 	}
 	h.logActivity(r.Context(), activity.ActionDocumentDelete, resourceTypeDocument, id, map[string]any{
@@ -363,16 +363,16 @@ func (h *Handler) GetDocumentSnapshot(w http.ResponseWriter, r *http.Request) {
 	// the binary fetch only to receive a 403.
 	meta, _, err := h.documents.GetMetadata(r.Context(), workspaceID, id)
 	if err != nil {
-		writeDocumentError(w, err)
+		writeDocumentError(w, r, err)
 		return
 	}
 	if err := h.assertResourceAccess(r.Context(), permission.ResourceFolder, meta.FolderID, permission.RoleViewer); err != nil {
-		writeServiceError(w, err)
+		writeServiceError(w, r, err)
 		return
 	}
 	snap, err := h.documents.Snapshot(r.Context(), workspaceID, id)
 	if err != nil {
-		writeDocumentError(w, err)
+		writeDocumentError(w, r, err)
 		return
 	}
 	tail := make([]deltaResponse, 0, len(snap.TailDeltas))
@@ -412,11 +412,11 @@ func (h *Handler) ListDocumentDeltas(w http.ResponseWriter, r *http.Request) {
 	// y_state column on every paginated tail fetch.
 	doc, _, err := h.documents.GetMetadata(r.Context(), workspaceID, id)
 	if err != nil {
-		writeDocumentError(w, err)
+		writeDocumentError(w, r, err)
 		return
 	}
 	if err := h.assertResourceAccess(r.Context(), permission.ResourceFolder, doc.FolderID, permission.RoleViewer); err != nil {
-		writeServiceError(w, err)
+		writeServiceError(w, r, err)
 		return
 	}
 	// after_seq is a strict cursor — reject malformed input with 400 so
@@ -499,11 +499,11 @@ func (h *Handler) AppendDocumentDelta(w http.ResponseWriter, r *http.Request) {
 	// two heavy reads + one lock.
 	doc, _, err := h.documents.GetMetadata(r.Context(), workspaceID, id)
 	if err != nil {
-		writeDocumentError(w, err)
+		writeDocumentError(w, r, err)
 		return
 	}
 	if err := h.assertResourceAccess(r.Context(), permission.ResourceFolder, doc.FolderID, permission.RoleEditor); err != nil {
-		writeServiceError(w, err)
+		writeServiceError(w, r, err)
 		return
 	}
 	var req appendDeltaRequest
@@ -523,7 +523,7 @@ func (h *Handler) AppendDocumentDelta(w http.ResponseWriter, r *http.Request) {
 		AuthorUserID: userID,
 	})
 	if err != nil {
-		writeDocumentError(w, err)
+		writeDocumentError(w, r, err)
 		return
 	}
 	writeJSON(w, http.StatusCreated, map[string]any{
@@ -553,7 +553,7 @@ func newDocumentResponse(d *document.Document, parent *folder.Folder) documentRe
 // writeDocumentError maps document-package errors to HTTP statuses
 // then falls through to writeServiceError for any folder / file /
 // permission errors that surface through the document service.
-func writeDocumentError(w http.ResponseWriter, err error) {
+func writeDocumentError(w http.ResponseWriter, r *http.Request, err error) {
 	switch {
 	case errors.Is(err, document.ErrNotFound):
 		middleware.RespondError(w, http.StatusNotFound, middleware.ErrCodeNotFound, err.Error())
@@ -571,6 +571,6 @@ func writeDocumentError(w http.ResponseWriter, err error) {
 	case errors.Is(err, document.ErrSeqConflict):
 		middleware.RespondError(w, http.StatusConflict, middleware.ErrCodeConflict, err.Error())
 	default:
-		writeServiceError(w, err)
+		writeServiceError(w, r, err)
 	}
 }

@@ -126,7 +126,7 @@ func (h *Handler) ServeDocumentCollab(w http.ResponseWriter, r *http.Request) {
 	// columns — the heavy snapshot read happens after auth passes.
 	doc, parent, err := h.documents.GetMetadata(r.Context(), workspaceID, documentID)
 	if err != nil {
-		writeDocumentError(w, err)
+		writeDocumentError(w, r, err)
 		return
 	}
 	if doc.CollabMode == document.CollabModeDisabled {
@@ -145,7 +145,7 @@ func (h *Handler) ServeDocumentCollab(w http.ResponseWriter, r *http.Request) {
 	// still gets to JOIN the room (to observe peer updates) but
 	// the hub silently drops their SyncUpdate / awareness frames.
 	if err := h.assertResourceAccess(r.Context(), permission.ResourceFolder, doc.FolderID, permission.RoleViewer); err != nil {
-		writeServiceError(w, err)
+		writeServiceError(w, r, err)
 		return
 	}
 	canWrite := h.assertResourceAccess(r.Context(), permission.ResourceFolder, doc.FolderID, permission.RoleEditor) == nil
@@ -157,7 +157,7 @@ func (h *Handler) ServeDocumentCollab(w http.ResponseWriter, r *http.Request) {
 	// rather than a half-open WS connection.
 	snap, err := h.documents.Snapshot(r.Context(), workspaceID, documentID)
 	if err != nil {
-		writeDocumentError(w, err)
+		writeDocumentError(w, r, err)
 		return
 	}
 

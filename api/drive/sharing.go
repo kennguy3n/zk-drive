@@ -72,7 +72,7 @@ func (h *Handler) CreateShareLink(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := h.assertResourceInWorkspace(r.Context(), workspaceID, req.ResourceType, resourceID); err != nil {
-		writeServiceError(w, err)
+		writeServiceError(w, r, err)
 		return
 	}
 	var expiresAt *time.Time
@@ -86,7 +86,7 @@ func (h *Handler) CreateShareLink(w http.ResponseWriter, r *http.Request) {
 	}
 	link, err := h.sharing.CreateShareLink(r.Context(), workspaceID, req.ResourceType, resourceID, req.Password, expiresAt, req.MaxDownloads, userID)
 	if err != nil {
-		writeSharingError(w, err)
+		writeSharingError(w, r, err)
 		return
 	}
 	h.notify(r.Context(), func(n *notification.Service) error {
@@ -121,7 +121,7 @@ func (h *Handler) ResolveShareLink(w http.ResponseWriter, r *http.Request) {
 	}
 	link, err := h.sharing.ResolveShareLink(r.Context(), token, password)
 	if err != nil {
-		writeSharingError(w, err)
+		writeSharingError(w, r, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, link)
@@ -145,7 +145,7 @@ func (h *Handler) RevokeShareLink(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := h.sharing.RevokeShareLink(r.Context(), workspaceID, id); err != nil {
-		writeSharingError(w, err)
+		writeSharingError(w, r, err)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
@@ -177,7 +177,7 @@ func (h *Handler) CreateGuestInvite(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := h.assertResourceInWorkspace(r.Context(), workspaceID, permission.ResourceFolder, folderID); err != nil {
-		writeServiceError(w, err)
+		writeServiceError(w, r, err)
 		return
 	}
 	var expiresAt *time.Time
@@ -191,7 +191,7 @@ func (h *Handler) CreateGuestInvite(w http.ResponseWriter, r *http.Request) {
 	}
 	inv, err := h.sharing.CreateGuestInvite(r.Context(), workspaceID, req.Email, folderID, req.Role, expiresAt, userID)
 	if err != nil {
-		writeSharingError(w, err)
+		writeSharingError(w, r, err)
 		return
 	}
 	// Invitee notifications run on two parallel paths:
@@ -338,7 +338,7 @@ func (h *Handler) PreviewGuestInvite(w http.ResponseWriter, r *http.Request) {
 	}
 	preview, err := h.sharing.GetGuestInvitePreview(r.Context(), id)
 	if err != nil {
-		writeSharingError(w, err)
+		writeSharingError(w, r, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, preview)
@@ -360,7 +360,7 @@ func (h *Handler) AcceptGuestInvite(w http.ResponseWriter, r *http.Request) {
 	}
 	inv, err := h.sharing.AcceptGuestInvite(r.Context(), workspaceID, id)
 	if err != nil {
-		writeSharingError(w, err)
+		writeSharingError(w, r, err)
 		return
 	}
 	h.notify(r.Context(), func(n *notification.Service) error {
@@ -387,7 +387,7 @@ func (h *Handler) RevokeGuestInvite(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := h.sharing.RevokeGuestInvite(r.Context(), workspaceID, id); err != nil {
-		writeSharingError(w, err)
+		writeSharingError(w, r, err)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
@@ -397,7 +397,7 @@ func (h *Handler) RevokeGuestInvite(w http.ResponseWriter, r *http.Request) {
 // ErrNotFound becomes 404, invalid-input errors become 400, expired /
 // exhausted / password-related errors become 410 / 429 / 401 / 403 so
 // clients can distinguish them without parsing the error text.
-func writeSharingError(w http.ResponseWriter, err error) {
+func writeSharingError(w http.ResponseWriter, r *http.Request, err error) {
 	switch {
 	case errors.Is(err, sharing.ErrNotFound):
 		middleware.RespondError(w, http.StatusNotFound, middleware.ErrCodeNotFound, err.Error())
@@ -425,6 +425,6 @@ func writeSharingError(w http.ResponseWriter, err error) {
 	case errors.Is(err, sharing.ErrInviteAlreadyUsed):
 		middleware.RespondError(w, http.StatusConflict, middleware.ErrCodeConflict, err.Error())
 	default:
-		writeServiceError(w, err)
+		writeServiceError(w, r, err)
 	}
 }

@@ -72,11 +72,11 @@ func (h *Handler) BulkMove(w http.ResponseWriter, r *http.Request) {
 	}
 	targetFolder, err := h.folders.GetByID(r.Context(), workspaceID, targetID)
 	if err != nil {
-		writeServiceError(w, err)
+		writeServiceError(w, r, err)
 		return
 	}
 	if err := h.assertResourceAccess(r.Context(), permission.ResourceFolder, targetID, permission.RoleEditor); err != nil {
-		writeServiceError(w, err)
+		writeServiceError(w, r, err)
 		return
 	}
 
@@ -257,11 +257,11 @@ func (h *Handler) BulkCopy(w http.ResponseWriter, r *http.Request) {
 	}
 	targetFolder, err := h.folders.GetByID(r.Context(), workspaceID, targetID)
 	if err != nil {
-		writeServiceError(w, err)
+		writeServiceError(w, r, err)
 		return
 	}
 	if err := h.assertResourceAccess(r.Context(), permission.ResourceFolder, targetID, permission.RoleEditor); err != nil {
-		writeServiceError(w, err)
+		writeServiceError(w, r, err)
 		return
 	}
 	resp := bulkResponse{Succeeded: []string{}, Failed: []bulkFailure{}}
@@ -398,12 +398,12 @@ func (h *Handler) BulkDownload(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if err := h.assertResourceAccess(r.Context(), permission.ResourceFile, id, permission.RoleViewer); err != nil {
-			writeServiceError(w, err)
+			writeServiceError(w, r, err)
 			return
 		}
 		f, err := h.files.GetByID(r.Context(), workspaceID, id)
 		if err != nil {
-			writeServiceError(w, err)
+			writeServiceError(w, r, err)
 			return
 		}
 		if f.CurrentVersionID == nil {
@@ -412,7 +412,7 @@ func (h *Handler) BulkDownload(w http.ResponseWriter, r *http.Request) {
 		}
 		v, err := h.files.GetVersionByID(r.Context(), workspaceID, *f.CurrentVersionID)
 		if err != nil {
-			writeServiceError(w, err)
+			writeServiceError(w, r, err)
 			return
 		}
 		if v.ScanStatus == scan.StatusQuarantined {
@@ -427,7 +427,7 @@ func (h *Handler) BulkDownload(w http.ResponseWriter, r *http.Request) {
 		items = append(items, prepped{name: dedupeZipName(seenNames, f.Name), objectKey: v.ObjectKey, size: v.SizeBytes})
 	}
 	if err := h.billing.CheckBandwidthQuota(r.Context(), workspaceID, total); err != nil {
-		writeBillingError(w, err)
+		writeBillingError(w, r, err)
 		return
 	}
 

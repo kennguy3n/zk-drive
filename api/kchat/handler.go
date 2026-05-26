@@ -91,7 +91,7 @@ func (h *Handler) CreateRoom(w http.ResponseWriter, r *http.Request) {
 	}
 	room, err := h.rooms.CreateRoomFolder(r.Context(), workspaceID, req.KChatRoomID, userID)
 	if err != nil {
-		writeServiceError(w, err)
+		writeServiceError(w, r, err)
 		return
 	}
 	writeJSON(w, http.StatusCreated, room)
@@ -106,7 +106,7 @@ func (h *Handler) ListRooms(w http.ResponseWriter, r *http.Request) {
 	}
 	rooms, err := h.rooms.List(r.Context(), workspaceID)
 	if err != nil {
-		writeServiceError(w, err)
+		writeServiceError(w, r, err)
 		return
 	}
 	if rooms == nil {
@@ -129,7 +129,7 @@ func (h *Handler) GetRoom(w http.ResponseWriter, r *http.Request) {
 	}
 	room, err := h.rooms.Get(r.Context(), workspaceID, id)
 	if err != nil {
-		writeServiceError(w, err)
+		writeServiceError(w, r, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, room)
@@ -155,7 +155,7 @@ func (h *Handler) DeleteRoom(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := h.rooms.Delete(r.Context(), workspaceID, id); err != nil {
-		writeServiceError(w, err)
+		writeServiceError(w, r, err)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
@@ -193,7 +193,7 @@ func (h *Handler) SyncMembers(w http.ResponseWriter, r *http.Request) {
 	}
 	mapping, err := h.rooms.Get(r.Context(), workspaceID, id)
 	if err != nil {
-		writeServiceError(w, err)
+		writeServiceError(w, r, err)
 		return
 	}
 	var req syncMembersRequest
@@ -211,7 +211,7 @@ func (h *Handler) SyncMembers(w http.ResponseWriter, r *http.Request) {
 		members = append(members, kchatpkg.MemberSync{UserID: uid, Role: m.Role})
 	}
 	if err := h.rooms.SyncMembers(r.Context(), workspaceID, mapping.KChatRoomID, members); err != nil {
-		writeServiceError(w, err)
+		writeServiceError(w, r, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"synced": len(members)})
@@ -243,7 +243,7 @@ func (h *Handler) AttachmentUploadURL(w http.ResponseWriter, r *http.Request) {
 	}
 	res, err := h.rooms.AttachmentUploadURL(r.Context(), workspaceID, req.KChatRoomID, req.Filename, req.MimeType, req.SizeBytes, userID)
 	if err != nil {
-		writeServiceError(w, err)
+		writeServiceError(w, r, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, res)
@@ -280,7 +280,7 @@ func (h *Handler) AttachmentConfirm(w http.ResponseWriter, r *http.Request) {
 	}
 	res, err := h.rooms.ConfirmAttachment(r.Context(), workspaceID, fileID, req.ObjectKey, req.Checksum, req.SizeBytes, userID)
 	if err != nil {
-		writeServiceError(w, err)
+		writeServiceError(w, r, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, res)
@@ -306,7 +306,7 @@ func (h *Handler) RoomSummary(w http.ResponseWriter, r *http.Request) {
 	}
 	mapping, err := h.rooms.Get(r.Context(), workspaceID, id)
 	if err != nil {
-		writeServiceError(w, err)
+		writeServiceError(w, r, err)
 		return
 	}
 	summary, err := h.summary.Summarize(r.Context(), workspaceID, mapping.FolderID)
@@ -336,8 +336,16 @@ func writeJSON(w http.ResponseWriter, status int, payload any) {
 }
 
 // writeServiceError translates kchat / underlying service errors
-// into HTTP status codes. Unknown errors map to 500.
-func writeServiceError(w http.ResponseWriter, err error) {
+// into HTTP status codes. The default branch (unrecognised error)
+// routes through middleware.RespondInternalError so the underlying
+// err string is logged server-side but never appears in the JSON
+// response body — same redaction contract as api/drive/helpers.go.
+// Devin Review BUG_0002 on commit a2e52fb flagged the prior
+// "drop err.Error() into the JSON message field" pattern as the
+// codebase's biggest 500 leak vector; fix is to thread *http.Request
+// through the helper so the slog logger can be reached for the
+// server-side log line.
+func writeServiceError(w http.ResponseWriter, r *http.Request, err error) {
 	switch {
 	case errors.Is(err, kchatpkg.ErrRoomNotFound),
 		errors.Is(err, file.ErrNotFound):
@@ -351,6 +359,6 @@ func writeServiceError(w http.ResponseWriter, err error) {
 		errors.Is(err, kchatpkg.ErrObjectKeyMismatch):
 		middleware.RespondError(w, http.StatusBadRequest, middleware.ErrCodeBadRequest, err.Error())
 	default:
-		middleware.RespondError(w, http.StatusInternalServerError, middleware.ErrCodeInternal, err.Error())
+		middleware.RespondInternalError(w, r, "kchat service error", err)
 	}
 }

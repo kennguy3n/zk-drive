@@ -37,11 +37,11 @@ func (h *Handler) PreviewURL(w http.ResponseWriter, r *http.Request) {
 	// workspace B and get a presigned URL to B's preview.
 	f, err := h.files.GetByID(r.Context(), workspaceID, id)
 	if err != nil {
-		writeServiceError(w, err)
+		writeServiceError(w, r, err)
 		return
 	}
 	if err := h.assertResourceAccess(r.Context(), permission.ResourceFile, id, permission.RoleViewer); err != nil {
-		writeServiceError(w, err)
+		writeServiceError(w, r, err)
 		return
 	}
 	// Refuse to serve a preview for a quarantined version for the
@@ -54,7 +54,7 @@ func (h *Handler) PreviewURL(w http.ResponseWriter, r *http.Request) {
 	if f.CurrentVersionID != nil {
 		current, verr := h.files.GetVersionByID(r.Context(), workspaceID, *f.CurrentVersionID)
 		if verr != nil && !errors.Is(verr, file.ErrNotFound) {
-			writeServiceError(w, verr)
+			writeServiceError(w, r, verr)
 			return
 		}
 		if current != nil && current.ScanStatus == scan.StatusQuarantined {
@@ -68,12 +68,12 @@ func (h *Handler) PreviewURL(w http.ResponseWriter, r *http.Request) {
 			middleware.RespondError(w, http.StatusNotFound, middleware.ErrCodeNotFound, "no preview available")
 			return
 		}
-		writeServiceError(w, err)
+		writeServiceError(w, r, err)
 		return
 	}
 	previewVersion, verr := h.files.GetVersionByID(r.Context(), workspaceID, p.VersionID)
 	if verr != nil && !errors.Is(verr, file.ErrNotFound) {
-		writeServiceError(w, verr)
+		writeServiceError(w, r, verr)
 		return
 	}
 	if previewVersion != nil && previewVersion.ScanStatus == scan.StatusQuarantined {

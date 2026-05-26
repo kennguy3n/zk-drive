@@ -239,6 +239,42 @@ func RespondInternalError(w http.ResponseWriter, r *http.Request, op string, err
 	})
 }
 
+// RespondUpstreamError is the 502 Bad Gateway analogue of
+// RespondInternalError: the same redaction contract, but for the
+// case where this handler reached out to a downstream service
+// (object storage fabric, billing provider, identity provider) and
+// the downstream returned an error or timed out. Operators still
+// get the raw err in the slog logger; clients see only the
+// stable op label in the JSON `message` field.
+//
+// Why this is a separate helper rather than a status param on
+// RespondInternalError: 5xx vs upstream-5xx is a meaningful
+// distinction for SRE dashboards and for the frontend, which
+// translates UPSTREAM_FAILED → "An upstream service didn't
+// respond" (transient, retryable) and INTERNAL_ERROR → "Something
+// went wrong on our end" (escalate). Naming the helper at the
+// call site preserves that signal.
+//
+// Devin Review ANALYSIS_0007 on commit a2e52fb noted that admin
+// handlers were dropping raw err.Error() into 502 responses
+// ("get placement: " + err.Error(), "put placement: " + err.Error()),
+// which leaked fabric provider URLs / driver state / endpoint
+// hints. The helper plugs that leak with the same machinery as
+// RespondInternalError.
+func RespondUpstreamError(w http.ResponseWriter, r *http.Request, op string, err error) {
+	logger := logging.FromContext(r.Context())
+	logger.Error("upstream error",
+		"op", op,
+		"err", err,
+		"path", r.URL.Path,
+		"method", r.Method,
+	)
+	WriteJSON(w, http.StatusBadGateway, ErrorResponse{
+		Code:    ErrCodeUpstream,
+		Message: op,
+	})
+}
+
 // WriteJSON writes a JSON-encoded payload with the canonical
 // response headers used across every handler package. Prefer this
 // over hand-rolled `w.Header().Set("Content-Type", "application/json")`

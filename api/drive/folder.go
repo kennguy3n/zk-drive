@@ -60,7 +60,7 @@ func (h *Handler) CreateFolder(w http.ResponseWriter, r *http.Request) {
 	}
 	f, err := h.folders.CreateWithMode(r.Context(), workspaceID, parentID, req.Name, req.EncryptionMode, userID)
 	if err != nil {
-		writeServiceError(w, err)
+		writeServiceError(w, r, err)
 		return
 	}
 	h.logActivity(r.Context(), activity.ActionFolderCreate, permission.ResourceFolder, f.ID, map[string]any{
@@ -81,11 +81,11 @@ func (h *Handler) GetFolder(w http.ResponseWriter, r *http.Request) {
 	}
 	f, err := h.folders.GetByID(r.Context(), workspaceID, id)
 	if err != nil {
-		writeServiceError(w, err)
+		writeServiceError(w, r, err)
 		return
 	}
 	if err := h.assertResourceAccess(r.Context(), permission.ResourceFolder, f.ID, permission.RoleViewer); err != nil {
-		writeServiceError(w, err)
+		writeServiceError(w, r, err)
 		return
 	}
 	children, err := h.folders.ListChildren(r.Context(), workspaceID, &id)
@@ -148,12 +148,12 @@ func (h *Handler) RenameFolder(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := h.assertResourceAccess(r.Context(), permission.ResourceFolder, id, permission.RoleEditor); err != nil {
-		writeServiceError(w, err)
+		writeServiceError(w, r, err)
 		return
 	}
 	f, err := h.folders.Rename(r.Context(), workspaceID, id, req.Name)
 	if err != nil {
-		writeServiceError(w, err)
+		writeServiceError(w, r, err)
 		return
 	}
 	h.logActivity(r.Context(), activity.ActionFolderRename, permission.ResourceFolder, f.ID, map[string]any{
@@ -171,7 +171,7 @@ func (h *Handler) DeleteFolder(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := h.assertResourceAccess(r.Context(), permission.ResourceFolder, id, permission.RoleEditor); err != nil {
-		writeServiceError(w, err)
+		writeServiceError(w, r, err)
 		return
 	}
 	// Snapshot every file AND collab document in the subtree BEFORE
@@ -185,7 +185,7 @@ func (h *Handler) DeleteFolder(w http.ResponseWriter, r *http.Request) {
 	fileSnaps := h.snapshotFilesForFolderSubtreeDelete(r.Context(), workspaceID, id)
 	docSnaps := h.snapshotDocumentsForFolderSubtreeDelete(r.Context(), workspaceID, id)
 	if err := h.folders.Delete(r.Context(), workspaceID, id); err != nil {
-		writeServiceError(w, err)
+		writeServiceError(w, r, err)
 		return
 	}
 	h.logActivity(r.Context(), activity.ActionFolderDelete, permission.ResourceFolder, id, nil)
@@ -224,18 +224,18 @@ func (h *Handler) MoveFolder(w http.ResponseWriter, r *http.Request) {
 		parentID = &pid
 	}
 	if err := h.assertResourceAccess(r.Context(), permission.ResourceFolder, id, permission.RoleEditor); err != nil {
-		writeServiceError(w, err)
+		writeServiceError(w, r, err)
 		return
 	}
 	if parentID != nil {
 		if err := h.assertResourceAccess(r.Context(), permission.ResourceFolder, *parentID, permission.RoleEditor); err != nil {
-			writeServiceError(w, err)
+			writeServiceError(w, r, err)
 			return
 		}
 	}
 	f, err := h.folders.Move(r.Context(), workspaceID, id, parentID)
 	if err != nil {
-		writeServiceError(w, err)
+		writeServiceError(w, r, err)
 		return
 	}
 	h.logActivity(r.Context(), activity.ActionFolderMove, permission.ResourceFolder, f.ID, map[string]any{

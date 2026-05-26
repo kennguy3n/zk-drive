@@ -72,11 +72,11 @@ func (h *Handler) UploadURL(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if _, err := h.folders.GetByID(r.Context(), workspaceID, folderID); err != nil {
-		writeServiceError(w, err)
+		writeServiceError(w, r, err)
 		return
 	}
 	if err := h.assertResourceAccess(r.Context(), permission.ResourceFolder, folderID, permission.RoleEditor); err != nil {
-		writeServiceError(w, err)
+		writeServiceError(w, r, err)
 		return
 	}
 
@@ -86,7 +86,7 @@ func (h *Handler) UploadURL(w http.ResponseWriter, r *http.Request) {
 	// against current usage gives a good gate; the confirm-upload
 	// step will record the actual byte count.
 	if err := h.billing.CheckStorageQuota(r.Context(), workspaceID, 0); err != nil {
-		writeBillingError(w, err)
+		writeBillingError(w, r, err)
 		return
 	}
 
@@ -102,7 +102,7 @@ func (h *Handler) UploadURL(w http.ResponseWriter, r *http.Request) {
 
 	f, err := h.files.Create(r.Context(), workspaceID, folderID, req.Filename, req.MimeType, userID)
 	if err != nil {
-		writeServiceError(w, err)
+		writeServiceError(w, r, err)
 		return
 	}
 
@@ -118,7 +118,7 @@ func (h *Handler) UploadURL(w http.ResponseWriter, r *http.Request) {
 	// column when current_version_id is advanced, so confirmed
 	// files never carry a stale key and the GC scan skips them.
 	if err := h.files.SetPendingUploadObjectKey(r.Context(), workspaceID, f.ID, objectKey); err != nil {
-		writeServiceError(w, err)
+		writeServiceError(w, r, err)
 		return
 	}
 
@@ -170,7 +170,7 @@ func (h *Handler) ConfirmUpload(w http.ResponseWriter, r *http.Request) {
 	}
 	f, err := h.files.GetByID(r.Context(), workspaceID, fileID)
 	if err != nil {
-		writeServiceError(w, err)
+		writeServiceError(w, r, err)
 		return
 	}
 
@@ -240,7 +240,7 @@ func (h *Handler) ConfirmUpload(w http.ResponseWriter, r *http.Request) {
 		// Unexpected DB error during replay probe. Surfacing 500
 		// rather than silently proceeding so the caller can retry
 		// idempotently on a transient blip.
-		writeServiceError(w, vErr)
+		writeServiceError(w, r, vErr)
 		return
 	}
 
@@ -252,7 +252,7 @@ func (h *Handler) ConfirmUpload(w http.ResponseWriter, r *http.Request) {
 		// the orphan object can be reclaimed by a future GC pass — better
 		// than silently allowing unbounded overage.
 		if err := h.billing.CheckStorageQuota(r.Context(), workspaceID, req.SizeBytes); err != nil {
-			writeBillingError(w, err)
+			writeBillingError(w, r, err)
 			return
 		}
 	}
@@ -278,13 +278,13 @@ func (h *Handler) ConfirmUpload(w http.ResponseWriter, r *http.Request) {
 	}
 	fresh, err := h.files.ConfirmVersion(r.Context(), workspaceID, v)
 	if err != nil {
-		writeServiceError(w, err)
+		writeServiceError(w, r, err)
 		return
 	}
 
 	updated, err := h.files.GetByID(r.Context(), workspaceID, f.ID)
 	if err != nil {
-		writeServiceError(w, err)
+		writeServiceError(w, r, err)
 		return
 	}
 	// Side effects (activity log, billing usage event, post-upload
@@ -355,11 +355,11 @@ func (h *Handler) DownloadURL(w http.ResponseWriter, r *http.Request) {
 	}
 	f, err := h.files.GetByID(r.Context(), workspaceID, id)
 	if err != nil {
-		writeServiceError(w, err)
+		writeServiceError(w, r, err)
 		return
 	}
 	if err := h.assertResourceAccess(r.Context(), permission.ResourceFile, f.ID, permission.RoleViewer); err != nil {
-		writeServiceError(w, err)
+		writeServiceError(w, r, err)
 		return
 	}
 	if f.CurrentVersionID == nil {
@@ -372,7 +372,7 @@ func (h *Handler) DownloadURL(w http.ResponseWriter, r *http.Request) {
 			middleware.RespondError(w, http.StatusNotFound, middleware.ErrCodeNotFound, "current version not found")
 			return
 		}
-		writeServiceError(w, err)
+		writeServiceError(w, r, err)
 		return
 	}
 	// Refuse to mint a presigned URL for a version clamd has already
@@ -384,7 +384,7 @@ func (h *Handler) DownloadURL(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := h.billing.CheckBandwidthQuota(r.Context(), workspaceID, current.SizeBytes); err != nil {
-		writeBillingError(w, err)
+		writeBillingError(w, r, err)
 		return
 	}
 	store := h.resolveStorage(r.Context(), workspaceID)
@@ -417,9 +417,9 @@ func (h *Handler) DownloadURL(w http.ResponseWriter, r *http.Request) {
 // billing call returns the same code for the same condition. Anything
 // the shared helper doesn't recognise falls through to writeServiceError
 // for the standard service-error taxonomy (storage, upstream, internal).
-func writeBillingError(w http.ResponseWriter, err error) {
+func writeBillingError(w http.ResponseWriter, r *http.Request, err error) {
 	if middleware.WriteBillingError(w, err) {
 		return
 	}
-	writeServiceError(w, err)
+	writeServiceError(w, r, err)
 }

@@ -170,6 +170,41 @@ func TestRespondInternalError_RedactsErr(t *testing.T) {
 	}
 }
 
+// TestRespondUpstreamError_RedactsErr verifies the same redaction
+// contract for the 502 Bad Gateway path. RespondUpstreamError is
+// the wrapper for fabric / billing / identity-provider failures —
+// admin handlers used to drop "get placement: " + err.Error() into
+// the 502 message field, which could leak provider endpoint URLs,
+// connection strings, or driver state. The helper takes the op
+// label as the only client-exposed string.
+func TestRespondUpstreamError_RedactsErr(t *testing.T) {
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/admin/placement", nil)
+	const secretFragment = "fabric: dial https://internal-fabric.uney-poc.local:8443 connect: dial tcp 10.4.5.6:8443"
+	RespondUpstreamError(rec, req, "get placement", errors.New(secretFragment))
+
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("status: got %d, want %d", rec.Code, http.StatusBadGateway)
+	}
+	body := rec.Body.String()
+	if strings.Contains(body, secretFragment) {
+		t.Fatalf("response body leaked upstream error: %q", body)
+	}
+	if strings.Contains(body, "10.4.5.6") || strings.Contains(body, "internal-fabric") {
+		t.Fatalf("response body leaked upstream endpoint: %q", body)
+	}
+	var resp ErrorResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("body is not JSON: %v (body=%q)", err, body)
+	}
+	if resp.Code != ErrCodeUpstream {
+		t.Fatalf("code: got %q, want %q", resp.Code, ErrCodeUpstream)
+	}
+	if resp.Message != "get placement" {
+		t.Fatalf("message: got %q, want %q (op should be the only exposed string)", resp.Message, "get placement")
+	}
+}
+
 // TestRespondInternalError_SetsCanonicalHeaders verifies that the
 // helper goes through WriteJSON so internal-error 500 responses
 // share the same Content-Type charset and X-Content-Type-Options

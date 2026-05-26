@@ -240,7 +240,7 @@ func (h *Handler) GetPlacement(w http.ResponseWriter, r *http.Request) {
 			middleware.RespondError(w, http.StatusNotFound, middleware.ErrCodeNotFound, "placement policy not set")
 			return
 		}
-		middleware.RespondError(w, http.StatusBadGateway, middleware.ErrCodeUpstream, "get placement: "+err.Error())
+		middleware.RespondUpstreamError(w, r, "get placement", err)
 		return
 	}
 	writeJSON(w, http.StatusOK, policy)
@@ -283,7 +283,7 @@ func (h *Handler) PutPlacement(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := h.fabric.PutPlacement(r.Context(), tenantID, &policy); err != nil {
-		middleware.RespondError(w, http.StatusBadGateway, middleware.ErrCodeUpstream, "put placement: "+err.Error())
+		middleware.RespondUpstreamError(w, r, "put placement", err)
 		return
 	}
 	// Mirror the policy_ref into the local credentials row so the
@@ -514,7 +514,7 @@ func (h *Handler) InviteUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := h.billing.CheckUserQuota(r.Context(), workspaceID); err != nil {
-		writeBillingError(w, err)
+		writeBillingError(w, r, err)
 		return
 	}
 	u, err := h.users.Create(r.Context(), workspaceID, req.Email, req.Name, req.Password, req.Role)
@@ -886,10 +886,20 @@ func (h *Handler) UpdateBillingPlan(w http.ResponseWriter, r *http.Request) {
 // middleware.WriteBillingError so every handler that touches a
 // billing call returns the same code for the same condition. The
 // admin package has no service-error helper of its own — unrecognised
-// billing errors fall through to a generic 500.
-func writeBillingError(w http.ResponseWriter, err error) {
+// billing errors route through middleware.RespondInternalError so
+// the underlying err is logged server-side (with op, request path,
+// and method for operator diagnostics) but never appears in the
+// JSON response body. Devin Review BUG_0001 on commit a2e52fb
+// flagged the previous err.Error() leak: a billing-database
+// connection failure or stripe-call panic would have surfaced raw
+// internals in the JSON `message` field for any non-frontend
+// consumer that read response.data. Threading *http.Request was
+// the architecturally correct fix (per the rest of the WS5
+// redaction contract) rather than a static "billing check failed"
+// fallback, since the operator log line carries actionable detail.
+func writeBillingError(w http.ResponseWriter, r *http.Request, err error) {
 	if middleware.WriteBillingError(w, err) {
 		return
 	}
-	middleware.RespondError(w, http.StatusInternalServerError, middleware.ErrCodeInternal, err.Error())
+	middleware.RespondInternalError(w, r, "billing check", err)
 }

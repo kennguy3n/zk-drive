@@ -66,7 +66,26 @@ func sameFolderEncryptionMode(a, b string) bool {
 	return a == b
 }
 
-func writeServiceError(w http.ResponseWriter, err error) {
+// writeServiceError maps a service-layer error to the canonical
+// JSON envelope. The classification matches the (mostly internal)
+// sentinel errors raised by the file / folder / workspace / user /
+// permission packages, plus the badRequestErr / forbiddenErr
+// dynamic-type carve-outs used inside drive handlers.
+//
+// The default branch — unrecognised error type — was the codebase's
+// biggest err.Error() leak vector before PR #83: every database
+// failure, context-timeout, or upstream panic that bubbled up to a
+// drive handler landed in a 500 response with the raw Go error
+// string in the JSON `message` field. The helper now takes
+// *http.Request so the default branch can route through
+// middleware.RespondInternalError, which logs the underlying err
+// to the request-scoped slog logger (operators get the diagnostic)
+// and writes a sanitised 500 envelope (clients see just
+// "drive service error"). Devin Review BUG_0002 on commit a2e52fb
+// flagged this — the new helper had to be threaded through the
+// helper rather than added as a one-line replacement because
+// writeServiceError previously had no access to *http.Request.
+func writeServiceError(w http.ResponseWriter, r *http.Request, err error) {
 	switch {
 	case errors.Is(err, folder.ErrNotFound),
 		errors.Is(err, file.ErrNotFound),
@@ -100,7 +119,7 @@ func writeServiceError(w http.ResponseWriter, err error) {
 			middleware.RespondError(w, http.StatusForbidden, middleware.ErrCodeForbidden, err.Error())
 			return
 		}
-		middleware.RespondError(w, http.StatusInternalServerError, middleware.ErrCodeInternal, err.Error())
+		middleware.RespondInternalError(w, r, "drive service error", err)
 	}
 }
 
