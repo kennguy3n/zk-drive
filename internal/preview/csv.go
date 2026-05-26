@@ -193,8 +193,16 @@ func renderCSVWithDelim(_ context.Context, srcBytes []byte, forcedDelim rune) (i
 		// An entirely empty input produces a usable but empty
 		// preview rather than failing the renderer. The text
 		// rasteriser handles an empty body cleanly.
+		//
+		// maxLines matches the data-row path below
+		// (csvPreviewMaxRows + 1 = 21) so the visible-line budget
+		// stays consistent across the empty and non-empty branches.
+		// The body is empty here so the canvas cap in
+		// renderTextToImage dominates anyway, but a single
+		// invariant value is less surprising to maintainers
+		// reading both branches side by side.
 		return renderTextToImage("", textPreviewOpts{
-			maxLines: csvPreviewMaxRows + 2,
+			maxLines: csvPreviewMaxRows + 1,
 			header:   delimiterLabel(delim),
 		}), nil
 	}

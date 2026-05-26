@@ -72,7 +72,23 @@ func renderTextToImage(body string, opts textPreviewOpts) image.Image {
 	if advance == 0 {
 		advance = fixed.I(8) // fallback if the font surprises us
 	}
-	colsPerLine := opts.width / advance.Ceil()
+	// x0 is the left margin where text drawing begins. We
+	// reserve symmetric whitespace on both sides of the visible
+	// text column so the column budget reflects the actual
+	// drawable area, not the full canvas width. Without
+	// subtracting both side margins from colsPerLine, a header
+	// or body line measured at exactly colsPerLine cells would
+	// physically extend past the right edge of the canvas by
+	// roughly x0 pixels (~1.5 glyphs at the 8 px advance of the
+	// Inconsolata regular face used for previews). The font
+	// drawer silently clips at the image boundary so the
+	// overflow renders as invisible glyph clipping rather than a
+	// crash, but the truncation logic below claims "total width
+	// never exceeds colsPerLine cells", which requires the
+	// column budget to be the count of glyphs that actually fit
+	// between [x0, opts.width - x0].
+	const x0 = 12
+	colsPerLine := (opts.width - 2*x0) / advance.Ceil()
 	if colsPerLine < 1 {
 		colsPerLine = 1
 	}
@@ -82,16 +98,39 @@ func renderTextToImage(body string, opts textPreviewOpts) image.Image {
 
 	drawer := &font.Drawer{Dst: dst, Src: solidImage(opts.fg), Face: face}
 
-	x0 := 12
 	y := lineHeight + 4
 	maxY := opts.height - lineHeight/2
 
 	if opts.header != "" {
+		// Truncate the header to the canvas column budget so a
+		// long header (e.g. a CSV banner row with 10 columns ×
+		// 32 runes joined by tabs, ~340 chars total) doesn't
+		// run off the right edge of the canvas without any
+		// visible indicator that it was cut. The total rendered
+		// width never exceeds colsPerLine cells because
+		// truncateRunes internally subtracts the suffix's rune
+		// count from the budget — passing colsPerLine yields
+		// `(colsPerLine - 1)` text runes plus the ellipsis,
+		// totalling exactly colsPerLine runes. (Pre-subtracting
+		// 1 from the budget here would double-count the suffix
+		// and shave another character off, leaving the header
+		// one cell short of the canvas budget.) This applies to
+		// every renderer (archive, email, CSV, markdown banner)
+		// — historically only short banners (file name, subject)
+		// reached this path, but the CSV renderer can produce a
+		// banner approaching the upper bound and the markdown
+		// renderer can produce a banner from the first H1
+		// heading, both of which overflow on narrow canvases
+		// without truncation.
+		header := opts.header
+		if utf8.RuneCountInString(header) > colsPerLine {
+			header = truncateRunes(header, colsPerLine, "…")
+		}
 		drawer.Dot = fixed.P(x0, y)
-		drawer.DrawString(opts.header)
+		drawer.DrawString(header)
 		// fake-bold by re-drawing 1 px to the right
 		drawer.Dot = fixed.P(x0+1, y)
-		drawer.DrawString(opts.header)
+		drawer.DrawString(header)
 		// rule
 		ruleY := y + 4
 		if ruleY < dst.Bounds().Max.Y {
