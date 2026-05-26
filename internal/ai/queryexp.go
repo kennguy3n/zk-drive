@@ -125,7 +125,16 @@ func (s *ExpansionService) ExpandResult(ctx context.Context, workspaceID uuid.UU
 	}
 	query = strings.TrimSpace(query)
 	if query == "" {
-		return &ExpansionResult{Terms: nil}, nil
+		// Always normalise to a non-nil empty slice so the JSON
+		// encoder emits `"terms": []` and not `"terms": null`.
+		// SuggestionService.Suggest does the same via
+		// make([]string, 0, ...) in ruleBasedSuggestions, so the
+		// two AI endpoints stay JSON-shape-consistent for any
+		// third-party API consumers — the frontend's
+		// `data.terms ?? []` safety net only covers the React
+		// path. Devin Review ANALYSIS_0001 on commit b6164c0
+		// flagged the divergence.
+		return &ExpansionResult{Terms: []string{}}, nil
 	}
 
 	// Workspace tag vocabulary for the rule-based expansion pass.
@@ -178,8 +187,16 @@ LIMIT 512`, workspaceID)
 	}
 
 	language := s.resolveLanguage(ctx, workspaceID)
+	// See the empty-query branch above for why we coalesce nil to
+	// an empty slice here — keep ExpandSearchQuery's JSON output
+	// shape stable across the rule-based, LLM-merged, and empty-
+	// result paths. Devin Review ANALYSIS_0001 on commit b6164c0.
+	terms := ruleBasedExpansion(query, workspaceTags)
+	if terms == nil {
+		terms = []string{}
+	}
 	res := &ExpansionResult{
-		Terms:    ruleBasedExpansion(query, workspaceTags),
+		Terms:    terms,
 		Language: language,
 	}
 

@@ -465,6 +465,44 @@ func TestRuleBasedSuggestionsShortPartUsesWordBoundary(t *testing.T) {
 			t.Fatalf("x-ray should NOT match body containing only 'x' substrings; got %v", suggestionsX)
 		}
 	}
+
+	// Single-segment short tag — regression for Devin Review
+	// BUG_0001 on commit b6164c0. Before the fix, the literal
+	// strings.Contains fast path at the top of the workspace-tag
+	// loop short-circuited past partMatches for tags without a
+	// hyphen, so a tag like "ai" would match corpora containing
+	// only substring occurrences ("main", "rain", "again"). The
+	// fast path is now gated to multi-segment tags so single-
+	// segment short tags fall through to partMatches' word-
+	// boundary semantics.
+	suggestionsSingleNeg := ruleBasedSuggestions(
+		"general-notes.pdf",
+		"The main highway during the rain was again congested.",
+		[]string{"ai"},
+	)
+	for _, s := range suggestionsSingleNeg {
+		if s == "ai" {
+			t.Fatalf("single-segment tag 'ai' should NOT match body without standalone 'ai' token; got suggestions %v", suggestionsSingleNeg)
+		}
+	}
+
+	// And the positive control: standalone token in the body
+	// still matches, so the gating doesn't break legitimate use.
+	suggestionsSinglePos := ruleBasedSuggestions(
+		"roadmap.pdf",
+		"The AI strategy this quarter is to ship fast.",
+		[]string{"ai"},
+	)
+	foundSingle := false
+	for _, s := range suggestionsSinglePos {
+		if s == "ai" {
+			foundSingle = true
+			break
+		}
+	}
+	if !foundSingle {
+		t.Fatalf("single-segment tag 'ai' should match body with standalone 'ai' token; got suggestions %v", suggestionsSinglePos)
+	}
 }
 
 func TestRuleBasedSuggestionsRejectsAllEmptyPartsTag(t *testing.T) {

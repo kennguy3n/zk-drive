@@ -230,9 +230,17 @@ func isTypedNil(v any) bool {
 	if v == nil {
 		return true
 	}
+	// reflect.ValueOf(v) on an `any` parameter unwraps the
+	// interface and returns the concrete value, so rv.Kind() can
+	// never be reflect.Interface here — the case used to appear
+	// in this switch defensively but it was dead code. Kinds that
+	// support IsNil() (per the reflect package contract) are the
+	// nilable concrete types listed below; passing any other Kind
+	// to IsNil() would panic, so the switch is also a guard. Devin
+	// Review ANALYSIS_0003 on commit b6164c0 flagged the dead arm.
 	rv := reflect.ValueOf(v)
 	switch rv.Kind() {
-	case reflect.Pointer, reflect.Map, reflect.Chan, reflect.Func, reflect.Slice, reflect.Interface:
+	case reflect.Pointer, reflect.Map, reflect.Chan, reflect.Func, reflect.Slice:
 		return rv.IsNil()
 	}
 	return false
