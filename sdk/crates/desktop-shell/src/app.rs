@@ -20,6 +20,7 @@
 //!   a workspace closes the channels into the engine; both the
 //!   poller and the engine exit on the next select tick.
 
+use std::collections::hash_map::Entry;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -81,10 +82,27 @@ struct WorkspaceBinding {
     last_error: Option<String>,
     last_updated: chrono::DateTime<chrono::Utc>,
 
-    /// Open catalogue handle. Kept alive between start/stop cycles
-    /// so the health-poll loop can sample even a stopped workspace
-    /// without re-opening SQLite every tick.
-    catalogue: Arc<Mutex<Catalogue>>,
+    /// Open catalogue handle.
+    ///
+    /// Wrapped in `Option` so [`App::remove_local_cache`] can `take`
+    /// the `Arc` out of the binding and drop it to close the
+    /// underlying `rusqlite::Connection` *before* deleting the
+    /// SQLite file. Without that, on Windows the delete would fail
+    /// because the file is still locked, and on Unix any
+    /// subsequent `start_sync` would reuse a stale connection
+    /// pointing at the unlinked inode -- a silent data-loss bug
+    /// (writes go to an inode that disappears on next restart).
+    ///
+    /// Invariants:
+    /// * `Some(_)` after [`App::add_workspace_at`] until
+    ///   [`App::remove_local_cache`] takes it out.
+    /// * `None` only in the transient window between
+    ///   [`App::remove_local_cache`] dropping the old handle and the
+    ///   next [`App::start_sync`] re-opening at the original path.
+    /// * [`App::tick_one`] treats `None` as "skip this workspace"
+    ///   so the health-poll loop can't observe a partially-removed
+    ///   binding.
+    catalogue: Option<Arc<Mutex<Catalogue>>>,
 
     /// JoinHandles for the three background tasks. `None` when the
     /// workspace is in [`SyncHealth::Stopped`].
@@ -271,10 +289,18 @@ impl App {
         root: PathBuf,
         catalogue_path: PathBuf,
     ) -> std::result::Result<(), CommandError> {
-        {
-            let map = self.workspaces.lock().await;
-            if let Some(existing) = map.get(&workspace_id) {
-                if existing.root == root {
+        // Hold the workspace-map lock across the existence check
+        // *and* the insert so two concurrent `AddWorkspace` calls
+        // for the same id can't both pass the duplicate check and
+        // race past each other. The filesystem and SQLite work is
+        // synchronous and fast (sub-millisecond for an existing
+        // directory / fresh SQLite open) so a single critical
+        // section is acceptable for the desktop concurrency this
+        // shell targets.
+        let mut map = self.workspaces.lock().await;
+        let entry = match map.entry(workspace_id) {
+            Entry::Occupied(existing) => {
+                if existing.get().root == root {
                     // Idempotent re-registration; the frontend may
                     // resend AddWorkspace after a reconnect and we
                     // shouldn't churn the catalogue / autostart
@@ -283,10 +309,11 @@ impl App {
                 }
                 return Err(CommandError::RootMismatch {
                     workspace_id,
-                    existing: existing.root.to_string_lossy().into_owned(),
+                    existing: existing.get().root.to_string_lossy().into_owned(),
                 });
             }
-        }
+            Entry::Vacant(v) => v,
+        };
         if let Some(parent) = catalogue_path.parent() {
             std::fs::create_dir_all(parent)
                 .map_err(|e| CommandError::Other(format!("create catalogue dir: {e}")))?;
@@ -295,25 +322,29 @@ impl App {
             .map_err(|e| CommandError::Other(format!("create workspace root: {e}")))?;
         let cat = Catalogue::open(&catalogue_path, workspace_id)
             .map_err(|e| CommandError::Other(format!("open catalogue: {e}")))?;
-        let binding = WorkspaceBinding {
+        // Seed the summary from whatever already lives in the
+        // catalogue. For a freshly-created file this is a default
+        // (all-zero) summary; for a resumed workspace the rows
+        // accumulated over the last run hydrate the tray icon
+        // immediately, without waiting for start_sync.
+        let seed_summary = summary_from_catalogue(&cat, workspace_id)
+            .map_err(|e| CommandError::Other(format!("seed summary: {e}")))?;
+        entry.insert(WorkspaceBinding {
             workspace_id,
             label: label.clone(),
             root,
             catalogue_path,
             autostart: false,
             health: SyncHealth::Stopped,
-            last_summary: Summary::default(),
+            last_summary: seed_summary,
             last_error: None,
             last_updated: chrono::Utc::now(),
-            catalogue: Arc::new(Mutex::new(cat)),
+            catalogue: Some(Arc::new(Mutex::new(cat))),
             engine_task: None,
             poller_task: None,
             watcher_task: None,
-        };
-        {
-            let mut map = self.workspaces.lock().await;
-            map.insert(workspace_id, binding);
-        }
+        });
+        drop(map);
         self.persist().await.ok();
         self.sink
             .emit(ShellEvent::WorkspaceAdded {
@@ -347,19 +378,63 @@ impl App {
 
     /// Delete a workspace's catalogue file. Requires the workspace
     /// to be stopped first.
+    ///
+    /// Takes the `Arc<Mutex<Catalogue>>` out of the binding before
+    /// touching the filesystem so the underlying SQLite
+    /// `Connection` is closed *before* `std::fs::remove_file` runs.
+    /// Skipping that step left the connection live on the unlinked
+    /// inode -- harmless on Unix in isolation but a Windows file-
+    /// lock error in practice, and a silent data-loss bug if a
+    /// subsequent `start_sync` reused the stale handle.
     pub async fn remove_local_cache(
         self: &Arc<Self>,
         workspace_id: Uuid,
     ) -> std::result::Result<(), CommandError> {
-        let map = self.workspaces.lock().await;
+        let mut map = self.workspaces.lock().await;
         let ws = map
-            .get(&workspace_id)
+            .get_mut(&workspace_id)
             .ok_or(CommandError::NotRegistered(workspace_id))?;
         if ws.health.is_running() {
             return Err(CommandError::AlreadyRunning(workspace_id));
         }
         let path = ws.catalogue_path.clone();
+        // Drop the binding-side Arc. Other holders (a tick_one that
+        // had already cloned the Arc before we took the map lock)
+        // will release their clones as soon as their SQLite scan
+        // finishes; in the meantime `tick_one` itself bails on the
+        // very next call because `ws.catalogue` is now `None`.
+        let cat_arc = ws.catalogue.take();
         drop(map);
+        // Wait a bounded amount of time for any in-flight clones to
+        // drop so the rusqlite Connection finishes closing before
+        // we try to delete the file. On Unix this isn't strictly
+        // necessary (unlink on an open inode succeeds), but on
+        // Windows the file would be locked and `remove_file` would
+        // fail. 50ms x 20 tries = up to one second; well-behaved
+        // ticks finish in <100ms even on a million-row catalogue.
+        if let Some(arc) = cat_arc {
+            let mut arc = arc;
+            for _ in 0..20 {
+                match Arc::try_unwrap(arc) {
+                    Ok(mutex) => {
+                        // Last reference released; the Connection
+                        // is dropped here when `mutex` goes out of
+                        // scope at the end of this match arm.
+                        drop(mutex);
+                        break;
+                    }
+                    Err(returned) => {
+                        arc = returned;
+                        tokio::time::sleep(Duration::from_millis(50)).await;
+                    }
+                }
+            }
+            // If we never reached strong_count==1 we still drop
+            // our last clone here -- on Unix the delete below
+            // proceeds regardless; on Windows the caller will see
+            // the file-lock error returned by `remove_file` and
+            // can retry after the in-flight tick finishes.
+        }
         if path.exists() {
             std::fs::remove_file(&path)
                 .map_err(|e| CommandError::Other(format!("remove catalogue: {e}")))?;
@@ -374,6 +449,17 @@ impl App {
     }
 
     /// Start the background sync loop for one workspace.
+    ///
+    /// The workspace-map lock is held for the full duration of
+    /// this call (no `.await` between the existence check and the
+    /// installation of the spawned `JoinHandle`s) so the previous
+    /// two-phase pattern can no longer leak tasks if a concurrent
+    /// `RemoveWorkspace` or second `StartSync` interleaves between
+    /// phases. All the pre-spawn work -- filesystem `create_dir_all`,
+    /// channel construction, `Watcher::start_with_ignore`, and the
+    /// three `tokio::spawn` calls themselves -- is synchronous and
+    /// completes in well under a tick, so holding the lock through
+    /// it is acceptable for desktop concurrency.
     pub async fn start_sync(
         self: &Arc<Self>,
         workspace_id: Uuid,
@@ -383,16 +469,27 @@ impl App {
                 "shell has no API client configured; call App::set_client before StartSync".into(),
             )
         })?;
-        let (root, catalogue) = {
-            let map = self.workspaces.lock().await;
-            let ws = map
-                .get(&workspace_id)
-                .ok_or(CommandError::NotRegistered(workspace_id))?;
-            if ws.health.is_running() {
-                return Err(CommandError::AlreadyRunning(workspace_id));
-            }
-            (ws.root.clone(), ws.catalogue.clone())
-        };
+
+        let mut map = self.workspaces.lock().await;
+        let ws = map
+            .get_mut(&workspace_id)
+            .ok_or(CommandError::NotRegistered(workspace_id))?;
+        if ws.health.is_running() {
+            return Err(CommandError::AlreadyRunning(workspace_id));
+        }
+        // Reopen the catalogue if `remove_local_cache` (or a
+        // previous transient error) left the binding without one.
+        if ws.catalogue.is_none() {
+            let cat = Catalogue::open(&ws.catalogue_path, workspace_id)
+                .map_err(|e| CommandError::Other(format!("reopen catalogue: {e}")))?;
+            ws.catalogue = Some(Arc::new(Mutex::new(cat)));
+        }
+        let catalogue = ws
+            .catalogue
+            .as_ref()
+            .expect("catalogue just ensured Some")
+            .clone();
+        let root = ws.root.clone();
 
         std::fs::create_dir_all(placeholder_dir(&root))
             .map_err(|e| CommandError::Other(format!("create placeholder dir: {e}")))?;
@@ -455,17 +552,13 @@ impl App {
         );
         let engine_task = tokio::spawn(async move { engine.run(local_rx, remote_rx).await });
 
-        {
-            let mut map = self.workspaces.lock().await;
-            if let Some(ws) = map.get_mut(&workspace_id) {
-                ws.engine_task = Some(engine_task);
-                ws.poller_task = Some(poller_task);
-                ws.watcher_task = Some(watcher_task);
-                ws.health = SyncHealth::Starting;
-                ws.last_error = None;
-                ws.last_updated = chrono::Utc::now();
-            }
-        }
+        ws.engine_task = Some(engine_task);
+        ws.poller_task = Some(poller_task);
+        ws.watcher_task = Some(watcher_task);
+        ws.health = SyncHealth::Starting;
+        ws.last_error = None;
+        ws.last_updated = chrono::Utc::now();
+        drop(map);
         self.sink
             .emit(ShellEvent::HealthChanged {
                 workspace_id,
@@ -554,12 +647,24 @@ impl App {
     async fn tick_one(self: &Arc<Self>, workspace_id: Uuid) {
         // Compute the next summary outside the workspaces-map lock
         // so a slow SQLite read doesn't block other commands.
-        let (catalogue, prev_health) = {
+        // Stopped workspaces don't have an engine writing to the
+        // catalogue, so the summary can't change -- skip the scan
+        // entirely. This also means `remove_local_cache` (which
+        // requires the workspace to be Stopped) is guaranteed not
+        // to be racing with a tick_one in-flight against the same
+        // workspace's catalogue.
+        let catalogue = {
             let map = self.workspaces.lock().await;
             let Some(ws) = map.get(&workspace_id) else {
                 return;
             };
-            (ws.catalogue.clone(), ws.health)
+            if ws.health == SyncHealth::Stopped {
+                return;
+            }
+            match ws.catalogue.as_ref() {
+                Some(c) => c.clone(),
+                None => return,
+            }
         };
         let summary = match build_summary(&catalogue, workspace_id).await {
             Ok(s) => s,
@@ -568,13 +673,20 @@ impl App {
                 return;
             }
         };
-        let next_health = derive_health(prev_health, &summary);
 
         let mut summary_changed = false;
         let mut health_changed_to: Option<SyncHealth> = None;
         {
             let mut map = self.workspaces.lock().await;
             if let Some(ws) = map.get_mut(&workspace_id) {
+                // Recompute next_health *inside* this second lock
+                // from the live `ws.health`, not the value we read
+                // before releasing the first lock. Otherwise a
+                // concurrent `stop_sync` (which sets `Stopped`) or
+                // `start_sync` (which sets `Starting`) that
+                // interleaved between the two locks would have
+                // its transition silently overwritten by us.
+                let next_health = derive_health(ws.health, &summary);
                 if ws.last_summary != summary {
                     summary_changed = true;
                     ws.last_summary = summary;
@@ -666,18 +778,27 @@ impl App {
 }
 
 /// Read every row in the catalogue, fold them into a [`Summary`],
-/// then read the workspace's last-applied cursor.
-async fn build_summary(
-    catalogue: &Arc<Mutex<Catalogue>>,
-    workspace_id: Uuid,
-) -> zk_sync_engine::Result<Summary> {
-    let cat = catalogue.lock().await;
+/// then read the workspace's last-applied cursor. Synchronous so
+/// callers that already hold the catalogue (e.g. the one-shot seed
+/// scan in `add_workspace_at`) don't need to async-lock it.
+fn summary_from_catalogue(cat: &Catalogue, workspace_id: Uuid) -> zk_sync_engine::Result<Summary> {
     let mut s = Summary::default();
     for rec in cat.list_all()? {
         s.accumulate(rec.status, rec.size_bytes);
     }
     s.cursor = cat.get_cursor(workspace_id)?;
     Ok(s)
+}
+
+/// Async wrapper around [`summary_from_catalogue`] for callers that
+/// only hold the shared `Arc<Mutex<Catalogue>>` (the health-poll
+/// loop is the only such caller today).
+async fn build_summary(
+    catalogue: &Arc<Mutex<Catalogue>>,
+    workspace_id: Uuid,
+) -> zk_sync_engine::Result<Summary> {
+    let cat = catalogue.lock().await;
+    summary_from_catalogue(&cat, workspace_id)
 }
 
 /// Pure helper: given the previous health and a fresh summary,

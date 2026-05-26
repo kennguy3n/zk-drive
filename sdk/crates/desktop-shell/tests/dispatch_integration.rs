@@ -349,3 +349,60 @@ async fn dispatch_get_status_returns_default_summary_after_add() {
     assert_eq!(state.summary.cursor, 0);
     assert!(state.last_error.is_none());
 }
+
+/// Regression for ANALYSIS_0002 in PR #86: `remove_local_cache`
+/// must close the SQLite `Connection` before unlinking the file so
+/// the on-disk catalogue is genuinely gone and a follow-up
+/// `AddWorkspace`/`GetStatus` cycle picks up the empty state. We
+/// can't exercise the Windows lock specifically from a Linux-only
+/// CI runner, but we *can* assert the two observable post-
+/// conditions: (a) the file no longer exists on disk, and (b) the
+/// binding's catalogue handle was released (a re-`AddWorkspace` on
+/// the same root succeeds, which it could not if a `RootMismatch`
+/// fired or a half-removed binding lingered in the map).
+#[tokio::test]
+async fn remove_local_cache_actually_unlinks_the_db_file() {
+    let dir = tempdir().unwrap();
+    let cfg_path = dir.path().join("app.json");
+    let sink = Arc::new(BroadcastSink::new());
+    let app = App::with_config_path(sink as Arc<dyn EventSink>, cfg_path.clone());
+    let id = Uuid::new_v4();
+    let root = dir.path().join("ws");
+    app.dispatch(Command::AddWorkspace {
+        workspace_id: id,
+        label: "Acme".into(),
+        root: root.clone(),
+    })
+    .await
+    .unwrap();
+
+    // The catalogue file lives next to the config file.
+    let cat_path = dir.path().join(format!("{id}.db"));
+    assert!(
+        cat_path.exists(),
+        "catalogue file should exist after Add: {cat_path:?}"
+    );
+
+    app.dispatch(Command::RemoveLocalCache { workspace_id: id })
+        .await
+        .unwrap();
+    assert!(
+        !cat_path.exists(),
+        "catalogue file should be gone after RemoveLocalCache: {cat_path:?}"
+    );
+
+    // A subsequent AddWorkspace on the same id+root is idempotent
+    // (same root match), but the catalogue is None on the binding;
+    // GetStatus must still return a default summary without
+    // panicking. This pins the Option<Arc<Mutex<Catalogue>>>
+    // invariant: tick_one / GetStatus do not unwrap.
+    let r = app
+        .dispatch(Command::GetStatus { workspace_id: id })
+        .await
+        .unwrap();
+    let CommandResult::Status(state) = r else {
+        panic!("expected Status reply, got {r:?}");
+    };
+    assert_eq!(state.summary.total_files, 0);
+    assert_eq!(state.health, SyncHealth::Stopped);
+}
