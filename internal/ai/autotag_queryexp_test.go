@@ -339,6 +339,27 @@ func TestRuleBasedExpansion(t *testing.T) {
 			t.Fatalf("expected empty expansion for no workspace tags, got %v", got)
 		}
 	})
+
+	t.Run("case-variant tags dedup to single result", func(t *testing.T) {
+		// Devin Review ANALYSIS_0003 on commit de78db5 flagged
+		// that two case-variant DB rows (possible via raw-SQL
+		// insert or migration bug bypassing file.Service.AddTag's
+		// lowercase invariant) would each get a scores[]
+		// entry, both canonicalTag to the same lowercase string,
+		// and produce duplicates in the output. The fix uses the
+		// lowercased tag as the score map key so case-variants
+		// merge naturally. This test pins that contract — without
+		// the fix, this returns ["marketing", "marketing"]; with
+		// the fix, ["marketing"].
+		caseVariantTags := []string{"Marketing", "marketing", "MARKETING"}
+		got := ruleBasedExpansion("marketing", caseVariantTags)
+		if len(got) != 1 {
+			t.Fatalf("expected case-variants to dedup to 1 entry, got %d: %v", len(got), got)
+		}
+		if got[0] != "marketing" {
+			t.Fatalf("expected lowercased canonical form, got %q", got[0])
+		}
+	})
 }
 
 func TestBuildQueryExpansionPromptLocalises(t *testing.T) {

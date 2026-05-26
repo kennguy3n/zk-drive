@@ -11,6 +11,7 @@ import (
 	"github.com/kennguy3n/zk-drive/api/middleware"
 	"github.com/kennguy3n/zk-drive/internal/ai"
 	"github.com/kennguy3n/zk-drive/internal/permission"
+	"github.com/kennguy3n/zk-drive/internal/workspace"
 )
 
 // SuggestFileTags returns up to a small number of AI-suggested tags
@@ -105,6 +106,23 @@ func (h *Handler) ExpandSearchQuery(w http.ResponseWriter, r *http.Request) {
 	// commit 744909a.
 	if terms == nil {
 		terms = []string{}
+	}
+	// Coalesce empty language to the package default for response-
+	// shape consistency with the sibling /api/search handler
+	// (api/drive/search.go:69 pre-seeds opts.Language with
+	// workspace.DefaultSearchLanguage "simple" before resolving the
+	// workspace's stored language, so its JSON response is never
+	// "language": ""). The internal ai.resolveWorkspaceLanguage
+	// helper returns "" on a nil resolver or a transient lookup
+	// failure — appropriate at the prompt-builder boundary because
+	// PromptLanguageFor("") falls through to the English fallback,
+	// but inappropriate at the JSON-response boundary because third-
+	// party API consumers expect a stable language token. Aligning
+	// here keeps the two endpoints' "language" semantics identical
+	// without changing the prompt-resolution path. Devin Review
+	// ANALYSIS_0002 on commit de78db5.
+	if language == "" {
+		language = workspace.DefaultSearchLanguage
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"query":    query,

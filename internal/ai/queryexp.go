@@ -309,6 +309,20 @@ func ruleBasedExpansion(query string, workspaceTags []string) []string {
 	if len(tokens) == 0 || len(workspaceTags) == 0 {
 		return nil
 	}
+	// Score by lowercased tag so two case-variant DB rows (e.g.
+	// "Marketing" and "marketing", possible via a future raw-SQL
+	// insert, an admin repair script, or a migration bug that
+	// bypasses file.Service.AddTag's lowercase invariant) merge into
+	// a single score entry. Without this dedup the two would each
+	// produce a kv pair, both canonicalTag to the same string, and
+	// the downstream out slice would contain a duplicate. The SQL
+	// query uses SELECT DISTINCT tag which dedupes byte-for-byte but
+	// not case-insensitively, so two case-variant rows would still
+	// slip through as separate workspaceTags entries. Defense-in-
+	// depth pattern matches autotag.go's workspace-tag loop (where
+	// t = strings.ToLower(t) is applied for the same reason) and the
+	// downstream canonicalTag is a backstop, not the primary
+	// invariant. Devin Review ANALYSIS_0003 on commit de78db5.
 	scores := make(map[string]int, len(workspaceTags))
 	for _, tag := range workspaceTags {
 		if tag == "" {
@@ -318,11 +332,11 @@ func ruleBasedExpansion(query string, workspaceTags []string) []string {
 		for _, tok := range tokens {
 			switch {
 			case ltag == tok:
-				scores[tag] += 3
+				scores[ltag] += 3
 			case containsHyphenSegment(ltag, tok):
-				scores[tag] += 2
+				scores[ltag] += 2
 			case strings.Contains(ltag, tok):
-				scores[tag]++
+				scores[ltag]++
 			}
 		}
 	}
