@@ -218,9 +218,22 @@ func assertLocalEndpoint(raw string) error {
 // see exactly what context their on-device model receives — the
 // privacy story depends on this being inspectable, not buried in
 // service.go.
-func BuildSummaryPrompt(folderName string, fileNames []string, contentPreview string) string {
+//
+// language is the workspace's Postgres search-language dictionary
+// name (e.g. "english", "french", "simple"). The prompt's system
+// half (the imperative + the final "answer in {LANG}" reminder)
+// is swapped via PromptLanguageFor so the LLM responds in the
+// workspace's working language. The user content half (folder
+// name, file names, content preview) is passed through unchanged
+// — we don't translate stored bytes; the LLM mirrors whatever
+// language they're already in. Empty / unknown values fall back
+// to English instructions.
+func BuildSummaryPrompt(folderName string, fileNames []string, contentPreview string, language string) string {
+	lang := PromptLanguageFor(language)
 	var b strings.Builder
 	b.WriteString("You are summarising a private team workspace folder for a busy admin. ")
+	b.WriteString(lang.Instruction)
+	b.WriteString(" ")
 	b.WriteString("Produce a single short paragraph (3–4 sentences) that lists the broad themes, ")
 	b.WriteString("not individual file names verbatim. Do not invent files. Do not request more data.\n\n")
 	if folderName != "" {
@@ -238,6 +251,8 @@ func BuildSummaryPrompt(folderName string, fileNames []string, contentPreview st
 		b.WriteString(contentPreview)
 		b.WriteString("\n")
 	}
+	b.WriteString("\n")
+	b.WriteString(lang.AnswerInLanguage)
 	b.WriteString("\nSummary:")
 	return b.String()
 }

@@ -1,0 +1,28 @@
+[package]
+name = "ymerge"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Yjs merge / state-vector helpers compiled to wasm32-wasip1 for use from Go via wazero. (WASI preview1 is required to satisfy yrs's transitive getrandom dependency via the host's random_get import — see build.sh.)"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+# yrs is the official Rust port of Yjs maintained by the Yjs team
+# (https://github.com/y-crdt/y-crdt). We pin a specific patch
+# because the wire format is stable across minor versions but the
+# Rust API has churned across majors (the v0.18 → v0.19 rename of
+# Doc::apply_update_v1 is a recent example), and we want
+# reproducible builds.
+yrs = "=0.26.0"
+
+[profile.release]
+# Optimise for size — the wasm binary is shipped in the Go binary
+# via `go:embed`, so every kilobyte we save reduces both the
+# server's RSS at startup and the deployable artefact size.
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = "debuginfo"

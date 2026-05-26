@@ -37,8 +37,8 @@ import (
 	"github.com/kennguy3n/zk-drive/internal/search"
 	"github.com/kennguy3n/zk-drive/internal/sharing"
 	"github.com/kennguy3n/zk-drive/internal/storage"
+	"github.com/kennguy3n/zk-drive/internal/typednil"
 	"github.com/kennguy3n/zk-drive/internal/user"
-	"github.com/kennguy3n/zk-drive/internal/webhooks"
 	"github.com/kennguy3n/zk-drive/internal/workspace"
 )
 
@@ -71,6 +71,48 @@ type Handler struct {
 	billing        *billing.Service
 	webhooks       WebhookEventPublisher
 	collab         *collab.DocumentHub
+	tagSuggest     TagSuggester
+	queryExpand    QueryExpander
+}
+
+// TagSuggester is the narrow interface the drive handler needs from
+// the AI suggestion service. Declared here so the handler depends on
+// the CONTRACT (one method, the request shape) rather than the
+// concrete *ai.SuggestionService type — meaning api/drive never
+// needs a compile-time reference to the SuggestionService struct,
+// its pool field, or any of its internal helpers. The handler's
+// With* setter takes the interface, and reflect-based typed-nil
+// detection in WithTagSuggester avoids the type-assertion that
+// would otherwise re-couple to *ai.SuggestionService.
+//
+// Caveat: api/drive/ai.go DOES import internal/ai for the error
+// sentinels (ai.ErrTagSuggestUnavailable, ai.ErrTagSuggestFileNotFound)
+// used in writeTagSuggestError's status-code mapping. The sentinels
+// are part of the ai → drive contract — they're typed values, not
+// new behaviour, so the import sits on the safer side of the
+// dependency boundary (drive consumes named errors, not concrete
+// service types). If we ever want a fully zero-import contract,
+// the sentinels could move to a shared sub-package
+// (e.g. internal/ai/aierr) — but a pure interface boundary at the
+// cost of a third package would be over-engineering for two error
+// constants. Devin Review ANALYSIS_0001 on PR #85 flagged the
+// earlier "no direct dependency" wording as overclaiming.
+type TagSuggester interface {
+	Suggest(ctx context.Context, workspaceID, fileID uuid.UUID) ([]string, error)
+}
+
+// QueryExpander is the narrow interface the drive handler needs
+// from the AI query-expansion service. The handler is interested in
+// the three response fields independently (terms, llm-used flag,
+// resolved language) — returning a tuple keeps the contract free
+// of a shared transport struct so the ai package can evolve its
+// internal shape without forcing this interface to follow.
+//
+// Same dependency caveat as TagSuggester above: the *interface*
+// avoids the concrete type, but the package still imports ai for
+// error sentinels.
+type QueryExpander interface {
+	Expand(ctx context.Context, workspaceID uuid.UUID, query string) (terms []string, llmUsed bool, language string, err error)
 }
 
 // NewHandler constructs a Handler from the underlying services. The pool is
@@ -119,17 +161,21 @@ func (h *Handler) WithBilling(b *billing.Service) *Handler {
 // no-op) so the metadata plane keeps working in tests / deployments
 // without NATS configured. Mirrors the WithJobs nil-safe pattern.
 func (h *Handler) WithWebhooks(p WebhookEventPublisher) *Handler {
-	// Guard against passing a typed-nil concrete *webhooks.Publisher,
+	// Guard against a typed-nil concrete pointer (e.g.
+	// (*webhooks.Publisher)(nil)) wrapped in WebhookEventPublisher,
 	// which would compare != nil under the interface comparison and
 	// then NPE inside the emit helpers. The concrete publisher's
 	// own methods are nil-safe (PublishFileEvent on a nil *Publisher
 	// returns nil) — but going through the interface here keeps the
-	// nil check at the boundary where it's obvious.
-	if p == nil {
-		h.webhooks = nil
-		return h
-	}
-	if pub, ok := p.(*webhooks.Publisher); ok && pub == nil {
+	// nil check at the boundary where it's obvious. Using isTypedNil
+	// rather than a `p.(*webhooks.Publisher)` type assertion avoids
+	// coupling this setter to the concrete type, matching the same
+	// pattern as WithTagSuggester / WithQueryExpander / WithPreviews
+	// — Devin Review ANALYSIS_0002 on commit 10bd9b9 noted the
+	// divergence (three interface-taking setters had been aligned on
+	// isTypedNil and two were stragglers). Now all four are
+	// consistent.
+	if isTypedNil(p) {
 		h.webhooks = nil
 		return h
 	}
@@ -173,6 +219,68 @@ func (h *Handler) WithSearch(s *search.Service) *Handler {
 	return h
 }
 
+// isTypedNil forwards to internal/typednil.IsTypedNil. Kept as a
+// thin alias so the existing call sites in this file stay
+// readable (without renaming every With* setter call); the helper
+// itself lives in internal/typednil so the AI services in
+// internal/ai can share the same implementation via the same
+// guard semantics. Devin Review ANALYSIS_0006 on commit 348b13d
+// flagged the asymmetry between this package's handler-level
+// guards and internal/ai's service-level WithLLM /
+// WithLanguageResolver setters — extracting was the
+// architecturally correct fix because api/drive imports
+// internal/ai (not the other way around) so the helper had to
+// live below both in the dep graph.
+func isTypedNil(v any) bool { return typednil.IsTypedNil(v) }
+
+// WithTagSuggester wires the AI tag-suggestion service so the
+// /api/files/{id}/tag-suggestions endpoint stops responding 501.
+// A nil suggester keeps the endpoint disabled. The service is
+// non-load-bearing for the file plane — actual tag writes go
+// through file.Service.AddTag regardless of whether suggestions
+// are wired.
+//
+// The typed-nil guard mirrors WithWebhooks above: a caller passing
+// a (*ai.SuggestionService)(nil) wrapped in the TagSuggester
+// interface would slip past a vanilla `s == nil` check (interfaces
+// compare != nil when the type slot is set), and the subsequent
+// s.Suggest call in ai.go would NPE on s.pool. Production wiring
+// at cmd/server/main.go:629 always constructs a non-nil service so
+// this guard is defence-in-depth — it costs nothing and removes a
+// future-conditional-wiring footgun (which is exactly the failure
+// mode WithWebhooks already absorbs for *webhooks.Publisher).
+//
+// isTypedNil uses reflection rather than a `s.(*ai.SuggestionService)`
+// type assertion so api/drive doesn't have to import internal/ai —
+// preserving the one-way dependency described on the TagSuggester
+// interface above (ai → middleware, drive → ai via interface only).
+func (h *Handler) WithTagSuggester(s TagSuggester) *Handler {
+	if isTypedNil(s) {
+		h.tagSuggest = nil
+		return h
+	}
+	h.tagSuggest = s
+	return h
+}
+
+// WithQueryExpander wires the AI query-expansion service so the
+// /api/search/expand endpoint stops responding 501. As with
+// WithTagSuggester, a nil expander keeps the endpoint disabled and
+// doesn't affect the primary /api/search endpoint.
+//
+// The typed-nil guard matches WithTagSuggester / WithWebhooks: a
+// (*ai.ExpansionService)(nil) wrapped in the QueryExpander
+// interface would NPE in Expand at runtime. Production never wires
+// a nil concrete pointer, but the guard keeps the contract honest.
+func (h *Handler) WithQueryExpander(e QueryExpander) *Handler {
+	if isTypedNil(e) {
+		h.queryExpand = nil
+		return h
+	}
+	h.queryExpand = e
+	return h
+}
+
 // WithClientRooms attaches a client-room service so the /api/client-rooms
 // endpoints stop responding 501 Not Implemented.
 func (h *Handler) WithClientRooms(s *sharing.ClientRoomService) *Handler {
@@ -210,7 +318,18 @@ func (h *Handler) WithEmail(s *email.Service) *Handler {
 // WithPreviews wires the preview repository so the handler can serve
 // preview download URLs without going through a service layer. A nil
 // repository causes /api/files/{id}/preview-url to respond 404.
+//
+// The typed-nil guard matches WithWebhooks / WithTagSuggester /
+// WithQueryExpander: a (*preview.PostgresRepository)(nil) wrapped
+// in preview.Repository would compare != nil under the interface
+// comparison and then NPE in handlePreviewURL's repo call. Devin
+// Review ANALYSIS_0002 on commit 10bd9b9 flagged this setter as
+// the last interface-taking setter without the guard.
 func (h *Handler) WithPreviews(r preview.Repository) *Handler {
+	if isTypedNil(r) {
+		h.previews = nil
+		return h
+	}
 	h.previews = r
 	return h
 }

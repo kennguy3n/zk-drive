@@ -147,6 +147,8 @@ func (h *Handler) RegisterRoutes(r chi.Router) {
 	r.Get("/cmk", h.GetCMK)
 	r.Put("/cmk", h.PutCMK)
 	r.Patch("/workspace/mfa-policy", h.UpdateMFAPolicy)
+	r.Get("/workspace/search-language", h.GetSearchLanguage)
+	r.Put("/workspace/search-language", h.UpdateSearchLanguage)
 }
 
 // updateMFAPolicyRequest carries the boolean toggle for the
@@ -210,6 +212,106 @@ func (h *Handler) UpdateMFAPolicy(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, updateMFAPolicyResponse{MFARequired: *req.MFARequired})
+}
+
+// searchLanguageRequest carries the new FTS dictionary. We use a
+// pointer so the absence of the key returns 400 rather than
+// silently defaulting to 'simple' (which would be a silent
+// configuration downgrade).
+type searchLanguageRequest struct {
+	Language *string `json:"language"`
+}
+
+type searchLanguageResponse struct {
+	Language  string   `json:"language"`
+	Supported []string `json:"supported"`
+}
+
+// GetSearchLanguage returns the workspace's current FTS dictionary
+// alongside the full supported-language allow-list. Admin UIs use
+// the supported set to populate the picker without shipping a
+// duplicate constant on the frontend.
+func (h *Handler) GetSearchLanguage(w http.ResponseWriter, r *http.Request) {
+	if h.workspaces == nil {
+		http.Error(w, "workspace service not wired", http.StatusNotImplemented)
+		return
+	}
+	workspaceID, ok := middleware.WorkspaceIDFromContext(r.Context())
+	if !ok {
+		http.Error(w, "workspace not in context", http.StatusInternalServerError)
+		return
+	}
+	lang, err := h.workspaces.GetSearchLanguage(r.Context(), workspaceID)
+	if err != nil {
+		http.Error(w, "get search language: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, http.StatusOK, searchLanguageResponse{
+		Language:  lang,
+		Supported: workspace.SupportedSearchLanguages(),
+	})
+}
+
+// UpdateSearchLanguage flips workspaces.search_language for the
+// caller's workspace. Validates the input against the supported
+// allow-list (workspace.IsSupportedSearchLanguage); a typo returns
+// 400 with the supported set so the operator can self-correct
+// without consulting the source.
+func (h *Handler) UpdateSearchLanguage(w http.ResponseWriter, r *http.Request) {
+	if h.workspaces == nil {
+		http.Error(w, "workspace service not wired", http.StatusNotImplemented)
+		return
+	}
+	workspaceID, ok := middleware.WorkspaceIDFromContext(r.Context())
+	if !ok {
+		http.Error(w, "workspace not in context", http.StatusInternalServerError)
+		return
+	}
+	actorID, _ := middleware.UserIDFromContext(r.Context())
+
+	var req searchLanguageRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid json body", http.StatusBadRequest)
+		return
+	}
+	if req.Language == nil {
+		http.Error(w, "language is required", http.StatusBadRequest)
+		return
+	}
+	lang := strings.ToLower(strings.TrimSpace(*req.Language))
+	if !workspace.IsSupportedSearchLanguage(lang) {
+		writeJSON(w, http.StatusBadRequest, map[string]any{
+			"error":     "unsupported language",
+			"supported": workspace.SupportedSearchLanguages(),
+		})
+		return
+	}
+
+	prev, err := h.workspaces.SetSearchLanguage(r.Context(), workspaceID, lang)
+	if err != nil {
+		if errors.Is(err, workspace.ErrUnsupportedSearchLanguage) {
+			writeJSON(w, http.StatusBadRequest, map[string]any{
+				"error":     "unsupported language",
+				"supported": workspace.SupportedSearchLanguages(),
+			})
+			return
+		}
+		http.Error(w, "update search language: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	if h.audit != nil {
+		actor := actorID
+		h.audit.LogAction(r.Context(), workspaceID, &actor, audit.ActionWorkspaceSearchLanguage, "", nil, r, map[string]any{
+			"previous": prev,
+			"current":  lang,
+		})
+	}
+
+	writeJSON(w, http.StatusOK, searchLanguageResponse{
+		Language:  lang,
+		Supported: workspace.SupportedSearchLanguages(),
+	})
 }
 
 // GetPlacement returns the workspace's current placement policy by

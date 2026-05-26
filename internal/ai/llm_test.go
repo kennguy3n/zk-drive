@@ -46,7 +46,7 @@ func TestOllamaClientGenerateSuccess(t *testing.T) {
 		t.Fatalf("NewOllamaClient: %v", err)
 	}
 	got, err := client.Generate(context.Background(),
-		BuildSummaryPrompt("Marketing", []string{"q3-launch.md"}, "Q3 launch plan"))
+		BuildSummaryPrompt("Marketing", []string{"q3-launch.md"}, "Q3 launch plan", "english"))
 	if err != nil {
 		t.Fatalf("Generate: %v", err)
 	}
@@ -190,7 +190,7 @@ func TestNewOllamaClientAcceptsLocalEndpoints(t *testing.T) {
 // ("Do not invent files. Do not request more data.").
 func TestBuildSummaryPromptShape(t *testing.T) {
 	t.Parallel()
-	prompt := BuildSummaryPrompt("Marketing", []string{"a.md", "b.md"}, "Q3 plan")
+	prompt := BuildSummaryPrompt("Marketing", []string{"a.md", "b.md"}, "Q3 plan", "english")
 	for _, want := range []string{
 		"You are summarising a private team workspace folder",
 		"Do not invent files",
@@ -199,9 +199,80 @@ func TestBuildSummaryPromptShape(t *testing.T) {
 		"a.md, b.md",
 		"Sample content",
 		"\nSummary:",
+		"Answer in English.",
 	} {
 		if !strings.Contains(prompt, want) {
 			t.Errorf("prompt missing %q: full text:\n%s", want, prompt)
+		}
+	}
+}
+
+// TestBuildSummaryPromptLocalisesInstructions pins that swapping
+// the workspace search-language swaps both the imperative and the
+// final answer-in reminder; the user content (folder name, file
+// names, preview) stays unchanged. Privacy-relevant: we never
+// translate stored bytes, only the system prompt vocabulary.
+func TestBuildSummaryPromptLocalisesInstructions(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		lang     string
+		wantSubs []string
+	}{
+		{"english", []string{"Answer in English."}},
+		{"french", []string{"R\u00e9pondez en fran\u00e7ais."}},
+		{"german", []string{"Antworten Sie auf Deutsch."}},
+		{"spanish", []string{"Responda en espa\u00f1ol."}},
+		{"simple", []string{"Match the user content's language."}},
+		{"", []string{"Answer in English"}},
+		{"klingon", []string{"Answer in English"}},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.lang, func(t *testing.T) {
+			t.Parallel()
+			prompt := BuildSummaryPrompt("Marketing", []string{"a.md"}, "sample", tc.lang)
+			for _, want := range tc.wantSubs {
+				if !strings.Contains(prompt, want) {
+					t.Errorf("lang=%q prompt missing %q\nfull:\n%s", tc.lang, want, prompt)
+				}
+			}
+			// User content half stays unchanged regardless of language.
+			for _, mustHave := range []string{"Folder name: Marketing", "Sample content"} {
+				if !strings.Contains(prompt, mustHave) {
+					t.Errorf("lang=%q prompt dropped user content marker %q", tc.lang, mustHave)
+				}
+			}
+		})
+	}
+}
+
+// TestPromptLanguageCoversAllSearchLanguages pins the contract
+// that every workspace search-language has matching prompt
+// vocabulary. Adding a new dictionary to
+// workspace.supportedSearchLanguages without adding a matching
+// entry to languagePrompts means non-English workspaces silently
+// get English instructions — this test trips before the gap
+// reaches users.
+func TestPromptLanguageCoversAllSearchLanguages(t *testing.T) {
+	t.Parallel()
+	// Pinned manually here rather than importing workspace to
+	// avoid a cyclic package dependency (workspace already imports
+	// ai indirectly via the upcoming auto-tag handler). The two
+	// allow-lists must stay in sync — if one changes, this test
+	// reminds the next editor to update the other.
+	workspaceLanguages := []string{
+		"simple", "english", "french", "german", "spanish",
+		"italian", "portuguese", "dutch", "russian", "swedish",
+		"norwegian", "danish", "finnish", "hungarian", "turkish",
+		"romanian",
+	}
+	prompt := make(map[string]struct{}, len(SupportedPromptLanguages()))
+	for _, k := range SupportedPromptLanguages() {
+		prompt[k] = struct{}{}
+	}
+	for _, lang := range workspaceLanguages {
+		if _, ok := prompt[lang]; !ok {
+			t.Errorf("workspace search language %q has no prompt vocabulary entry", lang)
 		}
 	}
 }

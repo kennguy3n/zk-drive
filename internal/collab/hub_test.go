@@ -497,7 +497,7 @@ func TestHub_Shutdown_ClosesAllClients(t *testing.T) {
 		hub.Register(c)
 		clients = append(clients, c)
 	}
-	hub.Shutdown()
+	hub.Shutdown(context.Background())
 	for i, c := range clients {
 		select {
 		case <-c.Done():

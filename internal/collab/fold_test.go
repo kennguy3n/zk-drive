@@ -2,6 +2,7 @@ package collab
 
 import (
 	"bytes"
+	"context"
 	"encoding/binary"
 	"testing"
 
@@ -11,7 +12,7 @@ import (
 )
 
 func TestOpaqueConcatFold_EmptyTailReturnsError(t *testing.T) {
-	if _, _, _, err := OpaqueConcatFold(nil, nil, nil); err == nil {
+	if _, _, _, err := OpaqueConcatFold(context.Background(), nil, nil, nil); err == nil {
 		t.Fatal("expected error for empty tail")
 	}
 }
@@ -23,7 +24,7 @@ func TestOpaqueConcatFold_PrefixesStateAndDeltas(t *testing.T) {
 		{DocumentID: uuid.New(), Seq: 2, Payload: []byte("U2")},
 		{DocumentID: uuid.New(), Seq: 5, Payload: []byte("LAST-DELTA")},
 	}
-	newState, newSV, upToSeq, err := OpaqueConcatFold(state, []byte("vector"), tail)
+	newState, newSV, upToSeq, err := OpaqueConcatFold(context.Background(), state, []byte("vector"), tail)
 	if err != nil {
 		t.Fatalf("fold returned error: %v", err)
 	}
@@ -57,7 +58,7 @@ func TestOpaqueConcatFold_UpToSeqIsLastTailSeq(t *testing.T) {
 		{Seq: 101, Payload: []byte("b")},
 		{Seq: 102, Payload: []byte("c")},
 	}
-	_, _, upToSeq, err := OpaqueConcatFold(nil, nil, tail)
+	_, _, upToSeq, err := OpaqueConcatFold(context.Background(), nil, nil, tail)
 	if err != nil {
 		t.Fatalf("fold returned error: %v", err)
 	}
@@ -67,29 +68,33 @@ func TestOpaqueConcatFold_UpToSeqIsLastTailSeq(t *testing.T) {
 }
 
 func TestFoldFor_StrictZKReturnsNil(t *testing.T) {
-	// strict_zk → ServerSnapshotAllowed=false → no fold.
-	if FoldFor(Capability{ServerSnapshotAllowed: false}) != nil {
-		t.Fatal("expected nil fold for ServerSnapshotAllowed=false")
+	// strict_zk → ServerSnapshotAllowed=false → no fold, regardless
+	// of whether a runtime is wired or not.
+	if FoldFor(Capability{ServerSnapshotAllowed: false}, nil) != nil {
+		t.Fatal("expected nil fold for ServerSnapshotAllowed=false (nil rt)")
 	}
 }
 
-func TestFoldFor_ManagedReturnsOpaqueConcat(t *testing.T) {
-	// managed_encrypted today → OpaqueConcatFold (placeholder until
-	// YjsMergeFold lands). The test is a structural pin so the
-	// future migration is intentional, not accidental.
-	f := FoldFor(Capability{ServerSnapshotAllowed: true})
+// TestFoldFor_NilRuntimeFallsBackToOpaqueConcat pins the
+// degraded-mode behaviour: when ServerSnapshotAllowed=true but no
+// runtime was wired (legacy deployments, or future opt-out
+// config), the routing falls back to OpaqueConcatFold so
+// compaction still runs (no zero-fold regression). The output
+// shape is the length-prefixed bundle.
+func TestFoldFor_NilRuntimeFallsBackToOpaqueConcat(t *testing.T) {
+	f := FoldFor(Capability{ServerSnapshotAllowed: true}, nil)
 	if f == nil {
-		t.Fatal("expected non-nil fold for ServerSnapshotAllowed=true")
+		t.Fatal("expected non-nil fold for ServerSnapshotAllowed=true with nil rt")
 	}
-	// Sanity check: invoke and assert it produces a length-prefix
-	// framed bundle.
+	// Sanity check: invoke and assert the output is a length-
+	// prefix bundle (OpaqueConcatFold's wire format).
 	tail := []*document.Delta{{Seq: 1, Payload: []byte("x")}}
-	out, _, _, err := f(nil, nil, tail)
+	out, _, _, err := f(context.Background(), nil, nil, tail)
 	if err != nil {
 		t.Fatalf("fold call failed: %v", err)
 	}
 	if len(out) < 4 {
-		t.Fatalf("output too small to contain a length prefix")
+		t.Fatalf("output too small to contain a length prefix: got %d bytes", len(out))
 	}
 }
 
