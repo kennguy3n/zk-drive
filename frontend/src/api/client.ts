@@ -53,6 +53,15 @@ const NON_SESSION_401_CODES = new Set<string>([
   // future handler starts emitting either of them as 401, add them
   // here at the same time.)
   "AUTH_MFA_INVALID",
+  // Mid-session password reverify failure (disable-2FA flow, future
+  // change-email / change-password flows). The user's session JWT
+  // is still valid — that's how they reached the handler in the
+  // first place. They just typed the wrong password on the step-up
+  // form. Redirecting to /login would discard a fully-valid session
+  // for a recoverable form-level error; the page's catch block
+  // should render "Incorrect password. Please try again." and let
+  // the user retry without losing their place.
+  "AUTH_PASSWORD_REVERIFY_FAILED",
 ]);
 
 // Redirect to /login on session-expiry 401s so stale sessions don't

@@ -275,7 +275,12 @@ func (h *Handler) Login(w http.ResponseWriter, r *http.Request) {
 	}
 	if err != nil {
 		if errors.Is(err, user.ErrNotFound) {
-			middleware.RespondError(w, http.StatusUnauthorized, middleware.ErrCodeAuthInvalidToken, "invalid credentials")
+			// Login flow: no user with that email. Distinct from
+			// AUTH_INVALID_TOKEN — there is no session/token in play;
+			// the user's credentials simply don't match. The locale
+			// renders this as "Email or password is incorrect",
+			// which is the actionable copy on the LoginPage form.
+			middleware.RespondError(w, http.StatusUnauthorized, middleware.ErrCodeAuthInvalidCredentials, "invalid credentials")
 			return
 		}
 		middleware.RespondError(w, http.StatusInternalServerError, middleware.ErrCodeInternal, "login: "+err.Error())
@@ -285,7 +290,10 @@ func (h *Handler) Login(w http.ResponseWriter, r *http.Request) {
 		h.logAudit(ctx, u.WorkspaceID, &u.ID, audit.ActionLogin, r, map[string]any{
 			"result": "password_mismatch",
 		})
-		middleware.RespondError(w, http.StatusUnauthorized, middleware.ErrCodeAuthInvalidToken, "invalid credentials")
+		// Same code as user-not-found above: deliberately conflate
+		// the two so login response timing doesn't expose whether
+		// an email is registered.
+		middleware.RespondError(w, http.StatusUnauthorized, middleware.ErrCodeAuthInvalidCredentials, "invalid credentials")
 		return
 	}
 	if u.DeactivatedAt != nil {

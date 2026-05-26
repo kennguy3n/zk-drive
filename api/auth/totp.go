@@ -320,7 +320,15 @@ func (h *TOTPHandler) Disable(w http.ResponseWriter, r *http.Request) {
 		h.h.logAudit(r.Context(), u.WorkspaceID, &u.ID, audit.ActionMFADisable, r, map[string]any{
 			"result": "password_mismatch",
 		})
-		middleware.RespondError(w, http.StatusUnauthorized, middleware.ErrCodeAuthInvalidToken, "invalid credentials")
+		// Distinct from AUTH_INVALID_TOKEN: the user IS authenticated
+		// (session JWT is valid; that's how they reached this handler),
+		// they just typed the wrong password on the step-up reverify.
+		// Using AUTH_INVALID_TOKEN here would trigger the frontend's
+		// session-clear-and-redirect interceptor and log them out
+		// entirely — discarding a valid session for a recoverable
+		// form-level error. AUTH_PASSWORD_REVERIFY_FAILED is in
+		// NON_SESSION_401_CODES so the page's catch block handles it.
+		middleware.RespondError(w, http.StatusUnauthorized, middleware.ErrCodeAuthPasswordReverify, "invalid credentials")
 		return
 	}
 

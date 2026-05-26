@@ -523,6 +523,8 @@
   "errors": {
     "AUTH_MISSING_TOKEN": "Authentication required.",
     "AUTH_INVALID_TOKEN": "Your session has expired. Please sign in again.",
+    "AUTH_INVALID_CREDENTIALS": "Email or password is incorrect.",
+    "AUTH_PASSWORD_REVERIFY_FAILED": "Incorrect password. Please try again.",
     "AUTH_REVOKED_TOKEN": "Your session has been revoked. Please sign in again.",
     "AUTH_MISSING_IAT": "This token is missing required claims. Please sign in again.",
     "AUTH_BAD_PURPOSE": "This token is not valid for this action. Please sign in again.",

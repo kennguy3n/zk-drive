@@ -90,6 +90,8 @@ func TestErrorCodes_DistinctValues(t *testing.T) {
 		ErrCodeAuthBadPurpose,
 		ErrCodeAuthMissingIat,
 		ErrCodeRevocationCheck,
+		ErrCodeAuthInvalidCredentials,
+		ErrCodeAuthPasswordReverify,
 		ErrCodeMFARequired,
 		ErrCodeMFAInvalid,
 		ErrCodeMFAEnrollNeeded,

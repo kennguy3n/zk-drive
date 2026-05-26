@@ -26,15 +26,36 @@ type ErrorCode string
 
 const (
 	// Authentication failures (401 Unauthorized).
-	ErrCodeAuthMissingToken ErrorCode = "AUTH_MISSING_TOKEN"
-	ErrCodeAuthInvalidToken ErrorCode = "AUTH_INVALID_TOKEN"
-	ErrCodeAuthRevokedToken ErrorCode = "AUTH_REVOKED_TOKEN"
-	ErrCodeAuthBadPurpose   ErrorCode = "AUTH_BAD_PURPOSE"
-	ErrCodeAuthMissingIat   ErrorCode = "AUTH_MISSING_IAT"
-	ErrCodeRevocationCheck  ErrorCode = "AUTH_REVOCATION_CHECK_FAILED"
-	ErrCodeMFARequired      ErrorCode = "AUTH_MFA_REQUIRED"
-	ErrCodeMFAInvalid       ErrorCode = "AUTH_MFA_INVALID"
-	ErrCodeMFAEnrollNeeded  ErrorCode = "MFA_ENROLL_REQUIRED"
+	//
+	// Three distinct semantic groups, all 401, that the frontend
+	// interceptor needs to distinguish:
+	//
+	//  - Token / session problems (AuthMissingToken, AuthInvalidToken,
+	//    AuthRevokedToken, AuthBadPurpose, AuthMissingIat,
+	//    RevocationCheck) — the JWT itself is dead or wrong-purpose;
+	//    clearing localStorage and bouncing to /login is correct.
+	//  - Login-flow wrong-credentials (AuthInvalidCredentials) — the
+	//    user has no valid session yet; the form's catch block
+	//    handles the error. Locale copy: "Email or password is
+	//    incorrect", NOT "Your session has expired".
+	//  - Mid-session step-up failures (AuthPasswordReverifyFailed,
+	//    MFAInvalid) — the user IS authenticated; they typed the
+	//    wrong password on a sensitive action (disable-2FA, change
+	//    email) or the wrong 6-digit MFA code. Must NOT nuke the
+	//    session. See frontend/src/api/client.ts
+	//    NON_SESSION_401_CODES for the codes the interceptor treats
+	//    as soft 401s.
+	ErrCodeAuthMissingToken        ErrorCode = "AUTH_MISSING_TOKEN"
+	ErrCodeAuthInvalidToken        ErrorCode = "AUTH_INVALID_TOKEN"
+	ErrCodeAuthRevokedToken        ErrorCode = "AUTH_REVOKED_TOKEN"
+	ErrCodeAuthBadPurpose          ErrorCode = "AUTH_BAD_PURPOSE"
+	ErrCodeAuthMissingIat          ErrorCode = "AUTH_MISSING_IAT"
+	ErrCodeRevocationCheck         ErrorCode = "AUTH_REVOCATION_CHECK_FAILED"
+	ErrCodeAuthInvalidCredentials  ErrorCode = "AUTH_INVALID_CREDENTIALS"
+	ErrCodeAuthPasswordReverify    ErrorCode = "AUTH_PASSWORD_REVERIFY_FAILED"
+	ErrCodeMFARequired             ErrorCode = "AUTH_MFA_REQUIRED"
+	ErrCodeMFAInvalid              ErrorCode = "AUTH_MFA_INVALID"
+	ErrCodeMFAEnrollNeeded         ErrorCode = "MFA_ENROLL_REQUIRED"
 
 	// Authorization failures (403 Forbidden).
 	ErrCodeForbidden   ErrorCode = "FORBIDDEN"
