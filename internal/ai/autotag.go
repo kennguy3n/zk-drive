@@ -44,6 +44,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/kennguy3n/zk-drive/internal/file"
@@ -205,7 +206,22 @@ JOIN folders fo ON fo.id = f.folder_id AND fo.workspace_id = f.workspace_id
 WHERE f.id = $1 AND f.workspace_id = $2 AND f.deleted_at IS NULL AND fo.deleted_at IS NULL`,
 		fileID, workspaceID).Scan(&name, &contentText, &mode)
 	if err != nil {
-		return nil, fmt.Errorf("%w: %v", ErrTagSuggestFileNotFound, err)
+		// Distinguish "row doesn't exist" (legitimate 404 for an
+		// invalid file id or a soft-deleted row) from transient DB
+		// errors (connection blip, timeout, syntax bug) which must
+		// surface as 500 so the client retries / the operator
+		// sees the real cause. Mirrors the standard repository
+		// pattern at internal/workspace/repository.go:65,
+		// internal/file/repository.go:106 and similar — only
+		// pgx.ErrNoRows maps to a not-found sentinel; everything
+		// else propagates as a generic wrapped error which
+		// writeTagSuggestError's default arm renders as 500.
+		// Devin Review BUG_0001 on PR #85 caught the prior
+		// unconditional wrap masking DB failures as 404.
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, fmt.Errorf("%w: %v", ErrTagSuggestFileNotFound, err)
+		}
+		return nil, fmt.Errorf("ai: load file for tag suggestion: %w", err)
 	}
 	if mode == folder.EncryptionStrictZK {
 		return nil, ErrTagSuggestUnavailable

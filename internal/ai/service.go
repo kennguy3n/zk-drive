@@ -29,6 +29,7 @@ import (
 	"github.com/kennguy3n/zk-drive/internal/logging"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/kennguy3n/zk-drive/internal/folder"
@@ -136,7 +137,22 @@ func (s *SummaryService) Summarize(ctx context.Context, workspaceID, folderID uu
 		`SELECT encryption_mode, name FROM folders WHERE id = $1 AND workspace_id = $2 AND deleted_at IS NULL`,
 		folderID, workspaceID).Scan(&mode, &folderName)
 	if err != nil {
-		return "", fmt.Errorf("%w: %v", ErrFolderNotFound, err)
+		// Only pgx.ErrNoRows is a legitimate 404 (folder doesn't
+		// exist in this workspace or is soft-deleted). Other errors
+		// (connection blips, timeouts, syntax bugs) must surface as
+		// 500 via the kchat handler's default arm so transient DB
+		// trouble doesn't masquerade as 'folder not found' to the
+		// client. Standard repository pattern — see e.g.
+		// internal/workspace/repository.go:65,
+		// internal/sharing/repository.go:66. Devin Review
+		// ANALYSIS_0003 on PR #85 flagged this pre-existing
+		// pattern (it was first introduced before WS6 landed but
+		// fixing it alongside the autotag.go change keeps the two
+		// QueryRow call sites consistent).
+		if errors.Is(err, pgx.ErrNoRows) {
+			return "", fmt.Errorf("%w: %v", ErrFolderNotFound, err)
+		}
+		return "", fmt.Errorf("ai: load folder for summary: %w", err)
 	}
 	if mode == folder.EncryptionStrictZK {
 		return "", ErrStrictZKForbidden
