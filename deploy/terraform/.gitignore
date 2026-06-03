@@ -1,0 +1,16 @@
+# Terraform working artifacts — never commit these.
+**/.terraform/*
+*.tfstate
+*.tfstate.*
+*.tfplan
+crash.log
+crash.*.log
+
+# Provider lock files are platform-specific here; operators regenerate
+# them with `terraform init`. Omit to keep the modules portable.
+.terraform.lock.hcl
+
+# Local variable files may contain secrets / environment-specific values.
+*.tfvars
+*.tfvars.json
+!example.tfvars
