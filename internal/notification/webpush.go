@@ -4,7 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
+	"net"
 	"net/http"
+	"net/url"
+	"strings"
 
 	"github.com/kennguy3n/zk-drive/internal/logging"
 
@@ -17,6 +21,16 @@ import (
 // require a mailto: or https: subscriber so they can contact the
 // application-server operator about a misbehaving sender.
 const defaultVAPIDSubscriber = "mailto:ops@zk-drive.example.com"
+
+// pushTTLSeconds is the Time-To-Live the push service holds an
+// undelivered message for. The whole point of Web Push (vs the live
+// WebSocket path) is to reach a user whose device is briefly offline
+// — laptop asleep, phone in a tunnel — so a 30s TTL defeated the
+// feature. One day keeps a notification deliverable across an
+// overnight-offline window while still letting the push service expire
+// truly stale messages. The notification is persisted in Postgres
+// regardless, so this only governs the out-of-band push copy.
+const pushTTLSeconds = 24 * 60 * 60
 
 // PushSubscription mirrors the browser PushSubscription shape the
 // frontend POSTs to /api/push/subscribe. p256dh and auth are the
@@ -131,7 +145,55 @@ func (s *WebPushService) Subscribe(ctx context.Context, workspaceID, userID uuid
 	if sub.Endpoint == "" || sub.P256dh == "" || sub.Auth == "" {
 		return fmt.Errorf("webpush: subscription requires endpoint, p256dh and auth")
 	}
+	if err := validatePushEndpoint(sub.Endpoint); err != nil {
+		return err
+	}
 	return s.repo.SaveSubscription(ctx, workspaceID, userID, sub)
+}
+
+// validatePushEndpoint rejects endpoints that are not plausible public
+// push-service URLs. The endpoint is attacker-controlled (any logged-in
+// client picks it), and the server later POSTs to it on every
+// notification, so an unvalidated endpoint turns the server into a
+// blind SSRF probe against internal addresses (cloud metadata at
+// 169.254.169.254, loopback, RFC 1918). We require https and block
+// literal loopback / private / link-local / unspecified IPs and
+// localhost. Note: this does not resolve DNS, so a hostname pointing
+// at an internal IP is not caught here — defence against that belongs
+// in a custom http.Transport dialer (tracked as a follow-up); blocking
+// the literal-IP vectors closes the cheap, obvious holes.
+func validatePushEndpoint(endpoint string) error {
+	u, err := url.Parse(endpoint)
+	if err != nil {
+		return fmt.Errorf("webpush: invalid endpoint url: %w", err)
+	}
+	if u.Scheme != "https" {
+		return fmt.Errorf("webpush: endpoint must be an https url")
+	}
+	host := u.Hostname()
+	if host == "" {
+		return fmt.Errorf("webpush: endpoint url missing host")
+	}
+	lower := strings.ToLower(host)
+	if lower == "localhost" || strings.HasSuffix(lower, ".localhost") {
+		return fmt.Errorf("webpush: endpoint host not allowed")
+	}
+	if ip := net.ParseIP(host); ip != nil && isDisallowedIP(ip) {
+		return fmt.Errorf("webpush: endpoint host not allowed")
+	}
+	return nil
+}
+
+// isDisallowedIP reports whether ip is in a range a push endpoint must
+// never target: loopback, RFC 1918 private, link-local (incl. the
+// 169.254.0.0/16 cloud-metadata range), unspecified, or multicast.
+func isDisallowedIP(ip net.IP) bool {
+	return ip.IsLoopback() ||
+		ip.IsPrivate() ||
+		ip.IsLinkLocalUnicast() ||
+		ip.IsLinkLocalMulticast() ||
+		ip.IsUnspecified() ||
+		ip.IsMulticast()
 }
 
 // Unsubscribe removes a single subscription identified by its push
@@ -194,7 +256,7 @@ func (s *WebPushService) deliver(ctx context.Context, message []byte, sub PushSu
 		Subscriber:      s.subscriber,
 		VAPIDPublicKey:  s.vapidPublicKey,
 		VAPIDPrivateKey: s.vapidPrivateKey,
-		TTL:             30,
+		TTL:             pushTTLSeconds,
 	}
 	if s.httpClient != nil {
 		opts.HTTPClient = s.httpClient
@@ -209,6 +271,11 @@ func (s *WebPushService) deliver(ctx context.Context, message []byte, sub PushSu
 	if err != nil {
 		return 0, err
 	}
-	defer func() { _ = resp.Body.Close() }()
+	// Drain then close so the keep-alive connection can be reused for
+	// the next device in the fan-out regardless of response size.
+	defer func() {
+		_, _ = io.Copy(io.Discard, resp.Body)
+		_ = resp.Body.Close()
+	}()
 	return resp.StatusCode, nil
 }

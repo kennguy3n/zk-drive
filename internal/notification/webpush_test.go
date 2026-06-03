@@ -169,6 +169,38 @@ func TestWebPushService_SubscribeValidation(t *testing.T) {
 	}
 }
 
+func TestWebPushService_SubscribeRejectsUnsafeEndpoints(t *testing.T) {
+	repo := newFakeWebPushRepo()
+	svc, _ := newTestService(t, repo, http.StatusCreated)
+	ctx := context.Background()
+	ws, user := uuid.New(), uuid.New()
+
+	bad := []string{
+		"http://push.example.com/abc",    // not https
+		"https://localhost/abc",          // localhost
+		"https://127.0.0.1/abc",          // loopback
+		"https://10.0.0.5/abc",           // RFC 1918 private
+		"https://192.168.1.1/abc",        // RFC 1918 private
+		"https://169.254.169.254/latest", // cloud metadata (link-local)
+		"https://0.0.0.0/abc",            // unspecified
+		"not-a-url",                      // no https scheme
+	}
+	for _, endpoint := range bad {
+		sub := testSubscription(t, endpoint)
+		if err := svc.Subscribe(ctx, ws, user, sub); err == nil {
+			t.Errorf("expected Subscribe to reject endpoint %q", endpoint)
+		}
+	}
+	if repo.count() != 0 {
+		t.Errorf("expected no unsafe subscription stored, got %d", repo.count())
+	}
+
+	// A normal public https push endpoint is still accepted.
+	if err := svc.Subscribe(ctx, ws, user, testSubscription(t, "https://fcm.googleapis.com/fcm/send/abc")); err != nil {
+		t.Errorf("expected public https endpoint to be accepted: %v", err)
+	}
+}
+
 func TestWebPushService_SendDeliversToAllSubscriptions(t *testing.T) {
 	repo := newFakeWebPushRepo()
 	svc, stub := newTestService(t, repo, http.StatusCreated)
