@@ -126,6 +126,18 @@ func (h *Handler) WithWebhooks(p MemberEventPublisher) *Handler {
 // the route responds 501 Not Implemented (e.g. deployments still on
 // HS256-only signing).
 func (h *Handler) WithJWTRotator(r JWTRotator) *Handler {
+	// Mirror WithWebhooks: a typed-nil *crypto.KeyManager wrapped in
+	// the JWTRotator interface compares != nil, so the h.jwtKeys == nil
+	// guard in RotateJWTKey would pass and then NPE inside RotateKey.
+	// Collapse it back to a real nil so the route cleanly responds 501.
+	if r == nil {
+		h.jwtKeys = nil
+		return h
+	}
+	if km, ok := r.(*cryptopkg.KeyManager); ok && km == nil {
+		h.jwtKeys = nil
+		return h
+	}
 	h.jwtKeys = r
 	return h
 }

@@ -9,6 +9,7 @@ import (
 	"encoding/pem"
 	"errors"
 	"fmt"
+	"log/slog"
 	"sync"
 	"time"
 
@@ -164,6 +165,49 @@ func (km *KeyManager) reload(ctx context.Context) error {
 	return nil
 }
 
+// Reload re-reads the signing-key set from the store, rebuilding the
+// verification map and re-selecting the active signing key. It is the
+// exported entrypoint the background refresh loop (and tests) use to
+// pick up rotations performed by other replicas. A KeyManager with no
+// store reloads to an HS256-only state without error. On failure the
+// previously-loaded key set is left intact (reload only swaps the
+// in-memory maps once the read fully succeeds).
+func (km *KeyManager) Reload(ctx context.Context) error {
+	return km.reload(ctx)
+}
+
+// RefreshLoop periodically calls Reload until ctx is cancelled, so a
+// key rotated in on any replica (which writes jwt_signing_keys and
+// reloads only itself, see RotateKey) propagates to every other
+// replica within one interval — without a restart. This closes the
+// multi-replica gap where a token signed by a freshly-rotated key
+// would 401 on replicas that had not yet observed the new key's
+// public half.
+//
+// interval must be positive; a non-positive value disables the loop
+// (callers gate on JWTKeyRefreshInterval > 0). The loop is resilient:
+// a failed Reload (e.g. a transient DB blip) is logged and retried on
+// the next tick rather than aborting, so a momentary outage cannot
+// permanently freeze the key set. RefreshLoop blocks until ctx is
+// done and is intended to run in its own goroutine.
+func (km *KeyManager) RefreshLoop(ctx context.Context, interval time.Duration) {
+	if interval <= 0 {
+		return
+	}
+	t := time.NewTicker(interval)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			if err := km.reload(ctx); err != nil {
+				slog.Warn("jwt signing-key auto-refresh failed; retaining existing key set", "err", err)
+			}
+		}
+	}
+}
+
 // Sign issues a signed token string for the given claims. It uses
 // ES256 with the active key when one is loaded, otherwise HS256.
 func (km *KeyManager) Sign(claims jwt.Claims) (string, error) {
@@ -176,6 +220,14 @@ func (km *KeyManager) Sign(claims jwt.Claims) (string, error) {
 		tok := jwt.NewWithClaims(jwt.SigningMethodES256, claims)
 		tok.Header["kid"] = signKID
 		return tok.SignedString(signKey)
+	}
+	// algoPref == AlgES256 is a hard compliance requirement: refuse to
+	// mint HS256 tokens when an operator has demanded asymmetric
+	// signing but no active key has been rotated in yet. Silently
+	// downgrading here would hand out symmetric tokens to a deployment
+	// that believes it is asymmetric-only.
+	if km.algoPref == AlgES256 {
+		return "", errors.New("crypto: JWT_ALGORITHM=ES256 but no active asymmetric signing key (run POST /api/admin/jwt/rotate first)")
 	}
 	if km.hmacSecret == "" {
 		return "", errors.New("crypto: no signing key and empty HS256 secret")
