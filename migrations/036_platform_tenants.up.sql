@@ -31,6 +31,13 @@ ALTER TABLE workspaces ADD COLUMN provisioned_by TEXT;
 -- middleware, e.g. {'tenant:read','tenant:write','tenant:suspend'}. Stored as a
 -- TEXT[] so adding a capability needs no migration.
 --
+-- lookup_id is the non-secret selector embedded in the key plaintext
+-- ("pk_<lookup_id><secret>"). Authenticate looks the candidate row up by this
+-- UNIQUE id and bcrypt-verifies only that one hash, so auth is O(1) in the
+-- number of keys rather than a full scan + bcrypt-compare of every active key.
+-- It is not a secret on its own; the secret portion (bcrypt-hashed into
+-- key_hash) carries the security.
+--
 -- last_used_at is refreshed (best-effort) on every successful authentication
 -- so operators can spot stale keys; revoked_at soft-revokes a key while keeping
 -- the row for audit. There is no workspace_id — these keys are global to the
@@ -39,6 +46,7 @@ ALTER TABLE workspaces ADD COLUMN provisioned_by TEXT;
 CREATE TABLE platform_api_keys (
     id           UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     key_hash     BYTEA NOT NULL,
+    lookup_id    TEXT NOT NULL UNIQUE,
     label        TEXT NOT NULL,
     permissions  TEXT[] NOT NULL DEFAULT '{}',
     created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -46,7 +54,8 @@ CREATE TABLE platform_api_keys (
     revoked_at   TIMESTAMPTZ
 );
 
--- Hot path on every platform-API request is "list active keys to match the
--- presented secret against". The partial index keeps that scan tight as
--- revoked keys accumulate.
-CREATE INDEX idx_platform_api_keys_active ON platform_api_keys(id) WHERE revoked_at IS NULL;
+-- The hot path on every platform-API request resolves a key by its embedded
+-- lookup_id. The UNIQUE constraint on lookup_id already provides the backing
+-- btree index that turns that lookup into a single index probe, so no extra
+-- index is needed (an index on id WHERE revoked_at IS NULL would never be used
+-- by the WHERE lookup_id = $1 auth query).

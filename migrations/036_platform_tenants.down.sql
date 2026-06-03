@@ -1,5 +1,5 @@
 -- Reverse 036_platform_tenants.
-DROP INDEX IF EXISTS idx_platform_api_keys_active;
+-- The lookup_id UNIQUE index is dropped implicitly with the table.
 DROP TABLE IF EXISTS platform_api_keys;
 
 ALTER TABLE workspaces DROP COLUMN IF EXISTS provisioned_by;

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -13,6 +14,12 @@ import (
 )
 
 const gibibyte = 1024 * 1024 * 1024
+
+// defaultAlertCooldown is the minimum interval between successive
+// firings of the same usage-alert rule. It bounds alert storms when
+// EvaluateUsageAlerts is driven on a schedule while a threshold stays
+// crossed. Override per-service with WithAlertCooldown (0 disables).
+const defaultAlertCooldown = time.Hour
 
 // ListAlertRules returns every usage-alert rule, newest first.
 func (s *PlatformService) ListAlertRules(ctx context.Context) ([]AlertRule, error) {
@@ -113,6 +120,16 @@ func (s *PlatformService) EvaluateUsageAlerts(ctx context.Context) ([]AlertFirin
 		if !thresholdCrossed(rule.Operator, value, rule.Threshold) {
 			continue
 		}
+		// De-dup: suppress re-firing a rule whose previous firing is
+		// still within the cooldown window. This enforces the contract
+		// documented on usage_alert_rules.last_triggered_at and stops a
+		// cron-driven evaluation loop from storming the configured
+		// channels on every tick while a threshold stays crossed.
+		now := s.now()
+		if rule.LastTriggeredAt != nil && s.alertCooldown > 0 &&
+			now.Sub(*rule.LastTriggeredAt) < s.alertCooldown {
+			continue
+		}
 		firing := AlertFiring{
 			RuleID:      rule.ID,
 			WorkspaceID: *rule.WorkspaceID,
@@ -120,11 +137,14 @@ func (s *PlatformService) EvaluateUsageAlerts(ctx context.Context) ([]AlertFirin
 			Operator:    rule.Operator,
 			Threshold:   rule.Threshold,
 			Value:       value,
-			FiredAt:     s.now(),
+			FiredAt:     now,
 		}
 		s.dispatchFiring(ctx, rule, &firing)
+		// Stamp last_triggered_at with the service clock (not the DB
+		// clock) so the cooldown above is evaluated on a single,
+		// test-controllable timeline.
 		if _, uerr := s.pool.Exec(ctx,
-			`UPDATE usage_alert_rules SET last_triggered_at = now() WHERE id = $1`, rule.ID,
+			`UPDATE usage_alert_rules SET last_triggered_at = $2 WHERE id = $1`, rule.ID, now,
 		); uerr != nil {
 			s.log().Warn("platform: update last_triggered_at failed", "rule_id", rule.ID, "err", uerr)
 		}

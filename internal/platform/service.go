@@ -100,19 +100,30 @@ type PlatformService struct {
 
 	clock  func() time.Time
 	logger *slog.Logger
+
+	// alertCooldown is the minimum interval between successive firings
+	// of the same usage-alert rule (see EvaluateUsageAlerts).
+	alertCooldown time.Duration
+	// suspCache is a short-lived per-workspace suspension-state cache
+	// in front of WorkspaceSuspension, which the suspension guard calls
+	// on every authenticated request.
+	suspCache *suspensionCache
 }
 
 // NewService constructs a PlatformService. pool, workspaces, users and
 // billing are required; pass the optional collaborators via With*.
 func NewService(pool *pgxpool.Pool, workspaces *workspace.Service, users *user.Service, billing *billing.Service) *PlatformService {
-	return &PlatformService{
-		pool:       pool,
-		workspaces: workspaces,
-		users:      users,
-		billing:    billing,
-		clock:      time.Now,
-		logger:     slog.Default(),
+	s := &PlatformService{
+		pool:          pool,
+		workspaces:    workspaces,
+		users:         users,
+		billing:       billing,
+		clock:         time.Now,
+		logger:        slog.Default(),
+		alertCooldown: defaultAlertCooldown,
 	}
+	s.suspCache = newSuspensionCache(defaultSuspensionCacheTTL, func() time.Time { return s.now() })
+	return s
 }
 
 // WithSessions wires the session store used to revoke a suspended
@@ -148,11 +159,29 @@ func (s *PlatformService) WithSubscriptionInspector(i SubscriptionInspector) *Pl
 	return s
 }
 
-// WithClock overrides the time source (used by tests).
+// WithClock overrides the time source (used by tests). The suspension
+// cache and alert cooldown observe the same clock via s.now().
 func (s *PlatformService) WithClock(fn func() time.Time) *PlatformService {
 	if fn != nil {
 		s.clock = fn
 	}
+	return s
+}
+
+// WithSuspensionCacheTTL overrides how long WorkspaceSuspension reuses
+// a cached result before re-querying. A non-positive ttl disables
+// caching so every lookup hits the database.
+func (s *PlatformService) WithSuspensionCacheTTL(ttl time.Duration) *PlatformService {
+	s.suspCache = newSuspensionCache(ttl, func() time.Time { return s.now() })
+	return s
+}
+
+// WithAlertCooldown overrides the minimum interval between successive
+// firings of the same alert rule (see EvaluateUsageAlerts). A
+// non-positive duration disables the cooldown so every currently-
+// crossed threshold fires on each evaluation.
+func (s *PlatformService) WithAlertCooldown(d time.Duration) *PlatformService {
+	s.alertCooldown = d
 	return s
 }
 
@@ -257,9 +286,16 @@ func (s *PlatformService) ProvisionWorkspace(ctx context.Context, name, ownerEma
 		}
 	}
 
-	// Re-fetch so the returned struct reflects the stamped tier.
+	// Stamp the tier we just applied so the returned struct is correct
+	// regardless of whether the re-fetch below succeeds.
+	ws.Tier = tier
+	// Re-fetch so the returned struct also reflects DB-managed columns
+	// (e.g. updated_at). A failure here does not undo the durable
+	// workspace, so log it and fall back to the locally-stamped struct
+	// rather than silently returning a stale one.
 	fresh, err := s.workspaces.GetByID(ctx, ws.ID)
 	if err != nil {
+		s.log().Warn("platform: re-fetch provisioned workspace failed", "workspace_id", ws.ID, "err", err)
 		return ws, nil
 	}
 	return fresh, nil
@@ -285,6 +321,9 @@ func (s *PlatformService) SuspendWorkspace(ctx context.Context, workspaceID uuid
 		return ErrNotFound
 	}
 	s.revokeWorkspaceSessions(ctx, workspaceID)
+	// Reflect the new state immediately on this instance so the
+	// suspension guard does not serve a stale "active" cache entry.
+	s.suspCache.set(workspaceID, true, reason)
 	return nil
 }
 
@@ -302,6 +341,7 @@ func (s *PlatformService) ResumeWorkspace(ctx context.Context, workspaceID uuid.
 	if tag.RowsAffected() == 0 {
 		return ErrNotFound
 	}
+	s.suspCache.set(workspaceID, false, "")
 	return nil
 }
 
@@ -348,6 +388,20 @@ func (s *PlatformService) revokeWorkspaceSessions(ctx context.Context, workspace
 // This is the lookup backing the api/middleware suspended-workspace
 // 503 guard.
 func (s *PlatformService) WorkspaceSuspension(ctx context.Context, workspaceID uuid.UUID) (bool, string, error) {
+	if st, ok := s.suspCache.get(workspaceID); ok {
+		return st.suspended, st.reason, nil
+	}
+	suspended, reason, err := s.loadSuspension(ctx, workspaceID)
+	if err != nil {
+		return false, "", err
+	}
+	s.suspCache.set(workspaceID, suspended, reason)
+	return suspended, reason, nil
+}
+
+// loadSuspension reads the suspension state straight from the database,
+// bypassing the cache.
+func (s *PlatformService) loadSuspension(ctx context.Context, workspaceID uuid.UUID) (bool, string, error) {
 	var (
 		suspendedAt *time.Time
 		reason      *string

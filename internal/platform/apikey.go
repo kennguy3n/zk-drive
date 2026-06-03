@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"golang.org/x/crypto/bcrypt"
 )
@@ -21,10 +22,33 @@ import (
 // grep logs / secret stores for the prefix.
 const APIKeyPrefix = "pk_"
 
-// apiKeyRandomBytes is the entropy of the random portion of a key.
-// 32 bytes (256 bits) base64url-encodes to 43 characters; with the
-// prefix the whole token stays well under bcrypt's 72-byte input cap.
-const apiKeyRandomBytes = 32
+// A platform key is "pk_<lookup><secret>": a fixed-width, non-secret
+// lookup id followed by the secret. The lookup id is stored verbatim
+// (indexed, UNIQUE) so Authenticate selects the single candidate row
+// in O(1) instead of scanning and bcrypt-comparing every active key;
+// only the matched row's hash is then bcrypt-verified. The secret
+// carries the security — the lookup id is just a selector.
+//
+//   apiKeyLookupBytes  12 bytes (96 bits)  -> 16 base64url chars
+//   apiKeySecretBytes  24 bytes (192 bits) -> 32 base64url chars
+//
+// Both base64url-encode without padding, so the lookup is always the
+// first apiKeyLookupLen characters after the prefix and parsing needs
+// no delimiter (base64url's alphabet itself contains '_').
+const (
+	apiKeyLookupBytes = 12
+	apiKeySecretBytes = 24
+)
+
+// apiKeyLookupLen is the encoded width of the lookup id (16). Computed
+// from the encoding so it tracks apiKeyLookupBytes.
+var apiKeyLookupLen = base64.RawURLEncoding.EncodedLen(apiKeyLookupBytes)
+
+// dummyAPIKeyHash is bcrypt-compared when no candidate row is found so
+// a missing lookup id costs the same wall-clock time as a wrong secret
+// (a present lookup id is not itself a secret, but equalizing keeps the
+// auth path free of an obvious timing oracle).
+var dummyAPIKeyHash, _ = bcrypt.GenerateFromPassword([]byte("platform-api-key-timing-equalizer"), bcrypt.DefaultCost)
 
 // Coarse capability strings stored in platform_api_keys.permissions
 // and checked by the platform-auth middleware. Kept as plain strings
@@ -75,16 +99,37 @@ func (k *APIKey) HasPermission(permission string) bool {
 	return false
 }
 
-// generateAPIKey returns a fresh plaintext key in the form
-// "pk_<base64url-no-padding>". Only the caller (APIKeyStore.Create)
-// ever sees the plaintext; the store immediately bcrypt-hashes it for
-// persistence.
-func generateAPIKey() (string, error) {
-	buf := make([]byte, apiKeyRandomBytes)
-	if _, err := rand.Read(buf); err != nil {
-		return "", fmt.Errorf("platform: read random: %w", err)
+// generateAPIKey returns a fresh plaintext key "pk_<lookup><secret>"
+// plus the lookup id to persist alongside the hash. Only the caller
+// (APIKeyStore.Create) ever sees the plaintext; the store immediately
+// bcrypt-hashes it for persistence.
+func generateAPIKey() (plaintext, lookup string, err error) {
+	lookupBuf := make([]byte, apiKeyLookupBytes)
+	if _, err := rand.Read(lookupBuf); err != nil {
+		return "", "", fmt.Errorf("platform: read random: %w", err)
 	}
-	return APIKeyPrefix + base64.RawURLEncoding.EncodeToString(buf), nil
+	secretBuf := make([]byte, apiKeySecretBytes)
+	if _, err := rand.Read(secretBuf); err != nil {
+		return "", "", fmt.Errorf("platform: read random: %w", err)
+	}
+	lookup = base64.RawURLEncoding.EncodeToString(lookupBuf)
+	secret := base64.RawURLEncoding.EncodeToString(secretBuf)
+	return APIKeyPrefix + lookup + secret, lookup, nil
+}
+
+// parseAPIKeyLookup extracts the non-secret lookup id from a presented
+// token. It returns false for anything that is not a well-formed
+// "pk_<lookup><secret>" (wrong prefix, or too short to carry both the
+// lookup id and at least one secret character).
+func parseAPIKeyLookup(presented string) (string, bool) {
+	if !strings.HasPrefix(presented, APIKeyPrefix) {
+		return "", false
+	}
+	rest := presented[len(APIKeyPrefix):]
+	if len(rest) <= apiKeyLookupLen {
+		return "", false
+	}
+	return rest[:apiKeyLookupLen], true
 }
 
 // hashAPIKey bcrypt-hashes a plaintext key. bcrypt salts internally so
@@ -118,12 +163,12 @@ func NewAPIKeyStore(pool *pgxpool.Pool) *APIKeyStore {
 func (s *APIKeyStore) Create(ctx context.Context, label string, permissions []string) (*APIKey, string, error) {
 	label = strings.TrimSpace(label)
 	if label == "" {
-		return nil, "", errors.New("platform: api key label is required")
+		return nil, "", fmt.Errorf("%w: api key label is required", ErrInvalidArgument)
 	}
 	if permissions == nil {
 		permissions = []string{}
 	}
-	plaintext, err := generateAPIKey()
+	plaintext, lookup, err := generateAPIKey()
 	if err != nil {
 		return nil, "", err
 	}
@@ -132,11 +177,11 @@ func (s *APIKeyStore) Create(ctx context.Context, label string, permissions []st
 		return nil, "", err
 	}
 	const q = `
-INSERT INTO platform_api_keys (key_hash, label, permissions)
-VALUES ($1, $2, $3)
+INSERT INTO platform_api_keys (key_hash, lookup_id, label, permissions)
+VALUES ($1, $2, $3, $4)
 RETURNING id, label, permissions, created_at, last_used_at, revoked_at`
 	key := &APIKey{}
-	if err := s.pool.QueryRow(ctx, q, hash, label, permissions).Scan(
+	if err := s.pool.QueryRow(ctx, q, hash, lookup, label, permissions).Scan(
 		&key.ID, &key.Label, &key.Permissions, &key.CreatedAt, &key.LastUsedAt, &key.RevokedAt,
 	); err != nil {
 		return nil, "", fmt.Errorf("platform: insert api key: %w", err)
@@ -193,53 +238,42 @@ WHERE id = $1`
 // any non-match (bad prefix, unknown, revoked). On success it
 // best-effort refreshes last_used_at.
 //
-// The lookup scans active (non-revoked) keys and bcrypt-compares each.
-// Platform keys are few (per-integration operator credentials), so the
-// linear scan is acceptable; bcrypt's constant-time compare and the
-// subtle.ConstantTimeCompare prefix screen keep timing side-channels
-// out of the matching path.
+// The non-secret lookup id embedded in the token selects the single
+// candidate row via the UNIQUE index, so authentication is O(1) in the
+// number of keys (no full scan) and only that row's bcrypt hash is
+// verified. When no row matches the lookup id a dummy bcrypt compare is
+// still performed so the "unknown key" path costs roughly the same as
+// the "wrong secret" path.
 func (s *APIKeyStore) Authenticate(ctx context.Context, presented string) (*APIKey, error) {
 	presented = strings.TrimSpace(presented)
-	if !strings.HasPrefix(presented, APIKeyPrefix) {
+	lookup, ok := parseAPIKeyLookup(presented)
+	if !ok {
 		return nil, ErrAPIKeyInvalid
 	}
 	const q = `
 SELECT id, key_hash, label, permissions, created_at, last_used_at, revoked_at
 FROM platform_api_keys
-WHERE revoked_at IS NULL`
-	rows, err := s.pool.Query(ctx, q)
+WHERE lookup_id = $1 AND revoked_at IS NULL`
+	var (
+		k    APIKey
+		hash []byte
+	)
+	err := s.pool.QueryRow(ctx, q, lookup).Scan(
+		&k.ID, &hash, &k.Label, &k.Permissions, &k.CreatedAt, &k.LastUsedAt, &k.RevokedAt,
+	)
 	if err != nil {
-		return nil, fmt.Errorf("platform: load api keys: %w", err)
-	}
-	defer rows.Close()
-
-	candidate := []byte(presented)
-	var matched *APIKey
-	for rows.Next() {
-		var (
-			k    APIKey
-			hash []byte
-		)
-		if err := rows.Scan(&k.ID, &hash, &k.Label, &k.Permissions, &k.CreatedAt, &k.LastUsedAt, &k.RevokedAt); err != nil {
-			return nil, fmt.Errorf("platform: scan api key: %w", err)
+		if errors.Is(err, pgx.ErrNoRows) {
+			// Equalize timing with the matched path.
+			_ = bcrypt.CompareHashAndPassword(dummyAPIKeyHash, []byte(presented))
+			return nil, ErrAPIKeyInvalid
 		}
-		if bcrypt.CompareHashAndPassword(hash, candidate) == nil {
-			kk := k
-			matched = &kk
-			// Keep iterating to drain the rows iterator cleanly; a
-			// constant-time guard is not needed beyond bcrypt's own
-			// compare, but we avoid an early break so the scan cost
-			// doesn't leak which row matched.
-		}
+		return nil, fmt.Errorf("platform: load api key: %w", err)
 	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("platform: iterate api keys: %w", err)
-	}
-	if matched == nil {
+	if bcrypt.CompareHashAndPassword(hash, []byte(presented)) != nil {
 		return nil, ErrAPIKeyInvalid
 	}
-	s.touchLastUsed(ctx, matched.ID)
-	return matched, nil
+	s.touchLastUsed(ctx, k.ID)
+	return &k, nil
 }
 
 // touchLastUsed refreshes last_used_at. Best-effort: a failure here

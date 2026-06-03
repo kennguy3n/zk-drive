@@ -101,17 +101,26 @@ func TestNullIfEmpty(t *testing.T) {
 // --- API key generation / verification ------------------------------
 
 func TestGenerateAndHashAPIKey(t *testing.T) {
-	key, err := generateAPIKey()
+	key, lookup, err := generateAPIKey()
 	if err != nil {
 		t.Fatalf("generateAPIKey: %v", err)
 	}
 	if !strings.HasPrefix(key, APIKeyPrefix) {
 		t.Fatalf("key %q missing prefix %q", key, APIKeyPrefix)
 	}
-	// Two generations must differ.
-	key2, _ := generateAPIKey()
+	// The lookup id is the fixed-width selector embedded right after
+	// the prefix and must be recoverable from the plaintext alone.
+	gotLookup, ok := parseAPIKeyLookup(key)
+	if !ok || gotLookup != lookup {
+		t.Fatalf("parseAPIKeyLookup(%q) = %q, %v; want %q, true", key, gotLookup, ok, lookup)
+	}
+	// Two generations must differ in both the full key and the lookup.
+	key2, lookup2, _ := generateAPIKey()
 	if key == key2 {
 		t.Fatalf("expected distinct keys, got identical")
+	}
+	if lookup == lookup2 {
+		t.Fatalf("expected distinct lookup ids, got identical")
 	}
 
 	hash, err := hashAPIKey(key)
