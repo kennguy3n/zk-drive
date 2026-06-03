@@ -524,21 +524,26 @@ func subscribeAll(ctx context.Context, wg *sync.WaitGroup, js nats.JetStreamCont
 		// (inline callback) behaviour every other subject uses.
 		workers int
 	}{
-		// MaxDeliver=preview.MaxDeliver caps how many times
-		// JetStream redelivers a preview job that the handler keeps
-		// Nak'ing. ErrUnsupportedMime is already Ack'd as a skip
-		// at attempt 1, so this cap only affects the "decode
-		// failed on bytes that will never decode" path — without
-		// it, a deterministic renderer error redelivers until
-		// MaxAge expires (eating worker goroutine time, producing
-		// noisy logs, and starving other preview jobs).
+		// QueueMaxDeliver caps how many times JetStream redelivers a
+		// preview job that the handler keeps Nak'ing.
+		// ErrUnsupportedMime is already Ack'd as a skip at attempt 1,
+		// so this cap affects the "decode failed on bytes that will
+		// never decode" path and — because previewHandler enforces
+		// the per-tenant budget on every preview subject — the
+		// budget DEFERRAL path (NakWithDelay). The legacy subject
+		// uses QueueMaxDeliver (not the smaller preview.MaxDeliver)
+		// for the same reason as the priority/standard subjects: the
+		// API still publishes all previews here via PublishPreview →
+		// drive.preview.generate, so capping at 5 would drop a
+		// legitimately over-budget workspace's previews after a few
+		// minutes of backoff instead of deferring them until its
+		// window drains.
 		//
 		// SubjectPreview (the legacy single subject) is retained so
-		// jobs published by an un-upgraded API server — which still
-		// calls PublishPreview → drive.preview.generate — keep being
+		// jobs published by an un-upgraded API server keep being
 		// processed during a rolling deploy. New, tier-routed jobs
 		// arrive on the priority / standard subjects below.
-		{jobs.SubjectPreview, "drive-preview", m.InstrumentJob(ctx, jobs.SubjectPreview, traceJob(jobs.SubjectPreview, previewHandler(pool, previewSvc))), []nats.SubOpt{nats.MaxDeliver(preview.MaxDeliver)}, 0},
+		{jobs.SubjectPreview, "drive-preview", m.InstrumentJob(ctx, jobs.SubjectPreview, traceJob(jobs.SubjectPreview, previewHandler(pool, previewSvc))), []nats.SubOpt{nats.MaxDeliver(preview.QueueMaxDeliver)}, 0},
 		// Priority (Business / Secure-Business) and standard (Free /
 		// Starter) preview subjects. Each gets its own durable
 		// consumer and its own goroutine pool; the priority pool is

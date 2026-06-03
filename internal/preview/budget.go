@@ -37,16 +37,16 @@ const budgetBackoffBase = 15 * time.Second
 // to 5 minutes" requirement.
 const MaxBudgetBackoff = 5 * time.Minute
 
-// QueueMaxDeliver is the JetStream redelivery cap for the priority /
-// standard preview consumers. It is intentionally higher than
-// MaxDeliver (the poison-payload cap on the legacy consumer) because
-// these consumers' Naks include budget DEFERRALS, not just decode
-// failures: a workspace pinned at its ceiling for the full 1-hour
-// window can legitimately be redelivered ~15-20 times (backoff ramps
-// to the 5-minute cap), and capping at MaxDeliver=5 would drop those
-// previews instead of eventually rendering them. A genuinely poison
-// payload still terminates — just after more attempts, costing only
-// bounded extra log noise.
+// QueueMaxDeliver is the JetStream redelivery cap for every preview
+// consumer (legacy, priority, and standard). It is intentionally
+// higher than MaxDeliver (the original poison-payload-only cap)
+// because previewHandler's Naks now include budget DEFERRALS, not
+// just decode failures: a workspace pinned at its ceiling for the
+// full 1-hour window can legitimately be redelivered ~15-20 times
+// (backoff ramps to the 5-minute cap), and capping at MaxDeliver=5
+// would drop those previews instead of eventually rendering them. A
+// genuinely poison payload still terminates — just after more
+// attempts, costing only bounded extra log noise.
 const QueueMaxDeliver = 50
 
 // BudgetBackoff returns the redelivery delay for a budget-deferred
