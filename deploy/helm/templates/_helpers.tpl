@@ -23,12 +23,20 @@ app.kubernetes.io/version: {{ .Chart.AppVersion | quote }}
 {{- printf "%s:%s" .Values.image.repository (.Values.image.tag | default .Chart.AppVersion) -}}
 {{- end -}}
 
-{{/* The Secret name workloads reference (existing or chart-managed). */}}
+{{/*
+The Secret name workloads reference (existing or chart-managed).
+Fails fast when secrets.create=false without an existingSecret: the
+workloads + migrate Job envFrom this name, so a missing Secret would
+otherwise surface as a runtime CreateContainerConfigError instead of a
+clear install-time error.
+*/}}
 {{- define "zk-drive.secretName" -}}
 {{- if .Values.secrets.existingSecret -}}
 {{- .Values.secrets.existingSecret -}}
-{{- else -}}
+{{- else if .Values.secrets.create -}}
 zk-drive-secrets
+{{- else -}}
+{{- fail "secrets.create=false requires secrets.existingSecret to be set: the server, worker, and migrate Job envFrom a Secret, so an existing one must be referenced (or set secrets.create=true to have the chart manage it)." -}}
 {{- end -}}
 {{- end -}}
 
