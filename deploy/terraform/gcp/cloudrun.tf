@@ -26,7 +26,7 @@ resource "google_project_iam_member" "app_metric_writer" {
 locals {
   redis_url = "redis://${google_redis_instance.this.host}:${google_redis_instance.this.port}"
 
-  public_url = local.has_domain ? "https://${var.domain_name}" : ""
+  public_url = "https://${var.domain_name}"
 
   cloud_sql_proxy_image = "gcr.io/cloud-sql-connectors/cloud-sql-proxy:2.11.4"
 

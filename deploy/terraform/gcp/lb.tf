@@ -38,7 +38,7 @@ resource "google_compute_url_map" "this" {
   default_service = google_compute_backend_bucket.frontend.id
 
   host_rule {
-    hosts        = local.has_domain ? [var.domain_name] : ["*"]
+    hosts        = [var.domain_name]
     path_matcher = "main"
   }
 

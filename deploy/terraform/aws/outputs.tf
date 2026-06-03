@@ -28,8 +28,13 @@ output "frontend_bucket" {
   value       = aws_s3_bucket.frontend.bucket
 }
 
+# Only the ALB cert's validation records are surfaced. The CloudFront cert
+# (aws_acm_certificate.cloudfront) is DNS-validated for the same
+# var.domain_name in the same account, and ACM emits identical CNAME
+# validation records in that case — so creating this one set validates both
+# certs. Listing the CloudFront cert's records too would just duplicate them.
 output "acm_certificate_validation_records" {
-  description = "DNS records to create to validate the ACM certificate for the ALB. Add these to the DNS zone hosting var.domain_name. Empty when no domain_name is set (the ALB cert is only created for a custom domain)."
+  description = "DNS records to create to validate the ACM certificate(s) for var.domain_name. Add these to the DNS zone hosting the domain; the same records validate both the ALB and CloudFront certs (ACM emits identical records for the same domain in one account). Empty when no domain_name is set."
   value = {
     for dvo in(local.has_domain ? aws_acm_certificate.this[0].domain_validation_options : []) :
     dvo.domain_name => {

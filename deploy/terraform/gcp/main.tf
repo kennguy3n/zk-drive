@@ -34,7 +34,11 @@ locals {
     var.labels,
   )
 
-  has_domain = var.domain_name != ""
+  # Note: unlike the AWS module there is no `has_domain` toggle here. On GCP a
+  # domain is mandatory (var.domain_name has a non-empty validation), because
+  # the external HTTPS LB's Google-managed cert and Cloud Run's internal-only
+  # ingress leave no domain-less serving path. So var.domain_name is used
+  # directly rather than behind an always-true conditional.
 
   # APIs the module needs enabled on the project.
   services = [
