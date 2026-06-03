@@ -38,6 +38,25 @@ spec:
         prometheus.io/port: "8080"
         prometheus.io/path: "/metrics"
     spec:
+      # Spread replicas across nodes (preferred, not required, so a
+      # single-node cluster still schedules) and across availability
+      # zones for resilience to a node or AZ loss.
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchLabels:
+                    app: zk-drive-server
+                topologyKey: kubernetes.io/hostname
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: topology.kubernetes.io/zone
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app: zk-drive-server
       containers:
         - name: server
           image: ghcr.io/kennguy3n/zk-drive:0.1.0
@@ -54,17 +73,25 @@ spec:
               port: 8080
               path: /healthz
             initialDelaySeconds: 5
-            periodSeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 3
+            successThreshold: 1
+            failureThreshold: 3
           livenessProbe:
             httpGet:
               port: 8080
               path: /healthz
             initialDelaySeconds: 15
             periodSeconds: 15
+            timeoutSeconds: 3
+            failureThreshold: 3
           resources:
+            # Requests sized at ~50% of the limits so the scheduler can
+            # bin-pack while the HPA (hpa-server.yaml) scales on a 70%
+            # CPU target relative to the request.
             requests:
-              cpu: 100m
-              memory: 128Mi
+              cpu: 250m
+              memory: 256Mi
             limits:
               cpu: 1000m
               memory: 512Mi

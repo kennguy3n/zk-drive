@@ -1,0 +1,235 @@
+# NetworkPolicies for the zk-drive namespace.
+#
+# Model: default-deny (both ingress and egress) for every pod, then a
+# small set of additive allow policies that open exactly the flows the
+# app needs. NetworkPolicies are additive (OR-ed), so a pod is allowed
+# a connection if ANY policy permits it.
+#
+# Requires a CNI that enforces NetworkPolicy (Calico, Cilium, Antrea,
+# AWS VPC CNI with policy, etc.). On a CNI that ignores policy (plain
+# kindnet/flannel) these objects apply cleanly but are not enforced.
+#
+# Namespace assumptions (adjust the namespaceSelector labels to match
+# your cluster):
+#   - ingress controller runs in namespace `ingress-nginx`
+#   - Prometheus runs in namespace `monitoring`
+# Both are matched via the well-known `kubernetes.io/metadata.name`
+# label that the apiserver stamps on every Namespace automatically.
+---
+# 1. Default deny-all ingress + egress for the whole namespace.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-all
+  namespace: zk-drive
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+    - Egress
+---
+# 2. Allow every pod to resolve DNS via kube-dns. Without this the
+# default-deny egress rule above would break name resolution for the
+# whole namespace (Postgres/NATS/S3 hostnames would never resolve).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-dns-egress
+  namespace: zk-drive
+spec:
+  podSelector: {}
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+---
+# 3. Server ingress: from the ingress controller on 8080 (the pod
+# target port behind the Service's :80) and from Prometheus scraping
+# /metrics on 8080.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-server-ingress
+  namespace: zk-drive
+spec:
+  podSelector:
+    matchLabels:
+      app: zk-drive-server
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: ingress-nginx
+      ports:
+        - protocol: TCP
+          port: 8080
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: monitoring
+      ports:
+        - protocol: TCP
+          port: 8080
+---
+# 4. Server egress: Postgres 5432, Redis 6379, NATS 4222, S3 443.
+# Redis and S3 are commonly managed/external endpoints, so their rules
+# allow the port to any destination; Postgres and NATS are matched to
+# in-cluster pods. The server needs S3 (HTTPS) for the /readyz
+# HeadBucket deep health check against the zk-object-fabric gateway.
+# (DNS is covered by allow-dns-egress above.)
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-server-egress
+  namespace: zk-drive
+spec:
+  podSelector:
+    matchLabels:
+      app: zk-drive-server
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              app: postgres
+      ports:
+        - protocol: TCP
+          port: 5432
+    - to:
+        - podSelector:
+            matchLabels:
+              app: nats
+      ports:
+        - protocol: TCP
+          port: 4222
+    - ports:
+        - protocol: TCP
+          port: 6379
+    - ports:
+        - protocol: TCP
+          port: 443
+---
+# 5. Worker ingress: Prometheus scraping /metrics on 9091.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-worker-ingress
+  namespace: zk-drive
+spec:
+  podSelector:
+    matchLabels:
+      app: zk-drive-worker
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: monitoring
+      ports:
+        - protocol: TCP
+          port: 9091
+---
+# 6. Worker egress: Postgres 5432, Redis 6379, NATS 4222, ClamAV 3310,
+# S3 443. As with the server, Redis and S3 are allowed by port for
+# managed endpoints while Postgres/NATS/ClamAV are matched to in-cluster
+# pods. The worker needs S3 (HTTPS) for preview generation, malware
+# scanning, orphan GC, and audit archiving against zk-object-fabric.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-worker-egress
+  namespace: zk-drive
+spec:
+  podSelector:
+    matchLabels:
+      app: zk-drive-worker
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              app: postgres
+      ports:
+        - protocol: TCP
+          port: 5432
+    - to:
+        - podSelector:
+            matchLabels:
+              app: nats
+      ports:
+        - protocol: TCP
+          port: 4222
+    - to:
+        - podSelector:
+            matchLabels:
+              app: clamav
+      ports:
+        - protocol: TCP
+          port: 3310
+    - ports:
+        - protocol: TCP
+          port: 6379
+    - ports:
+        - protocol: TCP
+          port: 443
+---
+# 7. Batch egress: the migrate Job and the reconciler / orphan-gc /
+# audit-archiver CronJobs share the `app: zk-drive-batch` pod label.
+# They aren't matched by the server/worker egress rules above, so under
+# the default-deny policy they would only get DNS. This opens the
+# backends they touch: Postgres 5432 (migrate, reconciler, archiver),
+# NATS 4222, Redis 6379, ClamAV 3310, and S3 443 (orphan-gc /
+# audit-archiver). Postgres/NATS/ClamAV match in-cluster pods; Redis and
+# S3 are port-only for managed endpoints. (DNS is via allow-dns-egress.)
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-batch-egress
+  namespace: zk-drive
+spec:
+  podSelector:
+    matchLabels:
+      app: zk-drive-batch
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              app: postgres
+      ports:
+        - protocol: TCP
+          port: 5432
+    - to:
+        - podSelector:
+            matchLabels:
+              app: nats
+      ports:
+        - protocol: TCP
+          port: 4222
+    - to:
+        - podSelector:
+            matchLabels:
+              app: clamav
+      ports:
+        - protocol: TCP
+          port: 3310
+    - ports:
+        - protocol: TCP
+          port: 6379
+    - ports:
+        - protocol: TCP
+          port: 443
