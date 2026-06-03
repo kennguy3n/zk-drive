@@ -143,6 +143,10 @@ resource "google_service_networking_connection" "private_vpc" {
 # Serverless VPC Access connector (Cloud Run -> VPC)
 # ----------------------------------------------------------------------------
 
+# Serverless VPC Access connector names are capped at 25 characters by the
+# API. "${local.name}-conn" is "<name_prefix>-<environment>-conn" (24 chars at
+# the defaults), so a longer name_prefix/environment would otherwise fail with
+# an opaque error at apply. The precondition surfaces it at plan time instead.
 resource "google_vpc_access_connector" "this" {
   name          = "${local.name}-conn"
   region        = var.region
@@ -153,4 +157,11 @@ resource "google_vpc_access_connector" "this" {
   max_instances = 3
 
   depends_on = [google_project_service.this]
+
+  lifecycle {
+    precondition {
+      condition     = length("${local.name}-conn") <= 25
+      error_message = "VPC Access connector name \"${local.name}-conn\" is ${length("${local.name}-conn")} chars; the limit is 25. Shorten var.name_prefix or var.environment."
+    }
+  }
 }

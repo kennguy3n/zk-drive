@@ -130,7 +130,7 @@ done
 | Variable | Default | Notes |
 | --- | --- | --- |
 | `domain_name` | `""` | Public domain; drives TLS. **Required on GCP**; **optional on AWS** (omit to use CloudFront's default `*.cloudfront.net` domain). |
-| `environment` | `production` | Name prefix + tag/label. |
+| `environment` | `production` | Name prefix + tag/label. On GCP, `<name_prefix>-<environment>-conn` must stay ≤ 25 chars (Serverless VPC connector name limit); the module fails at `plan` with a clear message otherwise. |
 | `app_image` / `app_version` | `ghcr.io/kennguy3n/zk-drive` / `0.1.0` | Image to deploy. |
 | `fabric_endpoint` / `fabric_bucket` / `fabric_console_url` | `""` | zk-object-fabric storage wiring (`S3_*`, `FABRIC_CONSOLE_URL`). |
 | `stripe_secret_key` / `stripe_webhook_secret` | `""` | Optional billing secrets. |

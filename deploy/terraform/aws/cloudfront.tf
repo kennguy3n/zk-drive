@@ -17,6 +17,35 @@ locals {
   alb_origin_id = "api-alb"
 }
 
+# SPA fallback, scoped to the S3 origin only. A viewer-request function
+# rewrites extensionless paths (client-side routes like /drive, /login) to
+# /index.html so a hard refresh resolves to the SPA shell. This is attached
+# ONLY to the default (S3) cache behavior, so it never touches the /api/* or
+# /healthz behaviors. We deliberately do NOT use a distribution-level
+# custom_error_response: that applies to every origin, so an honest 403/404
+# from the ALB API origin would be rewritten to 200 + index.html, silently
+# breaking the JSON error contract the frontend relies on.
+resource "aws_cloudfront_function" "spa_rewrite" {
+  name    = "${local.name}-spa-rewrite"
+  runtime = "cloudfront-js-2.0"
+  comment = "Rewrite extensionless SPA routes to /index.html (S3 origin only)"
+  publish = true
+  code    = <<-EOT
+    function handler(event) {
+      var request = event.request;
+      var uri = request.uri;
+      var lastSegment = uri.slice(uri.lastIndexOf('/') + 1);
+      // Requests for a concrete file (anything with an extension, e.g.
+      // /assets/app.123.js) pass through to S3 unchanged; everything else is
+      // treated as a client-side route and served the SPA shell.
+      if (lastSegment.indexOf('.') === -1) {
+        request.uri = '/index.html';
+      }
+      return request;
+    }
+  EOT
+}
+
 resource "aws_cloudfront_distribution" "this" {
   enabled             = true
   comment             = "${local.name} frontend + API"
@@ -66,6 +95,11 @@ resource "aws_cloudfront_distribution" "this" {
     min_ttl     = 0
     default_ttl = 3600
     max_ttl     = 86400
+
+    function_association {
+      event_type   = "viewer-request"
+      function_arn = aws_cloudfront_function.spa_rewrite.arn
+    }
   }
 
   # API: forward everything to the ALB, no caching.
@@ -110,21 +144,10 @@ resource "aws_cloudfront_distribution" "this" {
     max_ttl     = 0
   }
 
-  # SPA fallback: client-side routes (/drive, /login, ...) resolve to
-  # index.html on a hard refresh.
-  custom_error_response {
-    error_code            = 403
-    response_code         = 200
-    response_page_path    = "/index.html"
-    error_caching_min_ttl = 10
-  }
-
-  custom_error_response {
-    error_code            = 404
-    response_code         = 200
-    response_page_path    = "/index.html"
-    error_caching_min_ttl = 10
-  }
+  # SPA fallback is handled by the viewer-request function on the default
+  # (S3) behavior above — see aws_cloudfront_function.spa_rewrite. No
+  # distribution-level custom_error_response, so API 403/404 from the ALB
+  # origin pass through to the client untouched.
 
   restrictions {
     geo_restriction {

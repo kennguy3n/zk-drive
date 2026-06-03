@@ -254,6 +254,17 @@ resource "google_cloud_run_v2_service" "worker" {
         period_seconds        = 5
         failure_threshold     = 12
       }
+
+      # Restart the worker if its /healthz surface stops responding after
+      # startup (e.g. a wedged NATS consumer). Mirrors the server's probe so
+      # both services self-heal rather than silently going idle.
+      liveness_probe {
+        http_get {
+          path = "/healthz"
+          port = 9091
+        }
+        period_seconds = 30
+      }
     }
 
     containers {

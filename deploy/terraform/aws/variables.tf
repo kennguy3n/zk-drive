@@ -78,6 +78,12 @@ variable "rds_replica_instance_class" {
   default     = "db.t4g.medium"
 }
 
+variable "rds_max_connections" {
+  description = "Postgres max_connections for the primary instance, used to derive the 80% DatabaseConnections alarm threshold. Default ~410 matches db.t4g.medium's memory-derived default; set it to match the chosen rds_instance_class."
+  type        = number
+  default     = 410
+}
+
 variable "rds_allocated_storage" {
   description = "Allocated storage (GiB) for the primary RDS instance."
   type        = number
