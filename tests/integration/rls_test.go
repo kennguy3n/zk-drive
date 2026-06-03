@@ -238,6 +238,102 @@ func TestRLSEnforcesCrossTenantIsolation(t *testing.T) {
 			t.Fatalf("expected row-level security error, got %v", err)
 		}
 	})
+
+	// 5. Migration 033 hash-partitions activity_log, audit_log, and
+	//    change_log by workspace_id (64 partitions each). Partitioning
+	//    must stay transparent to RLS: the tenant_isolation policy on
+	//    the partitioned parent has to keep isolating rows across
+	//    tenants even though inserts now route to per-hash partitions
+	//    and selects prune to them.
+	pctx, pcancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer pcancel()
+
+	assertPartitioned := func(table string, wantParts int) {
+		t.Helper()
+		var relkind string
+		if err := env.pool.QueryRow(pctx,
+			`SELECT relkind::text FROM pg_class
+			 WHERE relname = $1 AND relnamespace = 'public'::regnamespace`,
+			table).Scan(&relkind); err != nil {
+			t.Fatalf("relkind for %s: %v", table, err)
+		}
+		if relkind != "p" {
+			t.Fatalf("%s: relkind = %q, want \"p\" (a partitioned table)", table, relkind)
+		}
+		var parts int
+		if err := env.pool.QueryRow(pctx,
+			`SELECT count(*) FROM pg_inherits WHERE inhparent = $1::regclass`,
+			table).Scan(&parts); err != nil {
+			t.Fatalf("partition count for %s: %v", table, err)
+		}
+		if parts != wantParts {
+			t.Fatalf("%s: %d partitions, want %d", table, parts, wantParts)
+		}
+	}
+	assertPartitioned("activity_log", 64)
+	assertPartitioned("audit_log", 64)
+	assertPartitioned("change_log", 64)
+
+	// Seed one committed row per workspace into two of the partitioned
+	// tables via the superuser pool (which bypasses RLS), then verify a
+	// tenant-bound, unfiltered read through rls_test_role sees only its
+	// own workspace's row — proving partition routing did not defeat
+	// the tenant_isolation policy.
+	ownerA := uuid.MustParse(tokA.UserID)
+	ownerB := uuid.MustParse(tokB.UserID)
+	actA, actB := uuid.New(), uuid.New()
+	audA, audB := uuid.New(), uuid.New()
+
+	seeds := []struct {
+		query string
+		args  []interface{}
+	}{
+		{`INSERT INTO activity_log (id, workspace_id, user_id, action, resource_type, resource_id)
+		  VALUES ($1, $2, $3, 'part_seed', 'folder', $4)`, []interface{}{actA, wsA, ownerA, folderA.ID}},
+		{`INSERT INTO activity_log (id, workspace_id, user_id, action, resource_type, resource_id)
+		  VALUES ($1, $2, $3, 'part_seed', 'folder', $4)`, []interface{}{actB, wsB, ownerB, folderB.ID}},
+		{`INSERT INTO audit_log (id, workspace_id, actor_id, action)
+		  VALUES ($1, $2, $3, 'part_seed')`, []interface{}{audA, wsA, ownerA}},
+		{`INSERT INTO audit_log (id, workspace_id, actor_id, action)
+		  VALUES ($1, $2, $3, 'part_seed')`, []interface{}{audB, wsB, ownerB}},
+	}
+	for _, s := range seeds {
+		if _, err := env.pool.Exec(pctx, s.query, s.args...); err != nil {
+			t.Fatalf("seed partitioned row: %v", err)
+		}
+	}
+
+	// With workspace A bound, A's seeded rows are visible and B's are
+	// hidden — even when B's row id is named explicitly in the WHERE.
+	runAsRLSRole(t, env, wsA, func(t *testing.T, tx pgx.Tx) {
+		cases := []struct {
+			table     string
+			ownID     uuid.UUID
+			foreignID uuid.UUID
+		}{
+			{"activity_log", actA, actB},
+			{"audit_log", audA, audB},
+		}
+		for _, c := range cases {
+			var own int
+			if err := tx.QueryRow(context.Background(),
+				"SELECT count(*) FROM "+c.table+" WHERE id = $1", c.ownID).Scan(&own); err != nil {
+				t.Fatalf("count own %s row (wsA bound): %v", c.table, err)
+			}
+			if own != 1 {
+				t.Fatalf("wsA bound: expected own %s row visible, got %d", c.table, own)
+			}
+
+			var foreign int
+			if err := tx.QueryRow(context.Background(),
+				"SELECT count(*) FROM "+c.table+" WHERE id = $1", c.foreignID).Scan(&foreign); err != nil {
+				t.Fatalf("count foreign %s row (wsA bound): %v", c.table, err)
+			}
+			if foreign != 0 {
+				t.Fatalf("wsA bound: RLS leaked a cross-tenant %s row on the partitioned table (got %d)", c.table, foreign)
+			}
+		}
+	})
 }
 
 // TestRLSAppliesToFileVersionsViaParentFiles verifies the EXISTS
