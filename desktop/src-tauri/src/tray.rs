@@ -51,8 +51,11 @@ pub fn build_tray<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
     // Reuse the bundled application icon for the tray. If the build
     // has no window icon configured we still create the tray (it
     // renders the platform default) rather than failing startup.
+    // `icon_as_template` makes macOS render it as a monochrome
+    // menu-bar template (a no-op on Windows / Linux) — preserving the
+    // behaviour the removed static `trayIcon` config used to provide.
     if let Some(icon) = app.default_window_icon() {
-        builder = builder.icon(icon.clone());
+        builder = builder.icon(icon.clone()).icon_as_template(true);
     }
 
     builder.build(app)?;

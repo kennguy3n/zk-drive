@@ -5,6 +5,7 @@ import * as shell from "../api/shell";
 import ConflictDialog from "../components/ConflictDialog";
 import {
   healthLabel,
+  isRunning,
   pending,
   type WorkspaceState,
 } from "../types";
@@ -112,14 +113,34 @@ function WorkspaceRow({
   onChange: () => Promise<void> | void;
   onResolve: () => void;
 }) {
-  const running = ws.health !== "stopped";
+  // Match the SDK's `is_running()` semantics (excludes `error`)
+  // rather than treating everything-but-stopped as running.
+  const running = isRunning(ws.health);
+  const errored = ws.health === "error";
   const total = useMemo(() => Math.max(ws.summary.total_files, 1), [ws.summary.total_files]);
   const done = ws.summary.up_to_date;
   const pct = Math.round((done / total) * 100);
 
+  // Running   -> Pause   (StopSync)
+  // Errored   -> Restart (StopSync then StartSync). The SDK's
+  //              `mark_task_failed` flips health to Error WITHOUT
+  //              aborting the sibling tasks, so a bare StartSync from
+  //              Error would overwrite — and leak — the still-live
+  //              handles. Stopping first aborts them, then a clean
+  //              StartSync restarts. This gives the user a one-click
+  //              recover instead of manual Pause-then-Resume.
+  // Stopped   -> Resume  (StartSync)
+  const actionLabel = running ? "Pause" : errored ? "Restart" : "Resume";
+
   async function toggle() {
-    if (running) await shell.pauseSync(ws.workspace_id);
-    else await shell.resumeSync(ws.workspace_id);
+    if (running) {
+      await shell.pauseSync(ws.workspace_id);
+    } else if (errored) {
+      await shell.pauseSync(ws.workspace_id);
+      await shell.resumeSync(ws.workspace_id);
+    } else {
+      await shell.resumeSync(ws.workspace_id);
+    }
     await onChange();
   }
 
@@ -151,7 +172,7 @@ function WorkspaceRow({
       {ws.last_error && <div className="error small">{ws.last_error}</div>}
 
       <div className="ws-actions">
-        <button onClick={toggle}>{running ? "Pause" : "Resume"}</button>
+        <button onClick={toggle}>{actionLabel}</button>
         {ws.summary.conflict > 0 && (
           <button className="warn" onClick={onResolve}>
             Resolve conflicts

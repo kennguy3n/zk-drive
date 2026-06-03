@@ -210,11 +210,22 @@ impl KeychainTokenProvider {
             return Err(ApiError::Status { status, body });
         }
         let parsed: TokenResponse = resp.json().await.map_err(ApiError::from)?;
+        // A hostile / misconfigured server can return an
+        // astronomically large `expires_in`. chrono's `Add` panics on
+        // overflow, so guard with `try_seconds` + `checked_add_signed`
+        // and surface it as a 401 rather than crashing the task — same
+        // discipline as the SDK's `HttpRefresher` (auth/src/token.rs).
+        let lifetime = ChronoDuration::try_seconds(parsed.expires_in).ok_or_else(|| {
+            ApiError::Status {
+                status: 401,
+                body: format!("non-representable expires_in: {}", parsed.expires_in),
+            }
+        })?;
         let expires_at = Utc::now()
-            .checked_add_signed(ChronoDuration::seconds(parsed.expires_in.max(0)))
+            .checked_add_signed(lifetime)
             .ok_or_else(|| ApiError::Status {
                 status: 401,
-                body: "expires_in overflow".into(),
+                body: format!("expires_in would overflow expires_at: {}", parsed.expires_in),
             })?;
         let new = TokenSet {
             access_token: parsed.access_token,
@@ -357,12 +368,23 @@ fn parse_request_target(request_line: &str) -> Option<Url> {
     Url::parse(&format!("http://127.0.0.1{target}")).ok()
 }
 
-async fn write_response(stream: &mut tokio::net::TcpStream, body: &str) {
-    let payload = format!(
-        "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n<!doctype html><html><body style=\"font-family:system-ui;padding:3rem;text-align:center\"><h2>{}</h2></body></html>",
-        body.len() + 120,
-        body
+/// Build the full HTTP/1.1 200 response (headers + body) for the
+/// loopback page. Kept pure (no I/O) so the framing — in particular
+/// that `Content-Length` equals the exact body byte count — is unit
+/// testable. Computing the length from the assembled body can't drift
+/// the way a hardcoded wrapper-size constant would.
+fn render_callback_response(message: &str) -> String {
+    let body = format!(
+        "<!doctype html><html><body style=\"font-family:system-ui;padding:3rem;text-align:center\"><h2>{message}</h2></body></html>"
     );
+    format!(
+        "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.len()
+    )
+}
+
+async fn write_response(stream: &mut tokio::net::TcpStream, message: &str) {
+    let payload = render_callback_response(message);
     let _ = stream.write_all(payload.as_bytes()).await;
     let _ = stream.flush().await;
 }
@@ -421,13 +443,121 @@ async fn exchange_code(
         .await
         .map_err(|e| DesktopError::Auth(format!("decode token response: {e}")))?;
 
+    // Guard against a non-representable / overflowing `expires_in` so a
+    // bad token response is a typed error, not a panic (see `refresh`).
+    let lifetime = ChronoDuration::try_seconds(parsed.expires_in).ok_or_else(|| {
+        DesktopError::Auth(format!(
+            "non-representable expires_in: {}",
+            parsed.expires_in
+        ))
+    })?;
     let expires_at = Utc::now()
-        .checked_add_signed(ChronoDuration::seconds(parsed.expires_in.max(0)))
-        .ok_or_else(|| DesktopError::Auth("expires_in overflow".into()))?;
+        .checked_add_signed(lifetime)
+        .ok_or_else(|| DesktopError::Auth("expires_in would overflow expires_at".into()))?;
     Ok(TokenSet {
         access_token: parsed.access_token,
         refresh_token: parsed.refresh_token,
         expires_at,
         scope: parsed.scope,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Split a raw HTTP/1.1 response into (headers, body) on the
+    /// blank-line terminator.
+    fn split_response(raw: &str) -> (&str, &str) {
+        raw.split_once("\r\n\r\n")
+            .expect("response must have a header/body separator")
+    }
+
+    fn header_value<'a>(headers: &'a str, name: &str) -> Option<&'a str> {
+        headers.lines().find_map(|line| {
+            let (k, v) = line.split_once(':')?;
+            k.trim()
+                .eq_ignore_ascii_case(name)
+                .then(|| v.trim())
+        })
+    }
+
+    #[test]
+    fn callback_response_content_length_matches_body_bytes() {
+        // The Content-Length must equal the exact byte count of the
+        // body — regression for the off-by-9 hardcoded wrapper size.
+        for message in ["Login complete — you can close this window.", "Invalid request", ""] {
+            let raw = render_callback_response(message);
+            let (headers, body) = split_response(&raw);
+            let declared: usize = header_value(headers, "Content-Length")
+                .expect("Content-Length header present")
+                .parse()
+                .expect("Content-Length is a number");
+            assert_eq!(
+                declared,
+                body.len(),
+                "declared Content-Length must equal body byte length for {message:?}"
+            );
+            assert!(body.contains(message), "body should embed the message");
+        }
+    }
+
+    #[test]
+    fn parse_request_target_extracts_query() {
+        let url = parse_request_target("GET /callback?code=abc123&state=xyz HTTP/1.1")
+            .expect("valid request target parses");
+        assert_eq!(url.path(), "/callback");
+        let pairs: std::collections::HashMap<_, _> = url.query_pairs().into_owned().collect();
+        assert_eq!(pairs.get("code").map(String::as_str), Some("abc123"));
+        assert_eq!(pairs.get("state").map(String::as_str), Some("xyz"));
+    }
+
+    #[test]
+    fn parse_request_target_rejects_malformed_line() {
+        assert!(parse_request_target("garbage-without-a-target").is_none());
+    }
+
+    #[test]
+    fn build_authorize_url_carries_pkce_and_state() {
+        let pkce = PkceChallenge::generate();
+        let url = build_authorize_url(
+            "https://drive.example.com/",
+            Provider::Google,
+            "http://127.0.0.1:51789/callback",
+            &pkce,
+            "state-token",
+        )
+        .expect("authorize url builds");
+
+        assert_eq!(url.path(), "/api/auth/oauth/google");
+        let pairs: std::collections::HashMap<_, _> = url.query_pairs().into_owned().collect();
+        assert_eq!(pairs.get("response_type").map(String::as_str), Some("code"));
+        assert_eq!(
+            pairs.get("code_challenge_method").map(String::as_str),
+            Some("S256")
+        );
+        assert_eq!(
+            pairs.get("code_challenge").map(String::as_str),
+            Some(pkce.challenge.as_str())
+        );
+        assert_eq!(pairs.get("state").map(String::as_str), Some("state-token"));
+        assert_eq!(
+            pairs.get("redirect_uri").map(String::as_str),
+            Some("http://127.0.0.1:51789/callback")
+        );
+    }
+
+    #[test]
+    fn microsoft_provider_uses_its_slug() {
+        let pkce = PkceChallenge::generate();
+        let url = build_authorize_url(
+            "https://drive.example.com",
+            Provider::Microsoft,
+            "http://127.0.0.1:1/callback",
+            &pkce,
+            "s",
+        )
+        .expect("authorize url builds");
+        assert_eq!(url.path(), "/api/auth/oauth/microsoft");
+    }
 }

@@ -82,6 +82,17 @@ export function pending(s: Summary): number {
   );
 }
 
+/**
+ * Mirror of the SDK's `SyncHealth::is_running()`
+ * (sdk/crates/desktop-shell/src/state.rs): the workspace's background
+ * task is supposed to be live. Deliberately excludes both `stopped`
+ * and `error` so the UI's action mapping matches the engine's own
+ * notion of "running" rather than re-deriving its own.
+ */
+export function isRunning(h: SyncHealth): boolean {
+  return h === "starting" || h === "idle" || h === "syncing" || h === "conflict";
+}
+
 /** Human label + accent color for a health value. */
 export function healthLabel(h: SyncHealth): string {
   switch (h) {
