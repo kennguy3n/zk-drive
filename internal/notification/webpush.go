@@ -3,6 +3,7 @@ package notification
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -15,6 +16,23 @@ import (
 	webpush "github.com/SherClockHolmes/webpush-go"
 	"github.com/google/uuid"
 )
+
+// ErrInvalidSubscription marks a push subscription the caller supplied
+// as unacceptable: missing fields, an over-long endpoint, or an
+// endpoint that fails SSRF validation (non-https / private / blocked
+// address). It is a client-caused error, so the HTTP layer maps it to
+// 400 Bad Request rather than logging a 500 — see writeServiceError in
+// api/drive/helpers.go. Validation failures are wrapped with this
+// sentinel via fmt.Errorf("%w: ...").
+var ErrInvalidSubscription = errors.New("webpush: invalid subscription")
+
+// maxPushEndpointLen bounds the stored endpoint URL. Real push-service
+// endpoints (FCM, Mozilla autopush, Apple) run a few hundred bytes; a
+// 2 KiB ceiling leaves generous headroom while stopping an
+// authenticated client from persisting arbitrarily large strings
+// (storage abuse). Enforced here for a clean 400 and mirrored by a
+// CHECK constraint in migration 038 as defence in depth.
+const maxPushEndpointLen = 2048
 
 // defaultVAPIDSubscriber is the `sub` claim embedded in the VAPID JWT
 // when the operator does not configure one explicitly. Push services
@@ -76,6 +94,19 @@ type httpDoer interface {
 	Do(*http.Request) (*http.Response, error)
 }
 
+// EndpointValidator performs DNS-resolving SSRF validation of a push
+// endpoint URL. It is satisfied by *webhooks.URLValidator, injected by
+// the server wiring via WithEndpointValidator. Defining it here (rather
+// than importing the webhooks package) keeps the notification package
+// free of that dependency and lets tests supply a fake-resolver
+// validator. Validate is called at subscribe time and again before each
+// delivery: re-resolving on every send is the DNS-rebinding defence —
+// a hostname that resolved to a public IP at subscribe time but is
+// later repointed at 169.254.169.254 is caught before we POST to it.
+type EndpointValidator interface {
+	Validate(ctx context.Context, raw string) (*url.URL, error)
+}
+
 // WebPushService delivers RFC 8030 / VAPID web-push messages to a
 // user's registered browser subscriptions. It is constructed only
 // when both VAPID keys are configured; callers treat a nil service as
@@ -86,6 +117,7 @@ type WebPushService struct {
 	vapidPrivateKey string
 	subscriber      string
 	httpClient      httpDoer
+	validator       EndpointValidator
 }
 
 // NewWebPushService returns a service that signs push messages with
@@ -126,6 +158,18 @@ func (s *WebPushService) WithHTTPClient(c httpDoer) *WebPushService {
 	return s
 }
 
+// WithEndpointValidator injects the DNS-resolving SSRF validator used
+// to vet push endpoints at subscribe and delivery time. Production
+// wires a *webhooks.URLValidator; when nil the service falls back to
+// the lightweight literal-IP checks in validatePushEndpoint (which do
+// not resolve DNS).
+func (s *WebPushService) WithEndpointValidator(v EndpointValidator) *WebPushService {
+	if s != nil {
+		s.validator = v
+	}
+	return s
+}
+
 // PublicKey returns the VAPID public key the frontend needs to pass as
 // applicationServerKey when calling pushManager.subscribe.
 func (s *WebPushService) PublicKey() string {
@@ -143,12 +187,35 @@ func (s *WebPushService) Subscribe(ctx context.Context, workspaceID, userID uuid
 		return nil
 	}
 	if sub.Endpoint == "" || sub.P256dh == "" || sub.Auth == "" {
-		return fmt.Errorf("webpush: subscription requires endpoint, p256dh and auth")
+		return fmt.Errorf("%w: endpoint, p256dh and auth are required", ErrInvalidSubscription)
 	}
-	if err := validatePushEndpoint(sub.Endpoint); err != nil {
+	if err := s.validateEndpoint(ctx, sub.Endpoint); err != nil {
 		return err
 	}
 	return s.repo.SaveSubscription(ctx, workspaceID, userID, sub)
+}
+
+// validateEndpoint enforces the length bound and runs SSRF validation,
+// returning every failure wrapped in ErrInvalidSubscription so the HTTP
+// layer answers 400 (not 500). When an EndpointValidator is injected it
+// does the full DNS-resolving check; otherwise it falls back to the
+// literal-IP checks. The detailed validator reason is logged (so an
+// operator can spot SSRF probes) but not echoed to the client.
+func (s *WebPushService) validateEndpoint(ctx context.Context, endpoint string) error {
+	if len(endpoint) > maxPushEndpointLen {
+		return fmt.Errorf("%w: endpoint exceeds %d bytes", ErrInvalidSubscription, maxPushEndpointLen)
+	}
+	if s.validator != nil {
+		if _, err := s.validator.Validate(ctx, endpoint); err != nil {
+			logging.FromContext(ctx).Warn("webpush rejected endpoint", "err", err)
+			return fmt.Errorf("%w: endpoint not allowed", ErrInvalidSubscription)
+		}
+		return nil
+	}
+	if err := validatePushEndpoint(endpoint); err != nil {
+		return fmt.Errorf("%w: %s", ErrInvalidSubscription, err.Error())
+	}
+	return nil
 }
 
 // validatePushEndpoint rejects endpoints that are not plausible public
@@ -252,6 +319,15 @@ func (s *WebPushService) Send(ctx context.Context, workspaceID, userID uuid.UUID
 // service's HTTP status code. The response body is always drained and
 // closed so the underlying connection can be reused.
 func (s *WebPushService) deliver(ctx context.Context, message []byte, sub PushSubscription) (int, error) {
+	// Re-validate (re-resolving DNS) immediately before sending so a
+	// subscription whose hostname was repointed at an internal address
+	// after it was stored is never POSTed to. Subscriptions are stored
+	// pre-validated, so this only trips on a deliberate DNS rebind.
+	if s.validator != nil {
+		if _, err := s.validator.Validate(ctx, sub.Endpoint); err != nil {
+			return 0, fmt.Errorf("webpush: endpoint failed pre-send revalidation: %w", err)
+		}
+	}
 	opts := &webpush.Options{
 		Subscriber:      s.subscriber,
 		VAPIDPublicKey:  s.vapidPublicKey,

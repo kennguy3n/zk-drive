@@ -507,7 +507,7 @@ func run() error {
 		webPushSvc = notification.NewWebPushService(
 			notification.NewPostgresRepository(pool),
 			cfg.VAPIDPublicKey, cfg.VAPIDPrivateKey,
-		)
+		).WithEndpointValidator(webhooks.NewURLValidator())
 		notificationPublisher = notification.NewWebPushPublisher(notificationPublisher, hub, webPushSvc)
 		slog.Info("web push enabled, offline notifications will fan out via VAPID")
 	} else {

@@ -28,7 +28,12 @@ CREATE TABLE webpush_subscriptions (
     id           UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     workspace_id UUID NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
     user_id      UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-    endpoint     TEXT NOT NULL,
+    -- Real push-service endpoints are a few hundred bytes; cap at 2 KiB
+    -- as defence in depth against an authenticated client persisting
+    -- arbitrarily large strings. Mirrors maxPushEndpointLen in the
+    -- WebPushService (which rejects over-long endpoints with a 400
+    -- before they reach here).
+    endpoint     TEXT NOT NULL CHECK (length(endpoint) <= 2048),
     p256dh       TEXT NOT NULL,
     auth         TEXT NOT NULL,
     created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),

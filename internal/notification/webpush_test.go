@@ -6,8 +6,12 @@ import (
 	"crypto/ecdh"
 	"crypto/rand"
 	"encoding/base64"
+	"errors"
+	"fmt"
 	"io"
 	"net/http"
+	"net/url"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -15,6 +19,25 @@ import (
 	webpush "github.com/SherClockHolmes/webpush-go"
 	"github.com/google/uuid"
 )
+
+// fakeEndpointValidator implements EndpointValidator. It rejects any
+// endpoint whose host is marked blocked, standing in for the
+// DNS-resolving *webhooks.URLValidator wired in production. Mutating
+// blocked between calls simulates a DNS-rebinding attack.
+type fakeEndpointValidator struct {
+	blocked map[string]bool
+}
+
+func (f *fakeEndpointValidator) Validate(_ context.Context, raw string) (*url.URL, error) {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return nil, err
+	}
+	if f.blocked[u.Hostname()] {
+		return nil, fmt.Errorf("host %s resolves to a blocked address", u.Hostname())
+	}
+	return u, nil
+}
 
 // fakeWebPushRepo is an in-memory WebPushRepository keyed by
 // (workspace, user, endpoint).
@@ -187,8 +210,10 @@ func TestWebPushService_SubscribeRejectsUnsafeEndpoints(t *testing.T) {
 	}
 	for _, endpoint := range bad {
 		sub := testSubscription(t, endpoint)
-		if err := svc.Subscribe(ctx, ws, user, sub); err == nil {
-			t.Errorf("expected Subscribe to reject endpoint %q", endpoint)
+		// Must surface ErrInvalidSubscription so the HTTP layer maps it
+		// to 400 (not 500 with an ERROR log) — see writeServiceError.
+		if err := svc.Subscribe(ctx, ws, user, sub); !errors.Is(err, ErrInvalidSubscription) {
+			t.Errorf("expected ErrInvalidSubscription for endpoint %q, got %v", endpoint, err)
 		}
 	}
 	if repo.count() != 0 {
@@ -198,6 +223,62 @@ func TestWebPushService_SubscribeRejectsUnsafeEndpoints(t *testing.T) {
 	// A normal public https push endpoint is still accepted.
 	if err := svc.Subscribe(ctx, ws, user, testSubscription(t, "https://fcm.googleapis.com/fcm/send/abc")); err != nil {
 		t.Errorf("expected public https endpoint to be accepted: %v", err)
+	}
+}
+
+func TestWebPushService_RejectsOverLongEndpoint(t *testing.T) {
+	repo := newFakeWebPushRepo()
+	svc, _ := newTestService(t, repo, http.StatusCreated)
+	ctx := context.Background()
+
+	long := "https://push.example.com/" + strings.Repeat("a", maxPushEndpointLen)
+	err := svc.Subscribe(ctx, uuid.New(), uuid.New(), testSubscription(t, long))
+	if !errors.Is(err, ErrInvalidSubscription) {
+		t.Errorf("expected ErrInvalidSubscription for over-long endpoint, got %v", err)
+	}
+	if repo.count() != 0 {
+		t.Errorf("over-long endpoint should not be stored, got %d", repo.count())
+	}
+}
+
+// TestWebPushService_InjectedValidatorGatesSubscribeAndDeliver proves
+// the injected DNS-resolving validator runs both at subscribe time and
+// again before each delivery — the latter being the DNS-rebinding
+// defence (a host that was public at subscribe time but is later
+// repointed at an internal address is never POSTed to).
+func TestWebPushService_InjectedValidatorGatesSubscribeAndDeliver(t *testing.T) {
+	repo := newFakeWebPushRepo()
+	svc, stub := newTestService(t, repo, http.StatusCreated)
+	validator := &fakeEndpointValidator{blocked: map[string]bool{"evil.internal": true}}
+	svc.WithEndpointValidator(validator)
+	ctx := context.Background()
+	ws, user := uuid.New(), uuid.New()
+
+	// Subscribe to a validator-blocked host is rejected (and not stored).
+	if err := svc.Subscribe(ctx, ws, user, testSubscription(t, "https://evil.internal/x")); !errors.Is(err, ErrInvalidSubscription) {
+		t.Errorf("expected ErrInvalidSubscription for blocked host, got %v", err)
+	}
+	if repo.count() != 0 {
+		t.Errorf("blocked subscription must not be stored, got %d", repo.count())
+	}
+
+	// A good host subscribes fine.
+	if err := svc.Subscribe(ctx, ws, user, testSubscription(t, "https://fcm.googleapis.com/fcm/send/x")); err != nil {
+		t.Fatalf("good subscribe: %v", err)
+	}
+
+	// Simulate DNS rebinding: the stored host now resolves to a blocked
+	// address. deliver must re-validate and skip the send entirely.
+	validator.blocked["fcm.googleapis.com"] = true
+	if err := svc.Send(ctx, ws, user, NotificationPayload{Title: "t", Body: "b"}); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	if stub.calls != 0 {
+		t.Errorf("expected 0 deliveries after rebinding, got %d", stub.calls)
+	}
+	// The subscription is NOT pruned — a rebinding block is not a 410/404.
+	if repo.count() != 1 {
+		t.Errorf("expected subscription retained, got %d", repo.count())
 	}
 }
 

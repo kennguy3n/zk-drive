@@ -170,6 +170,14 @@ export async function login(input: {
 }
 
 export function logout(): void {
+  // Tear down the browser push subscription (and its server-side row)
+  // before clearing the token. Push notifications can carry workspace-
+  // sensitive content (file names, share links), so a browser that is
+  // no longer authenticated must stop receiving them. currentToken() is
+  // captured now because the server-side DELETE needs the Authorization
+  // header and the token is removed synchronously just below.
+  // Best-effort and fire-and-forget — never blocks logout.
+  tearDownPushSubscription(currentToken());
   localStorage.removeItem(TOKEN_STORAGE_KEY);
   localStorage.removeItem(WORKSPACE_STORAGE_KEY);
   localStorage.removeItem(ROLE_STORAGE_KEY);
@@ -1128,6 +1136,42 @@ export async function registerPushSubscription(sub: PushSubscriptionJSON): Promi
 
 export async function unregisterPushSubscription(endpoint: string): Promise<void> {
   await client.delete("/push/subscribe", { data: { endpoint } });
+}
+
+// tearDownPushSubscription removes the browser PushSubscription and its
+// server-side row on logout so a browser that is no longer
+// authenticated stops receiving push notifications. The server DELETE
+// needs the auth token, which the caller captures *before* clearing
+// localStorage and passes here; it is sent as an explicit Authorization
+// header rather than relying on the request interceptor, which by the
+// time this request is built would read the already-cleared token.
+// Entirely best-effort: push being unsupported, no active subscription,
+// or a network failure is swallowed so logout always completes.
+export function tearDownPushSubscription(token: string | null): void {
+  if (
+    typeof window === "undefined" ||
+    !("serviceWorker" in navigator) ||
+    !("PushManager" in window)
+  ) {
+    return;
+  }
+  void navigator.serviceWorker.ready
+    .then((registration) => registration.pushManager.getSubscription())
+    .then(async (subscription) => {
+      if (!subscription) {
+        return;
+      }
+      if (token) {
+        await client
+          .delete("/push/subscribe", {
+            data: { endpoint: subscription.endpoint },
+            headers: { Authorization: `Bearer ${token}` },
+          })
+          .catch(() => undefined);
+      }
+      await subscription.unsubscribe().catch(() => undefined);
+    })
+    .catch(() => undefined);
 }
 
 export default client;
