@@ -29,7 +29,7 @@ variable "name_prefix" {
 }
 
 variable "domain_name" {
-  description = "Public domain the platform is served on (e.g. drive.example.com). Used for the managed SSL certificate. Leave empty to skip custom-domain wiring."
+  description = "Public domain the platform is served on (e.g. drive.example.com). Used for the Google-managed SSL certificate and is REQUIRED for `terraform apply`: the external HTTPS load balancer's managed cert cannot be created with an empty domain."
   type        = string
   default     = ""
 }
