@@ -8,6 +8,7 @@ import (
 	"image"
 	"image/png"
 	"io"
+	"log/slog"
 	"net/http"
 	"time"
 
@@ -15,6 +16,8 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	xdraw "golang.org/x/image/draw"
+
+	"github.com/kennguy3n/zk-drive/internal/billing"
 )
 
 // ErrUnsupportedMime is returned when the source version is of a type
@@ -22,6 +25,30 @@ import (
 // Callers (worker) catch this and simply skip the job without marking
 // it failed.
 var ErrUnsupportedMime = errors.New("preview: unsupported mime type")
+
+// ErrBudgetExceeded is returned by Generate when the workspace has
+// already consumed its per-window preview budget (see
+// TenantPreviewBudget). Unlike a transient failure, the caller (the
+// worker) does NOT treat this as an error to retry immediately —
+// instead it re-enqueues the job with an exponential backoff delay so
+// the preview is rendered later, once the workspace's window has room.
+var ErrBudgetExceeded = errors.New("preview: tenant budget exceeded")
+
+// BudgetObserver is the minimal observability surface the preview
+// service depends on to record budget rejections. Defined here (not
+// imported from internal/metrics) so internal/preview does not depend
+// on the metrics package — the same metrics-implements-observer
+// inversion internal/permission uses for its CacheObserver. tier is a
+// bounded billing tier name so the counter stays low-cardinality.
+type BudgetObserver interface {
+	RecordPreviewBudgetExceeded(tier string)
+}
+
+// noopBudgetObserver is the zero-cost default so Generate never has to
+// nil-check the observer on the hot path.
+type noopBudgetObserver struct{}
+
+func (noopBudgetObserver) RecordPreviewBudgetExceeded(string) {}
 
 // PresignClient is the minimal surface PreviewService needs from the
 // storage package. Kept as an interface so tests can stub out S3.
@@ -46,6 +73,17 @@ type Service struct {
 	repo    Repository
 	httpc   *http.Client
 	now     func() time.Time
+
+	// budget, when non-nil, enforces a per-workspace sliding-window
+	// preview rate limit before any source bytes are downloaded.
+	// tiers resolves the workspace's billing tier so the
+	// budget-exceeded metric can be partitioned by bounded tier, and
+	// obs records that rejection. All three are optional: wired by
+	// the worker via the Set* methods, absent in unit tests and
+	// single-replica deploys without Redis.
+	budget *TenantPreviewBudget
+	tiers  *TierCache
+	obs    BudgetObserver
 }
 
 // NewService wires a preview service against the given pool and
@@ -58,6 +96,7 @@ func NewService(pool *pgxpool.Pool, storage PresignClient, repo Repository) *Ser
 		repo:    repo,
 		httpc:   &http.Client{Timeout: 60 * time.Second},
 		now:     time.Now,
+		obs:     noopBudgetObserver{},
 	}
 }
 
@@ -65,6 +104,28 @@ func NewService(pool *pgxpool.Pool, storage PresignClient, repo Repository) *Ser
 // Intended for tests; production code uses the default 60s-timeout
 // client wired by NewService.
 func (s *Service) SetHTTPClient(c *http.Client) { s.httpc = c }
+
+// SetBudget installs the per-workspace preview budget enforced at the
+// start of Generate. Passing nil disables budget enforcement (the
+// default). Wired by the worker from PREVIEW_BUDGET_PER_WORKSPACE_HOUR
+// when Redis is configured.
+func (s *Service) SetBudget(b *TenantPreviewBudget) { s.budget = b }
+
+// SetTierCache installs the resolver used to label the
+// budget-exceeded metric by the workspace's billing tier. Optional;
+// when absent the metric is labelled with the free-tier default.
+func (s *Service) SetTierCache(t *TierCache) { s.tiers = t }
+
+// SetBudgetObserver installs the observer that records budget
+// rejections. Passing nil restores the no-op observer so the hot path
+// stays nil-safe.
+func (s *Service) SetBudgetObserver(o BudgetObserver) {
+	if o == nil {
+		s.obs = noopBudgetObserver{}
+		return
+	}
+	s.obs = o
+}
 
 // Generate renders a preview for (fileID, versionID) and persists the
 // result. Returns ErrUnsupportedMime when the source MIME has no
@@ -80,6 +141,16 @@ func (s *Service) Generate(ctx context.Context, fileID, versionID uuid.UUID) (*P
 	if err != nil {
 		return nil, err
 	}
+
+	// Per-tenant budget gate. Checked here — after the cheap version
+	// lookup but before the (expensive) source download / decode — so
+	// a workspace that has exhausted its window costs only one Redis
+	// round trip per rejected job, not a full render. A nil budget
+	// (Redis not configured) admits unconditionally.
+	if err := s.checkBudget(ctx, meta.workspaceID); err != nil {
+		return nil, err
+	}
+
 	r := lookup(meta.mimeType)
 	if r == nil {
 		return nil, fmt.Errorf("%w: %q", ErrUnsupportedMime, meta.mimeType)
@@ -118,6 +189,47 @@ func (s *Service) Generate(ctx context.Context, fileID, versionID uuid.UUID) (*P
 		return nil, err
 	}
 	return p, nil
+}
+
+// checkBudget enforces the per-workspace preview budget. It returns
+// ErrBudgetExceeded when the workspace is over its window limit, nil
+// when admitted (or when no budget is configured). Redis-side errors
+// fail OPEN — the budget is a fairness guard, not a correctness guard,
+// and must never block legitimate previews when Redis is unavailable.
+func (s *Service) checkBudget(ctx context.Context, workspaceID uuid.UUID) error {
+	if s.budget == nil {
+		return nil
+	}
+	dec, err := s.budget.Allow(ctx, workspaceID)
+	if err != nil {
+		// Fail open: log and admit. Mirrors the permission cache's
+		// fail-open posture on Redis errors.
+		slog.Warn("preview budget check failed, admitting (fail-open)", "workspace_id", workspaceID, "err", err)
+		return nil
+	}
+	if dec.Allowed {
+		return nil
+	}
+	tier := s.resolveTier(ctx, workspaceID)
+	s.obs.RecordPreviewBudgetExceeded(tier)
+	slog.Info("preview budget exceeded, deferring job",
+		"workspace_id", workspaceID, "tier", tier, "limit", dec.Limit, "count", dec.Count)
+	return ErrBudgetExceeded
+}
+
+// resolveTier best-effort resolves a workspace's billing tier for the
+// budget-exceeded metric label. Any lookup failure (or absent tier
+// cache) collapses to billing.TierFree so the bounded label set never
+// grows and a metric emit is never blocked on a DB hiccup.
+func (s *Service) resolveTier(ctx context.Context, workspaceID uuid.UUID) string {
+	if s.tiers == nil {
+		return billing.TierFree
+	}
+	tier, err := s.tiers.Tier(ctx, workspaceID)
+	if err != nil || tier == "" {
+		return billing.TierFree
+	}
+	return tier
 }
 
 // PreviewObjectKey returns the S3 key used to store a preview. Kept

@@ -22,6 +22,7 @@ import (
 	"fmt"
 
 	"github.com/google/uuid"
+	"github.com/kennguy3n/zk-drive/internal/billing"
 	"github.com/kennguy3n/zk-drive/internal/tracing"
 	"github.com/nats-io/nats.go"
 	"go.opentelemetry.io/otel"
@@ -41,13 +42,46 @@ const publisherTracerName = "github.com/kennguy3n/zk-drive/internal/jobs"
 // Subject constants. Keep these in sync with cmd/worker/main.go — the
 // worker uses the same strings when declaring JetStream consumers.
 const (
-	SubjectPreview  = "drive.preview.generate"
-	SubjectScan     = "drive.scan.virus"
-	SubjectIndex    = "drive.search.index"
-	SubjectArchive  = "drive.archive.cold"
+	SubjectPreview   = "drive.preview.generate"
+	SubjectScan      = "drive.scan.virus"
+	SubjectIndex     = "drive.search.index"
+	SubjectArchive   = "drive.archive.cold"
 	SubjectRetention = "drive.retention.evaluate"
 	SubjectClassify  = "drive.classify.file"
+
+	// Preview priority subjects. Preview generation is split across
+	// two subjects so the worker can give paying tiers a larger share
+	// of its goroutine budget and a single tenant bulk-uploading
+	// cannot starve interactive previews for everyone else:
+	//
+	//   SubjectPreviewPriority — Business / Secure-Business tiers.
+	//   SubjectPreviewStandard — Free / Starter tiers.
+	//
+	// Both are children of the legacy drive.preview.generate subject
+	// name so the DRIVE_JOBS stream's subject list and existing
+	// operator dashboards stay grep-able under one "drive.preview.*"
+	// prefix. SubjectPreview is retained for backward compatibility:
+	// the un-routed PublishPreview path still uses it, and the worker
+	// keeps a consumer on it so in-flight jobs published before a
+	// rollout are not stranded.
+	SubjectPreviewPriority = "drive.preview.generate.priority"
+	SubjectPreviewStandard = "drive.preview.generate.standard"
 )
+
+// PreviewSubjectForTier maps a billing tier name to the NATS subject
+// its preview jobs should be published on. Business and Secure-
+// Business land on the priority subject; every other tier (including
+// the empty / unknown string) falls back to standard so an
+// unrecognised tier degrades safely rather than silently gaining
+// priority.
+func PreviewSubjectForTier(tier string) string {
+	switch tier {
+	case billing.TierBusiness, billing.TierSecureBusiness:
+		return SubjectPreviewPriority
+	default:
+		return SubjectPreviewStandard
+	}
+}
 
 // FileJob is the common payload shape for every drive.* subject. We
 // keep it tiny and keyed by ids so the worker re-hydrates the latest
@@ -79,6 +113,16 @@ func NewPublisher(js nats.JetStreamContext) *Publisher {
 // version) pair. Safe to call on a nil receiver.
 func (p *Publisher) PublishPreview(ctx context.Context, fileID, versionID uuid.UUID) error {
 	return p.publish(ctx, SubjectPreview, FileJob{FileID: fileID, VersionID: versionID})
+}
+
+// PublishPreviewTier enqueues a preview-generation job on the
+// tier-appropriate priority subject (see PreviewSubjectForTier).
+// Callers that know the workspace's billing tier at dispatch time use
+// this instead of PublishPreview so Business / Secure-Business
+// previews are routed to the priority worker pool. Safe to call on a
+// nil receiver.
+func (p *Publisher) PublishPreviewTier(ctx context.Context, fileID, versionID uuid.UUID, tier string) error {
+	return p.publish(ctx, PreviewSubjectForTier(tier), FileJob{FileID: fileID, VersionID: versionID})
 }
 
 // PublishScan enqueues a virus-scan job. Safe to call on a nil receiver.
