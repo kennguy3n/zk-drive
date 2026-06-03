@@ -14,6 +14,28 @@ import (
 type Config struct {
 	DatabaseURL   string
 	JWTSecret     string
+
+	// DB connection-pool sizing. These tune the pgxpool created by
+	// internal/database.ConnectWithPool. Sourced from DB_MAX_CONNS,
+	// DB_MIN_CONNS, and DB_MAX_CONN_IDLE_TIME. DBMaxConns is clamped
+	// to [2, 200] and DBMinConns to [0, DBMaxConns] at load time so a
+	// fat-fingered env var cannot starve the pool (max < min) or
+	// exhaust Postgres' max_connections.
+	DBMaxConns        int32
+	DBMinConns        int32
+	DBMaxConnIdleTime time.Duration
+
+	// JWTAlgorithm selects the session-token signing algorithm:
+	//   - "auto" (default): sign with ES256 when an active asymmetric
+	//     signing key exists in jwt_signing_keys, otherwise fall back
+	//     to HS256 using JWTSecret. Verification always accepts both.
+	//   - "ES256": force ES256 signing (still verifies HS256 tokens
+	//     issued before the cutover so existing sessions survive).
+	//   - "HS256": force HS256 signing (legacy behaviour).
+	// Parsed case-insensitively; unrecognised values fall back to
+	// "auto".
+	JWTAlgorithm string
+
 	ListenAddr    string
 	S3Endpoint    string
 	S3Bucket      string
@@ -344,6 +366,10 @@ func buildConfigFromEnv() *Config {
 	return &Config{
 		DatabaseURL:           os.Getenv("DATABASE_URL"),
 		JWTSecret:             os.Getenv("JWT_SECRET"),
+		DBMaxConns:            dbMaxConnsFromEnv(),
+		DBMinConns:            dbMinConnsFromEnv(dbMaxConnsFromEnv()),
+		DBMaxConnIdleTime:     parseDurationDefault(os.Getenv("DB_MAX_CONN_IDLE_TIME"), defaultDBMaxConnIdleTime),
+		JWTAlgorithm:          normaliseJWTAlgorithm(os.Getenv("JWT_ALGORITHM")),
 		ListenAddr:            getEnvDefault("LISTEN_ADDR", ":8080"),
 		S3Endpoint:            os.Getenv("S3_ENDPOINT"),
 		S3Bucket:              os.Getenv("S3_BUCKET"),
@@ -670,6 +696,72 @@ func parseDurationDefault(s string, def time.Duration) time.Duration {
 		return def
 	}
 	return d
+}
+
+// DB connection-pool defaults and bounds. The pool is created by
+// internal/database.ConnectWithPool; these mirror the documented
+// defaults in docs/CONFIGURATION.md.
+const (
+	defaultDBMaxConns = 20
+	minDBMaxConns     = 2
+	maxDBMaxConns     = 200
+	defaultDBMinConns = 2
+
+	defaultDBMaxConnIdleTime = 30 * time.Minute
+)
+
+// dbMaxConnsFromEnv parses DB_MAX_CONNS and clamps the result to
+// [minDBMaxConns, maxDBMaxConns]. An unset / non-positive / malformed
+// value falls back to defaultDBMaxConns (operators most likely forgot
+// to set it), and an out-of-range value clamps to the nearest bound
+// so a typo can neither starve the pool nor exhaust Postgres'
+// max_connections.
+func dbMaxConnsFromEnv() int32 {
+	n := parseIntDefault(os.Getenv("DB_MAX_CONNS"), defaultDBMaxConns)
+	if n < minDBMaxConns {
+		n = minDBMaxConns
+	}
+	if n > maxDBMaxConns {
+		n = maxDBMaxConns
+	}
+	return int32(n)
+}
+
+// dbMinConnsFromEnv parses DB_MIN_CONNS and clamps it to
+// [0, maxConns]. Unlike parseIntDefault it honours an explicit 0
+// (a zero floor is legal — the pool simply opens connections lazily),
+// so the parse is done directly here. A value above maxConns clamps
+// down to maxConns so MinConns can never exceed MaxConns (pgxpool
+// rejects that configuration at NewWithConfig time).
+func dbMinConnsFromEnv(maxConns int32) int32 {
+	n := defaultDBMinConns
+	if s := strings.TrimSpace(os.Getenv("DB_MIN_CONNS")); s != "" {
+		if v, err := strconv.Atoi(s); err == nil && v >= 0 {
+			n = v
+		}
+	}
+	if n < 0 {
+		n = 0
+	}
+	if int32(n) > maxConns {
+		return maxConns
+	}
+	return int32(n)
+}
+
+// normaliseJWTAlgorithm canonicalises the JWT_ALGORITHM env var to
+// one of "auto", "ES256", or "HS256". Parsing is case-insensitive and
+// whitespace-tolerant; an empty or unrecognised value falls back to
+// "auto" so a typo can't silently disable asymmetric signing.
+func normaliseJWTAlgorithm(s string) string {
+	switch strings.ToUpper(strings.TrimSpace(s)) {
+	case "ES256":
+		return "ES256"
+	case "HS256":
+		return "HS256"
+	default:
+		return "auto"
+	}
 }
 
 // normaliseArchivePrefix ensures the prefix ends with exactly one

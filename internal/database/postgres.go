@@ -17,23 +17,78 @@ import (
 	"github.com/kennguy3n/zk-drive/internal/tenantctx"
 )
 
-// Connect opens a pgx connection pool against the supplied DSN. The
-// pool is configured with a PrepareConn hook that binds the
-// `app.workspace_id` GUC on every acquire to the workspace UUID
-// stored on the caller's context (via tenantctx.WithWorkspaceID).
-// Migration 024_row_level_security.up.sql relies on that GUC for
-// its tenant_isolation policies; when no workspace is set on the
-// context the hook clears the GUC so unauthenticated paths (login,
-// signup, public share-link resolution) and background workers fall
-// back to the RLS bypass branch.
+// PoolConfig carries the tunable pgxpool sizing knobs so callers can
+// source them from configuration (see internal/config:
+// DB_MAX_CONNS / DB_MIN_CONNS / DB_MAX_CONN_IDLE_TIME) instead of the
+// pool hard-coding fixed values. A zero value is safe: ConnectWithPool
+// substitutes DefaultPoolConfig() for any field left at its zero
+// (or out-of-range) value.
+type PoolConfig struct {
+	MaxConns        int32
+	MinConns        int32
+	MaxConnIdleTime time.Duration
+}
+
+// DefaultPoolConfig returns the pool sizing used by Connect and as the
+// fallback for any unset field in ConnectWithPool. The values match
+// the documented defaults in docs/CONFIGURATION.md and the defaults in
+// internal/config so every binary boots with the same baseline pool.
+func DefaultPoolConfig() PoolConfig {
+	return PoolConfig{
+		MaxConns:        20,
+		MinConns:        2,
+		MaxConnIdleTime: 30 * time.Minute,
+	}
+}
+
+// Connect opens a pgx connection pool against the supplied DSN using
+// DefaultPoolConfig(). It is retained for callers (short-lived batch
+// binaries, tests) that have no reason to tune pool sizing; the
+// server and worker call ConnectWithPool to pass operator-configured
+// values.
 func Connect(ctx context.Context, dsn string) (*pgxpool.Pool, error) {
+	return ConnectWithPool(ctx, dsn, DefaultPoolConfig())
+}
+
+// ConnectWithPool opens a pgx connection pool against the supplied DSN
+// with caller-provided pool sizing. The pool is configured with a
+// PrepareConn hook that binds the `app.workspace_id` GUC on every
+// acquire to the workspace UUID stored on the caller's context (via
+// tenantctx.WithWorkspaceID). Migration 024_row_level_security.up.sql
+// relies on that GUC for its tenant_isolation policies; when no
+// workspace is set on the context the hook clears the GUC so
+// unauthenticated paths (login, signup, public share-link resolution)
+// and background workers fall back to the RLS bypass branch.
+//
+// Each field of pc is validated defensively: a non-positive MaxConns
+// falls back to the default, MinConns is floored at 0 and capped at
+// MaxConns (pgxpool rejects MinConns > MaxConns), and a non-positive
+// idle time falls back to the default. internal/config already clamps
+// these, but ConnectWithPool stays robust for direct callers.
+func ConnectWithPool(ctx context.Context, dsn string, pc PoolConfig) (*pgxpool.Pool, error) {
 	cfg, err := pgxpool.ParseConfig(dsn)
 	if err != nil {
 		return nil, fmt.Errorf("parse database url: %w", err)
 	}
-	cfg.MaxConns = 10
-	cfg.MinConns = 1
-	cfg.MaxConnIdleTime = 30 * time.Minute
+	def := DefaultPoolConfig()
+	maxConns := pc.MaxConns
+	if maxConns < 1 {
+		maxConns = def.MaxConns
+	}
+	minConns := pc.MinConns
+	if minConns < 0 {
+		minConns = 0
+	}
+	if minConns > maxConns {
+		minConns = maxConns
+	}
+	idle := pc.MaxConnIdleTime
+	if idle <= 0 {
+		idle = def.MaxConnIdleTime
+	}
+	cfg.MaxConns = maxConns
+	cfg.MinConns = minConns
+	cfg.MaxConnIdleTime = idle
 	cfg.PrepareConn = bindTenantGUC
 
 	// Wire OpenTelemetry tracing into pgx via otelpgx. Every

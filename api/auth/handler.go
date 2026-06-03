@@ -54,6 +54,10 @@ type Handler struct {
 	workspaces *workspace.Service
 	audit      *audit.Service
 	jwtSecret  string
+	// signer mints and verifies session tokens. It defaults to an
+	// HS256 signer built from jwtSecret and is replaced by the ES256
+	// KeyManager via WithSigner when asymmetric signing is wired.
+	signer     middleware.Signer
 	postSignup PostSignupHook
 	sessions   SessionRevoker
 	totp       *totp.Service
@@ -62,7 +66,32 @@ type Handler struct {
 // NewHandler constructs a Handler from the user and workspace services. The
 // pool is used to run multi-step writes (signup) atomically.
 func NewHandler(pool *pgxpool.Pool, users *user.Service, workspaces *workspace.Service, jwtSecret string) *Handler {
-	return &Handler{pool: pool, users: users, workspaces: workspaces, jwtSecret: jwtSecret}
+	return &Handler{
+		pool:       pool,
+		users:      users,
+		workspaces: workspaces,
+		jwtSecret:  jwtSecret,
+		signer:     middleware.HMACSigner(jwtSecret),
+	}
+}
+
+// WithSigner installs the session-token Signer (typically the ES256
+// *crypto.KeyManager). When unset, the handler signs with HS256 using
+// jwtSecret. Returns the handler for chaining.
+func (h *Handler) WithSigner(s middleware.Signer) *Handler {
+	if s != nil {
+		h.signer = s
+	}
+	return h
+}
+
+// tokenSigner returns the configured Signer, falling back to an HS256
+// signer if (defensively) none was set.
+func (h *Handler) tokenSigner() middleware.Signer {
+	if h.signer != nil {
+		return h.signer
+	}
+	return middleware.HMACSigner(h.jwtSecret)
 }
 
 // WithAudit attaches an audit service so login / logout / SSO events
@@ -132,7 +161,7 @@ func (h *Handler) JWTSecret() string { return h.jwtSecret }
 // body. Exposed so other handlers (e.g. OAuth callbacks) can complete
 // the same login flow without duplicating JWT issuance.
 func (h *Handler) WriteToken(w http.ResponseWriter, r *http.Request, userID, workspaceID uuid.UUID, role string) {
-	writeToken(w, r, h.jwtSecret, userID, workspaceID, role)
+	writeToken(w, r, h.tokenSigner(), userID, workspaceID, role)
 }
 
 type signupRequest struct {
@@ -206,7 +235,7 @@ func (h *Handler) Signup(w http.ResponseWriter, r *http.Request) {
 		h.postSignup(r.Context(), ws.ID, ws.Name)
 	}
 
-	writeToken(w, r, h.jwtSecret, u.ID, ws.ID, u.Role)
+	writeToken(w, r, h.tokenSigner(), u.ID, ws.ID, u.Role)
 }
 
 // runSignupTx performs the workspace+user+owner writes in a single
@@ -353,7 +382,7 @@ func (h *Handler) Login(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 
-	writeToken(w, r, h.jwtSecret, u.ID, u.WorkspaceID, u.Role)
+	writeToken(w, r, h.tokenSigner(), u.ID, u.WorkspaceID, u.Role)
 }
 
 // maybeIssueMFAChallenge runs after a successful password verify
@@ -382,7 +411,7 @@ func (h *Handler) maybeIssueMFAChallenge(ctx context.Context, u *user.User, r *h
 	}
 
 	if status.Enabled {
-		token, exp, err := middleware.IssueMFAChallengeToken(h.jwtSecret, u.ID, u.WorkspaceID)
+		token, exp, err := middleware.IssueMFAChallengeTokenWith(h.tokenSigner(), u.ID, u.WorkspaceID)
 		if err != nil {
 			return nil, err
 		}
@@ -404,7 +433,7 @@ func (h *Handler) maybeIssueMFAChallenge(ctx context.Context, u *user.User, r *h
 	if !ws.MFARequired {
 		return nil, nil
 	}
-	token, exp, err := middleware.IssueMFAEnrollToken(h.jwtSecret, u.ID, u.WorkspaceID)
+	token, exp, err := middleware.IssueMFAEnrollTokenWith(h.tokenSigner(), u.ID, u.WorkspaceID)
 	if err != nil {
 		return nil, err
 	}
@@ -534,11 +563,11 @@ func (h *Handler) Refresh(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	writeToken(w, r, h.jwtSecret, claims.UserID, claims.WorkspaceID, claims.Role)
+	writeToken(w, r, h.tokenSigner(), claims.UserID, claims.WorkspaceID, claims.Role)
 }
 
-func writeToken(w http.ResponseWriter, r *http.Request, secret string, userID, workspaceID uuid.UUID, role string) {
-	token, exp, err := middleware.IssueToken(secret, userID, workspaceID, role, middleware.TokenTTL)
+func writeToken(w http.ResponseWriter, r *http.Request, signer middleware.Signer, userID, workspaceID uuid.UUID, role string) {
+	token, exp, err := middleware.IssueTokenWith(signer, userID, workspaceID, role, middleware.TokenTTL)
 	if err != nil {
 		middleware.RespondInternalError(w, r, "issue token", err)
 		return
