@@ -62,6 +62,7 @@ type Handler struct {
 	storeFactory *storage.ClientFactory
 	webhooks     MemberEventPublisher
 	jwtKeys      JWTRotator
+	ipAllow      *workspace.IPAllowService
 }
 
 // JWTRotator is the subset of *crypto.KeyManager the admin handler
@@ -169,6 +170,10 @@ func (h *Handler) RegisterRoutes(r chi.Router) {
 	r.Get("/workspace/search-language", h.GetSearchLanguage)
 	r.Put("/workspace/search-language", h.UpdateSearchLanguage)
 	r.Post("/jwt/rotate", h.RotateJWTKey)
+	r.Get("/ip-allowlist", h.ListIPAllowRules)
+	r.Post("/ip-allowlist", h.AddIPAllowRule)
+	r.Delete("/ip-allowlist/{id}", h.RemoveIPAllowRule)
+	r.Patch("/ip-allowlist/policy", h.UpdateIPAllowPolicy)
 }
 
 // jwtRotateResponse returns the public metadata of the freshly

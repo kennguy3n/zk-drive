@@ -360,6 +360,35 @@ func TestParseIntDefault(t *testing.T) {
 	}
 }
 
+// TestParseNonNegativeIntDefault verifies that an explicit 0 is
+// honoured (unlike parseIntDefault) while empty/garbage/negative still
+// fall back. This is the contract TRUSTED_PROXY_DEPTH relies on so that
+// 0 ("trust no proxy") is distinguishable from the default of 1.
+func TestParseNonNegativeIntDefault(t *testing.T) {
+	tests := []struct {
+		raw     string
+		def     int
+		want    int
+		comment string
+	}{
+		{"", 1, 1, "empty falls back"},
+		{"   ", 1, 1, "whitespace falls back"},
+		{"0", 1, 0, "explicit zero is honoured"},
+		{"  0 ", 1, 0, "trimmed zero is honoured"},
+		{"3", 1, 3, "positive int parses"},
+		{"-2", 1, 1, "negative falls back"},
+		{"abc", 1, 1, "garbage falls back"},
+	}
+	for _, tc := range tests {
+		tc := tc
+		t.Run(tc.comment, func(t *testing.T) {
+			if got := parseNonNegativeIntDefault(tc.raw, tc.def); got != tc.want {
+				t.Fatalf("parseNonNegativeIntDefault(%q, %d)=%d, want %d", tc.raw, tc.def, got, tc.want)
+			}
+		})
+	}
+}
+
 // TestGetEnvDefault verifies the helper consults os.Getenv and falls
 // back when empty. Whitespace-only is intentionally NOT treated as
 // empty here because operators sometimes use a single space as a

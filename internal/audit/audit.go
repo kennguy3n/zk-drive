@@ -66,6 +66,13 @@ const (
 	ActionWebhookSubscriptionDelete = "webhooks.subscription_delete"
 	ActionWebhookSubscriptionResume = "webhooks.subscription_resume"
 	ActionWebhookSubscriptionTest   = "webhooks.subscription_test"
+	// Per-workspace IP allowlisting (conditional access). Admins
+	// add / remove CIDR rules and flip the master switch; each
+	// change is audited so a compliance reviewer can attribute a
+	// network-access policy change to a specific operator and time.
+	ActionIPAllowRuleAdd      = "workspace.ip_allowlist_rule_add"
+	ActionIPAllowRuleRemove   = "workspace.ip_allowlist_rule_remove"
+	ActionIPAllowPolicyChange = "workspace.ip_allowlist_policy_change"
 )
 
 // Entry mirrors a single audit_log row. ActorID is nullable because
