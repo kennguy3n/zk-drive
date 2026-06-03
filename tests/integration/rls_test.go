@@ -322,13 +322,21 @@ func TestRLSEnforcesCrossTenantIsolation(t *testing.T) {
 	t.Cleanup(func() {
 		cctx, ccancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer ccancel()
+		// Constrain each delete by workspace_id as well as the row id.
+		// The deletes run on the superuser pool, which bypasses RLS, so
+		// without an explicit workspace_id predicate the planner has no
+		// hash-partition-key equality and must scan all 64 partitions.
+		// Adding workspace_id = ANY(...) lets it prune to just the two
+		// partitions holding wsA/wsB. (The read assertions below already
+		// prune via the RLS policy's workspace_id = app_current_workspace_id().)
+		wss := []uuid.UUID{wsA, wsB}
 		cleanups := []struct {
 			query string
 			args  []interface{}
 		}{
-			{`DELETE FROM activity_log WHERE id = ANY($1)`, []interface{}{[]uuid.UUID{actA, actB}}},
-			{`DELETE FROM audit_log WHERE id = ANY($1)`, []interface{}{[]uuid.UUID{audA, audB}}},
-			{`DELETE FROM change_log WHERE resource_id = ANY($1)`, []interface{}{[]uuid.UUID{chgA, chgB}}},
+			{`DELETE FROM activity_log WHERE workspace_id = ANY($1) AND id = ANY($2)`, []interface{}{wss, []uuid.UUID{actA, actB}}},
+			{`DELETE FROM audit_log WHERE workspace_id = ANY($1) AND id = ANY($2)`, []interface{}{wss, []uuid.UUID{audA, audB}}},
+			{`DELETE FROM change_log WHERE workspace_id = ANY($1) AND resource_id = ANY($2)`, []interface{}{wss, []uuid.UUID{chgA, chgB}}},
 		}
 		for _, c := range cleanups {
 			if _, err := env.pool.Exec(cctx, c.query, c.args...); err != nil {
