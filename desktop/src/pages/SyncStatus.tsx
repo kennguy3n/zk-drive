@@ -132,21 +132,40 @@ function WorkspaceRow({
   // Stopped   -> Resume  (StartSync)
   const actionLabel = running ? "Pause" : errored ? "Restart" : "Resume";
 
-  async function toggle() {
-    if (running) {
-      await shell.pauseSync(ws.workspace_id);
-    } else if (errored) {
-      await shell.pauseSync(ws.workspace_id);
-      await shell.resumeSync(ws.workspace_id);
-    } else {
-      await shell.resumeSync(ws.workspace_id);
+  const [busy, setBusy] = useState(false);
+  const [actionError, setActionError] = useState<string | null>(null);
+
+  // Wrap the IPC calls so a rejected command surfaces to the user
+  // instead of being swallowed as an unhandled rejection by React's
+  // event system — same contract as `bind()` above.
+  async function run(action: () => Promise<void>) {
+    setBusy(true);
+    setActionError(null);
+    try {
+      await action();
+      await onChange();
+    } catch (err) {
+      setActionError(formatError(err));
+    } finally {
+      setBusy(false);
     }
-    await onChange();
   }
 
-  async function remove() {
-    await shell.removeWorkspace(ws.workspace_id);
-    await onChange();
+  function toggle() {
+    return run(async () => {
+      if (running) {
+        await shell.pauseSync(ws.workspace_id);
+      } else if (errored) {
+        await shell.pauseSync(ws.workspace_id);
+        await shell.resumeSync(ws.workspace_id);
+      } else {
+        await shell.resumeSync(ws.workspace_id);
+      }
+    });
+  }
+
+  function remove() {
+    return run(() => shell.removeWorkspace(ws.workspace_id));
   }
 
   return (
@@ -170,15 +189,18 @@ function WorkspaceRow({
       </div>
 
       {ws.last_error && <div className="error small">{ws.last_error}</div>}
+      {actionError && <div className="error small">{actionError}</div>}
 
       <div className="ws-actions">
-        <button onClick={toggle}>{actionLabel}</button>
+        <button onClick={toggle} disabled={busy}>
+          {actionLabel}
+        </button>
         {ws.summary.conflict > 0 && (
-          <button className="warn" onClick={onResolve}>
+          <button className="warn" onClick={onResolve} disabled={busy}>
             Resolve conflicts
           </button>
         )}
-        <button className="danger" onClick={remove}>
+        <button className="danger" onClick={remove} disabled={busy}>
           Remove
         </button>
       </div>
