@@ -667,7 +667,18 @@ func subscribeAll(ctx context.Context, wg *sync.WaitGroup, js nats.JetStreamCont
 		}
 		sub, err := js.Subscribe(s.subject, handler, opts...)
 		if err != nil {
+			// Symmetric cleanup: tear down what this call created
+			// before returning. unsubscribeAll stops delivery on the
+			// already-bound subjects, then the pool drains (including
+			// this subject's, appended just above) stop their
+			// goroutines and wait out any handler that slipped in
+			// during the brief window. Same unsubscribe→drain order
+			// run() uses on shutdown; without it the earlier pools
+			// would linger until run()'s deferred cancel reaps them.
 			unsubscribeAll(subs)
+			for _, drain := range drains {
+				drain()
+			}
 			return nil, nil, fmt.Errorf("subscribe %s: %w", s.subject, err)
 		}
 		subs = append(subs, sub)
