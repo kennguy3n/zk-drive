@@ -61,6 +61,16 @@ type Handler struct {
 	provisioner  *fabric.Provisioner
 	storeFactory *storage.ClientFactory
 	webhooks     MemberEventPublisher
+	jwtKeys      JWTRotator
+}
+
+// JWTRotator is the subset of *crypto.KeyManager the admin handler
+// needs to rotate the platform JWT signing key. Declared as an
+// interface so the rotate endpoint stays unit-testable without a live
+// key store. The returned record carries only public metadata — the
+// KeyManager never hands back private key material.
+type JWTRotator interface {
+	RotateKey(ctx context.Context) (cryptopkg.SigningKeyRecord, error)
 }
 
 // NewHandler constructs a Handler. Pass nil for services that are
@@ -111,6 +121,15 @@ func (h *Handler) WithWebhooks(p MemberEventPublisher) *Handler {
 	return h
 }
 
+// WithJWTRotator wires the JWT signing-key manager so POST
+// /jwt/rotate can rotate the platform ES256 key. Optional: when nil
+// the route responds 501 Not Implemented (e.g. deployments still on
+// HS256-only signing).
+func (h *Handler) WithJWTRotator(r JWTRotator) *Handler {
+	h.jwtKeys = r
+	return h
+}
+
 // WithFabric wires the placement-policy admin endpoints. The
 // FabricClient talks to the upstream zk-object-fabric console; the
 // provisioner is used to look up the per-workspace tenant ID and
@@ -149,6 +168,52 @@ func (h *Handler) RegisterRoutes(r chi.Router) {
 	r.Patch("/workspace/mfa-policy", h.UpdateMFAPolicy)
 	r.Get("/workspace/search-language", h.GetSearchLanguage)
 	r.Put("/workspace/search-language", h.UpdateSearchLanguage)
+	r.Post("/jwt/rotate", h.RotateJWTKey)
+}
+
+// jwtRotateResponse returns the public metadata of the freshly
+// activated signing key. Private key material is never serialised.
+type jwtRotateResponse struct {
+	KeyID     string    `json:"key_id"`
+	Algorithm string    `json:"algorithm"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
+// RotateJWTKey generates a new ES256 signing key, marks it active,
+// retires the previous one, and reloads the in-memory key set. Tokens
+// signed by the retired key keep verifying until they expire. The
+// action is audited; the response carries only public key metadata.
+func (h *Handler) RotateJWTKey(w http.ResponseWriter, r *http.Request) {
+	if h.jwtKeys == nil {
+		middleware.RespondError(w, http.StatusNotImplemented, middleware.ErrCodeUnsupportedOp, "jwt key manager not wired")
+		return
+	}
+	workspaceID, ok := middleware.WorkspaceIDFromContext(r.Context())
+	if !ok {
+		middleware.RespondError(w, http.StatusInternalServerError, middleware.ErrCodeInternal, "workspace not in context")
+		return
+	}
+	actorID, _ := middleware.UserIDFromContext(r.Context())
+
+	rec, err := h.jwtKeys.RotateKey(r.Context())
+	if err != nil {
+		middleware.RespondInternalError(w, r, "rotate jwt key", err)
+		return
+	}
+
+	if h.audit != nil {
+		actor := actorID
+		h.audit.LogAction(r.Context(), workspaceID, &actor, audit.ActionAdminJWTRotate, "", nil, r, map[string]any{
+			"key_id":    rec.ID.String(),
+			"algorithm": rec.Algorithm,
+		})
+	}
+
+	writeJSON(w, http.StatusOK, jwtRotateResponse{
+		KeyID:     rec.ID.String(),
+		Algorithm: rec.Algorithm,
+		CreatedAt: rec.CreatedAt,
+	})
 }
 
 // updateMFAPolicyRequest carries the boolean toggle for the
