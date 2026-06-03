@@ -329,6 +329,10 @@ spec:
   egress:
     - ports:
         - protocol: TCP
-          port: {{ .Values.networkPolicy.s3Port }}
+          # freshclam reaches the public ClamAV CDN (database.clamav.net)
+          # over HTTPS, which is always 443 — unrelated to networkPolicy.s3Port
+          # (the object-store endpoint, which may be a non-standard port like
+          # MinIO's 9000). Hardcoded to match deploy/k8s/networkpolicy.yaml.
+          port: 443
 {{- end }}
 {{- end }}
