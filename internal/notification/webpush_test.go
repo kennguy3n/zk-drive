@@ -3,7 +3,7 @@ package notification
 import (
 	"bytes"
 	"context"
-	"crypto/elliptic"
+	"crypto/ecdh"
 	"crypto/rand"
 	"encoding/base64"
 	"io"
@@ -86,12 +86,11 @@ func (s *stubHTTPClient) Do(req *http.Request) (*http.Response, error) {
 // succeeds and the request actually reaches the HTTP client.
 func testSubscription(t *testing.T, endpoint string) PushSubscription {
 	t.Helper()
-	priv, x, y, err := elliptic.GenerateKey(elliptic.P256(), rand.Reader)
+	priv, err := ecdh.P256().GenerateKey(rand.Reader)
 	if err != nil {
 		t.Fatalf("generate subscription key: %v", err)
 	}
-	_ = priv
-	pub := elliptic.Marshal(elliptic.P256(), x, y)
+	pub := priv.PublicKey().Bytes()
 	auth := make([]byte, 16)
 	if _, err := rand.Read(auth); err != nil {
 		t.Fatalf("generate auth: %v", err)
