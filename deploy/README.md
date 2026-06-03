@@ -109,6 +109,29 @@ requests/limits, image tag, env vars, ingress class, TLS secret name,
 StorageClass, HPA/PDB/NetworkPolicy toggles, and per-dependency enable
 flags).
 
+### Uninstall and cleanup
+
+```bash
+helm uninstall zk-drive -n zk-drive
+```
+
+`zk-drive-config` (ConfigMap) and `zk-drive-secrets` (Secret) are created
+as `pre-install,pre-upgrade` hooks so the migration Job can resolve their
+`envFrom` references on a first install (see the migration-hook note
+above). Helm does not track hook resources in the release manifest, so
+`helm uninstall` leaves them behind. Remove them manually if you want a
+clean teardown (skip the Secret if you supplied your own via
+`secrets.existingSecret`):
+
+```bash
+kubectl delete configmap zk-drive-config -n zk-drive
+kubectl delete secret zk-drive-secrets -n zk-drive   # chart-managed Secret only
+# The namespace itself (if created with --create-namespace) and any PVCs
+# from the bundled Postgres are also retained by design — delete them
+# explicitly when decommissioning:
+kubectl delete namespace zk-drive
+```
+
 ### Managed Postgres (recommended for production)
 
 The in-cluster Postgres StatefulSet is single-replica with a local PVC
