@@ -639,6 +639,13 @@ func run() error {
 		WithBilling(billingSvc).
 		WithWebhooks(webhookPublisher).
 		WithOnlyOffice(cfg.OnlyOfficeURL, cfg.OnlyOfficeSecret, cfg.PublicURL)
+	if cfg.OnlyOfficeURL != "" {
+		if cfg.OnlyOfficeSecret != "" {
+			slog.Info("onlyoffice integration enabled with callback JWT verification")
+		} else {
+			slog.Warn("onlyoffice ONLYOFFICE_SECRET not set: editor-callback JWT verification is disabled, so a forged callback could make the server fetch an attacker-supplied url (SSRF) — set ONLYOFFICE_SECRET outside trusted local dev")
+		}
+	}
 	var fabricClient admin.FabricClient
 	if cfg.FabricConsoleURL != "" {
 		fabricClient = fabric.NewClient(fabric.ClientConfig{
