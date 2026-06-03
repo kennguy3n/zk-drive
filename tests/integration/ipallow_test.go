@@ -157,3 +157,94 @@ func TestIPAllowlist_RejectsDuplicateCIDR(t *testing.T) {
 		t.Fatalf("stored %d copies of the racing range, want exactly 1", stored)
 	}
 }
+
+// TestIPAllowlist_EnableRemoveLastRuleInvariant proves the safety
+// invariant "ip_allowlist_enabled ⇒ at least one rule" holds against
+// real Postgres, both sequentially and under a SetEnabled(true) /
+// RemoveRule(last) race.
+//
+// The two mutations both take the workspaces row's FOR UPDATE lock, so
+// they serialize. Whichever wins, the loser sees the post-commit state:
+// if SetEnabled enables first, RemoveRule refuses the now-last rule
+// (ErrCannotRemoveLastRule); if RemoveRule deletes first, SetEnabled
+// counts zero rules and refuses to enable (ErrNoRulesToEnable). Either
+// way the workspace is never left enabled with an empty allowlist — the
+// fail-closed, workspace-wide outage this guards against.
+func TestIPAllowlist_EnableRemoveLastRuleInvariant(t *testing.T) {
+	env := setupEnv(t)
+	tok := env.signupAndLogin("AllowInv", "inv@ipallow.test", "Invy", "password-inv")
+	wsID := uuid.MustParse(tok.WorkspaceID)
+	userID := uuid.MustParse(tok.UserID)
+	ctx := context.Background()
+
+	store := workspace.NewPostgresIPAllowStore(env.pool)
+	svc := workspace.NewIPAllowService(store, nil)
+
+	// Sequential semantics first.
+	rule, err := svc.AddRule(ctx, wsID, "203.0.113.0/24", "hq", userID)
+	if err != nil {
+		t.Fatalf("AddRule: %v", err)
+	}
+	if _, err := svc.SetEnabled(ctx, wsID, true); err != nil {
+		t.Fatalf("enable with a rule: %v", err)
+	}
+	if err := svc.RemoveRule(ctx, wsID, rule.ID); !errors.Is(err, workspace.ErrCannotRemoveLastRule) {
+		t.Fatalf("remove last rule while enabled: got %v want ErrCannotRemoveLastRule", err)
+	}
+	if _, err := svc.SetEnabled(ctx, wsID, false); err != nil {
+		t.Fatalf("disable: %v", err)
+	}
+	if err := svc.RemoveRule(ctx, wsID, rule.ID); err != nil {
+		t.Fatalf("remove last rule while disabled: %v", err)
+	}
+
+	// Concurrency: repeatedly seed exactly one rule with the flag off,
+	// then race an enable against removing that rule. The invariant
+	// must hold on every iteration.
+	const rounds = 40
+	for i := 0; i < rounds; i++ {
+		r, err := svc.AddRule(ctx, wsID, fmt.Sprintf("198.51.100.%d/32", i), "", userID)
+		if err != nil {
+			t.Fatalf("round %d seed AddRule: %v", i, err)
+		}
+
+		var wg sync.WaitGroup
+		var enableErr, removeErr error
+		wg.Add(2)
+		go func() { defer wg.Done(); _, enableErr = svc.SetEnabled(ctx, wsID, true) }()
+		go func() { defer wg.Done(); removeErr = svc.RemoveRule(ctx, wsID, r.ID) }()
+		wg.Wait()
+
+		// Each call either succeeds or fails with its expected guard
+		// error; no unexpected (e.g. deadlock/serialization) errors.
+		if enableErr != nil && !errors.Is(enableErr, workspace.ErrNoRulesToEnable) {
+			t.Fatalf("round %d: unexpected SetEnabled error: %v", i, enableErr)
+		}
+		if removeErr != nil && !errors.Is(removeErr, workspace.ErrCannotRemoveLastRule) {
+			t.Fatalf("round %d: unexpected RemoveRule error: %v", i, removeErr)
+		}
+
+		var enabled bool
+		var count int
+		if err := env.pool.QueryRow(ctx,
+			`SELECT w.ip_allowlist_enabled,
+			        (SELECT count(*) FROM workspace_ip_allowlist WHERE workspace_id = w.id)
+			 FROM workspaces w WHERE w.id = $1`, wsID,
+		).Scan(&enabled, &count); err != nil {
+			t.Fatalf("round %d: read state: %v", i, err)
+		}
+		if enabled && count == 0 {
+			t.Fatalf("round %d: invariant violated — enabled with zero rules", i)
+		}
+
+		// Reset to a clean (disabled, empty) baseline for the next round.
+		if _, err := svc.SetEnabled(ctx, wsID, false); err != nil {
+			t.Fatalf("round %d: reset disable: %v", i, err)
+		}
+		if _, err := env.pool.Exec(ctx,
+			"DELETE FROM workspace_ip_allowlist WHERE workspace_id = $1", wsID,
+		); err != nil {
+			t.Fatalf("round %d: reset delete: %v", i, err)
+		}
+	}
+}

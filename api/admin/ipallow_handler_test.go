@@ -63,12 +63,18 @@ func (m *memIPAllowStore) AddRule(_ context.Context, rule workspace.IPRule) (wor
 	return rule, nil
 }
 
+// RemoveRule mirrors PostgresIPAllowStore.RemoveRule's atomic
+// last-rule guard so the handler's 409 mapping
+// (IP_ALLOWLIST_LAST_RULE) is exercised without Postgres.
 func (m *memIPAllowStore) RemoveRule(_ context.Context, ws, ruleID uuid.UUID) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	existing := m.rules[ws]
 	for i, r := range existing {
 		if r.ID == ruleID {
+			if m.enabled[ws] && len(existing) == 1 {
+				return workspace.ErrCannotRemoveLastRule
+			}
 			m.rules[ws] = append(existing[:i], existing[i+1:]...)
 			return nil
 		}
@@ -236,6 +242,42 @@ func TestRemoveIPAllowRule_SuccessAndNotFound(t *testing.T) {
 	r.ServeHTTP(rec, authedCtxRequest(http.MethodDelete, "/ip-allowlist/"+ruleID.String(), nil, ws))
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("second delete status: got %d want %d", rec.Code, http.StatusNotFound)
+	}
+}
+
+// TestRemoveIPAllowRule_LastRuleConflict verifies that deleting the
+// final rule of an enabled allowlist is refused with 409
+// IP_ALLOWLIST_LAST_RULE (it would fail closed for the whole
+// workspace), and that disabling first then allows the removal.
+func TestRemoveIPAllowRule_LastRuleConflict(t *testing.T) {
+	store := newMemIPAllowStore()
+	_, r, ws := newIPAllowTestHandler(t, store)
+	ruleID := uuid.New()
+	store.rules[ws] = []workspace.IPRule{{ID: ruleID, WorkspaceID: ws, CIDR: "203.0.113.0/24"}}
+	store.enabled[ws] = true
+
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, authedCtxRequest(http.MethodDelete, "/ip-allowlist/"+ruleID.String(), nil, ws))
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("status: got %d want %d (body=%s)", rec.Code, http.StatusConflict, rec.Body.String())
+	}
+	var resp middleware.ErrorResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if resp.Code != middleware.ErrCodeAllowlistLastRule {
+		t.Fatalf("code: got %q want %q", resp.Code, middleware.ErrCodeAllowlistLastRule)
+	}
+	if len(store.rules[ws]) != 1 {
+		t.Fatalf("rejected removal must not delete the rule")
+	}
+
+	// Disable, then the last rule can be removed.
+	store.enabled[ws] = false
+	rec = httptest.NewRecorder()
+	r.ServeHTTP(rec, authedCtxRequest(http.MethodDelete, "/ip-allowlist/"+ruleID.String(), nil, ws))
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("delete after disable: got %d want %d (body=%s)", rec.Code, http.StatusNoContent, rec.Body.String())
 	}
 }
 

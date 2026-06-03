@@ -162,6 +162,10 @@ func (h *Handler) RemoveIPAllowRule(w http.ResponseWriter, r *http.Request) {
 			middleware.RespondError(w, http.StatusNotFound, middleware.ErrCodeNotFound, "rule not found")
 			return
 		}
+		if errors.Is(err, workspace.ErrCannotRemoveLastRule) {
+			middleware.RespondError(w, http.StatusConflict, middleware.ErrCodeAllowlistLastRule, "disable the ip allowlist before removing its last rule")
+			return
+		}
 		middleware.RespondInternalError(w, r, "remove ip allowlist rule", err)
 		return
 	}

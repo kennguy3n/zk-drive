@@ -119,6 +119,11 @@ const (
 	// refused because the workspace has no rules; enabling would fail
 	// closed and block all data-plane traffic. Add a rule first.
 	ErrCodeAllowlistNoRules ErrorCode = "IP_ALLOWLIST_NO_RULES"
+	// ErrCodeAllowlistLastRule (409) — removing the rule was refused
+	// because it is the last one while the allowlist is enabled;
+	// deleting it would fail closed and block all data-plane traffic.
+	// Disable the allowlist first, then remove the rule.
+	ErrCodeAllowlistLastRule ErrorCode = "IP_ALLOWLIST_LAST_RULE"
 
 	// Resource state (404 / 409 / 410).
 	ErrCodeNotFound      ErrorCode = "NOT_FOUND"

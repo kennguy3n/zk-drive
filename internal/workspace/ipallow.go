@@ -54,6 +54,15 @@ var ErrDuplicateCIDR = errors.New("workspace: CIDR already allowlisted")
 // before enabling. Disabling is always permitted regardless of rules.
 var ErrNoRulesToEnable = errors.New("workspace: cannot enable ip allowlist with no rules")
 
+// ErrCannotRemoveLastRule is returned by RemoveRule when deleting the
+// rule would leave an *enabled* allowlist with zero rules. That is the
+// same fail-closed self-lockout ErrNoRulesToEnable guards against, just
+// reached from the other side: an admin clearing the rule set one entry
+// at a time. The two guards together keep the invariant "enabled ⇒ at
+// least one rule" true at all times. To clear the list, disable the
+// allowlist first (disabling is always permitted).
+var ErrCannotRemoveLastRule = errors.New("workspace: cannot remove the last rule while ip allowlist is enabled")
+
 // MaxIPRulesPerWorkspace caps the number of allowlist rules a single
 // workspace may hold. The cap bounds the cost of CheckAccess (a
 // linear scan over the rule set on every request) and the size of
@@ -101,12 +110,18 @@ type IPAllowStore interface {
 	// exists.
 	AddRule(ctx context.Context, rule IPRule) (IPRule, error)
 	// RemoveRule deletes the rule scoped to the workspace. Returns
-	// ErrNotFound when no row matches (wrong id or wrong tenant).
+	// ErrNotFound when no row matches (wrong id or wrong tenant), and
+	// ErrCannotRemoveLastRule when the rule is the workspace's last
+	// one while the allowlist is enabled — checked atomically under
+	// the workspace row lock so it cannot race SetEnabled.
 	RemoveRule(ctx context.Context, workspaceID, ruleID uuid.UUID) error
 	// IsEnabled reports the workspaces.ip_allowlist_enabled flag.
 	IsEnabled(ctx context.Context, workspaceID uuid.UUID) (bool, error)
-	// SetEnabled flips the flag and returns the previous value so
-	// the caller can audit the transition.
+	// SetEnabled flips the flag and returns the previous value so the
+	// caller can audit the transition. Enabling is refused with
+	// ErrNoRulesToEnable when the workspace has zero rules, checked
+	// atomically under the same workspace row lock so it cannot race
+	// a concurrent RemoveRule.
 	SetEnabled(ctx context.Context, workspaceID uuid.UUID, enabled bool) (previous bool, err error)
 }
 
@@ -323,10 +338,12 @@ func (s *IPAllowService) RemoveRule(ctx context.Context, workspaceID, ruleID uui
 // busts the cache. Returns the previous value so the caller can
 // record the transition in the audit log.
 func (s *IPAllowService) SetEnabled(ctx context.Context, workspaceID uuid.UUID, enabled bool) (bool, error) {
-	// Refuse to enable an empty allowlist: CheckAccess fails closed, so
-	// doing so would block every data-plane request for the workspace.
-	// Reading the rules first is cheap (a rare control-plane toggle) and
-	// keeps the guardrail in the service so every caller benefits.
+	// Fast-path rejection of the obvious empty-workspace case so the
+	// common mistake doesn't even open a transaction. This is NOT the
+	// authoritative guard: store.SetEnabled re-checks the rule count
+	// inside the same locked transaction that flips the flag, which is
+	// what actually closes the TOCTOU against a concurrent RemoveRule
+	// (a rule could be deleted between this read and the toggle).
 	if enabled {
 		rules, err := s.store.ListRules(ctx, workspaceID)
 		if err != nil {
@@ -510,14 +527,57 @@ RETURNING created_at`
 // predicate is defence in depth on top of RLS so a rule id from one
 // tenant can never delete another tenant's row even on the bypass
 // connection path.
+//
+// The delete runs under a SELECT ... FOR UPDATE lock on the owning
+// workspaces row — the same row AddRule and SetEnabled lock — so it is
+// serialized against them. Inside that lock it refuses to delete the
+// last remaining rule while the allowlist is enabled
+// (ErrCannotRemoveLastRule): leaving an enabled allowlist with zero
+// rules would make CheckAccess fail closed for the whole workspace.
+// Holding the lock is what makes the guard race-free against a
+// concurrent SetEnabled(true) (which counts rules under the same lock).
 func (r *PostgresIPAllowStore) RemoveRule(ctx context.Context, workspaceID, ruleID uuid.UUID) error {
-	const q = `DELETE FROM workspace_ip_allowlist WHERE id = $1 AND workspace_id = $2`
-	tag, err := r.pool.Exec(ctx, q, ruleID, workspaceID)
+	tx, err := r.pool.Begin(ctx)
 	if err != nil {
+		return fmt.Errorf("begin tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	var enabled bool
+	if err := tx.QueryRow(ctx,
+		"SELECT ip_allowlist_enabled FROM workspaces WHERE id = $1 FOR UPDATE", workspaceID,
+	).Scan(&enabled); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return ErrNotFound
+		}
+		return fmt.Errorf("lock workspace: %w", err)
+	}
+
+	// One round-trip for both facts: how many rules the workspace has
+	// and whether the target rule is one of them.
+	var total, target int
+	if err := tx.QueryRow(ctx,
+		`SELECT count(*), count(*) FILTER (WHERE id = $2)
+		 FROM workspace_ip_allowlist WHERE workspace_id = $1`,
+		workspaceID, ruleID,
+	).Scan(&total, &target); err != nil {
+		return fmt.Errorf("count ip rules: %w", err)
+	}
+	if target == 0 {
+		return ErrNotFound
+	}
+	if enabled && total == 1 {
+		return ErrCannotRemoveLastRule
+	}
+
+	if _, err := tx.Exec(ctx,
+		"DELETE FROM workspace_ip_allowlist WHERE id = $1 AND workspace_id = $2",
+		ruleID, workspaceID,
+	); err != nil {
 		return fmt.Errorf("delete ip rule: %w", err)
 	}
-	if tag.RowsAffected() == 0 {
-		return ErrNotFound
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit remove ip rule: %w", err)
 	}
 	return nil
 }
@@ -538,6 +598,14 @@ func (r *PostgresIPAllowStore) IsEnabled(ctx context.Context, workspaceID uuid.U
 // SetEnabled flips the flag under a SELECT ... FOR UPDATE / UPDATE
 // pair so a concurrent toggle can't misreport the previous value to
 // the audit log. Same concurrency reasoning as SetMFARequired.
+//
+// Enabling additionally requires at least one rule, counted inside
+// this same locked transaction. Because RemoveRule takes the same
+// workspace row lock, no rule can be deleted between the count and the
+// UPDATE — closing the TOCTOU where a concurrent RemoveRule of the last
+// rule would otherwise leave the workspace enabled with zero rules
+// (a fail-closed, workspace-wide outage). Returns ErrNoRulesToEnable
+// in that case and leaves the flag untouched.
 func (r *PostgresIPAllowStore) SetEnabled(ctx context.Context, workspaceID uuid.UUID, enabled bool) (bool, error) {
 	tx, err := r.pool.Begin(ctx)
 	if err != nil {
@@ -554,6 +622,17 @@ func (r *PostgresIPAllowStore) SetEnabled(ctx context.Context, workspaceID uuid.
 			return false, ErrNotFound
 		}
 		return false, fmt.Errorf("read ip_allowlist_enabled: %w", err)
+	}
+	if enabled {
+		var count int
+		if err := tx.QueryRow(ctx,
+			"SELECT count(*) FROM workspace_ip_allowlist WHERE workspace_id = $1", workspaceID,
+		).Scan(&count); err != nil {
+			return false, fmt.Errorf("count ip rules: %w", err)
+		}
+		if count == 0 {
+			return false, ErrNoRulesToEnable
+		}
 	}
 	if _, err := tx.Exec(ctx,
 		"UPDATE workspaces SET ip_allowlist_enabled = $2, updated_at = now() WHERE id = $1",

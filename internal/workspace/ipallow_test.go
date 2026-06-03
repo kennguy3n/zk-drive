@@ -77,12 +77,20 @@ func (f *fakeIPAllowStore) AddRule(_ context.Context, rule IPRule) (IPRule, erro
 	return rule, nil
 }
 
+// RemoveRule mirrors PostgresIPAllowStore.RemoveRule's atomic
+// semantics: it refuses to delete the last remaining rule while the
+// allowlist is enabled (ErrCannotRemoveLastRule) so the service's
+// invariant "enabled ⇒ at least one rule" is exercised without
+// Postgres.
 func (f *fakeIPAllowStore) RemoveRule(_ context.Context, workspaceID, ruleID uuid.UUID) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	existing := f.rules[workspaceID]
 	for i, r := range existing {
 		if r.ID == ruleID {
+			if f.enabled[workspaceID] && len(existing) == 1 {
+				return ErrCannotRemoveLastRule
+			}
 			f.rules[workspaceID] = append(existing[:i], existing[i+1:]...)
 			return nil
 		}
@@ -100,9 +108,16 @@ func (f *fakeIPAllowStore) IsEnabled(_ context.Context, workspaceID uuid.UUID) (
 	return f.enabled[workspaceID], nil
 }
 
+// SetEnabled mirrors PostgresIPAllowStore.SetEnabled's authoritative
+// guard: enabling a workspace with zero rules is refused with
+// ErrNoRulesToEnable, the same check the real store performs inside its
+// locked transaction.
 func (f *fakeIPAllowStore) SetEnabled(_ context.Context, workspaceID uuid.UUID, enabled bool) (bool, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if enabled && len(f.rules[workspaceID]) == 0 {
+		return false, ErrNoRulesToEnable
+	}
 	prev := f.enabled[workspaceID]
 	f.enabled[workspaceID] = enabled
 	return prev, nil
@@ -296,6 +311,49 @@ func TestRemoveRule_NotFound(t *testing.T) {
 	svc := NewIPAllowService(store, nil)
 	if err := svc.RemoveRule(context.Background(), ws, uuid.New()); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("expected ErrNotFound, got %v", err)
+	}
+}
+
+// TestRemoveRule_LastRuleWhileEnabled verifies the symmetric guard to
+// TestSetEnabled_NoRulesRejected: removing the final rule of an enabled
+// allowlist is refused with ErrCannotRemoveLastRule (it would leave the
+// workspace enabled with zero rules, a fail-closed outage), while
+// removing a non-last rule, or any rule once the allowlist is disabled,
+// succeeds.
+func TestRemoveRule_LastRuleWhileEnabled(t *testing.T) {
+	store := newFakeIPAllowStore()
+	ws := uuid.New()
+	svc := NewIPAllowService(store, nil)
+	mustAddRule(t, svc, ws, "203.0.113.0/24")
+	if _, err := svc.SetEnabled(context.Background(), ws, true); err != nil {
+		t.Fatalf("enable: %v", err)
+	}
+
+	// The single rule cannot be removed while enabled.
+	only := store.rules[ws][0].ID
+	if err := svc.RemoveRule(context.Background(), ws, only); !errors.Is(err, ErrCannotRemoveLastRule) {
+		t.Fatalf("remove last rule while enabled: got %v want ErrCannotRemoveLastRule", err)
+	}
+	if len(store.rules[ws]) != 1 {
+		t.Fatalf("rejected removal must not delete the rule")
+	}
+
+	// A second rule makes the first removable again (count stays >= 1).
+	mustAddRule(t, svc, ws, "198.51.100.0/24")
+	if err := svc.RemoveRule(context.Background(), ws, only); err != nil {
+		t.Fatalf("remove non-last rule: %v", err)
+	}
+
+	// Disabling lifts the guard entirely, so the now-last rule can go.
+	if _, err := svc.SetEnabled(context.Background(), ws, false); err != nil {
+		t.Fatalf("disable: %v", err)
+	}
+	last := store.rules[ws][0].ID
+	if err := svc.RemoveRule(context.Background(), ws, last); err != nil {
+		t.Fatalf("remove last rule while disabled: %v", err)
+	}
+	if len(store.rules[ws]) != 0 {
+		t.Fatalf("rule set should be empty after disabled removal")
 	}
 }
 

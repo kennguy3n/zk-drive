@@ -73,6 +73,15 @@ therefore rejects an enable with no rules (`409`,
 `IP_ALLOWLIST_NO_RULES`); add a rule first. Disabling is always
 allowed.
 
+**Cannot remove the last rule while enabled.** For the same
+fail-closed reason, deleting the final rule of an *enabled* allowlist
+is rejected (`409`, `IP_ALLOWLIST_LAST_RULE`) — it would leave the
+workspace enabled with zero rules and lock everyone out. Disable the
+allowlist first, then remove the rule. Both this guard and the
+enable-requires-a-rule guard are enforced atomically under a
+per-workspace row lock, so concurrent "enable" and "remove last rule"
+requests can never race the workspace into the locked-out state.
+
 **Enforcement scope.** The allowlist is enforced on authenticated
 data-plane HTTP requests — the main drive routes and the `/api/kchat`
 routes. The `/api/admin` routes are intentionally exempt so an admin
