@@ -115,3 +115,55 @@ fn show_main_window<R: Runtime>(app: &AppHandle<R>) {
         let _ = window.set_focus();
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn state(health: SyncHealth) -> TrayState {
+        TrayState {
+            health,
+            total_pending: 4,
+            total_conflicts: 2,
+            workspaces: 3,
+            workspaces_running: 2,
+            first_error: None,
+        }
+    }
+
+    #[test]
+    fn title_reflects_each_health() {
+        assert_eq!(title_for(&state(SyncHealth::Error)), "!");
+        assert_eq!(title_for(&state(SyncHealth::Conflict)), "⚠ 2");
+        assert_eq!(title_for(&state(SyncHealth::Syncing)), "↻ 4");
+        assert_eq!(title_for(&state(SyncHealth::Idle)), "✓");
+        assert_eq!(title_for(&state(SyncHealth::Starting)), "…");
+        assert_eq!(title_for(&state(SyncHealth::Stopped)), "");
+    }
+
+    #[test]
+    fn tooltip_surfaces_error_reason_when_present() {
+        let mut s = state(SyncHealth::Error);
+        s.first_error = Some("connection refused".to_string());
+        assert_eq!(tooltip_for(&s), "ZK Drive — Sync error: connection refused");
+    }
+
+    #[test]
+    fn tooltip_error_without_reason_falls_back_to_counts() {
+        // Error health but no captured message: must not claim an
+        // error reason, just the aggregate counts.
+        let s = state(SyncHealth::Error);
+        assert_eq!(
+            tooltip_for(&s),
+            "ZK Drive — Sync error (2/3 workspaces, 4 pending, 2 conflicts)"
+        );
+    }
+
+    #[test]
+    fn tooltip_packs_counts_for_running_states() {
+        assert_eq!(
+            tooltip_for(&state(SyncHealth::Idle)),
+            "ZK Drive — Up to date (2/3 workspaces, 4 pending, 2 conflicts)"
+        );
+    }
+}
