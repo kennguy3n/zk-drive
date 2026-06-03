@@ -392,9 +392,7 @@ func (h *Handler) saveEditedVersion(ctx context.Context, workspaceID, fileID uui
 			"size_bytes": v.SizeBytes,
 			"source":     "onlyoffice",
 		})
-		if h.billing != nil {
-			h.billing.RecordUpload(ctx, workspaceID, v.SizeBytes)
-		}
+		h.billing.RecordUpload(ctx, workspaceID, v.SizeBytes)
 		// Re-run preview / scan / index on the new bytes, mirroring
 		// the direct-upload confirm path.
 		h.publishPostUploadJobs(ctx, f.ID, v.ID)

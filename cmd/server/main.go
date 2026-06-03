@@ -645,6 +645,9 @@ func run() error {
 		} else {
 			slog.Warn("onlyoffice ONLYOFFICE_SECRET not set: editor-callback JWT verification is disabled, so a forged callback could make the server fetch an attacker-supplied url (SSRF) — set ONLYOFFICE_SECRET outside trusted local dev")
 		}
+		if cfg.PublicURL == "" {
+			slog.Warn("onlyoffice ONLYOFFICE_URL set but PUBLIC_URL empty: the editor callbackUrl resolves to a relative path the Document Server cannot reach, so save callbacks will fail and edits will be lost on editor close — set PUBLIC_URL to ZK Drive's externally reachable base URL")
+		}
 	}
 	var fabricClient admin.FabricClient
 	if cfg.FabricConsoleURL != "" {
