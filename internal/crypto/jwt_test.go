@@ -217,6 +217,42 @@ func TestKeyManager_ForceHS256IgnoresActiveKey(t *testing.T) {
 	}
 }
 
+func TestKeyManager_ForceHS256StillVerifiesES256(t *testing.T) {
+	ctx := context.Background()
+	store := &memKeyStore{}
+	// Mint an ES256 token via an auto manager (simulating tokens issued
+	// while ES256 was active).
+	auto, err := NewKeyManager(ctx, store, testCodec(t), "hs-secret", AlgAuto)
+	if err != nil {
+		t.Fatalf("auto manager: %v", err)
+	}
+	if _, err := auto.RotateKey(ctx); err != nil {
+		t.Fatalf("rotate: %v", err)
+	}
+	es256Token, err := auto.Sign(makeClaims(time.Hour))
+	if err != nil {
+		t.Fatalf("sign es256: %v", err)
+	}
+
+	// Operator rolls signing back to HS256 over the same key table.
+	// Verification must still accept the in-flight ES256 token so users
+	// are not locked out until their tokens expire.
+	km, err := NewKeyManager(ctx, store, testCodec(t), "hs-secret", AlgHS256)
+	if err != nil {
+		t.Fatalf("forced HS256 manager: %v", err)
+	}
+	if got := km.Algorithm(); got != AlgHS256 {
+		t.Fatalf("algorithm = %q, want %q", got, AlgHS256)
+	}
+	tok, err := km.Parse(es256Token, &jwt.RegisteredClaims{})
+	if err != nil {
+		t.Fatalf("forced-HS256 manager failed to verify in-flight ES256 token: %v", err)
+	}
+	if tok.Method.Alg() != "ES256" {
+		t.Fatalf("alg = %q, want ES256", tok.Method.Alg())
+	}
+}
+
 func TestKeyManager_RotateWithoutStoreFails(t *testing.T) {
 	ctx := context.Background()
 	km, err := NewKeyManager(ctx, nil, testCodec(t), "hs-secret", AlgAuto)

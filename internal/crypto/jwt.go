@@ -121,16 +121,20 @@ func (km *KeyManager) Algorithm() string {
 	return AlgHS256
 }
 
-// reload reads every key from the store, rebuilds the verification map
-// keyed by kid, and selects the active ES256 key (if any, and unless
-// algoPref forces HS256) for signing. A nil store leaves the manager
+// reload reads every key from the store and rebuilds the verification
+// map keyed by kid. Verification keys are always loaded when a store
+// is present — independent of algoPref — so that existing ES256 tokens
+// keep verifying even when algoPref forces HS256 (e.g. an operator
+// rolling signing back to HS256 must not lock out users holding valid
+// ES256 tokens). The active ES256 key is selected for signing only
+// when algoPref does not force HS256. A nil store leaves the manager
 // HS256-only.
 func (km *KeyManager) reload(ctx context.Context) error {
 	verify := map[string]*ecdsa.PublicKey{}
 	var signKID string
 	var signKey *ecdsa.PrivateKey
 
-	if km.store != nil && km.algoPref != AlgHS256 {
+	if km.store != nil {
 		recs, err := km.store.ListKeys(ctx)
 		if err != nil {
 			return fmt.Errorf("crypto: list signing keys: %w", err)
@@ -141,7 +145,7 @@ func (km *KeyManager) reload(ctx context.Context) error {
 				return fmt.Errorf("crypto: parse public key %s: %w", rec.ID, err)
 			}
 			verify[rec.ID.String()] = pub
-			if rec.IsActive && signKey == nil {
+			if rec.IsActive && signKey == nil && km.algoPref != AlgHS256 {
 				priv, err := km.decryptPrivateKey(ctx, rec.PrivateKeyPEMEncrypted)
 				if err != nil {
 					return fmt.Errorf("crypto: load active private key %s: %w", rec.ID, err)

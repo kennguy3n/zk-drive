@@ -35,10 +35,13 @@
 CREATE TABLE jwt_signing_keys (
     id                        UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     -- NULL = platform-wide key. A non-null value scopes the key to a
-    -- single workspace. No FK ON DELETE CASCADE: deleting a workspace
-    -- must not silently drop a key that may still be verifying
-    -- in-flight tokens; the row is harmless once its tokens expire.
-    workspace_id              UUID REFERENCES workspaces(id) ON DELETE CASCADE,
+    -- single workspace. ON DELETE SET NULL (not CASCADE): deleting a
+    -- workspace must not drop a key that may still be verifying
+    -- in-flight tokens. The orphaned row is retained — its scope
+    -- collapses to platform-wide for the remaining life of its tokens
+    -- and it is harmless once they expire. (Today every key is
+    -- platform-wide, so this only matters once per-workspace keys ship.)
+    workspace_id              UUID REFERENCES workspaces(id) ON DELETE SET NULL,
     -- algorithm is stored so a future migration can introduce other
     -- curves/algs (e.g. EdDSA) without a schema change. Today only
     -- 'ES256' is written.

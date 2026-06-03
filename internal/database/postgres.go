@@ -176,11 +176,21 @@ const migrateAdvisoryLockKey int64 = 0x5a4b44524956534D // 'ZKDRIVSM' ASCII
 // requires a different minimum schema version (e.g. audit-archiver
 // against migration 027) has its own MinRequiredMigrationVersionFoo
 // constant below. Keeping them as separate exported constants — not
-// bumping this one — preserves the documented contract that this
-// constant is the server/worker baseline. Server/worker do not touch
-// audit_log_archive_runs, so coupling their boot to migration 027
-// would block deploys that don't enable the archiver.
-const MinRequiredMigrationVersion = "032_search_extensions"
+// folding them into this one — preserves the documented contract that
+// this constant is the server/worker baseline. Server/worker do not
+// touch audit_log_archive_runs, so coupling their boot to migration
+// 027 would block deploys that don't enable the archiver.
+//
+// This baseline tracks the highest migration whose table the server
+// unconditionally reads at boot. As of migration 034 the server
+// constructs a JWT KeyManager that SELECTs from jwt_signing_keys
+// during startup, so the baseline is 034: an operator who deploys
+// against a stale schema fails fast with a clear "migrations out of
+// date" error rather than hitting a raw "relation jwt_signing_keys
+// does not exist" from deep in boot. The worker gates on the same
+// constant; since server and worker ship together in a release that
+// includes 034, advancing the shared baseline is safe.
+const MinRequiredMigrationVersion = "034_jwt_asymmetric_keys"
 
 // MinRequiredMigrationVersionAuditArchiver is the minimum schema
 // version that the cmd/audit-archiver binary requires — it inserts
