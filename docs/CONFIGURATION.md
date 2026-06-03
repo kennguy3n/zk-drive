@@ -67,17 +67,14 @@ who misconfigures the allowlist can still reach the management
 endpoints to fix it.
 
 The long-lived WebSocket endpoints (`/api/ws` and
-`/api/documents/{id}/ws`) are a known limitation: they authenticate the
-upgrade request but deliberately sit outside the per-request middleware
-stack (`TenantGuard` + the IP-allowlist middleware), because that stack
-assumes ordinary request/response semantics and would otherwise charge
-per WS frame. As a result the IP allowlist is **not** applied to
-WebSocket traffic today. The practical exposure is bounded: a client
-must already hold a valid session (JWT) to open a socket, and all
-allowlist-gated REST endpoints — including the upload-URL / confirm
-handshakes used to move file bytes — remain enforced. If you require
-strict connection-time IP enforcement for real-time editing, terminate
-WebSocket traffic at a proxy that applies the same CIDR allowlist.
+`/api/documents/{id}/ws`) are **also** gated by the allowlist. They
+still skip `TenantGuard` and the rate limiter (that stack assumes
+ordinary request/response semantics and would otherwise charge per WS
+frame), but the IP-allowlist check runs on the initial upgrade request,
+before the handshake completes — it needs only the workspace id, which
+the auth middleware binds from the JWT claims. A request from a blocked
+network is therefore rejected with the same `403` + `X-ZkDrive-IP-Blocked`
+response as the REST routes and never opens a socket.
 
 ## Database connection pool
 

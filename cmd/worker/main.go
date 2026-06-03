@@ -610,9 +610,11 @@ func subscribeAll(ctx context.Context, wg *sync.WaitGroup, js nats.JetStreamCont
 //
 // Concurrent processing is safe because each job calls msg.Ack /
 // Nak / Term itself (ManualAck) and the preview service holds no
-// per-call mutable state; the AckWait window plus QueueMaxDeliver
-// bound any redelivery of a message that was in flight when the
-// worker shut down.
+// per-call mutable state. A message that cannot be handed to a worker
+// because the pool is shutting down (ctx cancelled) is explicitly
+// Nak'd rather than dropped, so JetStream redelivers it promptly to a
+// surviving replica / after restart instead of stalling for the full
+// AckWait window. QueueMaxDeliver still bounds total redelivery.
 func startJobPool(ctx context.Context, wg *sync.WaitGroup, workers int, h nats.MsgHandler) nats.MsgHandler {
 	if workers < 1 {
 		workers = 1
@@ -634,8 +636,12 @@ func startJobPool(ctx context.Context, wg *sync.WaitGroup, workers int, h nats.M
 	}
 	return func(msg *nats.Msg) {
 		select {
-		case <-ctx.Done():
 		case ch <- msg:
+		case <-ctx.Done():
+			// Pool is draining: hand the delivery back to JetStream
+			// immediately so it is re-queued for prompt redelivery
+			// rather than waiting out the AckWait timeout.
+			_ = msg.Nak()
 		}
 	}
 }

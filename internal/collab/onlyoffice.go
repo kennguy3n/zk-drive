@@ -351,6 +351,71 @@ func (s *OnlyOfficeService) VerifyCallbackToken(token string) (jwt.MapClaims, er
 	return claims, nil
 }
 
+// CallbackPayload is the authenticated subset of an ONLYOFFICE save
+// callback the drive layer acts on. When JWT verification is enabled
+// every field is sourced from the verified token claims (never the
+// unsigned request body), so a spoofed body cannot influence which URL
+// the server fetches or whom the save is attributed to.
+type CallbackPayload struct {
+	Status int
+	URL    string
+	Key    string
+	Users  []string
+}
+
+// VerifyCallback verifies an inbound Document Server callback token and
+// returns the authenticated payload built ENTIRELY from the signed
+// claims. A nil error with a nil payload means verification is disabled
+// (no secret configured); callers gate on JWTSecret() before relying on
+// this. A non-nil error means the token failed verification and the
+// callback must be rejected.
+func (s *OnlyOfficeService) VerifyCallback(token string) (*CallbackPayload, error) {
+	claims, err := s.VerifyCallbackToken(token)
+	if err != nil {
+		return nil, err
+	}
+	if claims == nil {
+		return nil, nil
+	}
+	return callbackPayloadFromClaims(claims), nil
+}
+
+// callbackPayloadFromClaims projects verified JWT claims into a
+// CallbackPayload. Missing / mistyped claims yield zero values, which
+// the caller treats as a non-actionable callback rather than trusting
+// any unsigned fallback.
+func callbackPayloadFromClaims(claims jwt.MapClaims) *CallbackPayload {
+	p := &CallbackPayload{}
+	if status, ok := claims["status"].(float64); ok {
+		p.Status = int(status)
+	}
+	if url, ok := claims["url"].(string); ok {
+		p.URL = url
+	}
+	if key, ok := claims["key"].(string); ok {
+		p.Key = key
+	}
+	p.Users = stringsFromClaim(claims["users"])
+	return p
+}
+
+// stringsFromClaim coerces a JWT claim that should be an array of
+// strings (e.g. the ONLYOFFICE "users" list) into []string, ignoring
+// any non-string entries.
+func stringsFromClaim(v any) []string {
+	raw, ok := v.([]any)
+	if !ok {
+		return nil
+	}
+	out := make([]string, 0, len(raw))
+	for _, e := range raw {
+		if s, ok := e.(string); ok {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
 // documentKey derives the ONLYOFFICE document key from a version's
 // object key. The key must be unique per content revision and limited
 // to [0-9A-Za-z._=-] (max 128 chars). Object keys are

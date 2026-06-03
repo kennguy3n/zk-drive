@@ -262,26 +262,32 @@ func (h *Handler) EditorCallback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Verify the ONLYOFFICE token when a secret is configured. The
-	// token (Authorization: Bearer <jwt> header, else body.token)
-	// wraps the callback fields, so on success we trust the claims'
-	// status/url over the unsigned body to defeat spoofing.
+	// Authenticate the callback when a secret is configured. The token
+	// (Authorization: Bearer <jwt> header, else body.token) is the
+	// Document Server's JWT over the ENTIRE callback payload. On
+	// success we rebuild the callback solely from the verified claims
+	// and discard the unsigned body, so a spoofed body cannot steer
+	// which URL we fetch or whom the save is attributed to. When no
+	// secret is set the deployment is in the explicit insecure
+	// local-dev mode (config.Load refuses ONLYOFFICE_URL without
+	// ONLYOFFICE_SECRET unless ONLYOFFICE_ALLOW_INSECURE is set), so
+	// the unsigned body is used as-is.
 	if secret := h.onlyOffice.JWTSecret(); secret != "" {
 		token := bearerToken(r.Header.Get("Authorization"))
 		if token == "" {
 			token = cb.Token
 		}
-		claims, vErr := h.onlyOffice.VerifyCallbackToken(token)
-		if vErr != nil || claims == nil {
+		payload, vErr := h.onlyOffice.VerifyCallback(token)
+		if vErr != nil || payload == nil {
 			logging.FromContext(r.Context()).Warn("onlyoffice callback token verification failed", "file_id", fileID, "err", vErr)
 			writeOnlyOfficeAck(w, http.StatusForbidden, 1)
 			return
 		}
-		if status, ok := claims["status"].(float64); ok {
-			cb.Status = int(status)
-		}
-		if url, ok := claims["url"].(string); ok {
-			cb.URL = url
+		cb = onlyOfficeCallback{
+			Status: payload.Status,
+			URL:    payload.URL,
+			Key:    payload.Key,
+			Users:  payload.Users,
 		}
 	}
 
@@ -322,6 +328,19 @@ func (h *Handler) saveEditedVersion(ctx context.Context, workspaceID, fileID uui
 	f, err := h.files.GetByID(ctx, workspaceID, fileID)
 	if err != nil {
 		return err
+	}
+	// Defense-in-depth at the write boundary: re-verify the file's
+	// folder is not strict-ZK before writing plaintext bytes back.
+	// GenerateEditorConfig already refuses strict-ZK at editor-open, so
+	// a strict-ZK file can never legitimately reach a save callback;
+	// rechecking here ensures a crafted/replayed callback can never
+	// cause the server to write plaintext into a zero-knowledge folder.
+	encMode, err := folder.EncryptionModeForFile(ctx, h.pool, fileID)
+	if err != nil {
+		return err
+	}
+	if encMode == folder.EncryptionStrictZK {
+		return collab.ErrStrictZKForbidden
 	}
 	// Attribute the save to the callback's editing user (falling back to
 	// the file creator) so the activity log, changefeed, and webhook

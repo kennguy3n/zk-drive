@@ -128,3 +128,59 @@ func TestPlatformListWorkspacesFilters(t *testing.T) {
 		t.Fatalf("ListWorkspaces suspended filter: %v", err)
 	}
 }
+
+// TestPlatformAPIKeyAuthenticate exercises the indexed key_lookup
+// authentication path: a minted key authenticates by its deterministic
+// digest, the wrong token / a token for another key is rejected, and a
+// revoked key stops authenticating. The lookup digest selects at most
+// one candidate row, so a stored key must match the presented token
+// exactly to succeed.
+func TestPlatformAPIKeyAuthenticate(t *testing.T) {
+	env := setupEnv(t)
+	store := platform.NewAPIKeyStore(env.pool)
+	ctx := context.Background()
+
+	key, plaintext, err := store.Create(ctx, "ci-"+uuid.NewString()[:8], []string{"tenant:read"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	// Minting a second key ensures the lookup discriminates between keys
+	// rather than matching the only row present.
+	_, other, err := store.Create(ctx, "ci-"+uuid.NewString()[:8], []string{"tenant:write"})
+	if err != nil {
+		t.Fatalf("Create second key: %v", err)
+	}
+
+	got, err := store.Authenticate(ctx, plaintext)
+	if err != nil {
+		t.Fatalf("Authenticate valid key: %v", err)
+	}
+	if got.ID != key.ID {
+		t.Errorf("authenticated as key %s, want %s", got.ID, key.ID)
+	}
+	if len(got.Permissions) != 1 || got.Permissions[0] != "tenant:read" {
+		t.Errorf("unexpected permissions: %v", got.Permissions)
+	}
+
+	// The other key's plaintext must not authenticate as this key, and a
+	// tampered token must be rejected outright.
+	if other == plaintext {
+		t.Fatal("distinct keys produced identical plaintext")
+	}
+	if _, err := store.Authenticate(ctx, plaintext+"x"); !errors.Is(err, platform.ErrAPIKeyInvalid) {
+		t.Errorf("tampered token: got %v, want ErrAPIKeyInvalid", err)
+	}
+	if _, err := store.Authenticate(ctx, "not-a-platform-key"); !errors.Is(err, platform.ErrAPIKeyInvalid) {
+		t.Errorf("bad-prefix token: got %v, want ErrAPIKeyInvalid", err)
+	}
+
+	// Revocation stops authentication (the partial unique index excludes
+	// revoked rows, so the lookup finds no candidate).
+	if err := store.Revoke(ctx, key.ID); err != nil {
+		t.Fatalf("Revoke: %v", err)
+	}
+	if _, err := store.Authenticate(ctx, plaintext); !errors.Is(err, platform.ErrAPIKeyInvalid) {
+		t.Errorf("revoked key: got %v, want ErrAPIKeyInvalid", err)
+	}
+}

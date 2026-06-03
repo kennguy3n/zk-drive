@@ -3,6 +3,7 @@ package platform
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/base64"
 	"errors"
 	"fmt"
@@ -10,6 +11,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"golang.org/x/crypto/bcrypt"
 )
@@ -98,6 +100,19 @@ func hashAPIKey(plaintext string) ([]byte, error) {
 	return h, nil
 }
 
+// lookupDigest derives the deterministic SHA-256 digest stored in
+// platform_api_keys.key_lookup. Unlike the bcrypt hash (salted, so it
+// cannot be looked up), the digest is a stable function of the
+// plaintext, so Authenticate can fetch the single matching row by
+// digest instead of scanning every key. This is safe to index and
+// equality-match on because the plaintext carries 256 bits of entropy,
+// making the digest effectively unguessable; the bcrypt hash remains
+// the actual verifier.
+func lookupDigest(plaintext string) []byte {
+	sum := sha256.Sum256([]byte(plaintext))
+	return sum[:]
+}
+
 // APIKeyStore persists and authenticates platform API keys against
 // the platform_api_keys table.
 type APIKeyStore struct {
@@ -131,12 +146,13 @@ func (s *APIKeyStore) Create(ctx context.Context, label string, permissions []st
 	if err != nil {
 		return nil, "", err
 	}
+	lookup := lookupDigest(plaintext)
 	const q = `
-INSERT INTO platform_api_keys (key_hash, label, permissions)
-VALUES ($1, $2, $3)
+INSERT INTO platform_api_keys (key_hash, key_lookup, label, permissions)
+VALUES ($1, $2, $3, $4)
 RETURNING id, label, permissions, created_at, last_used_at, revoked_at`
 	key := &APIKey{}
-	if err := s.pool.QueryRow(ctx, q, hash, label, permissions).Scan(
+	if err := s.pool.QueryRow(ctx, q, hash, lookup, label, permissions).Scan(
 		&key.ID, &key.Label, &key.Permissions, &key.CreatedAt, &key.LastUsedAt, &key.RevokedAt,
 	); err != nil {
 		return nil, "", fmt.Errorf("platform: insert api key: %w", err)
@@ -193,11 +209,14 @@ WHERE id = $1`
 // any non-match (bad prefix, unknown, revoked). On success it
 // best-effort refreshes last_used_at.
 //
-// The lookup scans active (non-revoked) keys and bcrypt-compares each.
-// Platform keys are few (per-integration operator credentials), so the
-// linear scan is acceptable; bcrypt's constant-time compare and the
-// subtle.ConstantTimeCompare prefix screen keep timing side-channels
-// out of the matching path.
+// The presented token's deterministic SHA-256 digest selects at most
+// ONE candidate row through the unique key_lookup index, so the cost is
+// a single indexed fetch plus a single bcrypt comparison regardless of
+// how many keys exist. This bounds the work an unauthenticated caller
+// can force per request (the previous linear scan let a bogus token
+// trigger one bcrypt hash per stored key). The bcrypt compare on the
+// matched row is retained as defense-in-depth: the digest only selects
+// the candidate, the salted bcrypt hash is still the verifier.
 func (s *APIKeyStore) Authenticate(ctx context.Context, presented string) (*APIKey, error) {
 	presented = strings.TrimSpace(presented)
 	if !strings.HasPrefix(presented, APIKeyPrefix) {
@@ -206,40 +225,25 @@ func (s *APIKeyStore) Authenticate(ctx context.Context, presented string) (*APIK
 	const q = `
 SELECT id, key_hash, label, permissions, created_at, last_used_at, revoked_at
 FROM platform_api_keys
-WHERE revoked_at IS NULL`
-	rows, err := s.pool.Query(ctx, q)
-	if err != nil {
-		return nil, fmt.Errorf("platform: load api keys: %w", err)
-	}
-	defer rows.Close()
-
-	candidate := []byte(presented)
-	var matched *APIKey
-	for rows.Next() {
-		var (
-			k    APIKey
-			hash []byte
-		)
-		if err := rows.Scan(&k.ID, &hash, &k.Label, &k.Permissions, &k.CreatedAt, &k.LastUsedAt, &k.RevokedAt); err != nil {
-			return nil, fmt.Errorf("platform: scan api key: %w", err)
-		}
-		if bcrypt.CompareHashAndPassword(hash, candidate) == nil {
-			kk := k
-			matched = &kk
-			// Keep iterating to drain the rows iterator cleanly; a
-			// constant-time guard is not needed beyond bcrypt's own
-			// compare, but we avoid an early break so the scan cost
-			// doesn't leak which row matched.
-		}
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("platform: iterate api keys: %w", err)
-	}
-	if matched == nil {
+WHERE key_lookup = $1 AND revoked_at IS NULL`
+	var (
+		k    APIKey
+		hash []byte
+	)
+	err := s.pool.QueryRow(ctx, q, lookupDigest(presented)).Scan(
+		&k.ID, &hash, &k.Label, &k.Permissions, &k.CreatedAt, &k.LastUsedAt, &k.RevokedAt,
+	)
+	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrAPIKeyInvalid
 	}
-	s.touchLastUsed(ctx, matched.ID)
-	return matched, nil
+	if err != nil {
+		return nil, fmt.Errorf("platform: load api key: %w", err)
+	}
+	if bcrypt.CompareHashAndPassword(hash, []byte(presented)) != nil {
+		return nil, ErrAPIKeyInvalid
+	}
+	s.touchLastUsed(ctx, k.ID)
+	return &k, nil
 }
 
 // touchLastUsed refreshes last_used_at. Best-effort: a failure here

@@ -12,8 +12,8 @@ import (
 // binaries. All values are sourced from environment variables so deployments
 // can inject them uniformly.
 type Config struct {
-	DatabaseURL   string
-	JWTSecret     string
+	DatabaseURL string
+	JWTSecret   string
 
 	// DB connection-pool sizing. These tune the pgxpool created by
 	// internal/database.ConnectWithPool. Sourced from DB_MAX_CONNS,
@@ -373,6 +373,14 @@ type Config struct {
 	// callback skips token verification — acceptable only for trusted
 	// local development. Set via ONLYOFFICE_SECRET.
 	OnlyOfficeSecret string
+	// OnlyOfficeAllowInsecure explicitly opts in to running the
+	// ONLYOFFICE integration WITHOUT a callback-verification secret
+	// (ONLYOFFICE_URL set but ONLYOFFICE_SECRET empty). This leaves the
+	// editor-callback endpoint unauthenticated, so it is refused by
+	// default: Load returns an error unless this is set. Intended only
+	// for trusted local development against a JWT-disabled Document
+	// Server. Set via ONLYOFFICE_ALLOW_INSECURE.
+	OnlyOfficeAllowInsecure bool
 }
 
 // WebPushEnabled reports whether both VAPID keys are configured. When
@@ -407,6 +415,9 @@ func Load() (*Config, error) {
 	if err := validateS3Group(cfg); err != nil {
 		return nil, err
 	}
+	if err := validateOnlyOfficeGroup(cfg); err != nil {
+		return nil, err
+	}
 	return cfg, nil
 }
 
@@ -419,43 +430,43 @@ func Load() (*Config, error) {
 // constructors.
 func buildConfigFromEnv() *Config {
 	return &Config{
-		DatabaseURL:           os.Getenv("DATABASE_URL"),
-		JWTSecret:             os.Getenv("JWT_SECRET"),
-		DBMaxConns:            dbMaxConnsFromEnv(),
-		DBMinConns:            dbMinConnsFromEnv(dbMaxConnsFromEnv()),
-		DBMaxConnIdleTime:     parseDurationDefault(os.Getenv("DB_MAX_CONN_IDLE_TIME"), defaultDBMaxConnIdleTime),
-		JWTAlgorithm:          normaliseJWTAlgorithm(os.Getenv("JWT_ALGORITHM")),
-		ListenAddr:            getEnvDefault("LISTEN_ADDR", ":8080"),
-		S3Endpoint:            os.Getenv("S3_ENDPOINT"),
-		S3Bucket:              os.Getenv("S3_BUCKET"),
-		S3AccessKey:           os.Getenv("S3_ACCESS_KEY"),
-		S3SecretKey:           os.Getenv("S3_SECRET_KEY"),
-		MigrationsDir:         getEnvDefault("MIGRATIONS_DIR", "migrations"),
-		NATSURL:               os.Getenv("NATS_URL"),
-		ClamAVAddress:         os.Getenv("CLAMAV_ADDRESS"),
-		GoogleClientID:        os.Getenv("GOOGLE_CLIENT_ID"),
-		GoogleClientSecret:    os.Getenv("GOOGLE_CLIENT_SECRET"),
-		GoogleRedirectURL:     os.Getenv("GOOGLE_REDIRECT_URL"),
-		MicrosoftClientID:     os.Getenv("MICROSOFT_CLIENT_ID"),
-		MicrosoftClientSecret: os.Getenv("MICROSOFT_CLIENT_SECRET"),
-		MicrosoftRedirectURL:  os.Getenv("MICROSOFT_REDIRECT_URL"),
-		RateLimitPerUser:        parseIntDefault(os.Getenv("RATE_LIMIT_PER_USER"), 0),
-		RateLimitPerWorkspace:   parseIntDefault(os.Getenv("RATE_LIMIT_PER_WORKSPACE"), 0),
-		TrustedProxyDepth:       parseNonNegativeIntDefault(os.Getenv("TRUSTED_PROXY_DEPTH"), 1),
+		DatabaseURL:                   os.Getenv("DATABASE_URL"),
+		JWTSecret:                     os.Getenv("JWT_SECRET"),
+		DBMaxConns:                    dbMaxConnsFromEnv(),
+		DBMinConns:                    dbMinConnsFromEnv(dbMaxConnsFromEnv()),
+		DBMaxConnIdleTime:             parseDurationDefault(os.Getenv("DB_MAX_CONN_IDLE_TIME"), defaultDBMaxConnIdleTime),
+		JWTAlgorithm:                  normaliseJWTAlgorithm(os.Getenv("JWT_ALGORITHM")),
+		ListenAddr:                    getEnvDefault("LISTEN_ADDR", ":8080"),
+		S3Endpoint:                    os.Getenv("S3_ENDPOINT"),
+		S3Bucket:                      os.Getenv("S3_BUCKET"),
+		S3AccessKey:                   os.Getenv("S3_ACCESS_KEY"),
+		S3SecretKey:                   os.Getenv("S3_SECRET_KEY"),
+		MigrationsDir:                 getEnvDefault("MIGRATIONS_DIR", "migrations"),
+		NATSURL:                       os.Getenv("NATS_URL"),
+		ClamAVAddress:                 os.Getenv("CLAMAV_ADDRESS"),
+		GoogleClientID:                os.Getenv("GOOGLE_CLIENT_ID"),
+		GoogleClientSecret:            os.Getenv("GOOGLE_CLIENT_SECRET"),
+		GoogleRedirectURL:             os.Getenv("GOOGLE_REDIRECT_URL"),
+		MicrosoftClientID:             os.Getenv("MICROSOFT_CLIENT_ID"),
+		MicrosoftClientSecret:         os.Getenv("MICROSOFT_CLIENT_SECRET"),
+		MicrosoftRedirectURL:          os.Getenv("MICROSOFT_REDIRECT_URL"),
+		RateLimitPerUser:              parseIntDefault(os.Getenv("RATE_LIMIT_PER_USER"), 0),
+		RateLimitPerWorkspace:         parseIntDefault(os.Getenv("RATE_LIMIT_PER_WORKSPACE"), 0),
+		TrustedProxyDepth:             parseNonNegativeIntDefault(os.Getenv("TRUSTED_PROXY_DEPTH"), 1),
 		PreviewBudgetPerWorkspaceHour: parseIntDefault(os.Getenv("PREVIEW_BUDGET_PER_WORKSPACE_HOUR"), 100),
 		PreviewPriorityWorkers:        parseIntDefault(os.Getenv("PREVIEW_PRIORITY_WORKERS"), 6),
 		PreviewStandardWorkers:        parseIntDefault(os.Getenv("PREVIEW_STANDARD_WORKERS"), 2),
-		RedisURL:                os.Getenv("REDIS_URL"),
-		FabricConsoleURL:        os.Getenv("FABRIC_CONSOLE_URL"),
-		FabricConsoleAdminToken: os.Getenv("FABRIC_CONSOLE_ADMIN_TOKEN"),
-		FabricBucketTemplate:    getEnvDefault("FABRIC_BUCKET_TEMPLATE", "zk-drive-{tenant}"),
-		FabricDefaultPlacementRef: getEnvDefault("FABRIC_DEFAULT_PLACEMENT_REF", "b2c_pooled_default"),
-		StaticDir:                 os.Getenv("STATIC_DIR"),
-		StripeWebhookSecret:       os.Getenv("STRIPE_WEBHOOK_SECRET"),
-		StripeSecretKey:           os.Getenv("STRIPE_SECRET_KEY"),
-		StripePriceTierMap:        parsePriceTierMap(os.Getenv("STRIPE_PRICE_TIER_MAP")),
-		OllamaURL:                 os.Getenv("OLLAMA_URL"),
-		OllamaModel:               os.Getenv("OLLAMA_MODEL"),
+		RedisURL:                      os.Getenv("REDIS_URL"),
+		FabricConsoleURL:              os.Getenv("FABRIC_CONSOLE_URL"),
+		FabricConsoleAdminToken:       os.Getenv("FABRIC_CONSOLE_ADMIN_TOKEN"),
+		FabricBucketTemplate:          getEnvDefault("FABRIC_BUCKET_TEMPLATE", "zk-drive-{tenant}"),
+		FabricDefaultPlacementRef:     getEnvDefault("FABRIC_DEFAULT_PLACEMENT_REF", "b2c_pooled_default"),
+		StaticDir:                     os.Getenv("STATIC_DIR"),
+		StripeWebhookSecret:           os.Getenv("STRIPE_WEBHOOK_SECRET"),
+		StripeSecretKey:               os.Getenv("STRIPE_SECRET_KEY"),
+		StripePriceTierMap:            parsePriceTierMap(os.Getenv("STRIPE_PRICE_TIER_MAP")),
+		OllamaURL:                     os.Getenv("OLLAMA_URL"),
+		OllamaModel:                   os.Getenv("OLLAMA_MODEL"),
 
 		SecurityHeadersDisableHSTS:     parseBoolDefault(os.Getenv("SECURITY_HEADERS_DISABLE_HSTS"), false),
 		SecurityHeadersCSPReportOnly:   parseBoolDefault(os.Getenv("SECURITY_HEADERS_CSP_REPORT_ONLY"), false),
@@ -502,8 +513,9 @@ func buildConfigFromEnv() *Config {
 		VAPIDPublicKey:  strings.TrimSpace(os.Getenv("VAPID_PUBLIC_KEY")),
 		VAPIDPrivateKey: strings.TrimSpace(os.Getenv("VAPID_PRIVATE_KEY")),
 
-		OnlyOfficeURL:    strings.TrimSpace(os.Getenv("ONLYOFFICE_URL")),
-		OnlyOfficeSecret: os.Getenv("ONLYOFFICE_SECRET"),
+		OnlyOfficeURL:           strings.TrimSpace(os.Getenv("ONLYOFFICE_URL")),
+		OnlyOfficeSecret:        os.Getenv("ONLYOFFICE_SECRET"),
+		OnlyOfficeAllowInsecure: parseBoolDefault(os.Getenv("ONLYOFFICE_ALLOW_INSECURE"), false),
 	}
 }
 
@@ -555,6 +567,24 @@ func validateS3Group(cfg *Config) error {
 	}
 	if len(missingS3) > 0 {
 		return errors.New("S3_ENDPOINT is set but missing required variables: " + strings.Join(missingS3, ", "))
+	}
+	return nil
+}
+
+// validateOnlyOfficeGroup fails closed on an unauthenticated ONLYOFFICE
+// callback. When ONLYOFFICE_URL is configured the editor-callback
+// endpoint is mounted and writes new file versions from whatever the
+// Document Server POSTs; without ONLYOFFICE_SECRET that endpoint is
+// unauthenticated, so a misconfigured deployment would expose an
+// SSRF-able, spoofable write path to the public internet. We therefore
+// refuse to start in that combination unless the operator explicitly
+// opts in via ONLYOFFICE_ALLOW_INSECURE (trusted local dev only).
+func validateOnlyOfficeGroup(cfg *Config) error {
+	if strings.TrimSpace(cfg.OnlyOfficeURL) == "" {
+		return nil
+	}
+	if strings.TrimSpace(cfg.OnlyOfficeSecret) == "" && !cfg.OnlyOfficeAllowInsecure {
+		return errors.New("ONLYOFFICE_URL is set but ONLYOFFICE_SECRET is empty: the editor-callback endpoint would be unauthenticated. Set ONLYOFFICE_SECRET (recommended), or set ONLYOFFICE_ALLOW_INSECURE=true to permit the unauthenticated callback for trusted local development")
 	}
 	return nil
 }

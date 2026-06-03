@@ -1052,6 +1052,16 @@ func run() error {
 		// the upgrade handshake.
 		r.Group(func(r chi.Router) {
 			r.Use(middleware.AuthMiddlewareWithKeys(jwtKeyManager, sessionChecker))
+			// IP allowlist enforcement applies to the WS upgrade too:
+			// conditional access must gate EVERY entry into a
+			// workspace, not just the REST data plane, else a blocked
+			// network could still open the realtime sync / collab
+			// channels. IPAllowlist only needs the workspace id, which
+			// the auth middleware above binds from the JWT claims, so
+			// it works without TenantGuard (which is skipped here for
+			// the upgrade-handshake reasons noted below) and runs on
+			// the initial HTTP request before the upgrade.
+			r.Use(middleware.IPAllowlist(ipAllowSvc, cfg.TrustedProxyDepth))
 			r.Get("/ws", wsHandler.ServeWS)
 			// Collab WS endpoint: per-document Yjs relay. Mounted
 			// next to /ws because both are long-lived upgrade

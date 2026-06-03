@@ -235,6 +235,62 @@ func TestVerifyCallbackToken_DisabledWhenNoSecret(t *testing.T) {
 	}
 }
 
+func TestVerifyCallback_ProjectsSignedClaims(t *testing.T) {
+	secret := "callback-secret"
+	svc := NewOnlyOfficeService("https://office.example.com", secret, "https://drive.example.com", newTestData())
+
+	tok := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.MapClaims{
+		"status": float64(2),
+		"url":    "https://office.example.com/cache/out.docx",
+		"key":    "doc-key-123",
+		"users":  []any{"11111111-1111-1111-1111-111111111111", 42, "22222222-2222-2222-2222-222222222222"},
+	})
+	signed, err := tok.SignedString([]byte(secret))
+	if err != nil {
+		t.Fatalf("sign: %v", err)
+	}
+	p, err := svc.VerifyCallback(signed)
+	if err != nil {
+		t.Fatalf("VerifyCallback: %v", err)
+	}
+	if p == nil {
+		t.Fatal("expected non-nil payload")
+	}
+	if p.Status != 2 || p.URL != "https://office.example.com/cache/out.docx" || p.Key != "doc-key-123" {
+		t.Errorf("unexpected payload: %+v", p)
+	}
+	// Non-string entries in the users array are dropped, not coerced.
+	if len(p.Users) != 2 || p.Users[0] != "11111111-1111-1111-1111-111111111111" || p.Users[1] != "22222222-2222-2222-2222-222222222222" {
+		t.Errorf("users not projected from signed claims: %+v", p.Users)
+	}
+}
+
+func TestVerifyCallback_RejectsTamperedToken(t *testing.T) {
+	svc := NewOnlyOfficeService("https://office.example.com", "right", "https://drive.example.com", newTestData())
+	tok := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.MapClaims{"status": float64(2), "url": "https://evil.example/x"})
+	signed, _ := tok.SignedString([]byte("wrong"))
+	if _, err := svc.VerifyCallback(signed); err == nil {
+		t.Fatal("expected VerifyCallback to reject a token signed with the wrong secret")
+	}
+}
+
+func TestVerifyCallback_MissingClaimsYieldZeroValues(t *testing.T) {
+	secret := "callback-secret"
+	svc := NewOnlyOfficeService("https://office.example.com", secret, "https://drive.example.com", newTestData())
+	// A verified token that omits url/status (e.g. a non-save status)
+	// must project to zero values so the caller treats it as
+	// non-actionable rather than falling back to an unsigned body.
+	tok := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.MapClaims{"key": "k"})
+	signed, _ := tok.SignedString([]byte(secret))
+	p, err := svc.VerifyCallback(signed)
+	if err != nil {
+		t.Fatalf("VerifyCallback: %v", err)
+	}
+	if p.Status != 0 || p.URL != "" || len(p.Users) != 0 {
+		t.Errorf("expected zero values for absent claims, got %+v", p)
+	}
+}
+
 func TestIsOfficeDocument(t *testing.T) {
 	cases := map[string]bool{
 		"a.docx": true, "b.XLSX": true, "c.pptx": true, "d.odt": true,
