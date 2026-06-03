@@ -334,6 +334,25 @@ type Config struct {
 	// forever) or force-expire on every read (sub-second TTLs
 	// busy-loop the cache without serving hits).
 	PerformanceCacheTTL time.Duration
+
+	// Web Push (RFC 8030 + VAPID). VAPIDPublicKey / VAPIDPrivateKey
+	// are the application-server key pair used to sign push messages
+	// and identify the server to push services. Generate a pair with
+	// `npx web-push generate-vapid-keys` (see docs/CONFIGURATION.md).
+	// When EITHER value is empty, Web Push is disabled (graceful
+	// degradation): the /api/push/* endpoints respond 501 Not
+	// Implemented and the notification publisher skips the push
+	// fan-out, so the in-app + WebSocket notification path keeps
+	// working unchanged.
+	VAPIDPublicKey  string
+	VAPIDPrivateKey string
+}
+
+// WebPushEnabled reports whether both VAPID keys are configured. When
+// false, Web Push is disabled and callers fall back to the in-app /
+// WebSocket notification path only.
+func (c *Config) WebPushEnabled() bool {
+	return c.VAPIDPublicKey != "" && c.VAPIDPrivateKey != ""
 }
 
 // Load reads configuration from environment variables and returns a populated
@@ -449,6 +468,9 @@ func buildConfigFromEnv() *Config {
 
 		PerformanceCacheEnabled: parseBoolDefault(os.Getenv("PERFORMANCE_CACHE_ENABLED"), defaultPerformanceCacheEnabled),
 		PerformanceCacheTTL:     clampPerformanceCacheTTL(parseDurationDefault(os.Getenv("PERFORMANCE_CACHE_TTL"), defaultPerformanceCacheTTL)),
+
+		VAPIDPublicKey:  strings.TrimSpace(os.Getenv("VAPID_PUBLIC_KEY")),
+		VAPIDPrivateKey: strings.TrimSpace(os.Getenv("VAPID_PRIVATE_KEY")),
 	}
 }
 

@@ -1084,4 +1084,33 @@ export async function createPortalSession(input: {
   return data;
 }
 
+// ---------------------------------------------------------------------------
+// Web Push (RFC 8030 + VAPID) subscription management. The server signs
+// push messages with a VAPID key pair; the frontend fetches the public key,
+// subscribes via the browser PushManager, and registers the resulting
+// PushSubscription here so the server can deliver notifications while no
+// tab / WebSocket is connected. When VAPID keys are unconfigured the server
+// responds 501 and these helpers surface that to the caller.
+
+export async function getVapidPublicKey(): Promise<string> {
+  const { data } = await client.get<{ public_key: string }>("/push/vapid-public-key");
+  return data.public_key;
+}
+
+// registerPushSubscription POSTs a browser PushSubscription (its toJSON()
+// shape: { endpoint, keys: { p256dh, auth } }) to the server.
+export async function registerPushSubscription(sub: PushSubscriptionJSON): Promise<void> {
+  await client.post("/push/subscribe", {
+    endpoint: sub.endpoint,
+    keys: {
+      p256dh: sub.keys?.p256dh ?? "",
+      auth: sub.keys?.auth ?? "",
+    },
+  });
+}
+
+export async function unregisterPushSubscription(endpoint: string): Promise<void> {
+  await client.delete("/push/subscribe", { data: { endpoint } });
+}
+
 export default client;

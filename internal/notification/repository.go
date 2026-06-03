@@ -153,3 +153,54 @@ func (r *PostgresRepository) ListWorkspaceAdmins(ctx context.Context, workspaceI
 	}
 	return out, rows.Err()
 }
+
+// SaveSubscription upserts a browser push subscription. The
+// UNIQUE(workspace_id, user_id, endpoint) constraint (migration 038)
+// means re-registering the same endpoint refreshes its keys instead of
+// inserting a duplicate row.
+func (r *PostgresRepository) SaveSubscription(ctx context.Context, workspaceID, userID uuid.UUID, sub PushSubscription) error {
+	const q = `
+INSERT INTO webpush_subscriptions (workspace_id, user_id, endpoint, p256dh, auth)
+VALUES ($1, $2, $3, $4, $5)
+ON CONFLICT (workspace_id, user_id, endpoint)
+DO UPDATE SET p256dh = EXCLUDED.p256dh, auth = EXCLUDED.auth`
+	if _, err := r.pool.Exec(ctx, q, workspaceID, userID, sub.Endpoint, sub.P256dh, sub.Auth); err != nil {
+		return fmt.Errorf("save webpush subscription: %w", err)
+	}
+	return nil
+}
+
+// DeleteSubscription removes a single push subscription by endpoint.
+// Missing rows are not an error (idempotent unsubscribe).
+func (r *PostgresRepository) DeleteSubscription(ctx context.Context, workspaceID, userID uuid.UUID, endpoint string) error {
+	if _, err := r.pool.Exec(ctx,
+		`DELETE FROM webpush_subscriptions
+         WHERE workspace_id = $1 AND user_id = $2 AND endpoint = $3`,
+		workspaceID, userID, endpoint); err != nil {
+		return fmt.Errorf("delete webpush subscription: %w", err)
+	}
+	return nil
+}
+
+// ListSubscriptions returns every push subscription for (workspace,
+// user). Used by the publisher to fan a notification out to all of a
+// user's offline devices.
+func (r *PostgresRepository) ListSubscriptions(ctx context.Context, workspaceID, userID uuid.UUID) ([]PushSubscription, error) {
+	rows, err := r.pool.Query(ctx,
+		`SELECT endpoint, p256dh, auth FROM webpush_subscriptions
+         WHERE workspace_id = $1 AND user_id = $2`,
+		workspaceID, userID)
+	if err != nil {
+		return nil, fmt.Errorf("list webpush subscriptions: %w", err)
+	}
+	defer rows.Close()
+	var out []PushSubscription
+	for rows.Next() {
+		var sub PushSubscription
+		if err := rows.Scan(&sub.Endpoint, &sub.P256dh, &sub.Auth); err != nil {
+			return nil, err
+		}
+		out = append(out, sub)
+	}
+	return out, rows.Err()
+}

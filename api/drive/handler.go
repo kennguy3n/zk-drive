@@ -65,6 +65,7 @@ type Handler struct {
 	clientRooms    *sharing.ClientRoomService
 	jobs           *jobs.Publisher
 	notifications  *notification.Service
+	webpush        *notification.WebPushService
 	email          *email.Service
 	previews       preview.Repository
 	audit          *audit.Service
@@ -302,6 +303,16 @@ func (h *Handler) WithJobs(p *jobs.Publisher) *Handler {
 // notifications.
 func (h *Handler) WithNotifications(s *notification.Service) *Handler {
 	h.notifications = s
+	return h
+}
+
+// WithWebPush wires the Web Push service so the /api/push/* endpoints
+// can register and remove browser push subscriptions. A nil service
+// (VAPID keys unconfigured) makes those endpoints respond 501 Not
+// Implemented — the graceful-degradation pattern used elsewhere in
+// this handler.
+func (h *Handler) WithWebPush(s *notification.WebPushService) *Handler {
+	h.webpush = s
 	return h
 }
 

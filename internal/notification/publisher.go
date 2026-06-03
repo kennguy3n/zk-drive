@@ -137,6 +137,87 @@ func (p *RedisPublisher) Subscribe(ctx context.Context, bc LocalBroadcaster) err
 	}
 }
 
+// ConnectionChecker reports whether a user currently has at least one
+// live WebSocket connection on this replica. Implemented by *ws.Hub
+// (IsConnected). Used by WebPushPublisher to decide whether to fall
+// back to a browser push notification.
+type ConnectionChecker interface {
+	IsConnected(workspaceID, userID uuid.UUID) bool
+}
+
+// PushSender delivers a browser push notification to a user's
+// registered subscriptions. Implemented by *WebPushService.
+type PushSender interface {
+	Send(ctx context.Context, workspaceID, userID uuid.UUID, payload NotificationPayload) error
+}
+
+// WebPushPublisher decorates an inner WSPublisher: it first performs
+// the normal WebSocket publish (local hub or Redis pub/sub fan-out),
+// then — for a "notification" event whose recipient has no live
+// WebSocket connection on this replica — also delivers the same
+// notification via Web Push so PWA users see it with the tab closed.
+//
+// The connection check is best-effort and replica-local: in a
+// multi-replica deployment a user connected to a different replica
+// may still receive a push. That trade-off favours delivery over
+// suppression (a redundant push is preferable to a missed one) and
+// keeps the publisher free of cross-replica presence tracking.
+type WebPushPublisher struct {
+	inner WSPublisher
+	conns ConnectionChecker
+	push  PushSender
+}
+
+// NewWebPushPublisher wraps inner so notifications also fan out via
+// Web Push for offline users. conns may be nil (every user is then
+// treated as offline); push must be non-nil for the wrapper to add
+// value, but a nil push degrades to plain inner-publish behaviour.
+func NewWebPushPublisher(inner WSPublisher, conns ConnectionChecker, push PushSender) *WebPushPublisher {
+	return &WebPushPublisher{inner: inner, conns: conns, push: push}
+}
+
+// Publish delegates to the inner publisher, then best-effort delivers
+// a Web Push message to offline recipients. The inner publish error
+// (if any) is returned; push failures are swallowed by the service's
+// own logging so a push-service outage never masks the WS result.
+func (p *WebPushPublisher) Publish(ctx context.Context, workspaceID, userID uuid.UUID, event Event) error {
+	var innerErr error
+	if p.inner != nil {
+		innerErr = p.inner.Publish(ctx, workspaceID, userID, event)
+	}
+	if p.push == nil {
+		return innerErr
+	}
+	if p.conns != nil && p.conns.IsConnected(workspaceID, userID) {
+		return innerErr
+	}
+	if payload, ok := pushPayloadFromEvent(event); ok {
+		if err := p.push.Send(ctx, workspaceID, userID, payload); err != nil {
+			logging.FromContext(ctx).Error("notification web push failed",
+				"workspace_id", workspaceID, "user_id", userID, "err", err)
+		}
+	}
+	return innerErr
+}
+
+// pushPayloadFromEvent extracts a NotificationPayload from a
+// "notification" event. Returns ok=false for other event types (only
+// notifications are surfaced as browser push messages).
+func pushPayloadFromEvent(event Event) (NotificationPayload, bool) {
+	if event.Type != "notification" {
+		return NotificationPayload{}, false
+	}
+	n, ok := event.Payload.(*Notification)
+	if !ok || n == nil {
+		return NotificationPayload{}, false
+	}
+	return NotificationPayload{
+		Title: n.Title,
+		Body:  n.Body,
+		Type:  n.Type,
+	}, true
+}
+
 func parseChannel(channel string) (uuid.UUID, uuid.UUID, error) {
 	parts := strings.SplitN(channel, ":", 3)
 	if len(parts) != 3 || parts[0] != "ws" {
