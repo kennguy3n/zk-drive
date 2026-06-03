@@ -5,6 +5,16 @@ metadata:
   namespace: {{ include "zk-drive.namespace" . }}
   labels:
     {{- include "zk-drive.labels" . | nindent 4 }}
+  annotations:
+    # Created as a pre-install/pre-upgrade hook with a weight (-10) lower
+    # than the migrate Job (-5) so this ConfigMap exists before the
+    # migrate hook's envFrom resolves it on a first `helm install`
+    # (normal release resources are created only after pre-install hooks
+    # complete). before-hook-creation re-creates it each run so it tracks
+    # value changes and isn't left orphaned.
+    helm.sh/hook: pre-install,pre-upgrade
+    helm.sh/hook-weight: "-10"
+    helm.sh/hook-delete-policy: before-hook-creation
 data:
   DATABASE_URL: {{ .Values.config.DATABASE_URL | quote }}
   NATS_URL: {{ .Values.config.NATS_URL | quote }}
