@@ -216,6 +216,10 @@ func (h *Handler) UpdateIPAllowPolicy(w http.ResponseWriter, r *http.Request) {
 			middleware.RespondError(w, http.StatusNotFound, middleware.ErrCodeNotFound, "workspace not found")
 			return
 		}
+		if errors.Is(err, workspace.ErrNoRulesToEnable) {
+			middleware.RespondError(w, http.StatusConflict, middleware.ErrCodeAllowlistNoRules, "add at least one rule before enabling the ip allowlist")
+			return
+		}
 		middleware.RespondInternalError(w, r, "update ip allowlist policy", err)
 		return
 	}

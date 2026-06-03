@@ -60,6 +60,19 @@ allowlist only accepts public ranges, the resolved client IP must be a
 routable public address, so it must reflect the real external client
 rather than an internal proxy hop.
 
+**Allowlistable ranges.** Only publicly routable CIDRs are accepted.
+Private (RFC1918 / RFC4193), loopback, link-local, unspecified,
+multicast, and RFC 6598 carrier-grade-NAT shared space
+(`100.64.0.0/10`) are rejected, because an internet-facing gateway
+never legitimately observes them as a client source address.
+
+**Enabling requires at least one rule.** Because matching fails
+closed, turning the allowlist on for a workspace with no rules would
+block every data-plane request for that workspace. The policy endpoint
+therefore rejects an enable with no rules (`409`,
+`IP_ALLOWLIST_NO_RULES`); add a rule first. Disabling is always
+allowed.
+
 **Enforcement scope.** The allowlist is enforced on authenticated
 data-plane HTTP requests — the main drive routes and the `/api/kchat`
 routes. The `/api/admin` routes are intentionally exempt so an admin

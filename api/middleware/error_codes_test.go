@@ -131,6 +131,7 @@ func TestErrorCodes_DistinctValues(t *testing.T) {
 		ErrCodePrivateCIDR,
 		ErrCodeRuleCapExceeded,
 		ErrCodeDuplicateCIDR,
+		ErrCodeAllowlistNoRules,
 	}
 	seen := make(map[ErrorCode]int, len(codes))
 	for i, c := range codes {

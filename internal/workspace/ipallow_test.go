@@ -215,6 +215,8 @@ func TestAddRule_RejectsInvalidAndPrivate(t *testing.T) {
 		{"link-local", "169.254.0.0/16", ErrPrivateCIDR},
 		{"ipv6-ula", "fc00::/7", ErrPrivateCIDR},
 		{"ipv6-loopback", "::1/128", ErrPrivateCIDR},
+		{"rfc6598-cgnat", "100.64.0.0/10", ErrPrivateCIDR},
+		{"rfc6598-cgnat-subnet", "100.100.0.0/24", ErrPrivateCIDR},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -301,6 +303,9 @@ func TestSetEnabled_ReturnsPrevious(t *testing.T) {
 	store := newFakeIPAllowStore()
 	ws := uuid.New()
 	svc := NewIPAllowService(store, nil)
+	// A rule must exist before enabling is permitted (see
+	// TestSetEnabled_NoRulesRejected).
+	mustAddRule(t, svc, ws, "203.0.113.0/24")
 
 	prev, err := svc.SetEnabled(context.Background(), ws, true)
 	if err != nil {
@@ -315,6 +320,36 @@ func TestSetEnabled_ReturnsPrevious(t *testing.T) {
 	}
 	if !prev {
 		t.Fatalf("second toggle previous should be true, got false")
+	}
+}
+
+// TestSetEnabled_NoRulesRejected verifies the guardrail: enabling the
+// allowlist for a workspace with no rules is refused with
+// ErrNoRulesToEnable, the flag is left off, and the cache is not
+// touched — preventing a one-toggle self-lockout. Disabling an empty
+// allowlist is always permitted.
+func TestSetEnabled_NoRulesRejected(t *testing.T) {
+	store := newFakeIPAllowStore()
+	ws := uuid.New()
+	svc := NewIPAllowService(store, nil)
+
+	if _, err := svc.SetEnabled(context.Background(), ws, true); !errors.Is(err, ErrNoRulesToEnable) {
+		t.Fatalf("enable with no rules: got %v want ErrNoRulesToEnable", err)
+	}
+	if store.enabled[ws] {
+		t.Fatalf("flag must remain off after a rejected enable")
+	}
+	// Disabling is always allowed, even with no rules.
+	if _, err := svc.SetEnabled(context.Background(), ws, false); err != nil {
+		t.Fatalf("disable with no rules should succeed, got %v", err)
+	}
+	// Once a rule exists, enabling succeeds.
+	mustAddRule(t, svc, ws, "203.0.113.0/24")
+	if _, err := svc.SetEnabled(context.Background(), ws, true); err != nil {
+		t.Fatalf("enable with a rule should succeed, got %v", err)
+	}
+	if !store.enabled[ws] {
+		t.Fatalf("flag must be on after a successful enable")
 	}
 }
 

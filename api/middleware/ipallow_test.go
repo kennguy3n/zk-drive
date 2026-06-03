@@ -49,6 +49,21 @@ func TestIPAllowlist_NilCheckerPassesThrough(t *testing.T) {
 	}
 }
 
+// TestIPAllowlist_TypedNilCheckerPassesThrough guards the typed-nil
+// case: a nil *workspace.IPAllowService passed through the interface
+// is not == nil, so without the unwrap it would panic in CheckAccess.
+// It must instead disable enforcement, like an untyped nil.
+func TestIPAllowlist_TypedNilCheckerPassesThrough(t *testing.T) {
+	var svc *workspace.IPAllowService // typed nil
+	var called bool
+	h := IPAllowlist(svc, 1)(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { called = true }))
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, newAuthedRequest(uuid.New(), "70.0.0.1:1234", ""))
+	if !called {
+		t.Fatalf("typed-nil checker should be a pass-through")
+	}
+}
+
 func TestIPAllowlist_AllowedCallsNext(t *testing.T) {
 	ws := uuid.New()
 	checker := &fakeIPChecker{err: nil}

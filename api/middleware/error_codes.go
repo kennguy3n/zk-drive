@@ -115,6 +115,10 @@ const (
 	ErrCodePrivateCIDR     ErrorCode = "PRIVATE_CIDR_NOT_ALLOWED"
 	ErrCodeRuleCapExceeded ErrorCode = "IP_RULE_CAP_EXCEEDED"
 	ErrCodeDuplicateCIDR   ErrorCode = "DUPLICATE_CIDR"
+	// ErrCodeAllowlistNoRules (409) — enabling the allowlist was
+	// refused because the workspace has no rules; enabling would fail
+	// closed and block all data-plane traffic. Add a rule first.
+	ErrCodeAllowlistNoRules ErrorCode = "IP_ALLOWLIST_NO_RULES"
 
 	// Resource state (404 / 409 / 410).
 	ErrCodeNotFound      ErrorCode = "NOT_FOUND"

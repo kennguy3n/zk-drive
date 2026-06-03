@@ -46,6 +46,14 @@ var ErrTooManyRules = errors.New("workspace: ip allowlist rule cap reached")
 // of the MaxIPRulesPerWorkspace slots.
 var ErrDuplicateCIDR = errors.New("workspace: CIDR already allowlisted")
 
+// ErrNoRulesToEnable is returned by SetEnabled when enabling the
+// allowlist for a workspace that has zero rules. CheckAccess fails
+// closed (an empty rule set matches no IP), so flipping the switch on
+// in that state would 403 every data-plane request for the workspace
+// — a one-toggle self-lockout. The admin must add at least one rule
+// before enabling. Disabling is always permitted regardless of rules.
+var ErrNoRulesToEnable = errors.New("workspace: cannot enable ip allowlist with no rules")
+
 // MaxIPRulesPerWorkspace caps the number of allowlist rules a single
 // workspace may hold. The cap bounds the cost of CheckAccess (a
 // linear scan over the rule set on every request) and the size of
@@ -315,6 +323,19 @@ func (s *IPAllowService) RemoveRule(ctx context.Context, workspaceID, ruleID uui
 // busts the cache. Returns the previous value so the caller can
 // record the transition in the audit log.
 func (s *IPAllowService) SetEnabled(ctx context.Context, workspaceID uuid.UUID, enabled bool) (bool, error) {
+	// Refuse to enable an empty allowlist: CheckAccess fails closed, so
+	// doing so would block every data-plane request for the workspace.
+	// Reading the rules first is cheap (a rare control-plane toggle) and
+	// keeps the guardrail in the service so every caller benefits.
+	if enabled {
+		rules, err := s.store.ListRules(ctx, workspaceID)
+		if err != nil {
+			return false, fmt.Errorf("list ip rules: %w", err)
+		}
+		if len(rules) == 0 {
+			return false, ErrNoRulesToEnable
+		}
+	}
 	prev, err := s.store.SetEnabled(ctx, workspaceID, enabled)
 	if err != nil {
 		return false, err
@@ -347,17 +368,32 @@ func ValidatePublicCIDR(cidr string) (string, error) {
 	return network.String(), nil
 }
 
+// rfc6598CGNAT is the RFC 6598 Shared Address Space (100.64.0.0/10)
+// used between subscriber CPE and the ISP in carrier-grade NAT.
+// net.IP.IsPrivate only covers RFC1918/RFC4193, so this range is
+// matched explicitly. Like RFC1918 space it is never a legitimate
+// public source address, so it must not be allowlistable.
+var rfc6598CGNAT = func() *net.IPNet {
+	_, n, err := net.ParseCIDR("100.64.0.0/10")
+	if err != nil {
+		panic("workspace: bad RFC6598 CIDR literal: " + err.Error())
+	}
+	return n
+}()
+
 // isPublicIP reports whether ip is routable on the public internet
 // for allowlisting purposes. Anything an internet-facing gateway
 // would never legitimately see as a source — private, loopback,
-// link-local, unspecified, or multicast — is rejected.
+// link-local, unspecified, multicast, or RFC 6598 carrier-grade NAT
+// shared space — is rejected.
 func isPublicIP(ip net.IP) bool {
 	if ip == nil {
 		return false
 	}
 	if ip.IsLoopback() || ip.IsUnspecified() ||
 		ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() ||
-		ip.IsMulticast() || ip.IsPrivate() {
+		ip.IsMulticast() || ip.IsPrivate() ||
+		rfc6598CGNAT.Contains(ip) {
 		return false
 	}
 	return true

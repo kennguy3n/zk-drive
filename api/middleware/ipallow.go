@@ -35,9 +35,11 @@ type IPAllowChecker interface {
 // allowlist. It MUST be composed AFTER the auth/tenant middleware so
 // the workspace id is already bound in the request context.
 //
-// When checker is nil the middleware is a pass-through, so the
-// server boots without an IPAllowService wired (mirroring the
-// nil-service-disables-feature convention used elsewhere).
+// When checker is nil — including a typed-nil concrete
+// *workspace.IPAllowService passed through the interface — the
+// middleware is a pass-through, so the server boots without an
+// IPAllowService wired (mirroring the nil-service-disables-feature
+// convention used elsewhere, e.g. admin.Handler.WithWebhooks).
 //
 // The client IP is resolved from X-Forwarded-For honouring
 // trustedProxyDepth (the number of trusted proxies appended to the
@@ -48,6 +50,12 @@ type IPAllowChecker interface {
 func IPAllowlist(checker IPAllowChecker, trustedProxyDepth int) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		if checker == nil {
+			return next
+		}
+		// A typed-nil *IPAllowService satisfies the interface but is
+		// not == nil; unwrap it so it disables enforcement instead of
+		// panicking on a nil receiver inside CheckAccess.
+		if svc, ok := checker.(*workspace.IPAllowService); ok && svc == nil {
 			return next
 		}
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

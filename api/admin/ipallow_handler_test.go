@@ -253,6 +253,9 @@ func TestRemoveIPAllowRule_InvalidID(t *testing.T) {
 func TestUpdateIPAllowPolicy_TogglesAndRequiresKey(t *testing.T) {
 	store := newMemIPAllowStore()
 	_, r, ws := newIPAllowTestHandler(t, store)
+	// Enabling requires at least one rule (see
+	// TestUpdateIPAllowPolicy_NoRulesConflict); seed one.
+	store.rules[ws] = []workspace.IPRule{{ID: uuid.New(), WorkspaceID: ws, CIDR: "203.0.113.0/24"}}
 
 	enabled := true
 	body, _ := json.Marshal(updateIPAllowPolicyRequest{Enabled: &enabled})
@@ -270,6 +273,41 @@ func TestUpdateIPAllowPolicy_TogglesAndRequiresKey(t *testing.T) {
 	r.ServeHTTP(rec, authedCtxRequest(http.MethodPatch, "/ip-allowlist/policy", []byte(`{}`), ws))
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("missing key status: got %d want %d", rec.Code, http.StatusBadRequest)
+	}
+}
+
+// TestUpdateIPAllowPolicy_NoRulesConflict verifies enabling an empty
+// allowlist is refused with 409 IP_ALLOWLIST_NO_RULES (preventing a
+// workspace-wide self-lockout) and that the flag stays off.
+func TestUpdateIPAllowPolicy_NoRulesConflict(t *testing.T) {
+	store := newMemIPAllowStore()
+	_, r, ws := newIPAllowTestHandler(t, store)
+
+	enabled := true
+	body, _ := json.Marshal(updateIPAllowPolicyRequest{Enabled: &enabled})
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, authedCtxRequest(http.MethodPatch, "/ip-allowlist/policy", body, ws))
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("status: got %d want %d (body=%s)", rec.Code, http.StatusConflict, rec.Body.String())
+	}
+	var resp middleware.ErrorResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if resp.Code != middleware.ErrCodeAllowlistNoRules {
+		t.Fatalf("code: got %q want %q", resp.Code, middleware.ErrCodeAllowlistNoRules)
+	}
+	if store.enabled[ws] {
+		t.Fatalf("flag must remain off after a rejected enable")
+	}
+
+	// Disabling an empty allowlist is always permitted.
+	disabled := false
+	body, _ = json.Marshal(updateIPAllowPolicyRequest{Enabled: &disabled})
+	rec = httptest.NewRecorder()
+	r.ServeHTTP(rec, authedCtxRequest(http.MethodPatch, "/ip-allowlist/policy", body, ws))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("disable status: got %d want %d (body=%s)", rec.Code, http.StatusOK, rec.Body.String())
 	}
 }
 
