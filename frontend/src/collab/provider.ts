@@ -58,6 +58,14 @@ export type ConnectionStatus =
 export interface CollabProviderOptions {
   url: string;
   token: string;
+  // tokenProvider, when supplied, is called on every (re)connect to
+  // obtain the freshest JWT. It lets a long-lived editor session
+  // survive token rotation: the auth token captured at construction
+  // time eventually expires, and without a refresh the WS upgrade
+  // would 401 on the next reconnect and the provider would retry the
+  // same stale token forever. Returning null/empty falls back to the
+  // last known good token (the static `token` on first connect).
+  tokenProvider?: () => string | null;
   doc: Y.Doc;
   // awareness is optional — when omitted the provider only does
   // sync. Passing one (typically created alongside the Y.Doc) wires
@@ -90,7 +98,11 @@ export interface CollabProviderOptions {
 // (connect / destroy) and a status callback for the UI.
 export class CollabProvider {
   private readonly url: string;
-  private readonly token: string;
+  // token holds the last token used to open the socket. It is
+  // refreshed from tokenProvider (when supplied) on every connect so
+  // reconnects after a token rotation use a valid credential.
+  private token: string;
+  private readonly tokenProvider: (() => string | null) | undefined;
   private readonly doc: Y.Doc;
   private readonly awareness: Awareness | undefined;
   private readonly presenceAllowed: boolean;
@@ -130,6 +142,7 @@ export class CollabProvider {
   constructor(opts: CollabProviderOptions) {
     this.url = opts.url;
     this.token = opts.token;
+    this.tokenProvider = opts.tokenProvider;
     this.doc = opts.doc;
     this.awareness = opts.awareness;
     // Fail-closed: presence broadcasts ONLY when the caller has
@@ -186,6 +199,14 @@ export class CollabProvider {
       return;
     }
     this.setStatus("connecting");
+    // Refresh the credential from the provider (if any) so a
+    // reconnect after token rotation uses a current JWT. A null /
+    // empty return keeps the last known good token rather than
+    // opening with an empty credential that would 401 immediately.
+    if (this.tokenProvider) {
+      const refreshed = this.tokenProvider();
+      if (refreshed) this.token = refreshed;
+    }
     // ["bearer", token] is the well-known subprotocol pair that
     // tells our AuthMiddleware to read the JWT off the next entry.
     // The server echoes "bearer" as the chosen subprotocol; the

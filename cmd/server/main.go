@@ -637,7 +637,8 @@ func run() error {
 		WithPreviews(previewRepo).
 		WithAudit(auditSvc).
 		WithBilling(billingSvc).
-		WithWebhooks(webhookPublisher)
+		WithWebhooks(webhookPublisher).
+		WithOnlyOffice(cfg.OnlyOfficeURL, cfg.OnlyOfficeSecret, cfg.PublicURL)
 	var fabricClient admin.FabricClient
 	if cfg.FabricConsoleURL != "" {
 		fabricClient = fabric.NewClient(fabric.ClientConfig{
@@ -1024,6 +1025,8 @@ func run() error {
 			r.Get("/files/{id}/versions", driveHandler.ListFileVersions)
 			r.Get("/files/{id}/download-url", driveHandler.DownloadURL)
 			r.Get("/files/{id}/preview-url", driveHandler.PreviewURL)
+			r.Get("/files/{id}/editor-config", driveHandler.EditorConfig)
+			r.Get("/onlyoffice/status", driveHandler.OnlyOfficeStatus)
 			r.Get("/files/{id}/tags", driveHandler.ListFileTags)
 			r.Post("/files/{id}/tags", driveHandler.AddFileTag)
 			r.Delete("/files/{id}/tags/{tag}", driveHandler.RemoveFileTag)
@@ -1109,6 +1112,14 @@ func run() error {
 		// Stripe-Signature header rather than a JWT, which the
 		// handler verifies against STRIPE_WEBHOOK_SECRET.
 		r.Post("/webhooks/stripe", stripeService.HandleWebhook)
+
+		// ONLYOFFICE Document Server save callback — outside the
+		// session-auth group because the Document Server holds no ZK
+		// Drive JWT. It is authenticated by the ONLYOFFICE-signed
+		// body/header token (verified against ONLYOFFICE_SECRET) plus
+		// the workspace_id query param the editor-config embedded in
+		// the callbackUrl.
+		r.Post("/files/{id}/editor-callback", driveHandler.EditorCallback)
 	})
 
 	if cfg.StaticDir != "" {

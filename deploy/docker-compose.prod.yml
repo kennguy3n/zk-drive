@@ -111,6 +111,17 @@ services:
       # browser caches the requirement for HTTPS for a year. Flip to
       # true only for local plain-HTTP development.
       SECURITY_HEADERS_DISABLE_HSTS: ${SECURITY_HEADERS_DISABLE_HSTS:-false}
+      # ONLYOFFICE collaborative office editing (see docs/CONFIGURATION.md
+      # → "Collaborative office editing"). Leave ONLYOFFICE_URL unset to
+      # disable the feature entirely (graceful degradation). When you run
+      # the optional `onlyoffice` service below, point ONLYOFFICE_URL at it
+      # (e.g. http://onlyoffice) and set ONLYOFFICE_SECRET to the same
+      # value as the Document Server's JWT_SECRET. PUBLIC_URL must be the
+      # externally reachable base URL so the Document Server can POST the
+      # save callback back to the API.
+      ONLYOFFICE_URL: ${ONLYOFFICE_URL:-}
+      ONLYOFFICE_SECRET: ${ONLYOFFICE_SECRET:-}
+      PUBLIC_URL: ${PUBLIC_URL:-}
     ports:
       - "127.0.0.1:8080:8080"
     healthcheck:
@@ -203,5 +214,37 @@ services:
           cpus: "1.0"
           memory: 512M
 
+  # Optional ONLYOFFICE Document Server for collaborative office-document
+  # editing. Disabled by default — uncomment this block, then set
+  # ONLYOFFICE_URL=http://onlyoffice and ONLYOFFICE_SECRET=<same as
+  # JWT_SECRET below> on the zk-drive-server service above. See
+  # docs/CONFIGURATION.md → "Collaborative office editing (ONLYOFFICE)".
+  #
+  # onlyoffice:
+  #   image: onlyoffice/documentserver:latest
+  #   restart: unless-stopped
+  #   environment:
+  #     # Require and verify signed JWTs on every editor config and save
+  #     # callback. JWT_SECRET MUST equal the server's ONLYOFFICE_SECRET.
+  #     JWT_ENABLED: "true"
+  #     JWT_SECRET: ${ONLYOFFICE_SECRET:?set ONLYOFFICE_SECRET}
+  #   # The Document Server fetches the document and posts the save
+  #   # callback over the Compose network, so it must reach zk-drive-server
+  #   # (PUBLIC_URL) and the storage gateway. Expose it behind the same
+  #   # host-level reverse proxy as the rest of the stack.
+  #   ports:
+  #     - "127.0.0.1:8081:80"
+  #   volumes:
+  #     - onlyoffice_data:/var/www/onlyoffice/Data
+  #     - onlyoffice_log:/var/log/onlyoffice
+  #   deploy:
+  #     resources:
+  #       limits:
+  #         cpus: "2.0"
+  #         memory: 2G
+
 volumes:
   pgdata:
+  # Uncomment alongside the optional `onlyoffice` service above.
+  # onlyoffice_data:
+  # onlyoffice_log:

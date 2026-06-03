@@ -1,5 +1,6 @@
 import { useTranslation } from "react-i18next";
 import { getDownloadURL, type FileItem } from "../api/client";
+import { isOfficeDocument } from "../collab/office";
 import FilePreview from "./FilePreview";
 
 export interface FileListProps {
@@ -9,6 +10,12 @@ export interface FileListProps {
   // onShare is optional so callers that don't wire ShareDialog yet
   // keep working unchanged — the Share button is hidden when omitted.
   onShare?: (file: FileItem) => void;
+  // onEdit is optional so callers that haven't wired the office editor
+  // keep working unchanged. When provided, an "Edit" button appears
+  // for office document types (see collab/office.ts) and invokes it
+  // with the target file; the parent decides how to present the
+  // editor (FileBrowserPage opens the OnlyOffice editor overlay).
+  onEdit?: (file: FileItem) => void;
   // selectedIDs + onToggleSelect power the bulk-operations toolbar
   // rendered by the parent page. When omitted, selection checkboxes
   // are hidden (keeps the legacy single-file UX for callers that
@@ -44,6 +51,7 @@ export default function FileList({
   onRename,
   onDelete,
   onShare,
+  onEdit,
   selectedIDs,
   onToggleSelect,
 }: FileListProps) {
@@ -94,6 +102,15 @@ export default function FileList({
               <button onClick={() => handleDownload(f.id)} style={actionBtn}>
                 {t("common.download")}
               </button>
+              {onEdit && isOfficeDocument(f.name) ? (
+                <button
+                  onClick={() => onEdit(f)}
+                  style={actionBtn}
+                  aria-label={t("onlyoffice.editAria", { name: f.name })}
+                >
+                  {t("common.edit")}
+                </button>
+              ) : null}
               <button
                 onClick={() => {
                   const name = prompt(t("drive.renamePrompt"), f.name);
