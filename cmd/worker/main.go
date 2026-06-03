@@ -346,6 +346,10 @@ func run() error {
 		return fmt.Errorf("ensure stream: %w", err)
 	}
 
+	if err := reconcilePreviewConsumers(js); err != nil {
+		return fmt.Errorf("reconcile preview consumers: %w", err)
+	}
+
 	subs, err := subscribeAll(ctx, &bgGoroutines, js, pool, metricsSurface, previewSvc, scanSvc, archiveSvc, indexSvc, classifySvc, cfg.PreviewPriorityWorkers, cfg.PreviewStandardWorkers)
 	if err != nil {
 		return fmt.Errorf("subscribe: %w", err)
@@ -484,6 +488,41 @@ func ensureStream(js nats.JetStreamContext) error {
 			return nil
 		}
 		return err
+	}
+	return nil
+}
+
+// reconcilePreviewConsumers brings the persisted MaxDeliver of the
+// preview durables up to preview.QueueMaxDeliver. js.Subscribe binds
+// to an existing durable without rewriting its server-side config, so
+// the legacy drive-preview consumer — created by an earlier deploy
+// when it still used preview.MaxDeliver (5) — would otherwise keep
+// that stale cap. Because previewHandler now NakWithDelay's
+// budget-deferred jobs on every preview subject and the API still
+// publishes all previews to the legacy subject, a 5-delivery cap
+// would terminate an over-budget workspace's previews after only a
+// few minutes instead of deferring them until its window drains. We
+// mirror ensureStream's reconcile-on-startup approach (ConsumerInfo →
+// UpdateConsumer) so the cap self-heals across deploys without manual
+// operator intervention. Consumers that don't exist yet are skipped:
+// Subscribe creates them fresh with the correct cap.
+func reconcilePreviewConsumers(js nats.JetStreamContext) error {
+	for _, durable := range []string{"drive-preview", "drive-preview-priority", "drive-preview-standard"} {
+		ci, err := js.ConsumerInfo(streamName, durable)
+		if err != nil {
+			if errors.Is(err, nats.ErrConsumerNotFound) {
+				continue
+			}
+			return fmt.Errorf("consumer info %s: %w", durable, err)
+		}
+		if ci.Config.MaxDeliver == preview.QueueMaxDeliver {
+			continue
+		}
+		cfg := ci.Config
+		cfg.MaxDeliver = preview.QueueMaxDeliver
+		if _, err := js.UpdateConsumer(streamName, &cfg); err != nil {
+			return fmt.Errorf("update consumer %s: %w", durable, err)
+		}
 	}
 	return nil
 }
