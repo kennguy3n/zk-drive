@@ -56,6 +56,10 @@ export default defineConfig({
         globPatterns: ["**/*.{js,css,html,ico,png,svg}"],
         navigateFallback: "/index.html",
         navigateFallbackDenylist: [/^\/api\//],
+        // Pull the Web Push handlers (push / notificationclick) into the
+        // generated service worker. Lives in public/ so it's served at the
+        // root scope; see public/push-sw.js.
+        importScripts: ["/push-sw.js"],
       },
     }),
   ],

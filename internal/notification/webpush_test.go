@@ -1,0 +1,308 @@
+package notification
+
+import (
+	"bytes"
+	"context"
+	"crypto/elliptic"
+	"crypto/rand"
+	"encoding/base64"
+	"io"
+	"net/http"
+	"sync"
+	"testing"
+
+	webpush "github.com/SherClockHolmes/webpush-go"
+	"github.com/google/uuid"
+)
+
+// fakeWebPushRepo is an in-memory WebPushRepository keyed by
+// (workspace, user, endpoint).
+type fakeWebPushRepo struct {
+	mu   sync.Mutex
+	subs map[string]PushSubscription
+}
+
+func newFakeWebPushRepo() *fakeWebPushRepo {
+	return &fakeWebPushRepo{subs: map[string]PushSubscription{}}
+}
+
+func key(workspaceID, userID uuid.UUID, endpoint string) string {
+	return workspaceID.String() + "|" + userID.String() + "|" + endpoint
+}
+
+func (f *fakeWebPushRepo) SaveSubscription(_ context.Context, workspaceID, userID uuid.UUID, sub PushSubscription) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.subs[key(workspaceID, userID, sub.Endpoint)] = sub
+	return nil
+}
+
+func (f *fakeWebPushRepo) DeleteSubscription(_ context.Context, workspaceID, userID uuid.UUID, endpoint string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	delete(f.subs, key(workspaceID, userID, endpoint))
+	return nil
+}
+
+func (f *fakeWebPushRepo) ListSubscriptions(_ context.Context, workspaceID, userID uuid.UUID) ([]PushSubscription, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	prefix := workspaceID.String() + "|" + userID.String() + "|"
+	var out []PushSubscription
+	for k, v := range f.subs {
+		if len(k) >= len(prefix) && k[:len(prefix)] == prefix {
+			out = append(out, v)
+		}
+	}
+	return out, nil
+}
+
+func (f *fakeWebPushRepo) count() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return len(f.subs)
+}
+
+// stubHTTPClient records requests and returns a canned status code.
+type stubHTTPClient struct {
+	mu     sync.Mutex
+	calls  int
+	status int
+}
+
+func (s *stubHTTPClient) Do(req *http.Request) (*http.Response, error) {
+	s.mu.Lock()
+	s.calls++
+	s.mu.Unlock()
+	return &http.Response{
+		StatusCode: s.status,
+		Body:       io.NopCloser(bytes.NewReader(nil)),
+		Header:     make(http.Header),
+	}, nil
+}
+
+// testSubscription returns a PushSubscription with cryptographically
+// valid p256dh / auth keys so webpush-go's RFC 8291 payload encryption
+// succeeds and the request actually reaches the HTTP client.
+func testSubscription(t *testing.T, endpoint string) PushSubscription {
+	t.Helper()
+	priv, x, y, err := elliptic.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("generate subscription key: %v", err)
+	}
+	_ = priv
+	pub := elliptic.Marshal(elliptic.P256(), x, y)
+	auth := make([]byte, 16)
+	if _, err := rand.Read(auth); err != nil {
+		t.Fatalf("generate auth: %v", err)
+	}
+	return PushSubscription{
+		Endpoint: endpoint,
+		P256dh:   base64.RawURLEncoding.EncodeToString(pub),
+		Auth:     base64.RawURLEncoding.EncodeToString(auth),
+	}
+}
+
+func newTestService(t *testing.T, repo WebPushRepository, status int) (*WebPushService, *stubHTTPClient) {
+	t.Helper()
+	priv, pub, err := webpush.GenerateVAPIDKeys()
+	if err != nil {
+		t.Fatalf("generate vapid keys: %v", err)
+	}
+	stub := &stubHTTPClient{status: status}
+	svc := NewWebPushService(repo, pub, priv).WithHTTPClient(stub)
+	if svc == nil {
+		t.Fatal("NewWebPushService returned nil with valid keys")
+	}
+	return svc, stub
+}
+
+func TestNewWebPushService_DisabledWhenKeysMissing(t *testing.T) {
+	repo := newFakeWebPushRepo()
+	if NewWebPushService(repo, "", "priv") != nil {
+		t.Error("expected nil service when public key empty")
+	}
+	if NewWebPushService(repo, "pub", "") != nil {
+		t.Error("expected nil service when private key empty")
+	}
+	if NewWebPushService(nil, "pub", "priv") != nil {
+		t.Error("expected nil service when repo nil")
+	}
+}
+
+func TestWebPushService_NilIsNoop(t *testing.T) {
+	var svc *WebPushService
+	ctx := context.Background()
+	if err := svc.Subscribe(ctx, uuid.New(), uuid.New(), PushSubscription{}); err != nil {
+		t.Errorf("nil Subscribe: %v", err)
+	}
+	if err := svc.Unsubscribe(ctx, uuid.New(), uuid.New(), "e"); err != nil {
+		t.Errorf("nil Unsubscribe: %v", err)
+	}
+	if err := svc.Send(ctx, uuid.New(), uuid.New(), NotificationPayload{}); err != nil {
+		t.Errorf("nil Send: %v", err)
+	}
+	if svc.PublicKey() != "" {
+		t.Error("nil PublicKey should be empty")
+	}
+}
+
+func TestWebPushService_SubscribeValidation(t *testing.T) {
+	repo := newFakeWebPushRepo()
+	svc, _ := newTestService(t, repo, http.StatusCreated)
+	ctx := context.Background()
+	ws, user := uuid.New(), uuid.New()
+
+	if err := svc.Subscribe(ctx, ws, user, PushSubscription{Endpoint: "e"}); err == nil {
+		t.Error("expected error when keys missing")
+	}
+	if repo.count() != 0 {
+		t.Errorf("expected no subscription stored, got %d", repo.count())
+	}
+
+	sub := testSubscription(t, "https://push.example.com/abc")
+	if err := svc.Subscribe(ctx, ws, user, sub); err != nil {
+		t.Fatalf("Subscribe: %v", err)
+	}
+	if repo.count() != 1 {
+		t.Errorf("expected 1 subscription, got %d", repo.count())
+	}
+}
+
+func TestWebPushService_SendDeliversToAllSubscriptions(t *testing.T) {
+	repo := newFakeWebPushRepo()
+	svc, stub := newTestService(t, repo, http.StatusCreated)
+	ctx := context.Background()
+	ws, user := uuid.New(), uuid.New()
+
+	if err := svc.Subscribe(ctx, ws, user, testSubscription(t, "https://push.example.com/a")); err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.Subscribe(ctx, ws, user, testSubscription(t, "https://push.example.com/b")); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := svc.Send(ctx, ws, user, NotificationPayload{Title: "Hi", Body: "There"}); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	if stub.calls != 2 {
+		t.Errorf("expected 2 push deliveries, got %d", stub.calls)
+	}
+	if repo.count() != 2 {
+		t.Errorf("expected subscriptions retained on success, got %d", repo.count())
+	}
+}
+
+func TestWebPushService_SendRemovesSubscriptionOn410(t *testing.T) {
+	repo := newFakeWebPushRepo()
+	svc, stub := newTestService(t, repo, http.StatusGone)
+	ctx := context.Background()
+	ws, user := uuid.New(), uuid.New()
+
+	if err := svc.Subscribe(ctx, ws, user, testSubscription(t, "https://push.example.com/gone")); err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.Send(ctx, ws, user, NotificationPayload{Title: "Hi", Body: "There"}); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	if stub.calls != 1 {
+		t.Errorf("expected 1 delivery attempt, got %d", stub.calls)
+	}
+	if repo.count() != 0 {
+		t.Errorf("expected expired subscription auto-removed, got %d", repo.count())
+	}
+}
+
+func TestWebPushService_SendNoSubscriptionsIsNoop(t *testing.T) {
+	repo := newFakeWebPushRepo()
+	svc, stub := newTestService(t, repo, http.StatusCreated)
+	if err := svc.Send(context.Background(), uuid.New(), uuid.New(), NotificationPayload{Title: "x"}); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	if stub.calls != 0 {
+		t.Errorf("expected no deliveries, got %d", stub.calls)
+	}
+}
+
+func TestWebPushService_Unsubscribe(t *testing.T) {
+	repo := newFakeWebPushRepo()
+	svc, _ := newTestService(t, repo, http.StatusCreated)
+	ctx := context.Background()
+	ws, user := uuid.New(), uuid.New()
+	sub := testSubscription(t, "https://push.example.com/x")
+	if err := svc.Subscribe(ctx, ws, user, sub); err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.Unsubscribe(ctx, ws, user, ""); err == nil {
+		t.Error("expected error on empty endpoint")
+	}
+	if err := svc.Unsubscribe(ctx, ws, user, sub.Endpoint); err != nil {
+		t.Fatalf("Unsubscribe: %v", err)
+	}
+	if repo.count() != 0 {
+		t.Errorf("expected subscription removed, got %d", repo.count())
+	}
+}
+
+// TestWebPushPublisher_FansToPushForOfflineUser verifies the publisher
+// decorator delegates to the inner publisher and only pushes to users
+// without a live WebSocket connection.
+func TestWebPushPublisher_FansToPushForOfflineUser(t *testing.T) {
+	ctx := context.Background()
+	ws, online, offline := uuid.New(), uuid.New(), uuid.New()
+
+	inner := &recordingPublisher{}
+	conns := connSet{online: true}
+	push := &recordingPushSender{}
+	pub := NewWebPushPublisher(inner, conns, push)
+
+	evt := Event{Type: "notification", Payload: &Notification{Title: "T", Body: "B", Type: "share_link.created"}}
+
+	if err := pub.Publish(ctx, ws, online, evt); err != nil {
+		t.Fatalf("Publish online: %v", err)
+	}
+	if err := pub.Publish(ctx, ws, offline, evt); err != nil {
+		t.Fatalf("Publish offline: %v", err)
+	}
+
+	if inner.calls != 2 {
+		t.Errorf("expected inner publish for both users, got %d", inner.calls)
+	}
+	if len(push.sent) != 1 {
+		t.Fatalf("expected 1 push (offline only), got %d", len(push.sent))
+	}
+	if push.sent[0] != offline {
+		t.Errorf("expected push to offline user %s, got %s", offline, push.sent[0])
+	}
+}
+
+func TestWebPushPublisher_IgnoresNonNotificationEvents(t *testing.T) {
+	inner := &recordingPublisher{}
+	push := &recordingPushSender{}
+	pub := NewWebPushPublisher(inner, connSet{}, push)
+	if err := pub.Publish(context.Background(), uuid.New(), uuid.New(), Event{Type: "change", Payload: map[string]string{"k": "v"}}); err != nil {
+		t.Fatal(err)
+	}
+	if len(push.sent) != 0 {
+		t.Errorf("expected no push for non-notification event, got %d", len(push.sent))
+	}
+}
+
+type recordingPublisher struct{ calls int }
+
+func (r *recordingPublisher) Publish(_ context.Context, _, _ uuid.UUID, _ Event) error {
+	r.calls++
+	return nil
+}
+
+type recordingPushSender struct{ sent []uuid.UUID }
+
+func (r *recordingPushSender) Send(_ context.Context, _, userID uuid.UUID, _ NotificationPayload) error {
+	r.sent = append(r.sent, userID)
+	return nil
+}
+
+// connSet reports a user as connected when present in the map.
+type connSet map[uuid.UUID]bool
+
+func (c connSet) IsConnected(_, userID uuid.UUID) bool { return c[userID] }

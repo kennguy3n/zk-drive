@@ -5,6 +5,8 @@ import SignupPage from "./pages/SignupPage";
 import FileBrowserPage from "./pages/FileBrowserPage";
 import RequireAuth from "./components/RequireAuth";
 import InstallPrompt from "./components/InstallPrompt";
+import { useAuth } from "./hooks/useAuth";
+import { usePushNotifications } from "./hooks/usePushNotifications";
 
 // Admin-only pages are off the critical path — split them into their own
 // chunks so the initial JS payload stays small for the login / drive flows.
@@ -37,6 +39,12 @@ const TwoFactorEnrollPage = lazy(() => import("./pages/TwoFactorEnrollPage"));
 // event survives lazy-route transitions (the browser only fires that event
 // once per page load).
 export default function App() {
+  // Register the browser for Web Push once the user is authenticated so
+  // PWA notifications arrive with the tab closed. No-op when the browser
+  // lacks push support or the server has web push disabled.
+  const { token } = useAuth();
+  usePushNotifications(token);
+
   return (
     <>
       <InstallPrompt />

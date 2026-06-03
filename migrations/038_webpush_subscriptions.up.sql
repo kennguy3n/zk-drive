@@ -1,0 +1,54 @@
+-- Web Push (RFC 8030 + VAPID) browser push subscriptions.
+--
+-- PWA clients that have granted the Notification permission register a
+-- PushSubscription here so the server can deliver notifications even
+-- when no tab is open / no WebSocket is connected. One row per
+-- (workspace, user, endpoint): a user with the PWA installed on a
+-- laptop and a phone has two rows. The browser-supplied `endpoint` is
+-- the push service URL (FCM / Mozilla autopush / Apple), and
+-- (p256dh, auth) are the base64url ECDH/auth keys used by the
+-- webpush-go library to encrypt the payload per RFC 8291.
+--
+-- # Lifecycle
+--
+-- Rows are created by POST /api/push/subscribe and removed either by
+-- DELETE /api/push/subscribe (the user revokes / logs out) or
+-- automatically by the WebPushService when a push attempt returns
+-- 410 Gone (the browser expired the subscription).
+--
+-- # RLS
+--
+-- Same `tenant_isolation` pattern as the rest of the schema
+-- (migration 024). Request-scoped queries set the app.workspace_id
+-- GUC and see only their own workspace; the notification publisher
+-- runs without the GUC set so the `app_current_workspace_id() IS NULL`
+-- bypass branch fires when it fans push messages out to offline users.
+
+CREATE TABLE webpush_subscriptions (
+    id           UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    workspace_id UUID NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+    user_id      UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    endpoint     TEXT NOT NULL,
+    p256dh       TEXT NOT NULL,
+    auth         TEXT NOT NULL,
+    created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+    UNIQUE(workspace_id, user_id, endpoint)
+);
+
+-- Hot path on every notification publish: "find every push
+-- subscription for (workspace, user)" so we can fan out to a user's
+-- registered devices when they're not connected via WebSocket.
+CREATE INDEX idx_webpush_subs_workspace_user
+    ON webpush_subscriptions (workspace_id, user_id);
+
+ALTER TABLE webpush_subscriptions ENABLE ROW LEVEL SECURITY;
+ALTER TABLE webpush_subscriptions FORCE ROW LEVEL SECURITY;
+CREATE POLICY tenant_isolation ON webpush_subscriptions
+    USING (
+        app_current_workspace_id() IS NULL
+        OR workspace_id = app_current_workspace_id()
+    )
+    WITH CHECK (
+        app_current_workspace_id() IS NULL
+        OR workspace_id = app_current_workspace_id()
+    );

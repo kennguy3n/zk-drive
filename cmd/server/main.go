@@ -496,6 +496,24 @@ func run() error {
 		}()
 	}
 
+	// Web Push (RFC 8030 + VAPID). Constructed only when both VAPID
+	// keys are configured; otherwise webPushSvc stays nil and the
+	// /api/push/* endpoints respond 501. When enabled, wrap the
+	// notification publisher so a "notification" event for a user
+	// with no live WebSocket connection on this replica also fans out
+	// as a browser push message.
+	var webPushSvc *notification.WebPushService
+	if cfg.WebPushEnabled() {
+		webPushSvc = notification.NewWebPushService(
+			notification.NewPostgresRepository(pool),
+			cfg.VAPIDPublicKey, cfg.VAPIDPrivateKey,
+		)
+		notificationPublisher = notification.NewWebPushPublisher(notificationPublisher, hub, webPushSvc)
+		slog.Info("web push enabled, offline notifications will fan out via VAPID")
+	} else {
+		slog.Warn("web push disabled (VAPID_PUBLIC_KEY / VAPID_PRIVATE_KEY unset), /api/push/* will respond 501")
+	}
+
 	notificationSvc := notification.NewService(notification.NewPostgresRepository(pool)).
 		WithPublisher(notificationPublisher)
 
@@ -632,6 +650,7 @@ func run() error {
 		WithClientRooms(clientRoomSvc).
 		WithJobs(jobPublisher).
 		WithNotifications(notificationSvc).
+		WithWebPush(webPushSvc).
 		WithChangefeed(changefeedSvc).
 		WithEmail(emailSvc).
 		WithPreviews(previewRepo).
@@ -1058,6 +1077,12 @@ func run() error {
 			r.Get("/notifications", driveHandler.ListNotifications)
 			r.Post("/notifications/read-all", driveHandler.MarkAllNotificationsRead)
 			r.Post("/notifications/{id}/read", driveHandler.MarkNotificationRead)
+
+			// Web Push (RFC 8030 + VAPID) subscription management.
+			// Respond 501 when VAPID keys are unconfigured.
+			r.Get("/push/vapid-public-key", driveHandler.VAPIDPublicKey)
+			r.Post("/push/subscribe", driveHandler.SubscribePush)
+			r.Delete("/push/subscribe", driveHandler.UnsubscribePush)
 
 			r.Get("/activity", driveHandler.ListActivity)
 
