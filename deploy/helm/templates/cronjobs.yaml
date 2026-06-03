@@ -34,7 +34,7 @@ spec:
               command: ["/app/reconciler"]
               {{- include "zk-drive.envFrom" . | nindent 14 }}
               resources:
-                {{- toYaml .Values.cronjobs.resources | nindent 16 }}
+                {{- toYaml (.Values.cronjobs.reconciler.resources | default .Values.cronjobs.resources) | nindent 16 }}
 {{- end }}
 {{- if .Values.cronjobs.orphanGc.enabled }}
 ---
@@ -73,7 +73,7 @@ spec:
               command: ["/app/orphan-gc"]
               {{- include "zk-drive.envFrom" . | nindent 14 }}
               resources:
-                {{- toYaml .Values.cronjobs.resources | nindent 16 }}
+                {{- toYaml (.Values.cronjobs.orphanGc.resources | default .Values.cronjobs.resources) | nindent 16 }}
 {{- end }}
 {{- if .Values.cronjobs.auditArchiver.enabled }}
 ---
@@ -118,5 +118,5 @@ spec:
                   value: {{ .Values.cronjobs.auditArchiver.enabledFlag | quote }}
               {{- include "zk-drive.envFrom" . | nindent 14 }}
               resources:
-                {{- toYaml .Values.cronjobs.resources | nindent 16 }}
+                {{- toYaml (.Values.cronjobs.auditArchiver.resources | default .Values.cronjobs.resources) | nindent 16 }}
 {{- end }}

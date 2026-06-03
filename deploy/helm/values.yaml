@@ -179,6 +179,22 @@ cronjobs:
     activeDeadlineSeconds: 14400
     # Opt-in gate; archiver no-ops until true.
     enabledFlag: "true"
+    # The archiver is bound by S3 PUT latency and gzip CPU on the batch
+    # encoder; its memory limit is intentionally double the other
+    # CronJobs' (512Mi vs 256Mi) to hold the encoder working set +
+    # JSONL.gz scratch buffer — matching deploy/k8s/audit-archiver-cronjob.yaml.
+    # Each CronJob falls back to the shared cronjobs.resources below when
+    # its own .resources is unset, so only the archiver overrides it here.
+    resources:
+      requests:
+        cpu: 100m
+        memory: 128Mi
+      limits:
+        cpu: 500m
+        memory: 512Mi
+  # Shared default for any CronJob without its own .resources block
+  # (reconciler + orphan-gc; both are Postgres/S3-latency bound, not
+  # CPU/memory bound, so 256Mi is ample — see the raw manifests).
   resources:
     requests:
       cpu: 50m
