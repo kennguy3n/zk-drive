@@ -6,6 +6,7 @@ import FileList from "../components/FileList";
 import UploadButton from "../components/UploadButton";
 import SearchBar from "../components/SearchBar";
 import ShareDialog from "../components/ShareDialog";
+import OnlyOfficeEditor from "../components/OnlyOfficeEditor";
 import EncryptionBadge, { type EncryptionMode } from "../components/EncryptionBadge";
 import { translateApiError } from "../api/errors";
 import {
@@ -19,6 +20,7 @@ import {
   deleteFolder,
   fetchClientRoomTemplates,
   getFolderContents,
+  getOnlyOfficeStatus,
   listFolders,
   renameFile,
   type ClientRoomTemplate,
@@ -52,6 +54,10 @@ export default function FileBrowserPage() {
   const [selectedFiles, setSelectedFiles] = useState<Set<string>>(new Set());
   const [createFolderOpen, setCreateFolderOpen] = useState(false);
   const [templateDialogOpen, setTemplateDialogOpen] = useState(false);
+  // Office editing: feature flag (from the backend) plus the file
+  // currently open in the OnlyOffice editor overlay.
+  const [onlyOfficeEnabled, setOnlyOfficeEnabled] = useState(false);
+  const [editorFile, setEditorFile] = useState<FileItem | null>(null);
 
   const toggleSelect = useCallback((id: string) => {
     setSelectedFiles((prev) => {
@@ -86,6 +92,23 @@ export default function FileBrowserPage() {
   useEffect(() => {
     refresh();
   }, [refresh]);
+
+  // Probe the office-editing feature flag once on mount. A failure
+  // (endpoint missing / network) leaves it disabled so the Edit
+  // affordance simply stays hidden.
+  useEffect(() => {
+    let cancelled = false;
+    getOnlyOfficeStatus()
+      .then((enabled) => {
+        if (!cancelled) setOnlyOfficeEnabled(enabled);
+      })
+      .catch(() => {
+        if (!cancelled) setOnlyOfficeEnabled(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   // Selections are folder-scoped; clearing them on navigation prevents
   // stale IDs from a previous folder leaking into bulk operations.
@@ -333,6 +356,7 @@ export default function FileBrowserPage() {
               refresh();
             }}
             onShare={(f) => setShareTarget({ type: "file", value: f })}
+            onEdit={onlyOfficeEnabled ? (f) => setEditorFile(f) : undefined}
             selectedIDs={selectedFiles}
             onToggleSelect={toggleSelect}
           />
@@ -340,6 +364,28 @@ export default function FileBrowserPage() {
       </main>
       {shareTarget ? (
         <ShareDialog resource={shareTarget} onClose={() => setShareTarget(null)} />
+      ) : null}
+      {editorFile ? (
+        <div
+          style={editorOverlayStyle}
+          role="dialog"
+          aria-modal="true"
+          aria-label={t("onlyoffice.title")}
+        >
+          <div style={editorModalStyle}>
+            <OnlyOfficeEditor
+              fileID={editorFile.id}
+              mode="edit"
+              onClose={() => {
+                setEditorFile(null);
+                // The save callback writes a new version server-side;
+                // refresh so the listing reflects the latest size /
+                // modified time once the editor closes.
+                refresh();
+              }}
+            />
+          </div>
+        </div>
       ) : null}
       {createFolderOpen ? (
         <CreateFolderDialog
@@ -676,6 +722,30 @@ const btn: React.CSSProperties = {
   border: "1px solid #d1d5db",
   borderRadius: 4,
   fontSize: 13,
+};
+
+// Full-screen scrim + centred panel for the OnlyOffice editor. The
+// Document Server renders into an iframe that wants a large viewport,
+// so the modal claims most of the screen.
+const editorOverlayStyle: React.CSSProperties = {
+  position: "fixed",
+  inset: 0,
+  background: "rgba(0,0,0,0.5)",
+  display: "flex",
+  alignItems: "center",
+  justifyContent: "center",
+  zIndex: 1000,
+  padding: 24,
+};
+
+const editorModalStyle: React.CSSProperties = {
+  background: "white",
+  borderRadius: 6,
+  width: "min(1200px, 96vw)",
+  height: "min(860px, 92vh)",
+  display: "flex",
+  flexDirection: "column",
+  overflow: "hidden",
 };
 
 // Privacy-mode comparison-table styles used by CreateFolderDialog. The

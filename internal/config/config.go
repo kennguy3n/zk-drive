@@ -357,6 +357,22 @@ type Config struct {
 	// working unchanged.
 	VAPIDPublicKey  string
 	VAPIDPrivateKey string
+
+	// OnlyOfficeURL is the base URL of the ONLYOFFICE Document Server
+	// (e.g. "https://onlyoffice.example.com"). When empty,
+	// collaborative office-document editing is disabled: the
+	// /api/files/{id}/editor-config endpoint reports the feature as
+	// unavailable and the frontend hides the "Open in Editor" button
+	// (graceful degradation). Set via ONLYOFFICE_URL.
+	OnlyOfficeURL string
+	// OnlyOfficeSecret is the shared JWT secret configured on the
+	// ONLYOFFICE Document Server (its JWT_ENABLED / JWT_SECRET pair).
+	// The server signs the editor config it hands the browser and
+	// verifies the JWT on inbound Document Server save callbacks with
+	// this value. When empty, the config is emitted unsigned and the
+	// callback skips token verification — acceptable only for trusted
+	// local development. Set via ONLYOFFICE_SECRET.
+	OnlyOfficeSecret string
 }
 
 // WebPushEnabled reports whether both VAPID keys are configured. When
@@ -485,6 +501,9 @@ func buildConfigFromEnv() *Config {
 
 		VAPIDPublicKey:  strings.TrimSpace(os.Getenv("VAPID_PUBLIC_KEY")),
 		VAPIDPrivateKey: strings.TrimSpace(os.Getenv("VAPID_PRIVATE_KEY")),
+
+		OnlyOfficeURL:    strings.TrimSpace(os.Getenv("ONLYOFFICE_URL")),
+		OnlyOfficeSecret: os.Getenv("ONLYOFFICE_SECRET"),
 	}
 }
 

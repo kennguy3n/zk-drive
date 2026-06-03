@@ -110,6 +110,18 @@ export default function App() {
               </RequireAuth>
             }
           />
+          {/* Canonical collaborative-editor deep link. Aliases the
+              /drive/document/:id route above so links shaped as
+              /documents/:id/edit (e.g. from the file list "Edit"
+              button) resolve to the same TipTap + Yjs editor. */}
+          <Route
+            path="/documents/:id/edit"
+            element={
+              <RequireAuth>
+                <DocumentEditorPage />
+              </RequireAuth>
+            }
+          />
           <Route
             path="/admin"
             element={
