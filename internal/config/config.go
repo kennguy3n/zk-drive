@@ -72,6 +72,17 @@ type Config struct {
 	// TRUSTED_PROXY_DEPTH; defaults to 1 (single load balancer).
 	TrustedProxyDepth int
 
+	// Preview pipeline scaling + per-tenant fairness. The budget is a
+	// Redis-backed sliding-window limit on previews generated per
+	// workspace per hour so one tenant bulk-uploading cannot starve
+	// the shared worker fleet; the priority / standard worker counts
+	// size the two goroutine pools the worker fans preview jobs
+	// across (paid tiers get the larger priority pool). All three
+	// fall back to their defaults when unset or <= 0.
+	PreviewBudgetPerWorkspaceHour int
+	PreviewPriorityWorkers        int
+	PreviewStandardWorkers        int
+
 	// RedisURL switches the rate limiter and session store from
 	// in-memory state to a Redis-backed implementation so limits and
 	// session revocation work across replicas. When empty, the
@@ -415,6 +426,9 @@ func buildConfigFromEnv() *Config {
 		RateLimitPerUser:        parseIntDefault(os.Getenv("RATE_LIMIT_PER_USER"), 0),
 		RateLimitPerWorkspace:   parseIntDefault(os.Getenv("RATE_LIMIT_PER_WORKSPACE"), 0),
 		TrustedProxyDepth:       parseNonNegativeIntDefault(os.Getenv("TRUSTED_PROXY_DEPTH"), 1),
+		PreviewBudgetPerWorkspaceHour: parseIntDefault(os.Getenv("PREVIEW_BUDGET_PER_WORKSPACE_HOUR"), 100),
+		PreviewPriorityWorkers:        parseIntDefault(os.Getenv("PREVIEW_PRIORITY_WORKERS"), 6),
+		PreviewStandardWorkers:        parseIntDefault(os.Getenv("PREVIEW_STANDARD_WORKERS"), 2),
 		RedisURL:                os.Getenv("REDIS_URL"),
 		FabricConsoleURL:        os.Getenv("FABRIC_CONSOLE_URL"),
 		FabricConsoleAdminToken: os.Getenv("FABRIC_CONSOLE_ADMIN_TOKEN"),
