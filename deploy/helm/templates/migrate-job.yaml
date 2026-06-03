@@ -22,7 +22,9 @@ spec:
   template:
     metadata:
       labels:
-        app: zk-drive
+        # Batch label so allow-batch-egress lets this pre-upgrade hook
+        # reach Postgres (and S3) under the default-deny policy.
+        app: zk-drive-batch
         component: migrate
     spec:
       restartPolicy: Never

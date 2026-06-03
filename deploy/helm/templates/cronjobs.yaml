@@ -18,6 +18,12 @@ spec:
       backoffLimit: 2
       ttlSecondsAfterFinished: 86400
       template:
+        metadata:
+          labels:
+            # Batch label so allow-batch-egress permits DB/NATS/S3
+            # egress under the namespace default-deny policy.
+            app: zk-drive-batch
+            component: reconciler
         spec:
           restartPolicy: OnFailure
           {{- include "zk-drive.imagePullSecrets" . | nindent 10 }}
@@ -51,6 +57,12 @@ spec:
       backoffLimit: 2
       ttlSecondsAfterFinished: 86400
       template:
+        metadata:
+          labels:
+            # Batch label so allow-batch-egress permits DB/NATS/S3
+            # egress under the namespace default-deny policy.
+            app: zk-drive-batch
+            component: orphan-gc
         spec:
           restartPolicy: OnFailure
           {{- include "zk-drive.imagePullSecrets" . | nindent 10 }}
@@ -87,6 +99,12 @@ spec:
       backoffLimit: 2
       ttlSecondsAfterFinished: 86400
       template:
+        metadata:
+          labels:
+            # Batch label so allow-batch-egress permits DB/NATS/S3
+            # egress under the namespace default-deny policy.
+            app: zk-drive-batch
+            component: audit-archiver
         spec:
           restartPolicy: OnFailure
           {{- include "zk-drive.imagePullSecrets" . | nindent 10 }}

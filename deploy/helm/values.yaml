@@ -230,3 +230,8 @@ networkPolicy:
   dnsNamespace: kube-system
   # Allow egress to Redis on this port (managed/external friendly).
   redisPort: 6379
+  # Allow egress to the S3 / zk-object-fabric endpoint on this port
+  # (port-only, so managed/external S3 works). Server uses it for the
+  # /readyz HeadBucket check; worker for previews, scanning, orphan-gc,
+  # and audit archiving.
+  s3Port: 443

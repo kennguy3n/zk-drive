@@ -75,8 +75,13 @@ every manifest in `k8s/` and adds the production-readiness objects:
   node drains / cluster upgrades never take a tier fully offline.
 - **NetworkPolicies** — default-deny ingress+egress with scoped allows
   (ingress→server:8080, Prometheus→server:8080 / worker:9091,
-  server/worker→Postgres:5432 / Redis:6379 / NATS:4222,
-  worker→ClamAV:3310, and DNS egress to kube-dns).
+  server/worker→Postgres:5432 / Redis:6379 / NATS:4222 / S3:443,
+  worker→ClamAV:3310, a batch-egress policy for the migrate Job and
+  CronJobs (`app: zk-drive-batch`) covering the same backends, and DNS
+  egress to kube-dns). The S3 egress (443) is what lets the server run
+  its `/readyz` HeadBucket check and the worker reach zk-object-fabric
+  for previews, scanning, orphan GC, and audit archiving; set the port
+  via `networkPolicy.s3Port`.
 - **Pod anti-affinity + topology spread** so replicas spread across
   nodes and availability zones.
 - **Migration Job** as a `pre-install,pre-upgrade` hook so the schema is
@@ -121,6 +126,18 @@ Provide the credentials via a pre-provisioned Secret
 (`secrets.create=false`, `secrets.existingSecret=<name>`) populated by
 External Secrets Operator, Sealed Secrets, or your cloud's secret
 manager rather than chart `--set` values.
+
+> **NetworkPolicy + managed endpoints.** The egress policies match the
+> bundled Postgres / NATS / ClamAV by in-cluster `podSelector`, so they
+> only permit traffic to pods carrying those labels. A managed Postgres
+> or NATS (RDS, Cloud SQL, NGS) has no in-cluster pod to select, so the
+> `podSelector` rule won't match its IP and the connection is dropped
+> under default-deny. Redis and S3 are already allowed **port-only** for
+> exactly this reason. When you point the app at a managed backend,
+> relax that backend's rule to a port-only `egress` entry (drop the
+> `to.podSelector`) — or, on Cilium/Calico, use a CIDR/FQDN selector
+> scoped to the provider — in both `k8s/networkpolicy.yaml` and the
+> chart's `templates/networkpolicy.yaml`.
 
 ### PgBouncer sidecar / connection pooling
 

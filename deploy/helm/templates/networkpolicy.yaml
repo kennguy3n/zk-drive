@@ -100,6 +100,9 @@ spec:
     - ports:
         - protocol: TCP
           port: {{ .Values.networkPolicy.redisPort }}
+    - ports:
+        - protocol: TCP
+          port: {{ .Values.networkPolicy.s3Port }}
 {{- if .Values.worker.metricsEnabled }}
 ---
 # Worker ingress: Prometheus scraping /metrics.
@@ -126,7 +129,7 @@ spec:
           port: {{ .Values.worker.metricsPort }}
 {{- end }}
 ---
-# Worker egress: Postgres, NATS, ClamAV, Redis.
+# Worker egress: Postgres, NATS, ClamAV, Redis, S3.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -165,4 +168,53 @@ spec:
     - ports:
         - protocol: TCP
           port: {{ .Values.networkPolicy.redisPort }}
+    - ports:
+        - protocol: TCP
+          port: {{ .Values.networkPolicy.s3Port }}
+---
+# Batch egress: migrate Job + reconciler/orphan-gc/audit-archiver
+# CronJobs share the `app: zk-drive-batch` pod label and aren't matched
+# by the server/worker egress rules, so open the backends they touch
+# (Postgres, NATS, ClamAV, Redis, S3). DNS is via allow-dns-egress.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-batch-egress
+  namespace: {{ $ns }}
+  labels:
+    {{- $labels | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      app: zk-drive-batch
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              app: postgres
+      ports:
+        - protocol: TCP
+          port: 5432
+    - to:
+        - podSelector:
+            matchLabels:
+              app: nats
+      ports:
+        - protocol: TCP
+          port: 4222
+    - to:
+        - podSelector:
+            matchLabels:
+              app: clamav
+      ports:
+        - protocol: TCP
+          port: 3310
+    - ports:
+        - protocol: TCP
+          port: {{ .Values.networkPolicy.redisPort }}
+    - ports:
+        - protocol: TCP
+          port: {{ .Values.networkPolicy.s3Port }}
 {{- end }}
