@@ -27,6 +27,38 @@ is read-only against S3.
 | `LISTEN_ADDR`    | `:8080`      | HTTP listen address for the API server.                                                       |
 | `MIGRATIONS_DIR` | `migrations` | Path to SQL migrations applied by `migrate` (read-only by `server` / `worker`).                |
 | `STATIC_DIR`     | _empty_      | Optional path to the frontend Vite build. When set, the server serves the SPA from this dir.   |
+| `TRUSTED_PROXY_DEPTH` | `1`     | Number of trusted reverse proxies in front of the server. Governs how the IP-allowlist middleware resolves the client IP from `X-Forwarded-For`. See [IP allowlisting](#ip-allowlisting-trusted_proxy_depth).  |
+
+### IP allowlisting (`TRUSTED_PROXY_DEPTH`)
+
+Workspaces may restrict access to a set of public CIDR ranges
+(conditional access). When a workspace enables its allowlist, the
+server enforces it on every authenticated data-plane request by
+resolving the client IP and rejecting any address not covered by a
+rule with `403 Forbidden` and an `X-ZkDrive-IP-Blocked: true` header.
+
+`TRUSTED_PROXY_DEPTH` tells the server how many reverse proxies (load
+balancers, CDNs) sit in front of it so it can trust the right entry in
+the `X-Forwarded-For` header. The header is a left-to-right list of
+addresses appended by each hop; only the right-most entries — those
+added by infrastructure you control — are trustworthy, because a
+client can forge any value to the left. The middleware takes the
+address `TRUSTED_PROXY_DEPTH` entries from the **right**:
+
+- `1` (default): a single trusted proxy (e.g. one ALB/nginx). The
+  client IP is the last `X-Forwarded-For` entry.
+- `2`: two trusted hops (e.g. CDN → load balancer). The client IP is
+  the second-from-last entry.
+- `0`: no trusted proxy; ignore `X-Forwarded-For` entirely and use the
+  raw TCP peer address (`RemoteAddr`).
+
+If the header is absent or has fewer entries than the configured
+depth, the server falls back to `RemoteAddr`. **Set this to the actual
+number of proxies in your deployment** — too low admits spoofed
+addresses, too high trusts a client-supplied entry. Because the
+allowlist only accepts public ranges, the resolved client IP must be a
+routable public address, so it must reflect the real external client
+rather than an internal proxy hop.
 
 ## Storage (zk-object-fabric S3 gateway)
 

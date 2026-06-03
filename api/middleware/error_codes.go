@@ -64,6 +64,11 @@ const (
 	ErrCodeAdminOnly   ErrorCode = "ADMIN_ACCESS_REQUIRED"
 	ErrCodeReadOnly    ErrorCode = "READ_ONLY_ROLE"
 	ErrCodeWrongTenant ErrorCode = "WRONG_TENANT"
+	// ErrCodeIPBlocked (403) — the workspace has IP allowlisting
+	// enabled and the resolved client IP is not contained by any
+	// configured rule. Returned by the IPAllowlist middleware
+	// alongside the X-ZkDrive-IP-Blocked: true response header.
+	ErrCodeIPBlocked ErrorCode = "IP_NOT_ALLOWED"
 
 	// Workspace-routing failure (401 Unauthorized). Distinct from the
 	// AUTH_* codes above because the user IS authenticated — we just
@@ -100,6 +105,14 @@ const (
 	// allow-list via GET /workspace/search-language; the error
 	// payload itself stays in the standard {code,message} envelope.
 	ErrCodeUnsupportedLanguage ErrorCode = "UNSUPPORTED_SEARCH_LANGUAGE"
+
+	// IP allowlist rule validation (400). Distinct codes so the
+	// admin UI can render targeted hints: a malformed CIDR vs. a
+	// well-formed but private/reserved range vs. hitting the
+	// per-workspace rule cap.
+	ErrCodeInvalidCIDR     ErrorCode = "INVALID_CIDR"
+	ErrCodePrivateCIDR     ErrorCode = "PRIVATE_CIDR_NOT_ALLOWED"
+	ErrCodeRuleCapExceeded ErrorCode = "IP_RULE_CAP_EXCEEDED"
 
 	// Resource state (404 / 409 / 410).
 	ErrCodeNotFound      ErrorCode = "NOT_FOUND"

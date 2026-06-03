@@ -645,12 +645,28 @@ func run() error {
 			AdminToken: cfg.FabricConsoleAdminToken,
 		})
 	}
+	// Per-workspace IP allowlisting (conditional access). The
+	// service caches the allowlist in Redis when available
+	// (redisClient may be nil — caching simply disabled) and reads
+	// through to Postgres otherwise. Shared between the admin CRUD
+	// handler and the enforcement middleware mounted on the
+	// authenticated route group below.
+	// Pass a true nil interface (not a typed-nil *redis.Client) when
+	// Redis is unconfigured so the service's nil-check disables
+	// caching cleanly instead of dereferencing a nil client.
+	var ipAllowRedis redis.UniversalClient
+	if redisClient != nil {
+		ipAllowRedis = redisClient
+	}
+	ipAllowSvc := workspace.NewIPAllowService(workspace.NewPostgresIPAllowStore(pool), ipAllowRedis)
+
 	adminHandler := admin.NewHandler(pool, userSvc, auditSvc, retentionSvc).
 		WithBilling(billingSvc).
 		WithStripe(stripeService).
 		WithFabric(fabricClient, provisioner, storageFactory).
 		WithWorkspaces(wsSvc).
-		WithWebhooks(webhookPublisher)
+		WithWebhooks(webhookPublisher).
+		WithIPAllow(ipAllowSvc)
 
 	// Outbound-webhook subscription admin handler. Mounted
 	// under /api/admin/webhooks so it inherits the admin-only +
@@ -990,6 +1006,14 @@ func run() error {
 		r.Group(func(r chi.Router) {
 			r.Use(middleware.AuthMiddleware(cfg.JWTSecret, sessionChecker))
 			r.Use(middleware.TenantGuard())
+			// IP allowlist enforcement runs after the tenant guard
+			// has resolved the workspace. It is a no-op for any
+			// workspace that has not enabled the feature. Mounted on
+			// the data-plane group only — NOT the /admin group below
+			// — so an admin who misconfigures the allowlist can still
+			// reach the management endpoints to fix it and cannot
+			// lock themselves out of their own workspace.
+			r.Use(middleware.IPAllowlist(ipAllowSvc, cfg.TrustedProxyDepth))
 			r.Use(rateLimiter())
 
 			r.Get("/workspaces", driveHandler.ListWorkspaces)

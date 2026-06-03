@@ -41,6 +41,15 @@ type Config struct {
 	RateLimitPerUser      int
 	RateLimitPerWorkspace int
 
+	// TrustedProxyDepth is the number of trusted reverse proxies in
+	// front of the server. It governs how the IP-allowlist
+	// middleware resolves the client IP from X-Forwarded-For: the
+	// real client address is taken TrustedProxyDepth entries from
+	// the right of the header (entries further left are
+	// client-supplied and spoofable). Sourced from
+	// TRUSTED_PROXY_DEPTH; defaults to 1 (single load balancer).
+	TrustedProxyDepth int
+
 	// RedisURL switches the rate limiter and session store from
 	// in-memory state to a Redis-backed implementation so limits and
 	// session revocation work across replicas. When empty, the
@@ -360,6 +369,7 @@ func buildConfigFromEnv() *Config {
 		MicrosoftRedirectURL:  os.Getenv("MICROSOFT_REDIRECT_URL"),
 		RateLimitPerUser:        parseIntDefault(os.Getenv("RATE_LIMIT_PER_USER"), 0),
 		RateLimitPerWorkspace:   parseIntDefault(os.Getenv("RATE_LIMIT_PER_WORKSPACE"), 0),
+		TrustedProxyDepth:       parseIntDefault(os.Getenv("TRUSTED_PROXY_DEPTH"), 1),
 		RedisURL:                os.Getenv("REDIS_URL"),
 		FabricConsoleURL:        os.Getenv("FABRIC_CONSOLE_URL"),
 		FabricConsoleAdminToken: os.Getenv("FABRIC_CONSOLE_ADMIN_TOKEN"),

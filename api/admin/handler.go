@@ -61,6 +61,7 @@ type Handler struct {
 	provisioner  *fabric.Provisioner
 	storeFactory *storage.ClientFactory
 	webhooks     MemberEventPublisher
+	ipAllow      *workspace.IPAllowService
 }
 
 // NewHandler constructs a Handler. Pass nil for services that are
@@ -149,6 +150,10 @@ func (h *Handler) RegisterRoutes(r chi.Router) {
 	r.Patch("/workspace/mfa-policy", h.UpdateMFAPolicy)
 	r.Get("/workspace/search-language", h.GetSearchLanguage)
 	r.Put("/workspace/search-language", h.UpdateSearchLanguage)
+	r.Get("/ip-allowlist", h.ListIPAllowRules)
+	r.Post("/ip-allowlist", h.AddIPAllowRule)
+	r.Delete("/ip-allowlist/{id}", h.RemoveIPAllowRule)
+	r.Patch("/ip-allowlist/policy", h.UpdateIPAllowPolicy)
 }
 
 // updateMFAPolicyRequest carries the boolean toggle for the

@@ -126,6 +126,10 @@ func TestErrorCodes_DistinctValues(t *testing.T) {
 		ErrCodeUpstream,
 		ErrCodeMaintenance,
 		ErrCodeStorageFailure,
+		ErrCodeIPBlocked,
+		ErrCodeInvalidCIDR,
+		ErrCodePrivateCIDR,
+		ErrCodeRuleCapExceeded,
 	}
 	seen := make(map[ErrorCode]int, len(codes))
 	for i, c := range codes {
