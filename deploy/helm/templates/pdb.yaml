@@ -1,0 +1,29 @@
+{{- if .Values.server.pdb.enabled }}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: zk-drive-server
+  namespace: {{ include "zk-drive.namespace" . }}
+  labels:
+    {{- include "zk-drive.labels" . | nindent 4 }}
+spec:
+  minAvailable: {{ .Values.server.pdb.minAvailable }}
+  selector:
+    matchLabels:
+      app: zk-drive-server
+{{- end }}
+{{- if .Values.worker.pdb.enabled }}
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: zk-drive-worker
+  namespace: {{ include "zk-drive.namespace" . }}
+  labels:
+    {{- include "zk-drive.labels" . | nindent 4 }}
+spec:
+  minAvailable: {{ .Values.worker.pdb.minAvailable }}
+  selector:
+    matchLabels:
+      app: zk-drive-worker
+{{- end }}

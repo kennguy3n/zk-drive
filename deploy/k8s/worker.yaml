@@ -22,6 +22,25 @@ spec:
         prometheus.io/port: "9091"
         prometheus.io/path: "/metrics"
     spec:
+      # Spread worker replicas across nodes (preferred) and AZs so a
+      # single node or zone loss doesn't take out the whole consumer
+      # fleet. minReplicas is 2 under hpa-worker.yaml.
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchLabels:
+                    app: zk-drive-worker
+                topologyKey: kubernetes.io/hostname
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: topology.kubernetes.io/zone
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app: zk-drive-worker
       containers:
         - name: worker
           image: ghcr.io/kennguy3n/zk-drive:0.1.0
@@ -67,10 +86,31 @@ spec:
               port: metrics
             initialDelaySeconds: 5
             periodSeconds: 10
+            timeoutSeconds: 3
+            successThreshold: 1
+            failureThreshold: 3
+          # Liveness uses the same metrics-port /healthz surface. A
+          # higher initialDelay than readiness gives the JetStream
+          # consumer time to connect before the kubelet starts
+          # counting liveness failures. If WORKER_METRICS_ADDR is
+          # disabled (see the operator coupling note above) this
+          # block must be removed alongside the readinessProbe.
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: metrics
+            initialDelaySeconds: 15
+            periodSeconds: 15
+            timeoutSeconds: 3
+            failureThreshold: 3
           resources:
+            # Requests sized at ~50%/75% of the limits — the worker
+            # carries a heavier steady-state footprint (NATS consumer +
+            # preview/encode work) than the server. hpa-worker.yaml
+            # scales on a 70% CPU target relative to this request.
             requests:
-              cpu: 100m
-              memory: 128Mi
+              cpu: 500m
+              memory: 384Mi
             limits:
               cpu: 1000m
               memory: 512Mi
