@@ -2,11 +2,14 @@
 # This is a YAML-formatted file. Override with `-f my-values.yaml` or
 # `--set key=value` at install/upgrade time.
 
-# -- Namespace the chart deploys into. The chart does NOT create the
-# namespace by default (set namespace.create=true to manage it here);
-# `helm install -n <ns> --create-namespace` is the common path.
+# -- Namespace the chart deploys into. Left empty so resources follow the
+# release namespace (`helm install -n <ns>`), the conventional Helm
+# behavior — `--set namespace.name=<ns>` only when you need to pin
+# resources to a namespace different from the release's. The chart does
+# NOT create the namespace by default (set namespace.create=true to manage
+# it here); `helm install -n zk-drive --create-namespace` is the common path.
 namespace:
-  name: zk-drive
+  name: ""
   create: false
 
 # Image used by server, worker, migrate Job, and all CronJobs — every
