@@ -746,14 +746,15 @@ func dbMaxConnsFromEnv() int32 {
 // down to maxConns so MinConns can never exceed MaxConns (pgxpool
 // rejects that configuration at NewWithConfig time).
 func dbMinConnsFromEnv(maxConns int32) int32 {
+	// n stays non-negative by construction: it starts at the default and
+	// is only reassigned from an explicitly-parsed value when v >= 0, so a
+	// negative DB_MIN_CONNS is ignored (default retained) rather than
+	// clamped — no separate floor check is needed.
 	n := defaultDBMinConns
 	if s := strings.TrimSpace(os.Getenv("DB_MIN_CONNS")); s != "" {
 		if v, err := strconv.Atoi(s); err == nil && v >= 0 {
 			n = v
 		}
-	}
-	if n < 0 {
-		n = 0
 	}
 	if int32(n) > maxConns {
 		return maxConns
