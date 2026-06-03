@@ -40,15 +40,22 @@ func (m *memIPAllowStore) ListRules(_ context.Context, ws uuid.UUID) ([]workspac
 	return out, nil
 }
 
-func (m *memIPAllowStore) CountRules(_ context.Context, ws uuid.UUID) (int, error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	return len(m.rules[ws]), nil
-}
-
+// AddRule mirrors PostgresIPAllowStore.AddRule's atomic cap +
+// uniqueness enforcement so the handler's 409 mappings
+// (IP_RULE_CAP_EXCEEDED / DUPLICATE_CIDR) are exercised without
+// Postgres.
 func (m *memIPAllowStore) AddRule(_ context.Context, rule workspace.IPRule) (workspace.IPRule, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	existing := m.rules[rule.WorkspaceID]
+	if len(existing) >= workspace.MaxIPRulesPerWorkspace {
+		return workspace.IPRule{}, workspace.ErrTooManyRules
+	}
+	for _, r := range existing {
+		if r.CIDR == rule.CIDR {
+			return workspace.IPRule{}, workspace.ErrDuplicateCIDR
+		}
+	}
 	if rule.ID == uuid.Nil {
 		rule.ID = uuid.New()
 	}
@@ -144,6 +151,34 @@ func TestAddIPAllowRule_PrivateRejected(t *testing.T) {
 	}
 	if resp.Code != middleware.ErrCodePrivateCIDR {
 		t.Fatalf("code: got %q want %q", resp.Code, middleware.ErrCodePrivateCIDR)
+	}
+}
+
+func TestAddIPAllowRule_DuplicateRejected(t *testing.T) {
+	store := newMemIPAllowStore()
+	_, r, ws := newIPAllowTestHandler(t, store)
+
+	body, _ := json.Marshal(addIPAllowRuleRequest{CIDR: "203.0.113.0/24", Label: "office"})
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, authedCtxRequest(http.MethodPost, "/ip-allowlist", body, ws))
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("first add status: got %d want %d (body=%s)", rec.Code, http.StatusCreated, rec.Body.String())
+	}
+
+	// Re-adding the same range (here via a host address that
+	// canonicalizes to the same network) must be a 409 DUPLICATE_CIDR.
+	body, _ = json.Marshal(addIPAllowRuleRequest{CIDR: "203.0.113.42/24", Label: "office-again"})
+	rec = httptest.NewRecorder()
+	r.ServeHTTP(rec, authedCtxRequest(http.MethodPost, "/ip-allowlist", body, ws))
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("duplicate add status: got %d want %d (body=%s)", rec.Code, http.StatusConflict, rec.Body.String())
+	}
+	var resp middleware.ErrorResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if resp.Code != middleware.ErrCodeDuplicateCIDR {
+		t.Fatalf("code: got %q want %q", resp.Code, middleware.ErrCodeDuplicateCIDR)
 	}
 }
 

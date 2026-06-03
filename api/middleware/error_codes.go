@@ -109,10 +109,12 @@ const (
 	// IP allowlist rule validation (400). Distinct codes so the
 	// admin UI can render targeted hints: a malformed CIDR vs. a
 	// well-formed but private/reserved range vs. hitting the
-	// per-workspace rule cap.
+	// per-workspace rule cap vs. re-adding a range that is already
+	// allowlisted (409 — the last two are conflicts, not 400s).
 	ErrCodeInvalidCIDR     ErrorCode = "INVALID_CIDR"
 	ErrCodePrivateCIDR     ErrorCode = "PRIVATE_CIDR_NOT_ALLOWED"
 	ErrCodeRuleCapExceeded ErrorCode = "IP_RULE_CAP_EXCEEDED"
+	ErrCodeDuplicateCIDR   ErrorCode = "DUPLICATE_CIDR"
 
 	// Resource state (404 / 409 / 410).
 	ErrCodeNotFound      ErrorCode = "NOT_FOUND"

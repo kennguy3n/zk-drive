@@ -35,10 +35,22 @@ CREATE TABLE workspace_ip_allowlist (
     cidr        CIDR        NOT NULL,
     label       TEXT        NOT NULL DEFAULT '',
     created_by  UUID        NOT NULL REFERENCES users(id),
-    created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+    -- A CIDR is a positive admission rule; storing the same range
+    -- twice (even under different labels) cannot widen access and
+    -- only burns one of the 50 rule slots. Enforce uniqueness in the
+    -- schema so AddRule's cap can't be silently wasted on duplicates
+    -- and so two concurrent adds of the same range can't both land.
+    -- cidr is canonicalised (host bits zeroed) by the Go layer before
+    -- insert, so "203.0.113.5/24" and "203.0.113.0/24" collide here.
+    CONSTRAINT uq_ip_allowlist_ws_cidr UNIQUE (workspace_id, cidr)
 );
 
-CREATE INDEX idx_ip_allowlist_ws ON workspace_ip_allowlist(workspace_id);
+-- No standalone index on (workspace_id): the uq_ip_allowlist_ws_cidr
+-- UNIQUE constraint above is backed by a btree on (workspace_id, cidr)
+-- whose leftmost column already serves every per-workspace lookup
+-- (ListRules ordered scan, the cap COUNT, the CheckAccess fetch). A
+-- separate single-column index would be redundant write amplification.
 
 -- tenant_isolation mirrors the direct-table policy from migration
 -- 024. Identical predicate so the cross-tenant guarantee is a

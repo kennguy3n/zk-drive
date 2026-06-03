@@ -10,6 +10,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/redis/go-redis/v9"
 
@@ -37,6 +38,13 @@ var ErrPrivateCIDR = errors.New("workspace: CIDR must be a public range")
 // ErrTooManyRules is returned by AddRule when the workspace already
 // holds MaxIPRulesPerWorkspace rules.
 var ErrTooManyRules = errors.New("workspace: ip allowlist rule cap reached")
+
+// ErrDuplicateCIDR is returned by AddRule when the workspace already
+// has a rule for the identical (canonicalized) CIDR. Enforced by the
+// UNIQUE(workspace_id, cidr) constraint in migration 035: a duplicate
+// range can never widen access, so admitting it would only waste one
+// of the MaxIPRulesPerWorkspace slots.
+var ErrDuplicateCIDR = errors.New("workspace: CIDR already allowlisted")
 
 // MaxIPRulesPerWorkspace caps the number of allowlist rules a single
 // workspace may hold. The cap bounds the cost of CheckAccess (a
@@ -77,11 +85,12 @@ type IPAllowStore interface {
 	// ListRules returns every rule for the workspace, ordered by
 	// created_at ascending.
 	ListRules(ctx context.Context, workspaceID uuid.UUID) ([]IPRule, error)
-	// CountRules returns the number of rules for the workspace,
-	// used to enforce MaxIPRulesPerWorkspace.
-	CountRules(ctx context.Context, workspaceID uuid.UUID) (int, error)
-	// AddRule inserts rule and returns it with the DB-assigned id
-	// and created_at populated.
+	// AddRule inserts rule and returns it with the DB-assigned
+	// created_at populated. It enforces MaxIPRulesPerWorkspace and
+	// per-workspace CIDR uniqueness atomically: it returns
+	// ErrTooManyRules when the workspace is already at the cap and
+	// ErrDuplicateCIDR when the (workspace_id, cidr) pair already
+	// exists.
 	AddRule(ctx context.Context, rule IPRule) (IPRule, error)
 	// RemoveRule deletes the rule scoped to the workspace. Returns
 	// ErrNotFound when no row matches (wrong id or wrong tenant).
@@ -160,6 +169,19 @@ func (s *IPAllowService) CheckAccess(ctx context.Context, workspaceID uuid.UUID,
 // Redis cache when present and fresh, otherwise loaded from the
 // store and written back. Redis errors degrade to a direct store
 // read.
+//
+// There is an inherent write-after-invalidate race: if a mutation's
+// bust() DEL lands between this method's store read and its writeCache
+// SET, the freshly-loaded (now-stale) snapshot overwrites the busted
+// key and is served until the TTL expires (≤ ipAllowCacheTTL). The
+// practical exposure is at most a 30s window in which a just-removed
+// rule still admits, or a just-enabled policy still admits — never a
+// cross-tenant leak (the snapshot is per-workspace). Closing it would
+// require CAS/versioned writes or a distributed lock, which is not
+// worth the complexity for a self-healing 30s window on a control-
+// plane mutation; the TTL is deliberately short for exactly this
+// reason. Operators needing sub-second enforcement should disable the
+// cache (nil Redis) so every CheckAccess reads through to Postgres.
 func (s *IPAllowService) snapshot(ctx context.Context, workspaceID uuid.UUID) (ipAllowSnapshot, error) {
 	if s.rdb != nil {
 		if raw, err := s.rdb.Get(ctx, s.cacheKey(workspaceID)).Bytes(); err == nil {
@@ -247,20 +269,17 @@ func (s *IPAllowService) ListRules(ctx context.Context, workspaceID uuid.UUID) (
 	return s.store.ListRules(ctx, workspaceID)
 }
 
-// AddRule validates cidr (well-formed and public), enforces the
-// per-workspace rule cap, persists the rule, and busts the cache.
-// The returned rule carries the DB-assigned id and created_at.
+// AddRule validates cidr (well-formed and public), persists the rule
+// under the per-workspace cap and uniqueness constraints, and busts
+// the cache. The returned rule carries the DB-assigned id and
+// created_at. The cap and duplicate checks are enforced atomically by
+// the store in a single statement (see PostgresIPAllowStore.AddRule),
+// so two concurrent adds can neither exceed the cap nor both insert
+// the same range — a read-then-write check here would be racy.
 func (s *IPAllowService) AddRule(ctx context.Context, workspaceID uuid.UUID, cidr, label string, createdBy uuid.UUID) (*IPRule, error) {
 	canonical, err := ValidatePublicCIDR(cidr)
 	if err != nil {
 		return nil, err
-	}
-	count, err := s.store.CountRules(ctx, workspaceID)
-	if err != nil {
-		return nil, fmt.Errorf("count ip rules: %w", err)
-	}
-	if count >= MaxIPRulesPerWorkspace {
-		return nil, ErrTooManyRules
 	}
 	saved, err := s.store.AddRule(ctx, IPRule{
 		WorkspaceID: workspaceID,
@@ -269,6 +288,12 @@ func (s *IPAllowService) AddRule(ctx context.Context, workspaceID uuid.UUID, cid
 		CreatedBy:   createdBy,
 	})
 	if err != nil {
+		// ErrTooManyRules / ErrDuplicateCIDR are sentinel domain
+		// errors the handler maps to 409; surface them unwrapped so
+		// errors.Is keeps working at the call site.
+		if errors.Is(err, ErrTooManyRules) || errors.Is(err, ErrDuplicateCIDR) {
+			return nil, err
+		}
 		return nil, fmt.Errorf("add ip rule: %w", err)
 	}
 	s.bust(ctx, workspaceID)
@@ -377,31 +402,70 @@ ORDER BY created_at ASC`
 	return out, nil
 }
 
-// CountRules returns the number of rules for the workspace.
-func (r *PostgresIPAllowStore) CountRules(ctx context.Context, workspaceID uuid.UUID) (int, error) {
-	const q = `SELECT count(*) FROM workspace_ip_allowlist WHERE workspace_id = $1`
-	var n int
-	if err := r.pool.QueryRow(ctx, q, workspaceID).Scan(&n); err != nil {
-		return 0, fmt.Errorf("count ip rules: %w", err)
-	}
-	return n, nil
-}
-
-// AddRule inserts a rule. The id is generated in Go (mirroring
-// insertWorkspace) so the value is known without a RETURNING round
-// trip on every column; created_at is returned from the DB default.
-// The CIDR is bound as text and cast to the cidr column type.
+// AddRule inserts a rule, enforcing the per-workspace cap atomically.
+//
+// The cap is checked under a SELECT ... FOR UPDATE lock on the owning
+// workspaces row — the same row SetEnabled locks — so every AddRule
+// for a given workspace is serialized. A bare count-then-insert (even
+// folded into a single CTE) is NOT race-free under READ COMMITTED:
+// two callers take independent snapshots, both read count = cap-1,
+// and both insert, overshooting the cap. Taking the row lock first
+// closes that window completely. AddRule is a rare control-plane op
+// (an admin curating office/VPN ranges), so serializing per workspace
+// costs nothing in practice.
+//
+// Duplicate ranges are rejected by the uq_ip_allowlist_ws_cidr UNIQUE
+// constraint (SQLSTATE 23505 -> ErrDuplicateCIDR) rather than a
+// pre-check, so concurrent adds of the same CIDR can't both land. The
+// id is generated in Go (mirroring insertWorkspace); created_at comes
+// from the DB default.
 func (r *PostgresIPAllowStore) AddRule(ctx context.Context, rule IPRule) (IPRule, error) {
 	if rule.ID == uuid.Nil {
 		rule.ID = uuid.New()
 	}
-	const q = `
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return IPRule{}, fmt.Errorf("begin tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	// Lock the workspace row to serialize concurrent adds; also a
+	// cheap existence check (a request that reached here always has
+	// a resolved workspace, so a miss is ErrNotFound, not a 500).
+	var locked bool
+	if err := tx.QueryRow(ctx,
+		"SELECT true FROM workspaces WHERE id = $1 FOR UPDATE", rule.WorkspaceID,
+	).Scan(&locked); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return IPRule{}, ErrNotFound
+		}
+		return IPRule{}, fmt.Errorf("lock workspace: %w", err)
+	}
+
+	var count int
+	if err := tx.QueryRow(ctx,
+		"SELECT count(*) FROM workspace_ip_allowlist WHERE workspace_id = $1", rule.WorkspaceID,
+	).Scan(&count); err != nil {
+		return IPRule{}, fmt.Errorf("count ip rules: %w", err)
+	}
+	if count >= MaxIPRulesPerWorkspace {
+		return IPRule{}, ErrTooManyRules
+	}
+
+	const ins = `
 INSERT INTO workspace_ip_allowlist (id, workspace_id, cidr, label, created_by)
 VALUES ($1, $2, $3::cidr, $4, $5)
 RETURNING created_at`
-	if err := r.pool.QueryRow(ctx, q, rule.ID, rule.WorkspaceID, rule.CIDR, rule.Label, rule.CreatedBy).
+	if err := tx.QueryRow(ctx, ins, rule.ID, rule.WorkspaceID, rule.CIDR, rule.Label, rule.CreatedBy).
 		Scan(&rule.CreatedAt); err != nil {
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == "23505" {
+			return IPRule{}, ErrDuplicateCIDR
+		}
 		return IPRule{}, fmt.Errorf("insert ip rule: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return IPRule{}, fmt.Errorf("commit ip rule: %w", err)
 	}
 	return rule, nil
 }

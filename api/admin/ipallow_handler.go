@@ -118,6 +118,8 @@ func (h *Handler) AddIPAllowRule(w http.ResponseWriter, r *http.Request) {
 			middleware.RespondError(w, http.StatusBadRequest, middleware.ErrCodePrivateCIDR, "cidr must be a public range")
 		case errors.Is(err, workspace.ErrTooManyRules):
 			middleware.RespondError(w, http.StatusConflict, middleware.ErrCodeRuleCapExceeded, "ip allowlist rule cap reached")
+		case errors.Is(err, workspace.ErrDuplicateCIDR):
+			middleware.RespondError(w, http.StatusConflict, middleware.ErrCodeDuplicateCIDR, "cidr is already allowlisted")
 		default:
 			middleware.RespondInternalError(w, r, "add ip allowlist rule", err)
 		}

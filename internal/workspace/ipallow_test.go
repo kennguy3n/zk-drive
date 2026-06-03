@@ -50,17 +50,25 @@ func (f *fakeIPAllowStore) ListRules(_ context.Context, workspaceID uuid.UUID) (
 	return out, nil
 }
 
-func (f *fakeIPAllowStore) CountRules(_ context.Context, workspaceID uuid.UUID) (int, error) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	return len(f.rules[workspaceID]), nil
-}
-
+// AddRule mirrors PostgresIPAllowStore.AddRule's atomic semantics:
+// it rejects with ErrTooManyRules once the workspace is at the cap
+// and with ErrDuplicateCIDR when the (workspace_id, cidr) pair is
+// already present, so the service's error mapping is exercised
+// without Postgres.
 func (f *fakeIPAllowStore) AddRule(_ context.Context, rule IPRule) (IPRule, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.addErr != nil {
 		return IPRule{}, f.addErr
+	}
+	existing := f.rules[rule.WorkspaceID]
+	if len(existing) >= MaxIPRulesPerWorkspace {
+		return IPRule{}, ErrTooManyRules
+	}
+	for _, r := range existing {
+		if r.CIDR == rule.CIDR {
+			return IPRule{}, ErrDuplicateCIDR
+		}
 	}
 	if rule.ID == uuid.Nil {
 		rule.ID = uuid.New()
@@ -251,6 +259,32 @@ func TestAddRule_EnforcesCap(t *testing.T) {
 	_, err := svc.AddRule(context.Background(), ws, "198.51.100.1/32", "", uuid.New())
 	if !errors.Is(err, ErrTooManyRules) {
 		t.Fatalf("expected ErrTooManyRules at cap, got %v", err)
+	}
+}
+
+// TestAddRule_RejectsDuplicate proves the same range cannot be added
+// twice for a workspace, even via a non-canonical host address
+// (203.0.113.7/24 canonicalizes to 203.0.113.0/24). The second add
+// must surface ErrDuplicateCIDR unwrapped so the handler can map it
+// to 409, and must not grow the stored rule set.
+func TestAddRule_RejectsDuplicate(t *testing.T) {
+	store := newFakeIPAllowStore()
+	ws := uuid.New()
+	svc := NewIPAllowService(store, nil)
+
+	if _, err := svc.AddRule(context.Background(), ws, "203.0.113.0/24", "office", uuid.New()); err != nil {
+		t.Fatalf("first AddRule: %v", err)
+	}
+	_, err := svc.AddRule(context.Background(), ws, "203.0.113.7/24", "office-again", uuid.New())
+	if !errors.Is(err, ErrDuplicateCIDR) {
+		t.Fatalf("expected ErrDuplicateCIDR on duplicate range, got %v", err)
+	}
+	rules, err := svc.ListRules(context.Background(), ws)
+	if err != nil {
+		t.Fatalf("ListRules: %v", err)
+	}
+	if len(rules) != 1 {
+		t.Fatalf("duplicate add must not grow the rule set: got %d rules, want 1", len(rules))
 	}
 }
 
