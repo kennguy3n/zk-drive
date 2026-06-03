@@ -124,6 +124,20 @@ variable "redis_engine_version" {
   default     = "7.1"
 }
 
+variable "redis_transit_encryption" {
+  description = <<-EOT
+    Enable in-transit (TLS) encryption for ElastiCache Redis. Defaults to false:
+    the cluster lives on private subnets reachable only by the app tasks, and
+    disabling TLS avoids the per-op handshake/latency cost. Set to true for
+    compliance regimes (SOC2/HIPAA) that mandate encryption in transit even
+    inside the VPC; the app then connects over `rediss://` (ElastiCache presents
+    an Amazon-CA-signed cert that the standard go-redis client trusts via the
+    system root store, so no app change is required).
+  EOT
+  type        = bool
+  default     = false
+}
+
 # ----------------------------------------------------------------------------
 # ECS service sizing. CPU is in vCPU-units (1024 = 1 vCPU), memory in MiB.
 # Limits mirror deploy/docker-compose.prod.yml.

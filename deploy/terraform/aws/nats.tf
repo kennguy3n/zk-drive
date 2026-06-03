@@ -76,7 +76,7 @@ resource "aws_ecs_task_definition" "nats" {
         logDriver = "awslogs"
         options = {
           "awslogs-group"         = aws_cloudwatch_log_group.nats.name
-          "awslogs-region"        = data.aws_region.current.region
+          "awslogs-region"        = var.region
           "awslogs-stream-prefix" = "nats"
         }
       }

@@ -43,6 +43,10 @@ locals {
     S3_BUCKET                = var.fabric_bucket
     FABRIC_CONSOLE_URL       = var.fabric_console_url
     PUBLIC_URL               = local.public_url
+    # Pin the credential-encryption mode explicitly rather than relying on
+    # internal/crypto.LoadFromEnv auto-selecting "aesgcm" from the presence of
+    # CREDENTIAL_ENCRYPTION_KEY (mirrors the AWS module).
+    CREDENTIAL_ENCRYPTION = "aesgcm"
   }
 
   # Secret env vars: env var name -> Secret Manager secret id.

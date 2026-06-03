@@ -43,11 +43,15 @@ resource "aws_lb_target_group" "server" {
   }
 }
 
-# ACM certificate for the public domain. DNS validation records are
-# surfaced in outputs.tf so the operator can create them in whichever DNS
-# provider hosts the zone (this module does not assume Route 53 hosting).
-# `domain_name` must be set for `terraform apply`.
+# ACM certificate for the public domain, used by the optional direct-HTTPS
+# listener below. Only created when a custom domain is configured — with no
+# domain the stack is still fully usable through CloudFront's default
+# *.cloudfront.net domain (CloudFront reaches the ALB over HTTP/80). ACM
+# rejects an empty domain_name, so guarding this keeps `terraform apply`
+# working with all defaults. DNS validation records are surfaced in
+# outputs.tf (this module does not assume Route 53 hosting).
 resource "aws_acm_certificate" "this" {
+  count             = local.has_domain ? 1 : 0
   domain_name       = var.domain_name
   validation_method = "DNS"
 
@@ -76,12 +80,17 @@ resource "aws_lb_listener" "http" {
   }
 }
 
+# Optional direct-HTTPS path on the ALB, created only with a custom domain
+# (it needs the ACM cert above). CloudFront itself talks to the origin over
+# HTTP/80; this listener exists for operators who also want to reach the ALB
+# directly over TLS on their domain.
 resource "aws_lb_listener" "https" {
+  count             = local.has_domain ? 1 : 0
   load_balancer_arn = aws_lb.this.arn
   port              = 443
   protocol          = "HTTPS"
   ssl_policy        = "ELBSecurityPolicy-TLS13-1-2-2021-06"
-  certificate_arn   = aws_acm_certificate.this.arn
+  certificate_arn   = aws_acm_certificate.this[0].arn
 
   default_action {
     type             = "forward"

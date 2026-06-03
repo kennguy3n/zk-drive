@@ -1,7 +1,8 @@
-# CloudFront distribution serving the SPA static assets (and preview
-# thumbnails) from the private S3 bucket, while proxying /api/* and
-# /healthz to the ALB so the browser sees a single origin (matching the
-# same-origin posture the security headers / CSP expect).
+# CloudFront distribution serving the SPA static assets from the private S3
+# bucket, while proxying /api/* and /healthz to the ALB so the browser sees a
+# single origin (matching the same-origin posture the security headers / CSP
+# expect). Preview thumbnails are NOT served here — they live in
+# zk-object-fabric and are fetched through the authenticated /api/* path.
 
 resource "aws_cloudfront_origin_access_control" "frontend" {
   name                              = "${local.name}-frontend"

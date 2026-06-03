@@ -29,9 +29,9 @@ output "frontend_bucket" {
 }
 
 output "acm_certificate_validation_records" {
-  description = "DNS records to create to validate the ACM certificate for the ALB. Add these to the DNS zone hosting var.domain_name."
+  description = "DNS records to create to validate the ACM certificate for the ALB. Add these to the DNS zone hosting var.domain_name. Empty when no domain_name is set (the ALB cert is only created for a custom domain)."
   value = {
-    for dvo in aws_acm_certificate.this.domain_validation_options :
+    for dvo in(local.has_domain ? aws_acm_certificate.this[0].domain_validation_options : []) :
     dvo.domain_name => {
       name  = dvo.resource_record_name
       type  = dvo.resource_record_type

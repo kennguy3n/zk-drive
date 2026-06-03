@@ -32,6 +32,16 @@ variable "domain_name" {
   description = "Public domain the platform is served on (e.g. drive.example.com). Used for the Google-managed SSL certificate and is REQUIRED for `terraform apply`: the external HTTPS load balancer's managed cert cannot be created with an empty domain."
   type        = string
   default     = ""
+
+  validation {
+    # The whole external HTTPS LB stack (managed cert, HTTPS proxy,
+    # forwarding rule) needs a real domain, and Cloud Run is configured for
+    # internal-LB-only ingress, so there is no domain-less serving path on
+    # GCP. Fail at plan time with a clear message instead of letting the
+    # Google API reject an empty managed-cert domain partway through apply.
+    condition     = var.domain_name != ""
+    error_message = "domain_name is required on GCP: the external HTTPS load balancer's Google-managed certificate cannot be created without a domain. Pass -var 'domain_name=drive.example.com'."
+  }
 }
 
 # ----------------------------------------------------------------------------

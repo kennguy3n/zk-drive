@@ -3,7 +3,6 @@
 # application container with a PgBouncer sidecar that pools connections to
 # the RDS primary (the app reaches Postgres at 127.0.0.1:6432).
 
-data "aws_region" "current" {}
 data "aws_caller_identity" "current" {}
 
 resource "aws_ecs_cluster" "this" {
@@ -44,7 +43,8 @@ locals {
 
   nats_url       = "nats://nats.${local.namespace}:4222"
   clamav_address = "clamav.${local.namespace}:3310"
-  redis_url      = "redis://${aws_elasticache_replication_group.this.primary_endpoint_address}:6379"
+  redis_scheme   = var.redis_transit_encryption ? "rediss" : "redis"
+  redis_url      = "${local.redis_scheme}://${aws_elasticache_replication_group.this.primary_endpoint_address}:6379"
   public_url     = local.has_domain ? "https://${var.domain_name}" : ""
 
   # Non-secret application config shared by server + worker, in the ECS
@@ -65,6 +65,11 @@ locals {
     # Worker /metrics listen address; matches config.go's :9091 default and the
     # GCP module. Harmless on the server binary, which ignores it.
     { name = "WORKER_METRICS_ADDR", value = ":9091" },
+    # Pin the credential-encryption mode explicitly. internal/crypto.LoadFromEnv
+    # would auto-select "aesgcm" from the presence of CREDENTIAL_ENCRYPTION_KEY,
+    # but setting it removes the dependence on that implicit fallback (a future
+    # change to the default must not silently downgrade us to "none").
+    { name = "CREDENTIAL_ENCRYPTION", value = "aesgcm" },
   ]
 
   # PgBouncer sidecar definition shared by server + worker tasks. Pools
@@ -95,7 +100,7 @@ locals {
       logDriver = "awslogs"
       options = {
         "awslogs-group"         = aws_cloudwatch_log_group.app.name
-        "awslogs-region"        = data.aws_region.current.region
+        "awslogs-region"        = var.region
         "awslogs-stream-prefix" = "pgbouncer"
       }
     }
@@ -204,7 +209,7 @@ resource "aws_ecs_task_definition" "server" {
         logDriver = "awslogs"
         options = {
           "awslogs-group"         = aws_cloudwatch_log_group.app.name
-          "awslogs-region"        = data.aws_region.current.region
+          "awslogs-region"        = var.region
           "awslogs-stream-prefix" = "server"
         }
       }
@@ -244,7 +249,7 @@ resource "aws_ecs_task_definition" "worker" {
         logDriver = "awslogs"
         options = {
           "awslogs-group"         = aws_cloudwatch_log_group.app.name
-          "awslogs-region"        = data.aws_region.current.region
+          "awslogs-region"        = var.region
           "awslogs-stream-prefix" = "worker"
         }
       }
@@ -285,8 +290,9 @@ resource "aws_ecs_service" "server" {
   }
 
   # The target group must be attached to a live listener before ECS will
-  # register tasks.
-  depends_on = [aws_lb_listener.https]
+  # register tasks. The HTTP/80 listener (the CloudFront origin) is always
+  # present; the HTTPS/443 listener is optional (custom-domain only).
+  depends_on = [aws_lb_listener.http]
 
   lifecycle {
     ignore_changes = [desired_count]
