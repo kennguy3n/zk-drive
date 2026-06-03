@@ -225,14 +225,14 @@ on-demand (no committed-use / savings plans).
 | --- | --- | --- |
 | RDS `db.t4g.medium` Multi-AZ | primary | ~$120 |
 | RDS `db.t4g.medium` read replica | single-AZ | ~$60 |
-| ECS Fargate — server | 2 × (1 vCPU / 0.5 GB) | ~$60 |
-| ECS Fargate — worker | 1 × (1 vCPU / 0.5 GB) | ~$30 |
-| ECS Fargate — NATS + ClamAV | 2 small tasks | ~$45 |
+| ECS Fargate — server | 2 × (1 vCPU / 2 GB) | ~$75 |
+| ECS Fargate — worker | 1 × (1 vCPU / 2 GB) | ~$36 |
+| ECS Fargate — NATS + ClamAV | 0.5 vCPU/1 GB + 1 vCPU/2 GB | ~$50 |
 | ElastiCache `cache.t4g.small` | 2 nodes | ~$50 |
 | ALB | 1 | ~$20 + LCU |
 | NAT gateways | 2 AZ | ~$65 + data |
 | CloudFront / S3 / Secrets / logs | low traffic | ~$15 |
-| **Total** | | **~$480–550/mo** |
+| **Total** | | **~$500–580/mo** |
 
 ### GCP (`us-central1`)
 

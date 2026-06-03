@@ -31,9 +31,11 @@ resource "aws_ecs_cluster_capacity_providers" "this" {
 
 # Private DNS namespace so the app tasks can resolve the NATS and ClamAV
 # services by name (nats.<ns>, clamav.<ns>). The discovery services
-# themselves are declared in nats.tf / clamav.tf.
+# themselves are declared in nats.tf / clamav.tf. Named with the
+# environment-qualified local.name (like every other resource) so two stacks
+# sharing one imported VPC don't collide on the namespace name.
 resource "aws_service_discovery_private_dns_namespace" "internal" {
-  name        = "${var.name_prefix}.internal"
+  name        = "${local.name}.internal"
   description = "ZK Drive internal service discovery"
   vpc         = aws_vpc.this.id
 }

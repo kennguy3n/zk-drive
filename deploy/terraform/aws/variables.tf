@@ -140,7 +140,14 @@ variable "redis_transit_encryption" {
 
 # ----------------------------------------------------------------------------
 # ECS service sizing. CPU is in vCPU-units (1024 = 1 vCPU), memory in MiB.
-# Limits mirror deploy/docker-compose.prod.yml.
+# CPU tiers mirror deploy/docker-compose.prod.yml (server/worker 1 vCPU, NATS
+# 0.5 vCPU). Memory is set to the Fargate-valid *minimum* for each CPU tier
+# rather than the compose memory limit: Fargate only accepts a fixed set of
+# CPU/memory pairings (1 vCPU -> 2048-8192 MiB, 0.5 vCPU -> 1024-4096 MiB),
+# so compose's 512 MiB limit is not a legal Fargate task size and would make
+# `terraform apply` fail at RegisterTaskDefinition. The app's actual working
+# set is well under these minimums; the extra headroom is unavoidable, not a
+# deliberate reservation.
 # ----------------------------------------------------------------------------
 
 variable "server_cpu" {
@@ -150,9 +157,9 @@ variable "server_cpu" {
 }
 
 variable "server_memory" {
-  description = "Fargate memory (MiB) for the server task."
+  description = "Fargate memory (MiB) for the server task. Minimum valid value for a 1 vCPU (1024) task is 2048."
   type        = number
-  default     = 512
+  default     = 2048
 }
 
 variable "server_desired_count" {
@@ -186,9 +193,9 @@ variable "worker_cpu" {
 }
 
 variable "worker_memory" {
-  description = "Fargate memory (MiB) for the worker task."
+  description = "Fargate memory (MiB) for the worker task. Minimum valid value for a 1 vCPU (1024) task is 2048."
   type        = number
-  default     = 512
+  default     = 2048
 }
 
 variable "worker_desired_count" {
@@ -234,9 +241,9 @@ variable "nats_cpu" {
 }
 
 variable "nats_memory" {
-  description = "Fargate memory (MiB) for the NATS task."
+  description = "Fargate memory (MiB) for the NATS task. Minimum valid value for a 0.5 vCPU (512) task is 1024."
   type        = number
-  default     = 512
+  default     = 1024
 }
 
 variable "nats_storage_gib" {
