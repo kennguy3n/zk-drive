@@ -411,6 +411,68 @@ func TestWebPushPublisher_IgnoresNonNotificationEvents(t *testing.T) {
 	}
 }
 
+// TestWebPushPublisher_TypedNilPushDegradesGracefully proves that a
+// typed-nil *WebPushService passed as the PushSender interface is
+// normalised to a plain-nil field, so Publish short-circuits to the
+// inner publisher instead of spawning a goroutine that dispatches on a
+// nil receiver. (A plain `p.push == nil` check would be false for a
+// typed nil, the classic Go interface-nil trap.)
+func TestWebPushPublisher_TypedNilPushDegradesGracefully(t *testing.T) {
+	inner := &recordingPublisher{}
+	var nilSvc *WebPushService // typed nil implementing PushSender
+	pub := NewWebPushPublisher(inner, connSet{}, nilSvc)
+	if pub.push != nil {
+		t.Fatalf("typed-nil PushSender should be normalised to nil, got %#v", pub.push)
+	}
+
+	evt := Event{Type: "notification", Payload: &Notification{Title: "T", Body: "B"}}
+	if err := pub.Publish(context.Background(), uuid.New(), uuid.New(), evt); err != nil {
+		t.Fatalf("Publish with typed-nil push: %v", err)
+	}
+	if inner.calls != 1 {
+		t.Errorf("inner publish should still run, got %d calls", inner.calls)
+	}
+}
+
+// TestWebPushPublisher_WaitGroupTracksDelivery proves that, when a
+// WaitGroup is registered, the detached push goroutine is tracked: a
+// Wait() unblocks only once delivery has completed. This is what lets
+// graceful shutdown drain in-flight pushes before the pool closes.
+func TestWebPushPublisher_WaitGroupTracksDelivery(t *testing.T) {
+	inner := &recordingPublisher{}
+	release := make(chan struct{})
+	push := &blockingPushSender{release: release}
+	var wg sync.WaitGroup
+	pub := NewWebPushPublisher(inner, connSet{}, push).WithWaitGroup(&wg)
+
+	evt := Event{Type: "notification", Payload: &Notification{Title: "T", Body: "B"}}
+	if err := pub.Publish(context.Background(), uuid.New(), uuid.New(), evt); err != nil {
+		t.Fatalf("Publish: %v", err)
+	}
+
+	// Wait must still be blocked while the push goroutine is in-flight.
+	done := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+		t.Fatal("WaitGroup unblocked before push delivery completed")
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	close(release) // let the push finish
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("WaitGroup did not unblock after push delivery completed")
+	}
+	if got := push.count(); got != 1 {
+		t.Errorf("expected 1 delivery, got %d", got)
+	}
+}
+
 type recordingPublisher struct{ calls int }
 
 func (r *recordingPublisher) Publish(_ context.Context, _, _ uuid.UUID, _ Event) error {
@@ -449,3 +511,25 @@ func (r *recordingPushSender) sentUsers() []uuid.UUID {
 type connSet map[uuid.UUID]bool
 
 func (c connSet) IsConnected(_, userID uuid.UUID) bool { return c[userID] }
+
+// blockingPushSender blocks inside Send until release is closed, so a
+// test can observe the WaitGroup counter while a push is in-flight.
+type blockingPushSender struct {
+	release chan struct{}
+	mu      sync.Mutex
+	calls   int
+}
+
+func (b *blockingPushSender) Send(_ context.Context, _, _ uuid.UUID, _ NotificationPayload) error {
+	<-b.release
+	b.mu.Lock()
+	b.calls++
+	b.mu.Unlock()
+	return nil
+}
+
+func (b *blockingPushSender) count() int {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.calls
+}

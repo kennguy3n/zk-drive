@@ -4,11 +4,13 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"sync"
 	"time"
 
 	"strings"
 
 	"github.com/kennguy3n/zk-drive/internal/logging"
+	"github.com/kennguy3n/zk-drive/internal/typednil"
 
 	"github.com/google/uuid"
 	"github.com/redis/go-redis/v9"
@@ -174,14 +176,41 @@ type WebPushPublisher struct {
 	inner WSPublisher
 	conns ConnectionChecker
 	push  PushSender
+	wg    *sync.WaitGroup
 }
 
 // NewWebPushPublisher wraps inner so notifications also fan out via
 // Web Push for offline users. conns may be nil (every user is then
 // treated as offline); push must be non-nil for the wrapper to add
 // value, but a nil push degrades to plain inner-publish behaviour.
+//
+// conns and push are normalised through typednil.IsTypedNil: a caller
+// that passes a typed-nil concrete value (e.g. a nil *WebPushService
+// wrapped in the PushSender interface) is treated as the plain-nil
+// case, so the `p.push == nil` short-circuit in Publish actually fires
+// instead of spawning a goroutine that calls into a nil receiver. This
+// matches the With* setter convention used elsewhere in the codebase
+// (api/drive, internal/ai).
 func NewWebPushPublisher(inner WSPublisher, conns ConnectionChecker, push PushSender) *WebPushPublisher {
+	if typednil.IsTypedNil(conns) {
+		conns = nil
+	}
+	if typednil.IsTypedNil(push) {
+		push = nil
+	}
 	return &WebPushPublisher{inner: inner, conns: conns, push: push}
+}
+
+// WithWaitGroup registers wg so each detached Web Push goroutine is
+// tracked (Add before launch, Done on return). Wiring the server's
+// background-goroutine WaitGroup in lets graceful shutdown drain
+// in-flight push deliveries before the database pool is closed —
+// otherwise a push that hit a 410 mid-shutdown would call
+// DeleteSubscription against an already-closed pool. The per-delivery
+// pushDeliveryTimeout still bounds how long the drain can block.
+func (p *WebPushPublisher) WithWaitGroup(wg *sync.WaitGroup) *WebPushPublisher {
+	p.wg = wg
+	return p
 }
 
 // Publish delegates to the inner publisher, then best-effort delivers
@@ -213,7 +242,18 @@ func (p *WebPushPublisher) Publish(ctx context.Context, workspaceID, userID uuid
 		return innerErr
 	}
 	pushCtx := context.WithoutCancel(ctx)
+	// Add before launching (not inside the goroutine) so a concurrent
+	// Wait at shutdown cannot observe the counter at zero between the
+	// `go` statement and the goroutine actually starting. The HTTP
+	// server is drained before bgGoroutines.Wait runs, so no Publish —
+	// hence no Add — races a Wait that has already begun.
+	if p.wg != nil {
+		p.wg.Add(1)
+	}
 	go func() {
+		if p.wg != nil {
+			defer p.wg.Done()
+		}
 		ctx, cancel := context.WithTimeout(pushCtx, pushDeliveryTimeout)
 		defer cancel()
 		if err := p.push.Send(ctx, workspaceID, userID, payload); err != nil {

@@ -508,7 +508,8 @@ func run() error {
 			notification.NewPostgresRepository(pool),
 			cfg.VAPIDPublicKey, cfg.VAPIDPrivateKey,
 		).WithEndpointValidator(webhooks.NewURLValidator())
-		notificationPublisher = notification.NewWebPushPublisher(notificationPublisher, hub, webPushSvc)
+		notificationPublisher = notification.NewWebPushPublisher(notificationPublisher, hub, webPushSvc).
+			WithWaitGroup(&bgGoroutines)
 		slog.Info("web push enabled, offline notifications will fan out via VAPID")
 	} else {
 		slog.Warn("web push disabled (VAPID_PUBLIC_KEY / VAPID_PRIVATE_KEY unset), /api/push/* will respond 501")
