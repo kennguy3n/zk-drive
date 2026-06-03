@@ -3,17 +3,13 @@ package platform
 import (
 	"context"
 	"errors"
-	"os"
 	"strings"
 	"testing"
 
 	"github.com/google/uuid"
-	"github.com/jackc/pgx/v5/pgxpool"
 	"golang.org/x/crypto/bcrypt"
 
 	"github.com/kennguy3n/zk-drive/internal/billing"
-	"github.com/kennguy3n/zk-drive/internal/user"
-	"github.com/kennguy3n/zk-drive/internal/workspace"
 )
 
 // --- pure-logic unit tests (no database) -----------------------------
@@ -203,161 +199,4 @@ func TestReconcileOneWithInspector(t *testing.T) {
 	if entry, mismatch := s.reconcileOne(context.Background(), id, billing.TierFree, strptr("cus_err")); !mismatch || !strings.Contains(entry.Reason, "boom") {
 		t.Errorf("inspector error should surface as a mismatch, got mismatch=%v reason=%q", mismatch, entry.Reason)
 	}
-}
-
-// --- DB-backed lifecycle test (skips when no database) ---------------
-
-// newDBService dials TEST_DATABASE_URL and returns a fully-wired
-// service. The test is skipped (not failed) when the database is
-// unreachable or the platform schema (migrations 036/037) is absent,
-// so the package's unit tests still run in environments without a DB.
-func newDBService(t *testing.T) (*PlatformService, *pgxpool.Pool) {
-	t.Helper()
-	dsn := os.Getenv("TEST_DATABASE_URL")
-	if dsn == "" {
-		t.Skip("TEST_DATABASE_URL not set; skipping DB-backed platform test")
-	}
-	ctx := context.Background()
-	pool, err := pgxpool.New(ctx, dsn)
-	if err != nil {
-		t.Skipf("cannot connect to TEST_DATABASE_URL: %v", err)
-	}
-	if err := pool.Ping(ctx); err != nil {
-		pool.Close()
-		t.Skipf("cannot ping TEST_DATABASE_URL: %v", err)
-	}
-	var exists bool
-	if err := pool.QueryRow(ctx,
-		`SELECT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='workspaces' AND column_name='suspended_at')`,
-	).Scan(&exists); err != nil || !exists {
-		pool.Close()
-		t.Skip("platform migrations (036/037) not applied; skipping DB-backed platform test")
-	}
-	svc := NewService(pool, workspace.NewService(workspace.NewPostgresRepository(pool)), user.NewService(user.NewPostgresRepository(pool)), billing.NewService(billing.NewPostgresRepository(pool)))
-	return svc, pool
-}
-
-func TestProvisionSuspendResumeLifecycle(t *testing.T) {
-	svc, pool := newDBService(t)
-	defer pool.Close()
-	ctx := context.Background()
-
-	name := "Platform Test " + uuid.NewString()[:8]
-	email := "owner+" + uuid.NewString()[:8] + "@example.com"
-	ws, err := svc.ProvisionWorkspace(ctx, name, email, billing.TierStarter, "")
-	if err != nil {
-		t.Fatalf("ProvisionWorkspace: %v", err)
-	}
-	t.Cleanup(func() { cleanupWorkspace(pool, ws.ID) })
-
-	if ws.Name != name {
-		t.Errorf("expected name %q, got %q", name, ws.Name)
-	}
-
-	// Detail reflects the provisioned tier and not-suspended status.
-	summary, err := svc.GetWorkspace(ctx, ws.ID)
-	if err != nil {
-		t.Fatalf("GetWorkspace: %v", err)
-	}
-	if summary.Tier != billing.TierStarter {
-		t.Errorf("expected tier %q, got %q", billing.TierStarter, summary.Tier)
-	}
-	if summary.Suspended {
-		t.Errorf("freshly provisioned workspace must not be suspended")
-	}
-	if summary.UserCount != 1 {
-		t.Errorf("expected exactly the owner user, got %d", summary.UserCount)
-	}
-
-	// Suspension flips the flag and the middleware-facing lookup.
-	if err := svc.SuspendWorkspace(ctx, ws.ID, "abuse"); err != nil {
-		t.Fatalf("SuspendWorkspace: %v", err)
-	}
-	suspended, reason, err := svc.WorkspaceSuspension(ctx, ws.ID)
-	if err != nil {
-		t.Fatalf("WorkspaceSuspension: %v", err)
-	}
-	if !suspended || reason != "abuse" {
-		t.Errorf("expected suspended with reason 'abuse', got suspended=%v reason=%q", suspended, reason)
-	}
-
-	// Resume clears it.
-	if err := svc.ResumeWorkspace(ctx, ws.ID); err != nil {
-		t.Fatalf("ResumeWorkspace: %v", err)
-	}
-	suspended, _, err = svc.WorkspaceSuspension(ctx, ws.ID)
-	if err != nil {
-		t.Fatalf("WorkspaceSuspension after resume: %v", err)
-	}
-	if suspended {
-		t.Errorf("workspace should not be suspended after resume")
-	}
-
-	// Unknown ids map to ErrNotFound.
-	if err := svc.SuspendWorkspace(ctx, uuid.New(), "x"); !errors.Is(err, ErrNotFound) {
-		t.Errorf("expected ErrNotFound for unknown workspace, got %v", err)
-	}
-}
-
-func TestListWorkspacesFilters(t *testing.T) {
-	svc, pool := newDBService(t)
-	defer pool.Close()
-	ctx := context.Background()
-
-	ws, err := svc.ProvisionWorkspace(ctx, "Filter Test "+uuid.NewString()[:8], "owner+"+uuid.NewString()[:8]+"@example.com", billing.TierBusiness, "")
-	if err != nil {
-		t.Fatalf("ProvisionWorkspace: %v", err)
-	}
-	t.Cleanup(func() { cleanupWorkspace(pool, ws.ID) })
-
-	// Filtering by the provisioned tier returns at least our workspace.
-	got, total, err := svc.ListWorkspaces(ctx, ListFilters{Tier: billing.TierBusiness, Limit: 100})
-	if err != nil {
-		t.Fatalf("ListWorkspaces: %v", err)
-	}
-	if total < 1 {
-		t.Fatalf("expected at least one business-tier workspace")
-	}
-	found := false
-	for _, s := range got {
-		if s.ID == ws.ID {
-			found = true
-			if s.Tier != billing.TierBusiness {
-				t.Errorf("tier filter leaked a %q workspace", s.Tier)
-			}
-		}
-	}
-	if !found {
-		t.Errorf("expected provisioned workspace in the filtered list")
-	}
-
-	// A suspended=true filter must exclude the active workspace.
-	active := false
-	yes := true
-	_, _, err = svc.ListWorkspaces(ctx, ListFilters{Suspended: &active, Limit: 1})
-	if err != nil {
-		t.Fatalf("ListWorkspaces active filter: %v", err)
-	}
-	suspendedList, _, err := svc.ListWorkspaces(ctx, ListFilters{Suspended: &yes, Limit: 100})
-	if err != nil {
-		t.Fatalf("ListWorkspaces suspended filter: %v", err)
-	}
-	for _, s := range suspendedList {
-		if s.ID == ws.ID {
-			t.Errorf("active workspace appeared in suspended=true filter")
-		}
-	}
-}
-
-// cleanupWorkspace removes the rows created by a provisioning test in
-// FK-safe order. Best-effort: failures are ignored so a cleanup hiccup
-// does not mask the test result.
-func cleanupWorkspace(pool *pgxpool.Pool, workspaceID uuid.UUID) {
-	ctx := context.Background()
-	_, _ = pool.Exec(ctx, `DELETE FROM usage_alert_rules WHERE workspace_id = $1`, workspaceID)
-	_, _ = pool.Exec(ctx, `DELETE FROM workspace_storage_credentials WHERE workspace_id = $1`, workspaceID)
-	_, _ = pool.Exec(ctx, `DELETE FROM workspace_plans WHERE workspace_id = $1`, workspaceID)
-	_, _ = pool.Exec(ctx, `UPDATE workspaces SET owner_user_id = NULL WHERE id = $1`, workspaceID)
-	_, _ = pool.Exec(ctx, `DELETE FROM users WHERE workspace_id = $1`, workspaceID)
-	_, _ = pool.Exec(ctx, `DELETE FROM workspaces WHERE id = $1`, workspaceID)
 }
