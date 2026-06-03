@@ -47,6 +47,12 @@ import (
 // a hung callback pinning a goroutine.
 const onlyOfficeFetchTimeout = 60 * time.Second
 
+// onlyOfficeMaxDocumentBytes caps how many bytes the save callback will
+// read from the Document Server's edited-document URL, so a hostile or
+// runaway response cannot exhaust memory. Office documents are far
+// below this bound.
+const onlyOfficeMaxDocumentBytes = 512 << 20 // 512 MiB
+
 // onlyOfficeHTTPClient pulls edited bytes from the Document Server in
 // the save callback. Shared so connections are reused across callbacks.
 var onlyOfficeHTTPClient = &http.Client{Timeout: onlyOfficeFetchTimeout}
@@ -292,8 +298,15 @@ func (h *Handler) EditorCallback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := h.saveEditedVersion(r.Context(), workspaceID, fileID, cb); err != nil {
-		logging.FromContext(r.Context()).Error("onlyoffice save edited version failed", "file_id", fileID, "err", err)
+	// This handler runs outside the session-auth middleware group, so
+	// the request context carries no tenant scope. Bind the workspace id
+	// (parsed from the signed callbackUrl) so downstream RLS-aware
+	// queries, the activity log, the changefeed, and webhook actors are
+	// correctly scoped. The editing user is injected inside
+	// saveEditedVersion once the file's fallback creator is known.
+	ctx := middleware.WithWorkspaceID(r.Context(), workspaceID)
+	if err := h.saveEditedVersion(ctx, workspaceID, fileID, cb); err != nil {
+		logging.FromContext(ctx).Error("onlyoffice save edited version failed", "file_id", fileID, "err", err)
 		// Non-zero error tells the Document Server to retry later;
 		// the edited bytes stay in its cache until then.
 		writeOnlyOfficeAck(w, http.StatusInternalServerError, 1)
@@ -310,6 +323,11 @@ func (h *Handler) saveEditedVersion(ctx context.Context, workspaceID, fileID uui
 	if err != nil {
 		return err
 	}
+	// Attribute the save to the callback's editing user (falling back to
+	// the file creator) so the activity log, changefeed, and webhook
+	// actor are recorded against a real user rather than uuid.Nil.
+	author := callbackAuthor(cb, f.CreatedBy)
+	ctx = middleware.WithUserID(ctx, author)
 	store := h.resolveStorage(ctx, workspaceID)
 	if store == nil {
 		return errors.New("drive: storage not configured")
@@ -335,7 +353,7 @@ func (h *Handler) saveEditedVersion(ctx context.Context, workspaceID, fileID uui
 		FileID:    f.ID,
 		ObjectKey: objectKey,
 		SizeBytes: int64(len(data)),
-		CreatedBy: callbackAuthor(cb, f.CreatedBy),
+		CreatedBy: author,
 	}
 	fresh, err := h.files.ConfirmVersion(ctx, workspaceID, v)
 	if err != nil {
@@ -373,7 +391,9 @@ func fetchEditedDocument(ctx context.Context, url string) ([]byte, error) {
 	if resp.StatusCode != http.StatusOK {
 		return nil, errors.New("onlyoffice: unexpected status fetching edited document: " + resp.Status)
 	}
-	return io.ReadAll(resp.Body)
+	// Cap the read so a hostile / runaway Document Server response cannot
+	// exhaust memory; office documents are far below this bound.
+	return io.ReadAll(io.LimitReader(resp.Body, onlyOfficeMaxDocumentBytes))
 }
 
 // callbackAuthor picks the user id to attribute the new version to:
