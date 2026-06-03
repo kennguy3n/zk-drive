@@ -235,6 +235,76 @@ func TestVerifyCallbackToken_DisabledWhenNoSecret(t *testing.T) {
 	}
 }
 
+func TestCallbackClaims(t *testing.T) {
+	cases := []struct {
+		name       string
+		claims     jwt.MapClaims
+		wantStatus int
+		wantURL    string
+		wantUsers  []string
+		wantOK     bool
+	}{
+		{
+			name:       "flat body-token claims",
+			claims:     jwt.MapClaims{"status": float64(2), "url": "https://office/cache/out.docx", "users": []any{"u1", "u2"}},
+			wantStatus: 2,
+			wantURL:    "https://office/cache/out.docx",
+			wantUsers:  []string{"u1", "u2"},
+			wantOK:     true,
+		},
+		{
+			name: "nested header-token payload",
+			claims: jwt.MapClaims{"payload": map[string]any{
+				"status": float64(6), "url": "https://office/cache/fs.docx", "users": []any{"u3"},
+			}},
+			wantStatus: 6,
+			wantURL:    "https://office/cache/fs.docx",
+			wantUsers:  []string{"u3"},
+			wantOK:     true,
+		},
+		{
+			name:       "status-only (editing) has no url",
+			claims:     jwt.MapClaims{"status": float64(1)},
+			wantStatus: 1,
+			wantURL:    "",
+			wantUsers:  nil,
+			wantOK:     true,
+		},
+		{
+			name:   "missing status rejected",
+			claims: jwt.MapClaims{"url": "https://office/cache/out.docx"},
+			wantOK: false,
+		},
+		{
+			name:       "non-string users filtered",
+			claims:     jwt.MapClaims{"status": float64(2), "users": []any{"u1", 42, nil, "u2"}},
+			wantStatus: 2,
+			wantUsers:  []string{"u1", "u2"},
+			wantOK:     true,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			status, url, users, ok := CallbackClaims(tc.claims)
+			if ok != tc.wantOK {
+				t.Fatalf("ok = %v, want %v", ok, tc.wantOK)
+			}
+			if !tc.wantOK {
+				return
+			}
+			if status != tc.wantStatus {
+				t.Errorf("status = %d, want %d", status, tc.wantStatus)
+			}
+			if url != tc.wantURL {
+				t.Errorf("url = %q, want %q", url, tc.wantURL)
+			}
+			if strings.Join(users, ",") != strings.Join(tc.wantUsers, ",") {
+				t.Errorf("users = %v, want %v", users, tc.wantUsers)
+			}
+		})
+	}
+}
+
 func TestIsOfficeDocument(t *testing.T) {
 	cases := map[string]bool{
 		"a.docx": true, "b.XLSX": true, "c.pptx": true, "d.odt": true,

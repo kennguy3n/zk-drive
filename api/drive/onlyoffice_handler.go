@@ -264,8 +264,10 @@ func (h *Handler) EditorCallback(w http.ResponseWriter, r *http.Request) {
 
 	// Verify the ONLYOFFICE token when a secret is configured. The
 	// token (Authorization: Bearer <jwt> header, else body.token)
-	// wraps the callback fields, so on success we trust the claims'
-	// status/url over the unsigned body to defeat spoofing.
+	// wraps the callback fields, so on success the signed claims — not
+	// the unsigned request body — are the sole source of truth for
+	// status/url/users, defeating a spoofed body paired with a stolen
+	// but unrelated token.
 	if secret := h.onlyOffice.JWTSecret(); secret != "" {
 		token := bearerToken(r.Header.Get("Authorization"))
 		if token == "" {
@@ -277,12 +279,15 @@ func (h *Handler) EditorCallback(w http.ResponseWriter, r *http.Request) {
 			writeOnlyOfficeAck(w, http.StatusForbidden, 1)
 			return
 		}
-		if status, ok := claims["status"].(float64); ok {
-			cb.Status = int(status)
+		status, url, users, ok := collab.CallbackClaims(claims)
+		if !ok {
+			logging.FromContext(r.Context()).Warn("onlyoffice callback token missing status claim", "file_id", fileID)
+			writeOnlyOfficeAck(w, http.StatusForbidden, 1)
+			return
 		}
-		if url, ok := claims["url"].(string); ok {
-			cb.URL = url
-		}
+		// Overwrite from the verified claims unconditionally so the
+		// unsigned body cannot influence what we fetch or attribute.
+		cb.Status, cb.URL, cb.Users = status, url, users
 	}
 
 	// Only the "ready for saving" / "force save" statuses carry new
@@ -323,6 +328,19 @@ func (h *Handler) saveEditedVersion(ctx context.Context, workspaceID, fileID uui
 	if err != nil {
 		return err
 	}
+	// Re-check the folder's encryption mode at save time, not just when
+	// the editor config was issued. An admin can flip a folder
+	// managed_encrypted -> strict_zk during an active edit session;
+	// without this guard the callback would write Document-Server
+	// plaintext into what is now a zero-knowledge folder, breaking the
+	// strict-ZK contract. Mirrors the check in GenerateEditorConfig.
+	encMode, err := folder.EncryptionModeForFile(ctx, h.pool, fileID)
+	if err != nil {
+		return err
+	}
+	if encMode == folder.EncryptionStrictZK {
+		return collab.ErrStrictZKForbidden
+	}
 	// Attribute the save to the callback's editing user (falling back to
 	// the file creator) so the activity log, changefeed, and webhook
 	// actor are recorded against a real user rather than uuid.Nil.
@@ -335,6 +353,15 @@ func (h *Handler) saveEditedVersion(ctx context.Context, workspaceID, fileID uui
 
 	data, err := fetchEditedDocument(ctx, cb.URL)
 	if err != nil {
+		return err
+	}
+
+	// Enforce the storage quota before committing the new version, the
+	// same pre-flight every other write path runs (ConfirmUpload,
+	// BulkCopy). Returning the error makes the callback ack non-zero, so
+	// the Document Server keeps the edited bytes and retries rather than
+	// silently letting the workspace exceed its plan.
+	if err := h.billing.CheckStorageQuota(ctx, workspaceID, int64(len(data))); err != nil {
 		return err
 	}
 

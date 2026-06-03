@@ -351,6 +351,37 @@ func (s *OnlyOfficeService) VerifyCallbackToken(token string) (jwt.MapClaims, er
 	return claims, nil
 }
 
+// CallbackClaims extracts the authoritative status / url / users from a
+// verified callback token's claims, so the signed values — not the
+// unsigned request body — drive the save. ONLYOFFICE places the
+// callback payload at the top level when the token is delivered in the
+// body (the default), but nests it under a "payload" object when the
+// token arrives via the Authorization header (JWT_HEADER mode); both
+// layouts are handled so verification stays authoritative regardless of
+// the Document Server's token transport. ok is false when the verified
+// claims carry no status field, which the caller should treat as a
+// malformed/unexpected token and reject rather than falling back to the
+// unsigned body.
+func CallbackClaims(claims jwt.MapClaims) (status int, url string, users []string, ok bool) {
+	src := map[string]any(claims)
+	if payload, isMap := claims["payload"].(map[string]any); isMap {
+		src = payload
+	}
+	st, hasStatus := src["status"].(float64)
+	if !hasStatus {
+		return 0, "", nil, false
+	}
+	url, _ = src["url"].(string)
+	if raw, isArr := src["users"].([]any); isArr {
+		for _, e := range raw {
+			if s, isStr := e.(string); isStr {
+				users = append(users, s)
+			}
+		}
+	}
+	return int(st), url, users, true
+}
+
 // documentKey derives the ONLYOFFICE document key from a version's
 // object key. The key must be unique per content revision and limited
 // to [0-9A-Za-z._=-] (max 128 chars). Object keys are
