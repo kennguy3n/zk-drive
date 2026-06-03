@@ -8,10 +8,21 @@
 -- CHECK constraints / RLS policies exactly as migrations 003-031 left
 -- them. The change_log sequence object is detached before the drop
 -- and re-attached afterwards so it (and its current value) survives.
+--
+-- As in the up migration, each table is LOCKed in ACCESS EXCLUSIVE mode
+-- before the INSERT...SELECT copy so no row committed by a concurrent
+-- writer between the copy snapshot and the DROP can be lost.
+--
+-- change_log is restored WITHOUT a tenant_isolation RLS policy: the up
+-- migration added that policy as a new improvement, but before 033
+-- (migration 029, after RLS migration 024) change_log had no RLS, so
+-- faithfully reverting 033 must leave it unprotected again.
 
 -- ===========================================================
 -- activity_log
 -- ===========================================================
+LOCK TABLE activity_log IN ACCESS EXCLUSIVE MODE;
+
 CREATE TABLE activity_log_plain (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     workspace_id UUID NOT NULL,
@@ -50,6 +61,8 @@ ALTER TABLE activity_log FORCE ROW LEVEL SECURITY;
 -- ===========================================================
 -- audit_log
 -- ===========================================================
+LOCK TABLE audit_log IN ACCESS EXCLUSIVE MODE;
+
 CREATE TABLE audit_log_plain (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     workspace_id UUID NOT NULL,
@@ -88,6 +101,8 @@ ALTER TABLE audit_log FORCE ROW LEVEL SECURITY;
 -- ===========================================================
 -- change_log
 -- ===========================================================
+LOCK TABLE change_log IN ACCESS EXCLUSIVE MODE;
+
 ALTER SEQUENCE change_log_sequence_seq OWNED BY NONE;
 
 CREATE TABLE change_log_plain (

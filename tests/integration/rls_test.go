@@ -24,7 +24,9 @@ import (
 // here (rather than imported from somewhere) so any future migration
 // that adds a tenant table is forced through this test by failing
 // loudly. The list mirrors migrations/024_row_level_security.up.sql
-// (direct + workspaces + version/preview chains).
+// (direct + workspaces + version/preview chains) plus change_log,
+// which migration 033_partition_large_tables.up.sql brings under the
+// tenant_isolation policy when it hash-partitions the table.
 var rlsTenantTables = []string{
 	"workspaces",
 	"users",
@@ -39,6 +41,7 @@ var rlsTenantTables = []string{
 	"client_rooms",
 	"notifications",
 	"audit_log",
+	"change_log",
 	"retention_policies",
 	"file_tags",
 	"workspace_plans",
@@ -274,15 +277,19 @@ func TestRLSEnforcesCrossTenantIsolation(t *testing.T) {
 	assertPartitioned("audit_log", 64)
 	assertPartitioned("change_log", 64)
 
-	// Seed one committed row per workspace into two of the partitioned
+	// Seed one committed row per workspace into each of the partitioned
 	// tables via the superuser pool (which bypasses RLS), then verify a
 	// tenant-bound, unfiltered read through rls_test_role sees only its
 	// own workspace's row — proving partition routing did not defeat
-	// the tenant_isolation policy.
+	// the tenant_isolation policy. change_log is included because
+	// migration 033 adds to it the tenant_isolation policy it never
+	// had, so this exercises that newly-added policy on a partitioned
+	// table.
 	ownerA := uuid.MustParse(tokA.UserID)
 	ownerB := uuid.MustParse(tokB.UserID)
 	actA, actB := uuid.New(), uuid.New()
 	audA, audB := uuid.New(), uuid.New()
+	chgA, chgB := uuid.New(), uuid.New()
 
 	seeds := []struct {
 		query string
@@ -296,6 +303,10 @@ func TestRLSEnforcesCrossTenantIsolation(t *testing.T) {
 		  VALUES ($1, $2, $3, 'part_seed')`, []interface{}{audA, wsA, ownerA}},
 		{`INSERT INTO audit_log (id, workspace_id, actor_id, action)
 		  VALUES ($1, $2, $3, 'part_seed')`, []interface{}{audB, wsB, ownerB}},
+		{`INSERT INTO change_log (workspace_id, actor_id, kind, op, resource_id, name)
+		  VALUES ($1, $2, 'folder', 'create', $3, 'part_seed')`, []interface{}{wsA, ownerA, chgA}},
+		{`INSERT INTO change_log (workspace_id, actor_id, kind, op, resource_id, name)
+		  VALUES ($1, $2, 'folder', 'create', $3, 'part_seed')`, []interface{}{wsB, ownerB, chgB}},
 	}
 	for _, s := range seeds {
 		if _, err := env.pool.Exec(pctx, s.query, s.args...); err != nil {
@@ -303,21 +314,46 @@ func TestRLSEnforcesCrossTenantIsolation(t *testing.T) {
 		}
 	}
 
+	// These rows are committed outside any rolled-back transaction (a
+	// tenant-bound connection has to observe them), so delete them when
+	// the test ends to keep the run idempotent and avoid polluting other
+	// tests. A fresh context is used because pctx is cancelled by its
+	// deferred cancel before Cleanup funcs run.
+	t.Cleanup(func() {
+		cctx, ccancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer ccancel()
+		cleanups := []struct {
+			query string
+			args  []interface{}
+		}{
+			{`DELETE FROM activity_log WHERE id = ANY($1)`, []interface{}{[]uuid.UUID{actA, actB}}},
+			{`DELETE FROM audit_log WHERE id = ANY($1)`, []interface{}{[]uuid.UUID{audA, audB}}},
+			{`DELETE FROM change_log WHERE resource_id = ANY($1)`, []interface{}{[]uuid.UUID{chgA, chgB}}},
+		}
+		for _, c := range cleanups {
+			if _, err := env.pool.Exec(cctx, c.query, c.args...); err != nil {
+				t.Logf("cleanup partitioned seed rows: %v", err)
+			}
+		}
+	})
+
 	// With workspace A bound, A's seeded rows are visible and B's are
 	// hidden — even when B's row id is named explicitly in the WHERE.
 	runAsRLSRole(t, env, wsA, func(t *testing.T, tx pgx.Tx) {
 		cases := []struct {
 			table     string
+			idCol     string
 			ownID     uuid.UUID
 			foreignID uuid.UUID
 		}{
-			{"activity_log", actA, actB},
-			{"audit_log", audA, audB},
+			{"activity_log", "id", actA, actB},
+			{"audit_log", "id", audA, audB},
+			{"change_log", "resource_id", chgA, chgB},
 		}
 		for _, c := range cases {
 			var own int
 			if err := tx.QueryRow(context.Background(),
-				"SELECT count(*) FROM "+c.table+" WHERE id = $1", c.ownID).Scan(&own); err != nil {
+				"SELECT count(*) FROM "+c.table+" WHERE "+c.idCol+" = $1", c.ownID).Scan(&own); err != nil {
 				t.Fatalf("count own %s row (wsA bound): %v", c.table, err)
 			}
 			if own != 1 {
@@ -326,7 +362,7 @@ func TestRLSEnforcesCrossTenantIsolation(t *testing.T) {
 
 			var foreign int
 			if err := tx.QueryRow(context.Background(),
-				"SELECT count(*) FROM "+c.table+" WHERE id = $1", c.foreignID).Scan(&foreign); err != nil {
+				"SELECT count(*) FROM "+c.table+" WHERE "+c.idCol+" = $1", c.foreignID).Scan(&foreign); err != nil {
 				t.Fatalf("count foreign %s row (wsA bound): %v", c.table, err)
 			}
 			if foreign != 0 {
