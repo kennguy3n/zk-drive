@@ -233,3 +233,107 @@ spec:
     - ports:
         - protocol: TCP
           port: 443
+---
+# 8. Postgres ingress: accept 5432 from the app tiers that have a
+# matching egress allow above (server, worker, batch). NetworkPolicy
+# requires BOTH the source's egress AND the destination's ingress to
+# permit a connection; the default-deny-all above selects every pod
+# (podSelector: {}), so without this rule all inbound to Postgres is
+# dropped and the app can't reach the DB. Drop this policy (or relax to
+# port-only) when Postgres is a managed endpoint with no in-cluster pod.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-postgres-ingress
+  namespace: zk-drive
+spec:
+  podSelector:
+    matchLabels:
+      app: postgres
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchExpressions:
+              - key: app
+                operator: In
+                values:
+                  - zk-drive-server
+                  - zk-drive-worker
+                  - zk-drive-batch
+      ports:
+        - protocol: TCP
+          port: 5432
+---
+# 9. NATS ingress: accept 4222 from server, worker, and batch.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-nats-ingress
+  namespace: zk-drive
+spec:
+  podSelector:
+    matchLabels:
+      app: nats
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchExpressions:
+              - key: app
+                operator: In
+                values:
+                  - zk-drive-server
+                  - zk-drive-worker
+                  - zk-drive-batch
+      ports:
+        - protocol: TCP
+          port: 4222
+---
+# 10. ClamAV ingress: accept 3310 (clamd) from the worker and batch
+# pods that scan uploads. The server does not talk to ClamAV directly.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-clamav-ingress
+  namespace: zk-drive
+spec:
+  podSelector:
+    matchLabels:
+      app: clamav
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchExpressions:
+              - key: app
+                operator: In
+                values:
+                  - zk-drive-worker
+                  - zk-drive-batch
+      ports:
+        - protocol: TCP
+          port: 3310
+---
+# 11. ClamAV egress: freshclam refreshes virus definitions from the
+# ClamAV CDN over HTTPS, so the clamav pod needs 443 egress (port-only,
+# external endpoint). Without it the default-deny egress freezes
+# definitions at the image's build-time snapshot. (DNS via allow-dns-egress.)
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-clamav-egress
+  namespace: zk-drive
+spec:
+  podSelector:
+    matchLabels:
+      app: clamav
+  policyTypes:
+    - Egress
+  egress:
+    - ports:
+        - protocol: TCP
+          port: 443
