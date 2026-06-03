@@ -24,6 +24,15 @@ imagePullSecrets: []
 # via envFrom on every workload.
 config:
   DATABASE_URL: postgres://zkdrive:zkdrive@postgres.zk-drive.svc.cluster.local:5432/zkdrive?sslmode=disable
+  # Set true for production so DATABASE_URL is NOT rendered into the
+  # ConfigMap (which is unencrypted at rest and broadly RBAC-readable).
+  # When true, supply the real connection string — which embeds the DB
+  # password — via the Secret instead: either secrets.data.DATABASE_URL
+  # (with secrets.create=true) or an existingSecret carrying a
+  # DATABASE_URL key. Both flow through the same envFrom, so the value
+  # reaches every workload + the migrate Job. Default false keeps the
+  # in-cluster dev connection string above for local/staging use.
+  databaseUrlInSecret: false
   NATS_URL: nats://nats.zk-drive.svc.cluster.local:4222
   LISTEN_ADDR: ":8080"
   RATE_LIMIT_PER_USER: "100"
@@ -65,7 +74,14 @@ server:
     topologyKey: kubernetes.io/hostname
     zoneKey: topology.kubernetes.io/zone
   readinessProbe:
-    path: /healthz
+    # Deep readiness check: /readyz pings Postgres/Redis/S3/NATS (checks
+    # run concurrently under a 900ms per-check budget) so a pod that has
+    # lost a dependency is pulled from the Service endpoints instead of
+    # serving failing traffic. This is what cmd/server/main.go documents
+    # for the readiness probe; /healthz is the shallow liveness check
+    # below (a failing liveness probe restarts the pod, which is the
+    # wrong response to a transient dependency outage).
+    path: /readyz
     initialDelaySeconds: 5
     periodSeconds: 10
     timeoutSeconds: 3

@@ -137,18 +137,39 @@ kubectl delete namespace zk-drive
 The in-cluster Postgres StatefulSet is single-replica with a local PVC
 and is intended for dev/staging only. For production, use managed
 Postgres (RDS / Cloud SQL / Cloud SQL for PostgreSQL) and disable the
-bundled one:
+bundled one.
+
+Keep the credential-bearing `DATABASE_URL` out of the ConfigMap: set
+`config.databaseUrlInSecret=true` so the chart drops `DATABASE_URL` from
+`zk-drive-config` and instead sources it from the Secret. The
+connection string then lives only in the Secret (which can be encrypted
+at rest and is more tightly RBAC-scoped than a ConfigMap), and reaches
+the server, worker, and migrate Job through the same `envFrom`.
 
 ```bash
+# Credentials in a pre-provisioned Secret (preferred — populated by
+# External Secrets Operator, Sealed Secrets, or your cloud's secret
+# manager; the Secret must carry a DATABASE_URL key):
 helm upgrade zk-drive deploy/helm -n zk-drive \
   --set postgres.enabled=false \
-  --set config.DATABASE_URL='postgres://zkdrive:***@db.internal:5432/zkdrive?sslmode=require'
+  --set config.databaseUrlInSecret=true \
+  --set secrets.create=false \
+  --set secrets.existingSecret=zk-drive-db
+
+# Or let the chart manage the Secret (avoid plaintext --set in shell
+# history; prefer -f a gitignored values file):
+helm upgrade zk-drive deploy/helm -n zk-drive \
+  --set postgres.enabled=false \
+  --set config.databaseUrlInSecret=true \
+  --set secrets.data.DATABASE_URL='postgres://zkdrive:***@db.internal:5432/zkdrive?sslmode=require'
 ```
 
-Provide the credentials via a pre-provisioned Secret
-(`secrets.create=false`, `secrets.existingSecret=<name>`) populated by
-External Secrets Operator, Sealed Secrets, or your cloud's secret
-manager rather than chart `--set` values.
+> **Why not `--set config.DATABASE_URL=...`?** That renders the password
+> into the `zk-drive-config` ConfigMap, which is unencrypted at rest and
+> broadly readable via RBAC. `config.databaseUrlInSecret=true` is the
+> production path. (The raw `k8s/configmap.yaml` carries the same dev
+> default; when applying the raw manifests against a managed DB, move
+> `DATABASE_URL` into `k8s/secret.yaml` instead.)
 
 > **NetworkPolicy + managed endpoints.** The egress policies match the
 > bundled Postgres / NATS / ClamAV by in-cluster `podSelector`, so they

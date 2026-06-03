@@ -68,10 +68,17 @@ spec:
                 name: zk-drive-secrets
           ports:
             - containerPort: 8080
+          # Deep readiness check: /readyz pings Postgres/Redis/S3/NATS
+          # (concurrently, 900ms per-check budget) so a pod that lost a
+          # dependency is pulled from the Service endpoints rather than
+          # serving failing traffic — see cmd/server/main.go, which
+          # documents mapping /readyz to readiness. Liveness stays on the
+          # shallow /healthz so a transient dependency outage doesn't
+          # trigger a pod restart loop.
           readinessProbe:
             httpGet:
               port: 8080
-              path: /healthz
+              path: /readyz
             initialDelaySeconds: 5
             periodSeconds: 10
             timeoutSeconds: 3

@@ -16,7 +16,12 @@ metadata:
     helm.sh/hook-weight: "-10"
     helm.sh/hook-delete-policy: before-hook-creation
 data:
+  {{- if not .Values.config.databaseUrlInSecret }}
+  # Omitted when config.databaseUrlInSecret=true so credential-bearing
+  # connection strings live only in the Secret (supplied via
+  # secrets.data.DATABASE_URL or an existingSecret), not this ConfigMap.
   DATABASE_URL: {{ .Values.config.DATABASE_URL | quote }}
+  {{- end }}
   NATS_URL: {{ .Values.config.NATS_URL | quote }}
   LISTEN_ADDR: {{ .Values.config.LISTEN_ADDR | quote }}
   RATE_LIMIT_PER_USER: {{ .Values.config.RATE_LIMIT_PER_USER | quote }}
