@@ -161,7 +161,12 @@ governance.
 | CMK / strict-ZK folders   | Yes       |
 | Data residency controls   | Yes       |
 | KChat integration API     | Yes       |
-| Offline access            | No        |
+| Desktop sync client       | Yes       |
+| Collaborative editing     | Yes       |
+| Web Push notifications    | Yes       |
+| IP allowlisting           | Yes       |
+| Platform control-plane API| Yes       |
+| Offline access            | Yes       |
 
 ### 3.3 Encryption modes
 
@@ -254,9 +259,7 @@ improving the value proposition.
 
 | Item                                           | Why                                                                                       |
 | ---------------------------------------------- | ----------------------------------------------------------------------------------------- |
-| Full office suite                              | Google and Microsoft own this. Ship a preview viewer, not an editor.                      |
-| Desktop sync client                            | Native sync is an ops tax and a security surface. PWA + browser first.                    |
-| Real-time collaborative editing                | Large build cost. If demand appears, integrate OnlyOffice or Collabora.                   |
+| Full office suite                              | Google and Microsoft own this. ZK Drive integrates OnlyOffice for editing rather than building its own suite. |
 | Unlimited storage tiers                        | Dishonest; incompatible with zk-object-fabric fair-use economics; destroys margin.        |
 | Video conferencing                             | Wrong product. KChat covers calls; ZK Drive stores the recordings.                        |
 | Enterprise DLP / legal hold / eDiscovery       | Belongs in a future Enterprise SKU with dedicated compliance engineering.                 |
@@ -440,8 +443,9 @@ runtime. NATS is already in the broader operational stack.
 | Virus scanning                 | Integrate  | ClamAV                                       |
 | Search                         | Build      | Postgres FTS                                 |
 | Authentication                 | Build      | `api/auth/` (+ OAuth2 for Google / MS SSO)   |
-| Real-time collaborative editing| Defer      | Integrate OnlyOffice / Collabora later       |
-| Desktop sync                   | Defer      | —                                            |
+| Real-time collaborative editing| Build + Integrate | Yjs CRDT (`internal/collab/`) + OnlyOffice for office docs |
+| Desktop sync                   | Build      | Tauri shell (`desktop/`) on the Rust SDK (`sdk/crates/`) |
+| Platform control plane         | Build      | `internal/platform/`, `api/platform/`        |
 
 "Build" means ZK Drive owns the code and the behaviour. "Integrate"
 means ZK Drive wraps an existing tool or service and does not try
