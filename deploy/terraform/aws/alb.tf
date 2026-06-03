@@ -63,8 +63,8 @@ resource "aws_acm_certificate" "this" {
 # Port 80 forwards to the server target group rather than redirecting to
 # HTTPS: this listener is the CloudFront origin (CloudFront connects over
 # HTTP — see cloudfront.tf — and terminates viewer TLS itself). The ALB SG
-# only accepts traffic from CloudFront/within the VPC, so this hop is not
-# exposed directly to the public internet.
+# restricts ingress to CloudFront's origin-facing prefix list (see main.tf),
+# so this hop is not reachable directly from the public internet.
 resource "aws_lb_listener" "http" {
   load_balancer_arn = aws_lb.this.arn
   port              = 80

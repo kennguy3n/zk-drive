@@ -176,26 +176,37 @@ resource "aws_route_table_association" "private" {
 # Security groups
 # ----------------------------------------------------------------------------
 
-# Public ALB: HTTP/HTTPS from anywhere.
+# AWS-managed prefix list of CloudFront's origin-facing IP ranges. Used to
+# lock the ALB down so it only accepts traffic forwarded by CloudFront,
+# preventing clients from bypassing the CDN (and its caching/headers) to
+# reach the origin directly.
+data "aws_ec2_managed_prefix_list" "cloudfront" {
+  name = "com.amazonaws.global.cloudfront.origin-facing"
+}
+
+# ALB ingress restricted to CloudFront's origin-facing ranges: the ALB is an
+# origin behind CloudFront, not a public endpoint. CloudFront reaches it over
+# HTTP/80 (see cloudfront.tf); 443 stays open to the same ranges for an
+# optional direct-HTTPS path when a domain is configured.
 resource "aws_security_group" "alb" {
   name        = "${local.name}-alb"
-  description = "ALB ingress from the internet"
+  description = "ALB ingress from CloudFront origin-facing ranges"
   vpc_id      = aws_vpc.this.id
 
   ingress {
-    description = "HTTP"
-    from_port   = 80
-    to_port     = 80
-    protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
+    description     = "HTTP from CloudFront"
+    from_port       = 80
+    to_port         = 80
+    protocol        = "tcp"
+    prefix_list_ids = [data.aws_ec2_managed_prefix_list.cloudfront.id]
   }
 
   ingress {
-    description = "HTTPS"
-    from_port   = 443
-    to_port     = 443
-    protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
+    description     = "HTTPS from CloudFront"
+    from_port       = 443
+    to_port         = 443
+    protocol        = "tcp"
+    prefix_list_ids = [data.aws_ec2_managed_prefix_list.cloudfront.id]
   }
 
   egress {

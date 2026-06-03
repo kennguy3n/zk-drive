@@ -254,6 +254,20 @@ variable "fabric_bucket" {
   default     = ""
 }
 
+variable "fabric_access_key" {
+  description = "Access key for the zk-object-fabric storage gateway (S3_ACCESS_KEY). Required by the app whenever fabric_endpoint is set."
+  type        = string
+  default     = ""
+  sensitive   = true
+}
+
+variable "fabric_secret_key" {
+  description = "Secret key for the zk-object-fabric storage gateway (S3_SECRET_KEY). Required by the app whenever fabric_endpoint is set."
+  type        = string
+  default     = ""
+  sensitive   = true
+}
+
 variable "rate_limit_per_user" {
   description = "RATE_LIMIT_PER_USER applied by the API rate limiter."
   type        = number

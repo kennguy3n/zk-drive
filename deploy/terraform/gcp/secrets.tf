@@ -124,6 +124,44 @@ resource "google_secret_manager_secret_version" "stripe_webhook_secret" {
   secret_data = var.stripe_webhook_secret != "" ? var.stripe_webhook_secret : " "
 }
 
+# zk-object-fabric storage credentials. config.go's validateS3Group requires
+# S3_ACCESS_KEY + S3_SECRET_KEY whenever S3_ENDPOINT (fabric_endpoint) is set.
+# Seeded with a single space when unset (Secret Manager rejects empty
+# payloads); a space still trips validateS3Group's TrimSpace check.
+resource "google_secret_manager_secret" "s3_access_key" {
+  secret_id = "${local.name}-S3_ACCESS_KEY"
+
+  labels = local.common_labels
+
+  replication {
+    auto {}
+  }
+
+  depends_on = [google_project_service.this]
+}
+
+resource "google_secret_manager_secret_version" "s3_access_key" {
+  secret      = google_secret_manager_secret.s3_access_key.id
+  secret_data = var.fabric_access_key != "" ? var.fabric_access_key : " "
+}
+
+resource "google_secret_manager_secret" "s3_secret_key" {
+  secret_id = "${local.name}-S3_SECRET_KEY"
+
+  labels = local.common_labels
+
+  replication {
+    auto {}
+  }
+
+  depends_on = [google_project_service.this]
+}
+
+resource "google_secret_manager_secret_version" "s3_secret_key" {
+  secret      = google_secret_manager_secret.s3_secret_key.id
+  secret_data = var.fabric_secret_key != "" ? var.fabric_secret_key : " "
+}
+
 # Grant the application service account read access to each secret.
 locals {
   app_secret_ids = {
@@ -132,6 +170,8 @@ locals {
     database_url              = google_secret_manager_secret.database_url.secret_id
     stripe_secret_key         = google_secret_manager_secret.stripe_secret_key.secret_id
     stripe_webhook_secret     = google_secret_manager_secret.stripe_webhook_secret.secret_id
+    s3_access_key             = google_secret_manager_secret.s3_access_key.secret_id
+    s3_secret_key             = google_secret_manager_secret.s3_secret_key.secret_id
   }
 }
 

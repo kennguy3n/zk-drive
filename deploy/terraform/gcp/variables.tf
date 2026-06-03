@@ -191,6 +191,20 @@ variable "fabric_bucket" {
   default     = ""
 }
 
+variable "fabric_access_key" {
+  description = "Access key for the zk-object-fabric storage gateway (S3_ACCESS_KEY). Required by the app whenever fabric_endpoint is set."
+  type        = string
+  default     = ""
+  sensitive   = true
+}
+
+variable "fabric_secret_key" {
+  description = "Secret key for the zk-object-fabric storage gateway (S3_SECRET_KEY). Required by the app whenever fabric_endpoint is set."
+  type        = string
+  default     = ""
+  sensitive   = true
+}
+
 variable "nats_url" {
   description = "NATS JetStream URL (NATS_URL) reachable from the VPC. On GCP, NATS is expected to run on GKE/Compute or a managed offering; provide its in-VPC address here."
   type        = string

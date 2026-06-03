@@ -110,6 +110,32 @@ resource "aws_secretsmanager_secret_version" "stripe_webhook_secret" {
   secret_string = var.stripe_webhook_secret != "" ? var.stripe_webhook_secret : " "
 }
 
+# zk-object-fabric storage credentials. config.go's validateS3Group requires
+# S3_ACCESS_KEY + S3_SECRET_KEY whenever S3_ENDPOINT (fabric_endpoint) is set,
+# so these are injected as secrets alongside the other config. Seeded with a
+# single space when unset (Secrets Manager rejects empty SecretString); a
+# space still trips validateS3Group's TrimSpace check, surfacing the
+# misconfiguration at boot rather than silently passing.
+resource "aws_secretsmanager_secret" "s3_access_key" {
+  name        = "${local.name}/S3_ACCESS_KEY"
+  description = "zk-object-fabric access key"
+}
+
+resource "aws_secretsmanager_secret_version" "s3_access_key" {
+  secret_id     = aws_secretsmanager_secret.s3_access_key.id
+  secret_string = var.fabric_access_key != "" ? var.fabric_access_key : " "
+}
+
+resource "aws_secretsmanager_secret" "s3_secret_key" {
+  name        = "${local.name}/S3_SECRET_KEY"
+  description = "zk-object-fabric secret key"
+}
+
+resource "aws_secretsmanager_secret_version" "s3_secret_key" {
+  secret_id     = aws_secretsmanager_secret.s3_secret_key.id
+  secret_string = var.fabric_secret_key != "" ? var.fabric_secret_key : " "
+}
+
 locals {
   # Secrets injected into every application container, expressed in the
   # `secrets` shape ECS expects ({ name, valueFrom }). Names match the env
@@ -134,6 +160,14 @@ locals {
     {
       name      = "STRIPE_WEBHOOK_SECRET"
       valueFrom = aws_secretsmanager_secret.stripe_webhook_secret.arn
+    },
+    {
+      name      = "S3_ACCESS_KEY"
+      valueFrom = aws_secretsmanager_secret.s3_access_key.arn
+    },
+    {
+      name      = "S3_SECRET_KEY"
+      valueFrom = aws_secretsmanager_secret.s3_secret_key.arn
     },
   ]
 
@@ -160,6 +194,14 @@ locals {
       name      = "STRIPE_WEBHOOK_SECRET"
       valueFrom = aws_secretsmanager_secret.stripe_webhook_secret.arn
     },
+    {
+      name      = "S3_ACCESS_KEY"
+      valueFrom = aws_secretsmanager_secret.s3_access_key.arn
+    },
+    {
+      name      = "S3_SECRET_KEY"
+      valueFrom = aws_secretsmanager_secret.s3_secret_key.arn
+    },
   ]
 
   # ARNs the task execution role must be allowed to read.
@@ -170,6 +212,8 @@ locals {
     aws_secretsmanager_secret.credential_encryption_key.arn,
     aws_secretsmanager_secret.stripe_secret_key.arn,
     aws_secretsmanager_secret.stripe_webhook_secret.arn,
+    aws_secretsmanager_secret.s3_access_key.arn,
+    aws_secretsmanager_secret.s3_secret_key.arn,
     aws_secretsmanager_secret.db_password.arn,
   ]
 }

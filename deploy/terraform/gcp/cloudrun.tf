@@ -52,6 +52,8 @@ locals {
     CREDENTIAL_ENCRYPTION_KEY = google_secret_manager_secret.credential_encryption_key.secret_id
     STRIPE_SECRET_KEY         = google_secret_manager_secret.stripe_secret_key.secret_id
     STRIPE_WEBHOOK_SECRET     = google_secret_manager_secret.stripe_webhook_secret.secret_id
+    S3_ACCESS_KEY             = google_secret_manager_secret.s3_access_key.secret_id
+    S3_SECRET_KEY             = google_secret_manager_secret.s3_secret_key.secret_id
   }
 }
 
