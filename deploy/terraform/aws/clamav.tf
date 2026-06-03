@@ -94,7 +94,7 @@ resource "aws_ecs_task_definition" "clamav" {
         { sourceVolume = "signatures", containerPath = "/var/lib/clamav", readOnly = false },
       ]
       healthCheck = {
-        command     = ["CMD-SHELL", "echo PING | clamdscan --version >/dev/null 2>&1 || exit 0"]
+        command     = ["CMD-SHELL", "echo PING | clamdscan --version >/dev/null 2>&1 || exit 1"]
         interval    = 30
         timeout     = 10
         retries     = 3

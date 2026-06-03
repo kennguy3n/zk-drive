@@ -62,6 +62,9 @@ locals {
     { name = "S3_BUCKET", value = var.fabric_bucket },
     { name = "FABRIC_CONSOLE_URL", value = var.fabric_console_url },
     { name = "PUBLIC_URL", value = local.public_url },
+    # Worker /metrics listen address; matches config.go's :9091 default and the
+    # GCP module. Harmless on the server binary, which ignores it.
+    { name = "WORKER_METRICS_ADDR", value = ":9091" },
   ]
 
   # PgBouncer sidecar definition shared by server + worker tasks. Pools

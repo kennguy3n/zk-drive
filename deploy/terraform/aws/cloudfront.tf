@@ -30,7 +30,11 @@ resource "aws_cloudfront_distribution" "this" {
     origin_access_control_id = aws_cloudfront_origin_access_control.frontend.id
   }
 
-  # ALB origin for the API. CloudFront -> ALB is HTTPS.
+  # ALB origin for the API. CloudFront connects to the ALB over plain HTTP on
+  # port 80: CloudFront already terminates viewer TLS, and the hop to the ALB
+  # stays inside AWS. Using HTTPS here would fail the origin TLS handshake
+  # because the ACM cert covers var.domain_name, not the ALB's generated DNS
+  # name (aws_lb.this.dns_name) that CloudFront dials.
   origin {
     origin_id   = local.alb_origin_id
     domain_name = aws_lb.this.dns_name
@@ -38,7 +42,7 @@ resource "aws_cloudfront_distribution" "this" {
     custom_origin_config {
       http_port              = 80
       https_port             = 443
-      origin_protocol_policy = "https-only"
+      origin_protocol_policy = "http-only"
       origin_ssl_protocols   = ["TLSv1.2"]
     }
   }

@@ -94,8 +94,10 @@ resource "aws_secretsmanager_secret" "stripe_secret_key" {
 }
 
 resource "aws_secretsmanager_secret_version" "stripe_secret_key" {
-  secret_id     = aws_secretsmanager_secret.stripe_secret_key.id
-  secret_string = var.stripe_secret_key
+  secret_id = aws_secretsmanager_secret.stripe_secret_key.id
+  # Secrets Manager rejects an empty SecretString (min length 1); seed a
+  # single space when billing is not configured so a clean apply succeeds.
+  secret_string = var.stripe_secret_key != "" ? var.stripe_secret_key : " "
 }
 
 resource "aws_secretsmanager_secret" "stripe_webhook_secret" {
@@ -105,7 +107,7 @@ resource "aws_secretsmanager_secret" "stripe_webhook_secret" {
 
 resource "aws_secretsmanager_secret_version" "stripe_webhook_secret" {
   secret_id     = aws_secretsmanager_secret.stripe_webhook_secret.id
-  secret_string = var.stripe_webhook_secret
+  secret_string = var.stripe_webhook_secret != "" ? var.stripe_webhook_secret : " "
 }
 
 locals {
