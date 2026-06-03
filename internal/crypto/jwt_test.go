@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -425,6 +426,129 @@ func TestKeyManager_RotateWithoutStoreFails(t *testing.T) {
 	}
 	if _, err := km.RotateKey(ctx); err == nil {
 		t.Fatal("expected error rotating without a store")
+	}
+}
+
+// gatedStore wraps a SigningKeyStore and pauses exactly one ListKeys
+// call (the first after Arm) inside the store read: it signals via
+// reading once the snapshot has been taken, then blocks until release
+// is closed. This lets a test pin one reload in mid-flight to observe
+// the serialization invariant that reloadMu enforces.
+type gatedStore struct {
+	inner   SigningKeyStore
+	armed   atomic.Bool
+	reading chan struct{}
+	release chan struct{}
+}
+
+func (g *gatedStore) ListKeys(ctx context.Context) ([]SigningKeyRecord, error) {
+	if g.armed.CompareAndSwap(true, false) {
+		recs, err := g.inner.ListKeys(ctx)
+		close(g.reading)
+		<-g.release
+		return recs, err
+	}
+	return g.inner.ListKeys(ctx)
+}
+
+func (g *gatedStore) Rotate(ctx context.Context, rec SigningKeyRecord) error {
+	return g.inner.Rotate(ctx, rec)
+}
+
+// TestKeyManager_ReloadIsSerialized is a regression test for the
+// concurrent-reload race: reload reads the store and rebuilds its maps,
+// and before the fix only the final assignment was guarded — so a slow
+// reload holding a stale snapshot could swap in last and clobber a
+// fresher concurrent reload. The fix serializes the entire reload under
+// reloadMu. This test pins reload A inside its store read (holding
+// reloadMu) and asserts reload B cannot complete until A releases —
+// i.e. reloads are mutually exclusive across the whole read→swap. Without
+// the fix, B sails through its (un-gated) read and completes immediately,
+// failing the test.
+func TestKeyManager_ReloadIsSerialized(t *testing.T) {
+	ctx := context.Background()
+	g := &gatedStore{
+		inner:   &memKeyStore{},
+		reading: make(chan struct{}),
+		release: make(chan struct{}),
+	}
+	// Construction reload runs before arming, so it isn't gated.
+	km, err := NewKeyManager(ctx, g, testCodec(t), "hs-secret", AlgAuto)
+	if err != nil {
+		t.Fatalf("new key manager: %v", err)
+	}
+
+	g.armed.Store(true)
+	aDone := make(chan struct{})
+	go func() {
+		defer close(aDone)
+		_ = km.Reload(ctx)
+	}()
+	<-g.reading // A has read the store and is parked, holding reloadMu.
+
+	bDone := make(chan struct{})
+	go func() {
+		defer close(bDone)
+		_ = km.Reload(ctx)
+	}()
+
+	select {
+	case <-bDone:
+		t.Fatal("second reload completed while the first was mid-flight; reloads are not serialized (reloadMu missing)")
+	case <-time.After(200 * time.Millisecond):
+		// Expected: B is blocked on reloadMu held by A.
+	}
+
+	close(g.release) // Let A finish and drop reloadMu.
+	select {
+	case <-bDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("second reload did not complete after the first released reloadMu")
+	}
+	<-aDone
+}
+
+// TestKeyManager_ConcurrentReloadAndRotate exercises RotateKey racing
+// many Reload calls under -race, and asserts the manager converges on a
+// loaded ES256 signing key with a kid present in the verify map (i.e. no
+// reload left a torn or stale set installed). Pair with `go test -race`.
+func TestKeyManager_ConcurrentReloadAndRotate(t *testing.T) {
+	ctx := context.Background()
+	km, err := NewKeyManager(ctx, &memKeyStore{}, testCodec(t), "hs-secret", AlgAuto)
+	if err != nil {
+		t.Fatalf("new key manager: %v", err)
+	}
+
+	var wg sync.WaitGroup
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < 25; j++ {
+				_ = km.Reload(ctx)
+			}
+		}()
+	}
+	for i := 0; i < 5; i++ {
+		if _, err := km.RotateKey(ctx); err != nil {
+			t.Errorf("rotate: %v", err)
+		}
+	}
+	wg.Wait()
+
+	// One last reload to settle on the final persisted state, then verify
+	// the active signing key is consistent with the verify map.
+	if err := km.Reload(ctx); err != nil {
+		t.Fatalf("final reload: %v", err)
+	}
+	if got := km.Algorithm(); got != AlgES256 {
+		t.Fatalf("algorithm = %q, want ES256 after rotations", got)
+	}
+	km.mu.RLock()
+	_, ok := km.verifyKeys[km.signingKID]
+	km.mu.RUnlock()
+	if !ok {
+		t.Fatal("active signing kid not present in verify map after concurrent reload/rotate")
 	}
 }
 

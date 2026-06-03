@@ -77,6 +77,14 @@ type KeyManager struct {
 	hmacSecret string
 	algoPref   string
 
+	// reloadMu serializes the whole reload sequence (store read → build
+	// → swap) so two concurrent reloaders (e.g. RotateKey and the
+	// RefreshLoop tick) cannot interleave such that a reloader holding a
+	// stale pre-rotation snapshot swaps in last and clobbers a fresher
+	// one. It is held across the DB round-trip; mu (below) is taken only
+	// for the brief in-memory swap, so Sign/Parse never block on I/O.
+	reloadMu sync.Mutex
+
 	mu sync.RWMutex
 	// signingKID / signingKey describe the active ES256 key used for
 	// signing. signingKey is nil when no asymmetric key is active (or
@@ -131,6 +139,14 @@ func (km *KeyManager) Algorithm() string {
 // when algoPref does not force HS256. A nil store leaves the manager
 // HS256-only.
 func (km *KeyManager) reload(ctx context.Context) error {
+	// Serialize the entire read→build→swap so a reloader cannot swap in a
+	// snapshot older than one a concurrent reloader already installed.
+	// Without this, both callers read the store and build their maps
+	// lock-free, and only the final assignment is guarded by mu — letting
+	// a stale reader that locks second overwrite a fresher set.
+	km.reloadMu.Lock()
+	defer km.reloadMu.Unlock()
+
 	verify := map[string]*ecdsa.PublicKey{}
 	var signKID string
 	var signKey *ecdsa.PrivateKey
