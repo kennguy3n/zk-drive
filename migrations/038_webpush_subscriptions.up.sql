@@ -35,11 +35,13 @@ CREATE TABLE webpush_subscriptions (
     UNIQUE(workspace_id, user_id, endpoint)
 );
 
--- Hot path on every notification publish: "find every push
+-- The hot path on every notification publish — "find every push
 -- subscription for (workspace, user)" so we can fan out to a user's
--- registered devices when they're not connected via WebSocket.
-CREATE INDEX idx_webpush_subs_workspace_user
-    ON webpush_subscriptions (workspace_id, user_id);
+-- registered devices when they're offline — is already served by the
+-- UNIQUE(workspace_id, user_id, endpoint) constraint's backing B-tree:
+-- a leading-column prefix scan on (workspace_id, user_id) uses it
+-- directly. A separate index on (workspace_id, user_id) would be
+-- redundant (extra write amplification, no read benefit), so we omit it.
 
 ALTER TABLE webpush_subscriptions ENABLE ROW LEVEL SECURITY;
 ALTER TABLE webpush_subscriptions FORCE ROW LEVEL SECURITY;

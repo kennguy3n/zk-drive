@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"time"
 
 	"strings"
 
@@ -12,6 +13,13 @@ import (
 	"github.com/google/uuid"
 	"github.com/redis/go-redis/v9"
 )
+
+// pushDeliveryTimeout caps how long the detached Web Push fan-out may
+// run after the originating request returns. Push delivery makes
+// blocking HTTPS POSTs to third-party push services (FCM / Mozilla /
+// Apple), each 100-500ms; bounding the work keeps a slow push service
+// from leaking goroutines indefinitely.
+const pushDeliveryTimeout = 15 * time.Second
 
 // Event is the JSON envelope pushed to live WebSocket clients when a
 // notification is created. The shape mirrors api/ws.Event but is
@@ -180,6 +188,15 @@ func NewWebPushPublisher(inner WSPublisher, conns ConnectionChecker, push PushSe
 // a Web Push message to offline recipients. The inner publish error
 // (if any) is returned; push failures are swallowed by the service's
 // own logging so a push-service outage never masks the WS result.
+//
+// Web Push delivery runs in a detached goroutine: it performs blocking
+// HTTPS POSTs to external push services (hundreds of ms per device),
+// and the synchronous WebSocket publish is what the notification HTTP
+// handler actually waits on. Returning before the push completes keeps
+// that handler's latency independent of the push services' health. The
+// goroutine uses a cancellation-detached copy of ctx (so it survives
+// the request returning) with its own timeout, and still honours the
+// request's logger/trace values.
 func (p *WebPushPublisher) Publish(ctx context.Context, workspaceID, userID uuid.UUID, event Event) error {
 	var innerErr error
 	if p.inner != nil {
@@ -191,12 +208,19 @@ func (p *WebPushPublisher) Publish(ctx context.Context, workspaceID, userID uuid
 	if p.conns != nil && p.conns.IsConnected(workspaceID, userID) {
 		return innerErr
 	}
-	if payload, ok := pushPayloadFromEvent(event); ok {
+	payload, ok := pushPayloadFromEvent(event)
+	if !ok {
+		return innerErr
+	}
+	pushCtx := context.WithoutCancel(ctx)
+	go func() {
+		ctx, cancel := context.WithTimeout(pushCtx, pushDeliveryTimeout)
+		defer cancel()
 		if err := p.push.Send(ctx, workspaceID, userID, payload); err != nil {
 			logging.FromContext(ctx).Error("notification web push failed",
 				"workspace_id", workspaceID, "user_id", userID, "err", err)
 		}
-	}
+	}()
 	return innerErr
 }
 

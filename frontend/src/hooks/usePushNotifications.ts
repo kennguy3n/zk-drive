@@ -16,6 +16,36 @@ function urlBase64ToUint8Array(base64String: string): Uint8Array<ArrayBuffer> {
   return output;
 }
 
+// applicationServerKeyMatches reports whether an existing browser
+// PushSubscription was created with the same VAPID public key the
+// server is currently advertising. A push subscription is permanently
+// bound to the applicationServerKey it was created with: after the
+// operator rotates VAPID keys, a reused old subscription causes the
+// push service to reject deliveries (the server signs the request with
+// the NEW private key, but the subscription expects the OLD public
+// key), and those 403s are not the 410/404 the server auto-prunes on.
+// Detecting the mismatch here lets us drop the stale subscription and
+// re-subscribe against the current key.
+function applicationServerKeyMatches(
+  subscription: PushSubscription,
+  key: Uint8Array<ArrayBuffer>,
+): boolean {
+  const existingKey = subscription.options.applicationServerKey;
+  if (!existingKey) {
+    return false;
+  }
+  const existing = new Uint8Array(existingKey as ArrayBuffer);
+  if (existing.length !== key.length) {
+    return false;
+  }
+  for (let i = 0; i < existing.length; i++) {
+    if (existing[i] !== key[i]) {
+      return false;
+    }
+  }
+  return true;
+}
+
 function pushSupported(): boolean {
   return (
     typeof window !== "undefined" &&
@@ -58,14 +88,23 @@ async function ensurePushSubscription(): Promise<void> {
     return;
   }
 
+  const applicationServerKey = urlBase64ToUint8Array(publicKey);
   const registration = await navigator.serviceWorker.ready;
-  const existing = await registration.pushManager.getSubscription();
-  const subscription =
-    existing ??
-    (await registration.pushManager.subscribe({
+
+  // Reuse an existing subscription only when it was minted with the
+  // current VAPID key. After a key rotation the old subscription is
+  // unusable (deliveries 403), so drop it and create a fresh one.
+  let subscription = await registration.pushManager.getSubscription();
+  if (subscription && !applicationServerKeyMatches(subscription, applicationServerKey)) {
+    await subscription.unsubscribe();
+    subscription = null;
+  }
+  if (!subscription) {
+    subscription = await registration.pushManager.subscribe({
       userVisibleOnly: true,
-      applicationServerKey: urlBase64ToUint8Array(publicKey),
-    }));
+      applicationServerKey,
+    });
+  }
 
   await registerPushSubscription(subscription.toJSON() as PushSubscriptionJSON);
 }

@@ -13,6 +13,21 @@ const WORKSPACE_STORAGE_KEY = "zkdrive.workspace_id";
 const ROLE_STORAGE_KEY = "zkdrive.role";
 const USER_STORAGE_KEY = "zkdrive.user_id";
 
+// AUTH_CHANGE_EVENT is dispatched on `window` whenever auth state is
+// mutated in THIS tab (login / signup / MFA verify / logout). The
+// browser's native "storage" event only fires in OTHER tabs, so a
+// long-lived subscriber mounted before login (e.g. useAuth at the App
+// root) never learns about a same-tab login without this. useAuth
+// listens for both events to stay in sync regardless of which tab
+// changed the session.
+export const AUTH_CHANGE_EVENT = "zkdrive:auth-change";
+
+function emitAuthChange(): void {
+  if (typeof window !== "undefined") {
+    window.dispatchEvent(new Event(AUTH_CHANGE_EVENT));
+  }
+}
+
 // Attach the JWT to every outgoing request. Kept as a single interceptor
 // so the token is always fresh (e.g. after login, the next request picks
 // up the new value from localStorage without page reload).
@@ -159,6 +174,7 @@ export function logout(): void {
   localStorage.removeItem(WORKSPACE_STORAGE_KEY);
   localStorage.removeItem(ROLE_STORAGE_KEY);
   localStorage.removeItem(USER_STORAGE_KEY);
+  emitAuthChange();
 }
 
 // --- TOTP / 2FA ----------------------------------------------------------
@@ -299,6 +315,7 @@ function storeAuth(r: AuthResponse): void {
   if (r.role) {
     localStorage.setItem(ROLE_STORAGE_KEY, r.role);
   }
+  emitAuthChange();
 }
 
 // --- Folders -------------------------------------------------------------

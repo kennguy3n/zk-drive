@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"sync"
 	"testing"
+	"time"
 
 	webpush "github.com/SherClockHolmes/webpush-go"
 	"github.com/google/uuid"
@@ -252,7 +253,7 @@ func TestWebPushPublisher_FansToPushForOfflineUser(t *testing.T) {
 
 	inner := &recordingPublisher{}
 	conns := connSet{online: true}
-	push := &recordingPushSender{}
+	push := &recordingPushSender{signal: make(chan struct{}, 1)}
 	pub := NewWebPushPublisher(inner, conns, push)
 
 	evt := Event{Type: "notification", Payload: &Notification{Title: "T", Body: "B", Type: "share_link.created"}}
@@ -264,14 +265,22 @@ func TestWebPushPublisher_FansToPushForOfflineUser(t *testing.T) {
 		t.Fatalf("Publish offline: %v", err)
 	}
 
+	// Push fans out asynchronously; wait for the single offline delivery.
+	select {
+	case <-push.signal:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for async push delivery")
+	}
+
 	if inner.calls != 2 {
 		t.Errorf("expected inner publish for both users, got %d", inner.calls)
 	}
-	if len(push.sent) != 1 {
-		t.Fatalf("expected 1 push (offline only), got %d", len(push.sent))
+	sent := push.sentUsers()
+	if len(sent) != 1 {
+		t.Fatalf("expected 1 push (offline only), got %d", len(sent))
 	}
-	if push.sent[0] != offline {
-		t.Errorf("expected push to offline user %s, got %s", offline, push.sent[0])
+	if sent[0] != offline {
+		t.Errorf("expected push to offline user %s, got %s", offline, sent[0])
 	}
 }
 
@@ -282,8 +291,10 @@ func TestWebPushPublisher_IgnoresNonNotificationEvents(t *testing.T) {
 	if err := pub.Publish(context.Background(), uuid.New(), uuid.New(), Event{Type: "change", Payload: map[string]string{"k": "v"}}); err != nil {
 		t.Fatal(err)
 	}
-	if len(push.sent) != 0 {
-		t.Errorf("expected no push for non-notification event, got %d", len(push.sent))
+	// Non-notification events short-circuit before the async fan-out,
+	// so no goroutine is spawned and the snapshot is stable.
+	if sent := push.sentUsers(); len(sent) != 0 {
+		t.Errorf("expected no push for non-notification event, got %d", len(sent))
 	}
 }
 
@@ -294,11 +305,31 @@ func (r *recordingPublisher) Publish(_ context.Context, _, _ uuid.UUID, _ Event)
 	return nil
 }
 
-type recordingPushSender struct{ sent []uuid.UUID }
+// recordingPushSender records the users a push was delivered to. The
+// WebPushPublisher fans push out in a detached goroutine, so Send may
+// run after Publish returns; the mutex + signal channel let tests wait
+// for delivery deterministically instead of sleeping.
+type recordingPushSender struct {
+	mu     sync.Mutex
+	sent   []uuid.UUID
+	signal chan struct{}
+}
 
 func (r *recordingPushSender) Send(_ context.Context, _, userID uuid.UUID, _ NotificationPayload) error {
+	r.mu.Lock()
 	r.sent = append(r.sent, userID)
+	r.mu.Unlock()
+	if r.signal != nil {
+		r.signal <- struct{}{}
+	}
 	return nil
+}
+
+// sentUsers returns a snapshot of the recorded recipients.
+func (r *recordingPushSender) sentUsers() []uuid.UUID {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]uuid.UUID(nil), r.sent...)
 }
 
 // connSet reports a user as connected when present in the map.

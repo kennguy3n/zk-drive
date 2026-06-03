@@ -32,17 +32,41 @@ self.addEventListener("push", (event) => {
   event.waitUntil(self.registration.showNotification(title, options));
 });
 
+// EDITOR_PATH_PREFIX marks routes (the TipTap/Yjs document editor) where
+// blindly navigating an open tab could discard unsaved edits. The click
+// handler avoids redirecting such tabs.
+const EDITOR_PATH_PREFIX = "/drive/document/";
+
+function pathnameOf(url) {
+  try {
+    return new URL(url).pathname;
+  } catch (e) {
+    return "";
+  }
+}
+
 self.addEventListener("notificationclick", (event) => {
   event.notification.close();
   const targetUrl = (event.notification.data && event.notification.data.url) || "/drive";
   event.waitUntil(
     clients.matchAll({ type: "window", includeUncontrolled: true }).then((windowClients) => {
-      for (const client of windowClients) {
-        if ("focus" in client) {
-          client.navigate(targetUrl);
-          return client.focus();
-        }
+      const focusable = windowClients.filter((c) => "focus" in c);
+
+      // 1) A tab already on the target page: just focus it, no navigation.
+      const alreadyThere = focusable.find((c) => pathnameOf(c.url) === targetUrl);
+      if (alreadyThere) {
+        return alreadyThere.focus();
       }
+
+      // 2) Reuse a tab that ISN'T mid-edit so we don't blow away unsaved
+      // document changes by navigating away from the editor.
+      const reusable = focusable.find((c) => !pathnameOf(c.url).startsWith(EDITOR_PATH_PREFIX));
+      if (reusable) {
+        return Promise.resolve(reusable.navigate(targetUrl)).then(() => reusable.focus());
+      }
+
+      // 3) Every open tab is an editor (or none are open): open a new
+      // window rather than disrupting in-progress editing.
       if (clients.openWindow) {
         return clients.openWindow(targetUrl);
       }
