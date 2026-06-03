@@ -73,15 +73,21 @@ every manifest in `k8s/` and adds the production-readiness objects:
   `worker.hpa.metric=custom`).
 - **PodDisruptionBudgets** — `minAvailable: 1` for server and worker so
   node drains / cluster upgrades never take a tier fully offline.
-- **NetworkPolicies** — default-deny ingress+egress with scoped allows
-  (ingress→server:8080, Prometheus→server:8080 / worker:9091,
-  server/worker→Postgres:5432 / Redis:6379 / NATS:4222 / S3:443,
-  worker→ClamAV:3310, a batch-egress policy for the migrate Job and
-  CronJobs (`app: zk-drive-batch`) covering the same backends, and DNS
-  egress to kube-dns). The S3 egress (443) is what lets the server run
-  its `/readyz` HeadBucket check and the worker reach zk-object-fabric
-  for previews, scanning, orphan GC, and audit archiving; set the port
-  via `networkPolicy.s3Port`.
+- **NetworkPolicies** — default-deny ingress+egress with scoped allows.
+  Because a connection requires **both** the source's egress *and* the
+  destination's ingress to be permitted, there are matching egress and
+  ingress rules for every flow: ingress→server:8080, Prometheus→server:8080
+  / worker:9091, server/worker→Postgres:5432 / Redis:6379 / NATS:4222 /
+  S3:443, worker→ClamAV:3310, a batch-egress policy for the migrate Job and
+  CronJobs (`app: zk-drive-batch`) covering the same backends, **ingress
+  policies on the in-cluster Postgres/NATS/ClamAV pods** accepting from
+  those tiers, a ClamAV egress (443) so `freshclam` can refresh virus
+  definitions, and DNS egress to kube-dns. The S3 egress (443) is what lets
+  the server run its `/readyz` HeadBucket check and the worker reach
+  zk-object-fabric for previews, scanning, orphan GC, and audit archiving;
+  set the port via `networkPolicy.s3Port`. The chart gates the
+  Postgres/NATS/ClamAV ingress policies on their `*.enabled` flags, so a
+  managed backend (no in-cluster pod) renders none of them.
 - **Pod anti-affinity + topology spread** so replicas spread across
   nodes and availability zones.
 - **Migration Job** as a `pre-install,pre-upgrade` hook so the schema is
