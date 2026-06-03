@@ -369,7 +369,7 @@ func buildConfigFromEnv() *Config {
 		MicrosoftRedirectURL:  os.Getenv("MICROSOFT_REDIRECT_URL"),
 		RateLimitPerUser:        parseIntDefault(os.Getenv("RATE_LIMIT_PER_USER"), 0),
 		RateLimitPerWorkspace:   parseIntDefault(os.Getenv("RATE_LIMIT_PER_WORKSPACE"), 0),
-		TrustedProxyDepth:       parseIntDefault(os.Getenv("TRUSTED_PROXY_DEPTH"), 1),
+		TrustedProxyDepth:       parseNonNegativeIntDefault(os.Getenv("TRUSTED_PROXY_DEPTH"), 1),
 		RedisURL:                os.Getenv("REDIS_URL"),
 		FabricConsoleURL:        os.Getenv("FABRIC_CONSOLE_URL"),
 		FabricConsoleAdminToken: os.Getenv("FABRIC_CONSOLE_ADMIN_TOKEN"),
@@ -747,6 +747,24 @@ func parseIntDefault(s string, def int) int {
 	}
 	v, err := strconv.Atoi(s)
 	if err != nil || v <= 0 {
+		return def
+	}
+	return v
+}
+
+// parseNonNegativeIntDefault is like parseIntDefault but treats an
+// explicit 0 as a valid value rather than falling back to def. Only an
+// unset/empty var, a parse error, or a negative value yields def. This
+// matters for TRUSTED_PROXY_DEPTH where 0 ("trust no proxy; use the raw
+// peer address") is a meaningful, documented setting distinct from the
+// default of 1.
+func parseNonNegativeIntDefault(s string, def int) int {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return def
+	}
+	v, err := strconv.Atoi(s)
+	if err != nil || v < 0 {
 		return def
 	}
 	return v

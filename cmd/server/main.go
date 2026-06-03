@@ -1110,6 +1110,10 @@ func run() error {
 		r.Route("/kchat", func(r chi.Router) {
 			r.Use(middleware.AuthMiddleware(cfg.JWTSecret, sessionChecker))
 			r.Use(middleware.TenantGuard())
+			// kchat is a data-plane feature (attachment uploads, room
+			// creation, member sync), so it must honour the workspace IP
+			// allowlist exactly like the main data-plane group above.
+			r.Use(middleware.IPAllowlist(ipAllowSvc, cfg.TrustedProxyDepth))
 			r.Use(rateLimiter())
 			kchatHandler.RegisterRoutes(r)
 		})

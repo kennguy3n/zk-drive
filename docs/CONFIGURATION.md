@@ -60,6 +60,25 @@ allowlist only accepts public ranges, the resolved client IP must be a
 routable public address, so it must reflect the real external client
 rather than an internal proxy hop.
 
+**Enforcement scope.** The allowlist is enforced on authenticated
+data-plane HTTP requests — the main drive routes and the `/api/kchat`
+routes. The `/api/admin` routes are intentionally exempt so an admin
+who misconfigures the allowlist can still reach the management
+endpoints to fix it.
+
+The long-lived WebSocket endpoints (`/api/ws` and
+`/api/documents/{id}/ws`) are a known limitation: they authenticate the
+upgrade request but deliberately sit outside the per-request middleware
+stack (`TenantGuard` + the IP-allowlist middleware), because that stack
+assumes ordinary request/response semantics and would otherwise charge
+per WS frame. As a result the IP allowlist is **not** applied to
+WebSocket traffic today. The practical exposure is bounded: a client
+must already hold a valid session (JWT) to open a socket, and all
+allowlist-gated REST endpoints — including the upload-URL / confirm
+handshakes used to move file bytes — remain enforced. If you require
+strict connection-time IP enforcement for real-time editing, terminate
+WebSocket traffic at a proxy that applies the same CIDR allowlist.
+
 ## Storage (zk-object-fabric S3 gateway)
 
 These four are required together. If `S3_ENDPOINT` is unset, the
