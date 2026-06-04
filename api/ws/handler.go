@@ -246,6 +246,18 @@ func (h *Hub) ClientCount(workspaceID, userID uuid.UUID) int {
 	return len(h.clients[clientKey{workspaceID, userID}])
 }
 
+// IsConnected reports whether (workspaceID, userID) has at least one
+// live client registered on this hub. Used by the notification
+// publisher to decide whether to fall back to a browser push
+// notification for an offline user. Replica-local: in a multi-replica
+// deployment this only reflects connections terminated on this
+// process.
+func (h *Hub) IsConnected(workspaceID, userID uuid.UUID) bool {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	return len(h.clients[clientKey{workspaceID, userID}]) > 0
+}
+
 // BroadcastJSON pushes an already-encoded JSON payload to every
 // client for (workspaceID, userID). Useful when the encoded bytes
 // were produced upstream (e.g. relayed from Redis pub/sub).
