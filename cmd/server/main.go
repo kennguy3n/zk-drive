@@ -1110,6 +1110,19 @@ func run() error {
 		// the upgrade handshake.
 		r.Group(func(r chi.Router) {
 			r.Use(middleware.AuthMiddlewareWithKeys(jwtKeyManager, sessionChecker))
+			// Suspension enforcement applies to the WS upgrade too: a
+			// suspended workspace must not be able to keep realtime sync
+			// or collaborative editing alive when every REST call is
+			// already returning 503. SuspensionGuard needs only the
+			// workspace id (bound by the auth middleware above) and runs
+			// on the initial HTTP request before the upgrade, so — unlike
+			// TenantGuard/rateLimiter — it has no handshake or per-frame
+			// cost concerns and is safe to mount here. Ordered before
+			// IPAllowlist to match the REST data-plane group's precedence
+			// (SuspensionGuard → IPAllowlist), so a suspended workspace
+			// gets the same 503 regardless of transport rather than a 503
+			// on REST but a 403 on the WS upgrade.
+			r.Use(middleware.SuspensionGuard(platformSvc))
 			// IP allowlist enforcement applies to the WS upgrade too:
 			// conditional access must gate EVERY entry into a
 			// workspace, not just the REST data plane, else a blocked
@@ -1120,15 +1133,6 @@ func run() error {
 			// the upgrade-handshake reasons noted below) and runs on
 			// the initial HTTP request before the upgrade.
 			r.Use(middleware.IPAllowlist(ipAllowSvc, cfg.TrustedProxyDepth))
-			// Suspension enforcement applies to the WS upgrade too: a
-			// suspended workspace must not be able to keep realtime sync
-			// or collaborative editing alive when every REST call is
-			// already returning 503. SuspensionGuard needs only the
-			// workspace id (bound by the auth middleware above) and runs
-			// on the initial HTTP request before the upgrade, so — unlike
-			// TenantGuard/rateLimiter — it has no handshake or per-frame
-			// cost concerns and is safe to mount here.
-			r.Use(middleware.SuspensionGuard(platformSvc))
 			r.Get("/ws", wsHandler.ServeWS)
 			// Collab WS endpoint: per-document Yjs relay. Mounted
 			// next to /ws because both are long-lived upgrade

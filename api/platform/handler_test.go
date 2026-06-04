@@ -73,13 +73,21 @@ func TestDecodeOptional(t *testing.T) {
 // fakeRotator is an in-memory JWTRotator that records calls and returns
 // a canned platform-wide signing-key record.
 type fakeRotator struct {
-	calls int
-	rec   cryptopkg.SigningKeyRecord
+	calls      int
+	rec        cryptopkg.SigningKeyRecord
+	signingAlg string
 }
 
 func (f *fakeRotator) RotateKey(ctx context.Context) (cryptopkg.SigningKeyRecord, error) {
 	f.calls++
 	return f.rec, nil
+}
+
+func (f *fakeRotator) Algorithm() string {
+	if f.signingAlg == "" {
+		return "ES256"
+	}
+	return f.signingAlg
 }
 
 // fakePrincipal carries a fixed permission set, satisfying
@@ -135,7 +143,10 @@ func TestRotateJWTKey_RequiresKeysManage(t *testing.T) {
 	}
 
 	t.Run("with keys:manage rotates", func(t *testing.T) {
-		rot := &fakeRotator{rec: rec}
+		// signingAlg HS256 models the rotated ES256 key being stored but
+		// not yet signing (algorithm pinned to HS256) so the response must
+		// surface both the key's own algo and the effective signing algo.
+		rot := &fakeRotator{rec: rec, signingAlg: "HS256"}
 		resp := postRotate(t, mountRotate(rot, platformsvc.PermKeysManage))
 		if resp.Code != http.StatusOK {
 			t.Fatalf("status = %d, want 200; body=%s", resp.Code, resp.Body.String())
@@ -149,6 +160,9 @@ func TestRotateJWTKey_RequiresKeysManage(t *testing.T) {
 		}
 		if body.KeyID != rec.ID.String() || body.Algorithm != "ES256" {
 			t.Fatalf("unexpected body: %+v", body)
+		}
+		if body.SigningAlgorithm != "HS256" {
+			t.Fatalf("SigningAlgorithm = %q, want HS256 (effective signing algo, distinct from rotated key algo)", body.SigningAlgorithm)
 		}
 	})
 

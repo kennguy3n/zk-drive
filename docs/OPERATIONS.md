@@ -190,7 +190,13 @@ curl -X POST https://<host>/api/platform/jwt/rotate \
 ```
 
 The response carries only public key metadata (`key_id`, `algorithm`,
-`created_at`) — never private key material. The rotation is recorded via
+`signing_algorithm`, `created_at`) — never private key material.
+`algorithm` is the rotated key's own algorithm (always `ES256`);
+`signing_algorithm` is what the manager will actually sign with now, so
+when `JWT_ALGORITHM=HS256` pins signing the response shows `algorithm:
+ES256` (key stored + verifying) but `signing_algorithm: HS256` (not yet
+used to sign), letting an operator confirm whether the rotation is live.
+The rotation is recorded via
 structured logs (`slog`: `"platform jwt signing key rotated"` with
 `key_id` / `algorithm`); forward these to your log aggregator for an
 audit trail, since the platform plane has no workspace scope and so does

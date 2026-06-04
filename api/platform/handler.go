@@ -51,6 +51,12 @@ type Handler struct {
 // keys:manage capability instead.
 type JWTRotator interface {
 	RotateKey(ctx context.Context) (cryptopkg.SigningKeyRecord, error)
+	// Algorithm reports the algorithm the manager will actually use to
+	// sign the next token (AlgES256 once an active asymmetric key is
+	// loaded, otherwise AlgHS256). Surfaced in the rotate response so an
+	// operator can tell a key that is stored-but-not-signing (HS256
+	// forced) apart from one that is live (ES256).
+	Algorithm() string
 }
 
 // NewHandler constructs a platform Handler.
@@ -129,11 +135,16 @@ func (h *Handler) RegisterRoutes(r chi.Router) {
 }
 
 // jwtRotateResponse returns the public metadata of the freshly
-// activated signing key (never any private key material).
+// activated signing key (never any private key material). Algorithm is
+// the newly minted key's own algorithm (always ES256); SigningAlgorithm
+// is what the manager will actually sign with now — these differ when
+// signing is pinned to HS256, in which case the rotated ES256 key is
+// stored and verifies but is not yet used to sign.
 type jwtRotateResponse struct {
-	KeyID     string    `json:"key_id"`
-	Algorithm string    `json:"algorithm"`
-	CreatedAt time.Time `json:"created_at"`
+	KeyID            string    `json:"key_id"`
+	Algorithm        string    `json:"algorithm"`
+	SigningAlgorithm string    `json:"signing_algorithm"`
+	CreatedAt        time.Time `json:"created_at"`
 }
 
 // RotateJWTKey handles POST /api/platform/jwt/rotate. It generates a
@@ -158,9 +169,10 @@ func (h *Handler) RotateJWTKey(w http.ResponseWriter, r *http.Request) {
 		"key_id", rec.ID.String(), "algorithm", rec.Algorithm)
 
 	middleware.WriteJSON(w, http.StatusOK, jwtRotateResponse{
-		KeyID:     rec.ID.String(),
-		Algorithm: rec.Algorithm,
-		CreatedAt: rec.CreatedAt,
+		KeyID:            rec.ID.String(),
+		Algorithm:        rec.Algorithm,
+		SigningAlgorithm: h.jwtKeys.Algorithm(),
+		CreatedAt:        rec.CreatedAt,
 	})
 }
 
