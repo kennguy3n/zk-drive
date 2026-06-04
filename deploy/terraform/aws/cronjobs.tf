@@ -101,9 +101,14 @@ data "aws_iam_policy_document" "scheduler" {
   }
 
   statement {
-    sid       = "PassTaskRoles"
-    actions   = ["iam:PassRole"]
-    resources = [aws_iam_role.task_execution.arn, aws_iam_role.task.arn]
+    sid     = "PassTaskRoles"
+    actions = ["iam:PassRole"]
+    # The cron task definitions use cron_execution (not the server/worker
+    # task_execution role), so the scheduler must be allowed to pass exactly
+    # that role plus the shared task role — passing task_execution here would
+    # AccessDenied since RunTask requires PassRole on the task def's actual
+    # execution_role_arn.
+    resources = [aws_iam_role.cron_execution.arn, aws_iam_role.task.arn]
   }
 }
 
