@@ -103,6 +103,14 @@ func TestGenerateEditorConfig_EditMode(t *testing.T) {
 	if cfg.Token == "" {
 		t.Error("expected signed token")
 	}
+	// The signed config token carries an exp tied to the presign TTL.
+	parsed, err := jwt.Parse(cfg.Token, func(*jwt.Token) (any, error) { return []byte("topsecret"), nil })
+	if err != nil || !parsed.Valid {
+		t.Fatalf("parse signed token: valid=%v err=%v", parsed.Valid, err)
+	}
+	if _, err := parsed.Claims.GetExpirationTime(); err != nil {
+		t.Errorf("token exp claim: %v", err)
+	}
 	// The key must be derived from the object key and contain no path
 	// separators.
 	if strings.Contains(cfg.Document.Key, "/") || cfg.Document.Key == "" {

@@ -321,11 +321,16 @@ func (s *OnlyOfficeService) signConfig(cfg *EditorConfig) (string, error) {
 		return "", nil
 	}
 	// Sign only the fields the Document Server validates against the
-	// payload it receives — documentType, document, editorConfig.
+	// payload it receives — documentType, document, editorConfig — plus
+	// an exp tied to the embedded presigned URL's lifetime. The token is
+	// consumed once at editor open (well within the window); bounding it
+	// keeps a leaked config from being replayed after its download URL
+	// has already expired.
 	claims := jwt.MapClaims{
 		"documentType": cfg.DocumentType,
 		"document":     cfg.Document,
 		"editorConfig": cfg.EditorConfig,
+		"exp":          s.now().Add(onlyOfficePresignTTL).Unix(),
 	}
 	tok := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
 	return tok.SignedString([]byte(s.jwtSecret))

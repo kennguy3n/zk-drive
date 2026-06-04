@@ -48,10 +48,12 @@ import (
 const onlyOfficeFetchTimeout = 60 * time.Second
 
 // onlyOfficeMaxDocumentBytes caps how many bytes the save callback will
-// read from the Document Server's edited-document URL, so a hostile or
-// runaway response cannot exhaust memory. Office documents are far
-// below this bound.
-const onlyOfficeMaxDocumentBytes = 512 << 20 // 512 MiB
+// buffer in memory from the Document Server's edited-document URL, so a
+// hostile or runaway response cannot exhaust the API container (which
+// deploy/docker-compose.prod.yml limits to 512 MiB). 100 MiB matches the
+// repo's other bounded-in-memory job cap (index.MaxDownloadBytes) and is
+// far above any real office document.
+const onlyOfficeMaxDocumentBytes = 100 << 20 // 100 MiB
 
 // onlyOfficeHTTPClient pulls edited bytes from the Document Server in
 // the save callback. Shared so connections are reused across callbacks.
