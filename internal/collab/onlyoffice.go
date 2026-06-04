@@ -59,6 +59,15 @@ var (
 	// strict_zk folder. The Document Server would need plaintext
 	// access, which strict-ZK deliberately denies.
 	ErrStrictZKForbidden = errors.New("collab: onlyoffice editing forbidden for strict_zk folder")
+	// ErrWorkspaceSuspended is returned when a save callback targets a
+	// workspace the platform control plane has suspended. The callback
+	// path runs outside the session-auth middleware (the Document
+	// Server holds no ZK Drive JWT) and therefore outside
+	// SuspensionGuard, so the save path re-checks suspension at the
+	// write boundary to keep a suspended workspace frozen against
+	// callback-driven version writes, consistent with the 503 every
+	// REST write already returns.
+	ErrWorkspaceSuspended = errors.New("collab: workspace suspended")
 	// ErrEditorAccessDenied is returned when the user lacks even
 	// viewer access to the file.
 	ErrEditorAccessDenied = errors.New("collab: insufficient permission to open editor")

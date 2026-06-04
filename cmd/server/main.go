@@ -793,7 +793,14 @@ func run() error {
 	}
 	driveHandler = driveHandler.
 		WithTagSuggester(tagSuggestSvc).
-		WithQueryExpander(queryExpandSvc)
+		WithQueryExpander(queryExpandSvc).
+		// The ONLYOFFICE save callback runs outside the session-auth /
+		// SuspensionGuard group (the Document Server holds no JWT), so
+		// give the handler the same suspension checker to re-enforce the
+		// freeze at the write boundary. Wired here rather than at the
+		// initial NewHandler chain above because platformSvc is built
+		// after it.
+		WithSuspensionChecker(platformSvc)
 	kchatHandler := apikchat.NewHandler(kchatSvc, summarySvc)
 
 	// metrics owns a private prometheus.Registry, the HTTP
@@ -1062,6 +1069,15 @@ func run() error {
 			// the upgrade-handshake reasons noted below) and runs on
 			// the initial HTTP request before the upgrade.
 			r.Use(middleware.IPAllowlist(ipAllowSvc, cfg.TrustedProxyDepth))
+			// Suspension enforcement applies to the WS upgrade too: a
+			// suspended workspace must not be able to keep realtime sync
+			// or collaborative editing alive when every REST call is
+			// already returning 503. SuspensionGuard needs only the
+			// workspace id (bound by the auth middleware above) and runs
+			// on the initial HTTP request before the upgrade, so — unlike
+			// TenantGuard/rateLimiter — it has no handshake or per-frame
+			// cost concerns and is safe to mount here.
+			r.Use(middleware.SuspensionGuard(platformSvc))
 			r.Get("/ws", wsHandler.ServeWS)
 			// Collab WS endpoint: per-document Yjs relay. Mounted
 			// next to /ws because both are long-lived upgrade

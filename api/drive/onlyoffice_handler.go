@@ -76,6 +76,43 @@ func (h *Handler) WithOnlyOffice(serverURL, jwtSecret, publicURL string) *Handle
 	return h
 }
 
+// WithSuspensionChecker wires the workspace-suspension checker used to
+// freeze callback-driven writes (the ONLYOFFICE save path) for a
+// suspended workspace. The save callback runs outside the session-auth
+// middleware group — the Document Server holds no ZK Drive JWT — so it
+// also runs outside SuspensionGuard; this lets saveEditedVersion
+// re-check suspension at the write boundary. A nil checker disables the
+// check (e.g. metadata-only test wiring with no control plane), exactly
+// as SuspensionGuard is a no-op when its checker is nil.
+func (h *Handler) WithSuspensionChecker(c middleware.WorkspaceSuspensionChecker) *Handler {
+	h.suspension = c
+	return h
+}
+
+// ensureNotSuspended returns collab.ErrWorkspaceSuspended when the
+// workspace has been suspended by the platform control plane. It is a
+// no-op when no checker is wired (metadata-only test wiring), and fails
+// OPEN on a lookup error — exactly like SuspensionGuard — because
+// suspension is an availability control rather than a security
+// boundary, so a transient DB blip must not silently drop a user's
+// edited bytes. Used by the ONLYOFFICE save callback, which runs
+// outside the SuspensionGuard middleware group.
+func (h *Handler) ensureNotSuspended(ctx context.Context, workspaceID uuid.UUID) error {
+	if h.suspension == nil {
+		return nil
+	}
+	suspended, _, err := h.suspension.WorkspaceSuspension(ctx, workspaceID)
+	if err != nil {
+		logging.FromContext(ctx).Warn("onlyoffice save: suspension lookup failed; allowing write",
+			"workspace_id", workspaceID, "err", err)
+		return nil
+	}
+	if suspended {
+		return collab.ErrWorkspaceSuspended
+	}
+	return nil
+}
+
 // driveEditorData adapts the drive Handler's services to the
 // collab.EditorDataSource contract.
 type driveEditorData struct {
@@ -341,6 +378,14 @@ func (h *Handler) saveEditedVersion(ctx context.Context, workspaceID, fileID uui
 	}
 	if encMode == folder.EncryptionStrictZK {
 		return collab.ErrStrictZKForbidden
+	}
+	// Suspension re-check at the write boundary. The callback runs
+	// outside SuspensionGuard (the Document Server has no JWT), so a
+	// suspended workspace would otherwise still accept callback-driven
+	// version writes while every REST write returns 503. Mirror that
+	// 503 here by refusing the save.
+	if err := h.ensureNotSuspended(ctx, workspaceID); err != nil {
+		return err
 	}
 	// Attribute the save to the callback's editing user (falling back to
 	// the file creator) so the activity log, changefeed, and webhook
