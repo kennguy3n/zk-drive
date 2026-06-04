@@ -91,6 +91,25 @@ resource "aws_secretsmanager_secret_version" "database_url_direct" {
   secret_string = "postgres://${var.db_username}:${random_password.db.result}@${aws_db_instance.primary.address}:5432/${var.db_name}?sslmode=require"
 }
 
+# Credentialed REDIS_URL, created ONLY when Redis AUTH is enabled
+# (var.redis_auth_token_enabled). The token is sensitive, so the full
+# rediss://:<token>@host connection string is injected via the task `secrets`
+# block rather than a plaintext `environment` entry — see ecs.tf, where the
+# plain REDIS_URL env var is dropped whenever AUTH is on. AUTH implies TLS, so
+# the scheme is always rediss:// here.
+resource "aws_secretsmanager_secret" "redis_url" {
+  count                   = var.redis_auth_token_enabled ? 1 : 0
+  name                    = "${local.name}/REDIS_URL"
+  description             = "ZK Drive REDIS_URL with embedded AUTH token"
+  recovery_window_in_days = var.secret_recovery_window_days
+}
+
+resource "aws_secretsmanager_secret_version" "redis_url" {
+  count         = var.redis_auth_token_enabled ? 1 : 0
+  secret_id     = aws_secretsmanager_secret.redis_url[0].id
+  secret_string = "rediss://:${random_password.redis_auth[0].result}@${aws_elasticache_replication_group.this.primary_endpoint_address}:6379"
+}
+
 # Stripe keys are created (and injected) ONLY when billing is configured.
 # Previously these were always created and seeded with a single space when
 # unset (Secrets Manager rejects an empty SecretString). But unlike the S3
@@ -188,6 +207,13 @@ locals {
     [for s in aws_secretsmanager_secret.stripe_webhook_secret : s.arn],
   )
 
+  # REDIS_URL is a secret only when AUTH is enabled (the URL then carries the
+  # token); otherwise it's a plaintext env var built in ecs.tf. for-over-list
+  # yields a 0- or 1-element list with no index errors when AUTH is off. Only
+  # the server/worker get it — cron tasks don't touch Redis.
+  redis_url_secrets = [for s in aws_secretsmanager_secret.redis_url : { name = "REDIS_URL", valueFrom = s.arn }]
+  redis_url_arns    = [for s in aws_secretsmanager_secret.redis_url : s.arn]
+
   # Secrets injected into every application container, expressed in the
   # `secrets` shape ECS expects ({ name, valueFrom }). Names match the env
   # vars read by internal/config/config.go.
@@ -212,7 +238,7 @@ locals {
       name      = "S3_SECRET_KEY"
       valueFrom = aws_secretsmanager_secret.s3_secret_key.arn
     },
-  ], local.stripe_secrets)
+  ], local.stripe_secrets, local.redis_url_secrets)
 
   # Same set as app_secrets but pointing at the direct DATABASE_URL, for
   # the short-lived cron tasks that don't run a PgBouncer sidecar. Stripe is
@@ -251,5 +277,5 @@ locals {
     aws_secretsmanager_secret.s3_access_key.arn,
     aws_secretsmanager_secret.s3_secret_key.arn,
     aws_secretsmanager_secret.db_password.arn,
-  ], local.stripe_secret_arns)
+  ], local.stripe_secret_arns, local.redis_url_arns)
 }

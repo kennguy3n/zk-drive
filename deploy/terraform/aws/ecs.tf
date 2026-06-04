@@ -61,10 +61,13 @@ locals {
   # Non-secret application config shared by server + worker, in the ECS
   # `environment` shape ({ name, value }). Names mirror the env vars read
   # by internal/config/config.go.
-  app_environment = [
+  # REDIS_URL is a plaintext env var in the common case, but when Redis AUTH is
+  # enabled the URL embeds the token, so it's injected via the task `secrets`
+  # block instead (secrets.tf local.redis_url_secrets) and omitted here to keep
+  # the credential out of the ECS task-definition environment.
+  app_environment = concat([
     { name = "NATS_URL", value = local.nats_url },
     { name = "CLAMAV_ADDRESS", value = local.clamav_address },
-    { name = "REDIS_URL", value = local.redis_url },
     { name = "LISTEN_ADDR", value = ":8080" },
     { name = "MIGRATIONS_DIR", value = "migrations" },
     { name = "RATE_LIMIT_PER_USER", value = tostring(var.rate_limit_per_user) },
@@ -81,7 +84,9 @@ locals {
     # but setting it removes the dependence on that implicit fallback (a future
     # change to the default must not silently downgrade us to "none").
     { name = "CREDENTIAL_ENCRYPTION", value = "aesgcm" },
-  ]
+    ],
+    var.redis_auth_token_enabled ? [] : [{ name = "REDIS_URL", value = local.redis_url }],
+  )
 
   # PgBouncer sidecar definition shared by server + worker tasks. Pools
   # connections to the RDS primary; the app connects at 127.0.0.1:6432 via

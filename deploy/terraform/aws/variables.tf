@@ -151,6 +151,24 @@ variable "redis_transit_encryption" {
   default     = false
 }
 
+variable "redis_auth_token_enabled" {
+  description = <<-EOT
+    Enable Redis AUTH (a password) on the ElastiCache replication group.
+    Defaults to false: the cluster is on private subnets reachable only by the
+    app security group, so network isolation is the primary control. Set to true
+    for compliance regimes (SOC2/HIPAA) that require authentication on every data
+    store. When enabled, Terraform generates the token, sets it on the cluster,
+    and injects the full credentialed connection string as the REDIS_URL *secret*
+    (Secrets Manager) instead of a plaintext task-definition env var, so the token
+    never appears in the ECS API/console. AWS requires in-transit encryption for
+    AUTH, so this implies redis_transit_encryption=true (enforced by a
+    precondition). go-redis parses the rediss://:<token>@host form natively, so no
+    app change is required.
+  EOT
+  type        = bool
+  default     = false
+}
+
 variable "secret_recovery_window_days" {
   description = <<-EOT
     Recovery window (in days) for the AWS Secrets Manager secrets this module

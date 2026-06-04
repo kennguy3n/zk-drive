@@ -143,6 +143,7 @@ done
 | `rds_instance_class` / `rds_replica_instance_class` | `db.t4g.medium` |
 | `redis_node_type` | `cache.t4g.small` |
 | `redis_transit_encryption` | `false` (set `true` for TLS / `rediss://` — see Security & compliance) |
+| `redis_auth_token_enabled` | `false` (set `true` for Redis AUTH; implies `redis_transit_encryption` — see Security & compliance) |
 | `server_min_count` / `server_max_count` | `2` / `10` |
 | `worker_min_count` / `worker_max_count` | `1` / `6` |
 | `audit_log_archive_enabled` | `false` (set `true` to enable the daily audit-archiver task — see Scheduled jobs) |
@@ -244,15 +245,19 @@ done
   cannot verify when dialing by private IP, so enabling it cleanly requires
   an app-side change (plumbing the server CA into the Redis client) and is
   intentionally left off here — see the comment in `gcp/memorystore.tf`.
-- **Redis authentication.** Redis is reached without a password on both clouds:
-  the cache lives on private subnets/VPC networks whose security group / firewall
-  only admits the app tasks, and `REDIS_URL` carries no credentials. For
-  compliance regimes that require authentication on every data store, enable an
-  ElastiCache `auth_token` on **AWS** (`aws_elasticache_replication_group`, which
-  also requires `transit_encryption_enabled = true`) and embed the token in the
-  `rediss://` `REDIS_URL`; on **GCP**, enable Memorystore AUTH and source the
-  generated string into `REDIS_URL` the same way. Both are app-transparent (the
-  stock Redis client just needs the password in the URL).
+- **Redis authentication.** By default Redis is reached without a password on
+  both clouds: the cache lives on private subnets/VPC networks whose security
+  group / firewall only admits the app tasks, and `REDIS_URL` carries no
+  credentials. For compliance regimes that require authentication on every data
+  store, set `redis_auth_token_enabled = true` on **AWS**: Terraform generates
+  the token, sets it on the ElastiCache replication group, and injects the full
+  `rediss://:<token>@host` `REDIS_URL` as a **Secrets Manager secret** (not a
+  plaintext task-definition env var) so the token never appears in the ECS
+  API/console. AUTH requires TLS, so this implies `redis_transit_encryption =
+  true` (enforced by a plan-time precondition). On **GCP**, enable Memorystore
+  AUTH and source the generated string into `REDIS_URL` the same way. Both are
+  app-transparent — the stock Redis client (`redis.ParseURL`) reads the password
+  straight from the URL, no code change needed.
 - **CloudFront → ALB hop (AWS).** CloudFront terminates viewer TLS and reaches
   the ALB over plain **HTTP** on port 80. This is the standard CloudFront→ALB
   pattern: an HTTPS origin would fail the TLS handshake because the ACM
