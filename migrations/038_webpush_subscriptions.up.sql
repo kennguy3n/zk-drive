@@ -43,6 +43,14 @@ CREATE TABLE webpush_subscriptions (
     p256dh       TEXT NOT NULL CHECK (length(p256dh) <= 1024),
     auth         TEXT NOT NULL CHECK (length(auth) <= 1024),
     created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+    -- Bumped to now() every time the client re-registers the endpoint
+    -- (the ON CONFLICT upsert in SaveSubscription). The frontend
+    -- re-subscribes on each load, so a live browser refreshes this
+    -- regularly; a row that has not been touched in a long time signals
+    -- a browser that was uninstalled / cleared without an explicit
+    -- unsubscribe and never returned 410, letting an operator prune
+    -- those orphans with a periodic `DELETE ... WHERE updated_at < ...`.
+    updated_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
     UNIQUE(workspace_id, user_id, endpoint)
 );
 

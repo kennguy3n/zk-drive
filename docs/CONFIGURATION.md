@@ -145,6 +145,7 @@ live WebSocket connection, so an open tab still uses the realtime path.
 | -------------------- | ------- | ------------------------------------------------------------------------------------------------------------- |
 | `VAPID_PUBLIC_KEY`   | _empty_ | VAPID application-server **public** key. Sent to the browser as `applicationServerKey` and in the VAPID header. |
 | `VAPID_PRIVATE_KEY`  | _empty_ | VAPID application-server **private** key used to sign the VAPID JWT. Keep secret.                              |
+| `VAPID_SUBSCRIBER`   | _built-in placeholder_ | `sub` claim in the VAPID JWT — a `mailto:` or `https:` URI push services use to contact you about a misbehaving sender. Set to a monitored mailbox (e.g. `mailto:ops@yourdomain.com`) for production push traffic. |
 
 When **either** key is empty, Web Push is disabled (graceful
 degradation): the `/api/push/*` endpoints respond `501 Not Implemented`,

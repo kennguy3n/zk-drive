@@ -557,7 +557,8 @@ func run() error {
 		webPushSvc = notification.NewWebPushService(
 			notifRepo,
 			cfg.VAPIDPublicKey, cfg.VAPIDPrivateKey,
-		).WithEndpointValidator(webhooks.NewURLValidator())
+		).WithSubscriber(cfg.VAPIDSubscriber).
+			WithEndpointValidator(webhooks.NewURLValidator())
 		notificationPublisher = notification.NewWebPushPublisher(notificationPublisher, hub, webPushSvc).
 			WithWaitGroup(&bgGoroutines)
 		slog.Info("web push enabled, offline notifications will fan out via VAPID")

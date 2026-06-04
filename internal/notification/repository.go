@@ -223,7 +223,9 @@ func (r *PostgresRepository) ListWorkspaceAdmins(ctx context.Context, workspaceI
 // SaveSubscription upserts a browser push subscription. The
 // UNIQUE(workspace_id, user_id, endpoint) constraint (migration 038)
 // means re-registering the same endpoint refreshes its keys instead of
-// inserting a duplicate row.
+// inserting a duplicate row. The upsert also bumps updated_at so a live
+// browser (which re-subscribes on each load) keeps its row fresh, and
+// rows left stale are identifiable orphans an operator can prune.
 func (r *PostgresRepository) SaveSubscription(ctx context.Context, workspaceID, userID uuid.UUID, sub PushSubscription) error {
 	p256dh, auth, err := r.encryptKeys(ctx, sub)
 	if err != nil {
@@ -233,7 +235,7 @@ func (r *PostgresRepository) SaveSubscription(ctx context.Context, workspaceID, 
 INSERT INTO webpush_subscriptions (workspace_id, user_id, endpoint, p256dh, auth)
 VALUES ($1, $2, $3, $4, $5)
 ON CONFLICT (workspace_id, user_id, endpoint)
-DO UPDATE SET p256dh = EXCLUDED.p256dh, auth = EXCLUDED.auth`
+DO UPDATE SET p256dh = EXCLUDED.p256dh, auth = EXCLUDED.auth, updated_at = now()`
 	if _, err := r.pool.Exec(ctx, q, workspaceID, userID, sub.Endpoint, p256dh, auth); err != nil {
 		return fmt.Errorf("save webpush subscription: %w", err)
 	}
