@@ -44,6 +44,13 @@ variable "az_count" {
   description = "Number of availability zones to spread subnets across. Multi-AZ RDS and the ALB both require at least two."
   type        = number
   default     = 2
+
+  # Fail fast at plan time rather than letting the ALB / Multi-AZ RDS creation
+  # error out mid-apply (parity with the GCP module's plan-time validations).
+  validation {
+    condition     = var.az_count >= 2
+    error_message = "az_count must be at least 2: the ALB requires subnets in two AZs and RDS Multi-AZ needs a standby in a second AZ."
+  }
 }
 
 # ----------------------------------------------------------------------------
