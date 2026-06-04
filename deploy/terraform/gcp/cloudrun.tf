@@ -327,7 +327,12 @@ resource "google_cloud_run_v2_service" "worker" {
           cpu    = "1"
           memory = "256Mi"
         }
-        cpu_idle = true
+        # The worker (ingress container) sets cpu_idle = false, which forces the
+        # whole instance always-on, so the proxy gets CPU regardless. Set it
+        # false here too so the config states the effective behavior rather than
+        # implying the proxy could be throttled while background NATS consumers
+        # still need DB access.
+        cpu_idle = false
       }
     }
   }

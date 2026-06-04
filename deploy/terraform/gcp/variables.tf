@@ -222,13 +222,26 @@ variable "fabric_secret_key" {
 }
 
 variable "nats_url" {
-  description = "NATS JetStream URL (NATS_URL) reachable from the VPC. On GCP, NATS is expected to run on GKE/Compute or a managed offering; provide its in-VPC address here."
+  description = "NATS JetStream URL (NATS_URL) reachable from the VPC. On GCP, NATS is expected to run on GKE/Compute or a managed offering; provide its in-VPC address here. REQUIRED: the worker has no NATS-less mode and falls back to nats://localhost:4222, which does not exist in a Cloud Run instance, so an empty value crash-loops the worker."
   type        = string
   default     = ""
+
+  validation {
+    # The worker (cmd/worker/main.go) unconditionally dials NATS and falls back
+    # to nats://localhost:4222 when NATS_URL is empty; there is no localhost NATS
+    # in a Cloud Run instance, so the worker would fail to connect and Cloud Run
+    # would restart it in a loop. Fail at plan time with a clear message instead.
+    # (The server treats NATS as optional, but this module always deploys the
+    # worker, so nats_url is effectively required.) clamav_address is NOT guarded
+    # here because ClamAV is genuinely optional (cmd/worker/main.go scan service
+    # tolerates an empty address).
+    condition     = var.nats_url != ""
+    error_message = "nats_url is required: the worker has no NATS-less mode and would crash-loop against the localhost fallback in Cloud Run. Pass -var 'nats_url=nats://<in-vpc-host>:4222'."
+  }
 }
 
 variable "clamav_address" {
-  description = "ClamAV clamd address host:port (CLAMAV_ADDRESS) reachable from the VPC."
+  description = "ClamAV clamd address host:port (CLAMAV_ADDRESS) reachable from the VPC. Optional: leave empty to disable virus scanning (the worker's scan service tolerates an empty address)."
   type        = string
   default     = ""
 }
