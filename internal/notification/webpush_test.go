@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"sync"
 	"testing"
+	"time"
 
 	webpush "github.com/SherClockHolmes/webpush-go"
 	"github.com/google/uuid"
@@ -287,6 +288,9 @@ func TestWebPushPublisher_FansToPushForOfflineUser(t *testing.T) {
 	conns := connSet{online: true}
 	push := &recordingPushSender{}
 	pub := NewWebPushPublisher(inner, conns, push)
+	// Run the (production-async) push fan-out synchronously so the
+	// assertions below observe it deterministically.
+	pub.dispatch = func(fn func()) { fn() }
 
 	evt := Event{Type: "notification", Payload: &Notification{Title: "T", Body: "B", Type: "share_link.created"}}
 
@@ -320,6 +324,37 @@ func TestWebPushPublisher_IgnoresNonNotificationEvents(t *testing.T) {
 	}
 }
 
+// TestWebPushPublisher_DetachesPushFromCaller verifies the default
+// (production) dispatcher delivers the push on a separate goroutine
+// with a context that outlives a cancelled caller context — so a
+// returning request handler can neither block on nor abort the
+// external fan-out.
+func TestWebPushPublisher_DetachesPushFromCaller(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	ws, offline := uuid.New(), uuid.New()
+
+	done := make(chan error, 1)
+	push := &signalingPushSender{done: done}
+	pub := NewWebPushPublisher(&recordingPublisher{}, connSet{}, push)
+
+	evt := Event{Type: "notification", Payload: &Notification{Title: "T", Body: "B", Type: "share_link.created"}}
+	if err := pub.Publish(ctx, ws, offline, evt); err != nil {
+		t.Fatalf("Publish: %v", err)
+	}
+	// Cancel the caller context immediately: the detached push must
+	// still run and see a live (non-cancelled) context.
+	cancel()
+
+	select {
+	case sendCtxErr := <-done:
+		if sendCtxErr != nil {
+			t.Fatalf("detached push saw cancelled context: %v", sendCtxErr)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("detached push never ran")
+	}
+}
+
 type recordingPublisher struct{ calls int }
 
 func (r *recordingPublisher) Publish(_ context.Context, _, _ uuid.UUID, _ Event) error {
@@ -331,6 +366,16 @@ type recordingPushSender struct{ sent []uuid.UUID }
 
 func (r *recordingPushSender) Send(_ context.Context, _, userID uuid.UUID, _ NotificationPayload) error {
 	r.sent = append(r.sent, userID)
+	return nil
+}
+
+// signalingPushSender reports the context error observed at Send time
+// on done, so a test can assert the detached push ran with a live
+// (non-cancelled) context.
+type signalingPushSender struct{ done chan error }
+
+func (s *signalingPushSender) Send(ctx context.Context, _, _ uuid.UUID, _ NotificationPayload) error {
+	s.done <- ctx.Err()
 	return nil
 }
 

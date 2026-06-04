@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"time"
 
 	"strings"
 
@@ -12,6 +13,12 @@ import (
 	"github.com/google/uuid"
 	"github.com/redis/go-redis/v9"
 )
+
+// webPushDispatchTimeout bounds a single detached push fan-out. Each
+// HTTPS POST already carries the push client's own per-request
+// timeout; this is a backstop so a wedged fan-out goroutine cannot
+// outlive the event by more than this window.
+const webPushDispatchTimeout = 60 * time.Second
 
 // Event is the JSON envelope pushed to live WebSocket clients when a
 // notification is created. The shape mirrors api/ws.Event but is
@@ -166,6 +173,11 @@ type WebPushPublisher struct {
 	inner WSPublisher
 	conns ConnectionChecker
 	push  PushSender
+	// dispatch runs the best-effort push fan-out. In production it
+	// spawns a goroutine so the external HTTPS round trips never add
+	// latency to the (often request-path) notification-create call.
+	// Tests swap in a synchronous dispatcher for determinism.
+	dispatch func(func())
 }
 
 // NewWebPushPublisher wraps inner so notifications also fan out via
@@ -173,7 +185,10 @@ type WebPushPublisher struct {
 // treated as offline); push must be non-nil for the wrapper to add
 // value, but a nil push degrades to plain inner-publish behaviour.
 func NewWebPushPublisher(inner WSPublisher, conns ConnectionChecker, push PushSender) *WebPushPublisher {
-	return &WebPushPublisher{inner: inner, conns: conns, push: push}
+	return &WebPushPublisher{
+		inner: inner, conns: conns, push: push,
+		dispatch: func(fn func()) { go fn() },
+	}
 }
 
 // Publish delegates to the inner publisher, then best-effort delivers
@@ -192,10 +207,27 @@ func (p *WebPushPublisher) Publish(ctx context.Context, workspaceID, userID uuid
 		return innerErr
 	}
 	if payload, ok := pushPayloadFromEvent(event); ok {
-		if err := p.push.Send(ctx, workspaceID, userID, payload); err != nil {
-			logging.FromContext(ctx).Error("notification web push failed",
-				"workspace_id", workspaceID, "user_id", userID, "err", err)
+		// Web Push delivery is best-effort and external (FCM, Mozilla
+		// autopush): N sequential TLS POSTs for a user with multiple
+		// device registrations. Run it detached so it never blocks the
+		// caller (NotifyShareLinkCreated et al. publish on the request
+		// goroutine). WithoutCancel keeps log/trace values but severs
+		// cancellation so a returning handler can't abort an in-flight
+		// push; the timeout is a backstop around the whole fan-out.
+		pushCtx := context.WithoutCancel(ctx)
+		ws, uid := workspaceID, userID
+		dispatch := p.dispatch
+		if dispatch == nil {
+			dispatch = func(fn func()) { go fn() }
 		}
+		dispatch(func() {
+			dctx, cancel := context.WithTimeout(pushCtx, webPushDispatchTimeout)
+			defer cancel()
+			if err := p.push.Send(dctx, ws, uid, payload); err != nil {
+				logging.FromContext(dctx).Error("notification web push failed",
+					"workspace_id", ws, "user_id", uid, "err", err)
+			}
+		})
 	}
 	return innerErr
 }
