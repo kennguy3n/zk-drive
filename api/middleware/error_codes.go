@@ -122,6 +122,11 @@ const (
 	ErrCodePrivateCIDR     ErrorCode = "PRIVATE_CIDR_NOT_ALLOWED"
 	ErrCodeRuleCapExceeded ErrorCode = "IP_RULE_CAP_EXCEEDED"
 	ErrCodeDuplicateCIDR   ErrorCode = "DUPLICATE_CIDR"
+	// ErrCodeLabelTooLong (400) — the rule's free-text label exceeds
+	// the server-side length cap (workspace.MaxIPRuleLabelLen). The
+	// label is admin-supplied and persisted as TEXT, so the cap is a
+	// defense-in-depth bound on stored and cached entry size.
+	ErrCodeLabelTooLong ErrorCode = "IP_ALLOWLIST_LABEL_TOO_LONG"
 	// ErrCodeAllowlistNoRules (409) — enabling the allowlist was
 	// refused because the workspace has no rules; enabling would fail
 	// closed and block all data-plane traffic. Add a rule first.

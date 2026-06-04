@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net"
+	"strings"
 	"sync"
 	"testing"
 
@@ -279,6 +280,36 @@ func TestAddRule_CanonicalizesAndAccepts(t *testing.T) {
 	}
 	if rule.Label != "office" {
 		t.Fatalf("label: got %q", rule.Label)
+	}
+}
+
+// TestAddRule_RejectsOverlongLabel proves AddRule bounds the
+// admin-supplied label at MaxIPRuleLabelLen bytes (defense in depth
+// against an unbounded TEXT column inflating the cached snapshot) and
+// surfaces ErrLabelTooLong unwrapped so the handler can map it to 400.
+// A label exactly at the cap is accepted; one byte over is rejected
+// and must not reach the store.
+func TestAddRule_RejectsOverlongLabel(t *testing.T) {
+	store := newFakeIPAllowStore()
+	ws := uuid.New()
+	svc := NewIPAllowService(store, nil)
+
+	atCap := strings.Repeat("a", MaxIPRuleLabelLen)
+	if _, err := svc.AddRule(context.Background(), ws, "203.0.113.0/24", atCap, uuid.New()); err != nil {
+		t.Fatalf("label at cap should be accepted: %v", err)
+	}
+
+	overCap := strings.Repeat("a", MaxIPRuleLabelLen+1)
+	_, err := svc.AddRule(context.Background(), ws, "198.51.100.0/24", overCap, uuid.New())
+	if !errors.Is(err, ErrLabelTooLong) {
+		t.Fatalf("expected ErrLabelTooLong, got %v", err)
+	}
+	rules, err := svc.ListRules(context.Background(), ws)
+	if err != nil {
+		t.Fatalf("ListRules: %v", err)
+	}
+	if len(rules) != 1 {
+		t.Fatalf("overlong label must not persist: got %d rules, want 1", len(rules))
 	}
 }
 

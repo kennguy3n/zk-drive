@@ -18,11 +18,6 @@ import (
 // 403 without parsing the JSON body.
 const IPBlockedHeader = "X-ZkDrive-IP-Blocked"
 
-// DefaultTrustedProxyDepth is the assumed number of trusted reverse
-// proxies in front of the server when TRUSTED_PROXY_DEPTH is unset.
-// One matches the common single-load-balancer deployment.
-const DefaultTrustedProxyDepth = 1
-
 // IPAllowChecker is the subset of workspace.IPAllowService the
 // middleware needs. Declared as an interface so the middleware is
 // unit-testable with a fake and so a nil service cleanly disables

@@ -116,6 +116,8 @@ func (h *Handler) AddIPAllowRule(w http.ResponseWriter, r *http.Request) {
 			middleware.RespondError(w, http.StatusBadRequest, middleware.ErrCodeInvalidCIDR, "cidr is not a valid network")
 		case errors.Is(err, workspace.ErrPrivateCIDR):
 			middleware.RespondError(w, http.StatusBadRequest, middleware.ErrCodePrivateCIDR, "cidr must be a public range")
+		case errors.Is(err, workspace.ErrLabelTooLong):
+			middleware.RespondError(w, http.StatusBadRequest, middleware.ErrCodeLabelTooLong, "label is too long")
 		case errors.Is(err, workspace.ErrTooManyRules):
 			middleware.RespondError(w, http.StatusConflict, middleware.ErrCodeRuleCapExceeded, "ip allowlist rule cap reached")
 		case errors.Is(err, workspace.ErrDuplicateCIDR):

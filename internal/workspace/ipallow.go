@@ -63,12 +63,26 @@ var ErrNoRulesToEnable = errors.New("workspace: cannot enable ip allowlist with 
 // allowlist first (disabling is always permitted).
 var ErrCannotRemoveLastRule = errors.New("workspace: cannot remove the last rule while ip allowlist is enabled")
 
+// ErrLabelTooLong is returned by AddRule when the supplied label
+// exceeds MaxIPRuleLabelLen bytes.
+var ErrLabelTooLong = errors.New("workspace: ip allowlist label too long")
+
 // MaxIPRulesPerWorkspace caps the number of allowlist rules a single
 // workspace may hold. The cap bounds the cost of CheckAccess (a
 // linear scan over the rule set on every request) and the size of
 // the cached entry. 50 comfortably covers an SME with several
 // offices plus VPN egress ranges.
 const MaxIPRulesPerWorkspace = 50
+
+// MaxIPRuleLabelLen caps the length (in bytes) of a rule's free-text
+// label. The label is admin-supplied and stored in an unbounded TEXT
+// column that is also serialized into the cached snapshot, so an
+// arbitrarily large label would inflate every cached entry. 256 is
+// ample for a human-readable name ("London office VPN egress") while
+// bounding the worst case. Enforced in AddRule rather than at the DB
+// layer so all callers share the same validation and get the
+// ErrLabelTooLong sentinel.
+const MaxIPRuleLabelLen = 256
 
 // ipAllowCacheTTL is the lifetime of a cached allowlist snapshot in
 // Redis. Short enough that a missed bust (e.g. mutation on another
@@ -307,6 +321,9 @@ func (s *IPAllowService) AddRule(ctx context.Context, workspaceID uuid.UUID, cid
 	canonical, err := ValidatePublicCIDR(cidr)
 	if err != nil {
 		return nil, err
+	}
+	if len(label) > MaxIPRuleLabelLen {
+		return nil, ErrLabelTooLong
 	}
 	saved, err := s.store.AddRule(ctx, IPRule{
 		WorkspaceID: workspaceID,

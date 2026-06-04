@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 
@@ -178,6 +179,27 @@ func TestAddIPAllowRule_PrivateRejected(t *testing.T) {
 	}
 	if resp.Code != middleware.ErrCodePrivateCIDR {
 		t.Fatalf("code: got %q want %q", resp.Code, middleware.ErrCodePrivateCIDR)
+	}
+}
+
+func TestAddIPAllowRule_LabelTooLong(t *testing.T) {
+	store := newMemIPAllowStore()
+	_, r, ws := newIPAllowTestHandler(t, store)
+
+	overCap := strings.Repeat("a", workspace.MaxIPRuleLabelLen+1)
+	body, _ := json.Marshal(addIPAllowRuleRequest{CIDR: "203.0.113.0/24", Label: overCap})
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, authedCtxRequest(http.MethodPost, "/ip-allowlist", body, ws))
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status: got %d want %d (body=%s)", rec.Code, http.StatusBadRequest, rec.Body.String())
+	}
+	var resp middleware.ErrorResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if resp.Code != middleware.ErrCodeLabelTooLong {
+		t.Fatalf("code: got %q want %q", resp.Code, middleware.ErrCodeLabelTooLong)
 	}
 }
 
