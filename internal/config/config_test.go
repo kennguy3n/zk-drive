@@ -82,6 +82,13 @@ func requireEnv(t *testing.T, envs map[string]string) {
 		// and tests asserting on the default-on / clamped-TTL
 		// behaviour MUST see the production "unset" state.
 		"PERFORMANCE_CACHE_ENABLED", "PERFORMANCE_CACHE_TTL",
+		// Platform-admin allowlist (JWT key-rotation gate). Same
+		// convention as the blocks above: buildConfigFromEnv reads
+		// PLATFORM_ADMIN_USER_IDS via platformAdminUserIDsFromEnv, so
+		// it must be baseline-cleared here or a CI runner that has it
+		// exported would bleed UUIDs into PlatformAdminUserIDs for any
+		// test exercising the "unset → deny-by-default" state.
+		"PLATFORM_ADMIN_USER_IDS",
 	}
 	// WORKER_METRICS_ADDR is intentionally NOT included in the keys
 	// list above. t.Setenv(k, "") makes os.LookupEnv return
