@@ -122,7 +122,11 @@ func run() error {
 		}
 	}()
 
-	pool, err := database.Connect(ctx, cfg.DatabaseURL)
+	pool, err := database.ConnectWithPool(ctx, cfg.DatabaseURL, database.PoolConfig{
+		MaxConns:        cfg.DBMaxConns,
+		MinConns:        cfg.DBMinConns,
+		MaxConnIdleTime: cfg.DBMaxConnIdleTime,
+	})
 	if err != nil {
 		cancel()
 		return fmt.Errorf("connect postgres: %w", err)
@@ -279,6 +283,43 @@ func run() error {
 		return fmt.Errorf("credential codec: %w", err)
 	}
 	slog.Info("crypto credential encryption mode", "mode", credentialCodec.Mode())
+
+	// Session-token signing. The KeyManager signs/verifies with ES256
+	// when an active asymmetric key exists in jwt_signing_keys
+	// (migration 034), and otherwise falls back to HS256 using
+	// cfg.JWTSecret. Verification always accepts both, so rotating to
+	// ES256 (POST /api/admin/jwt/rotate) never invalidates sessions
+	// issued before the cutover. JWT_ALGORITHM forces a mode; the
+	// default ("auto") picks ES256-when-available.
+	jwtKeyManager, err := cryptopkg.NewKeyManager(
+		ctx,
+		cryptopkg.NewPostgresSigningKeyStore(pool),
+		credentialCodec,
+		cfg.JWTSecret,
+		cfg.JWTAlgorithm,
+	)
+	if err != nil {
+		cancel()
+		return fmt.Errorf("jwt key manager: %w", err)
+	}
+	slog.Info("jwt signing", "algorithm", jwtKeyManager.Algorithm())
+
+	// Cross-replica key-rotation propagation. RotateKey only reloads
+	// the replica that served POST /api/admin/jwt/rotate; every other
+	// replica must re-read jwt_signing_keys to learn the new key's
+	// public half, or it would 401 tokens signed by it. This loop
+	// polls the table every cfg.JWTKeyRefreshInterval (default 60s)
+	// and exits on ctx cancellation via the shared bgGoroutines
+	// WaitGroup, so shutdown drains it deterministically. A
+	// non-positive interval disables it (single-replica deployments).
+	if cfg.JWTKeyRefreshInterval > 0 {
+		bgGoroutines.Add(1)
+		go func() {
+			defer bgGoroutines.Done()
+			jwtKeyManager.RefreshLoop(ctx, cfg.JWTKeyRefreshInterval)
+		}()
+		slog.Info("jwt signing-key auto-refresh enabled", "interval", cfg.JWTKeyRefreshInterval)
+	}
 
 	storageFactory := storage.NewClientFactory(pool, storageClient, credentialCodec)
 
@@ -580,6 +621,7 @@ func run() error {
 
 	authHandler := auth.NewHandler(pool, userSvc, wsSvc, cfg.JWTSecret).
 		WithAudit(auditSvc).
+		WithSigner(jwtKeyManager).
 		WithTOTP(totpSvc).
 		WithPostSignupHook(func(ctx context.Context, workspaceID uuid.UUID, workspaceName string) {
 			// Best-effort: provision a fabric tenant for the new
@@ -639,7 +681,18 @@ func run() error {
 		WithPreviews(previewRepo).
 		WithAudit(auditSvc).
 		WithBilling(billingSvc).
-		WithWebhooks(webhookPublisher)
+		WithWebhooks(webhookPublisher).
+		WithOnlyOffice(cfg.OnlyOfficeURL, cfg.OnlyOfficeSecret, cfg.PublicURL)
+	if cfg.OnlyOfficeURL != "" {
+		if cfg.OnlyOfficeSecret != "" {
+			slog.Info("onlyoffice integration enabled with callback JWT verification")
+		} else {
+			slog.Warn("onlyoffice ONLYOFFICE_SECRET not set: editor-callback JWT verification is disabled, so a forged callback could make the server fetch an attacker-supplied url (SSRF) — set ONLYOFFICE_SECRET outside trusted local dev")
+		}
+		if cfg.PublicURL == "" {
+			slog.Warn("onlyoffice ONLYOFFICE_URL set but PUBLIC_URL empty: the editor callbackUrl resolves to a relative path the Document Server cannot reach, so save callbacks will fail and edits will be lost on editor close — set PUBLIC_URL to ZK Drive's externally reachable base URL")
+		}
+	}
 	var fabricClient admin.FabricClient
 	if cfg.FabricConsoleURL != "" {
 		fabricClient = fabric.NewClient(fabric.ClientConfig{
@@ -647,12 +700,37 @@ func run() error {
 			AdminToken: cfg.FabricConsoleAdminToken,
 		})
 	}
+	// Per-workspace IP allowlisting (conditional access). The
+	// service caches the allowlist in Redis when available
+	// (redisClient may be nil — caching simply disabled) and reads
+	// through to Postgres otherwise. Shared between the admin CRUD
+	// handler and the enforcement middleware mounted on the
+	// authenticated route group below.
+	// Pass a true nil interface (not a typed-nil *redis.Client) when
+	// Redis is unconfigured so the service's nil-check disables
+	// caching cleanly instead of dereferencing a nil client.
+	var ipAllowRedis redis.UniversalClient
+	if redisClient != nil {
+		ipAllowRedis = redisClient
+	}
+	ipAllowSvc := workspace.NewIPAllowService(workspace.NewPostgresIPAllowStore(pool), ipAllowRedis)
+
 	adminHandler := admin.NewHandler(pool, userSvc, auditSvc, retentionSvc).
 		WithBilling(billingSvc).
 		WithStripe(stripeService).
 		WithFabric(fabricClient, provisioner, storageFactory).
 		WithWorkspaces(wsSvc).
-		WithWebhooks(webhookPublisher)
+		WithWebhooks(webhookPublisher).
+		WithIPAllow(ipAllowSvc).
+		WithJWTRotator(jwtKeyManager).
+		WithPlatformAdmins(cfg.PlatformAdminUserIDs)
+	if len(cfg.PlatformAdminUserIDsInvalid) > 0 {
+		slog.Warn("ignoring malformed PLATFORM_ADMIN_USER_IDS entries (not valid UUIDs); affected admins will be excluded from JWT key rotation",
+			"entries", cfg.PlatformAdminUserIDsInvalid)
+	}
+	if len(cfg.PlatformAdminUserIDs) == 0 {
+		slog.Warn("PLATFORM_ADMIN_USER_IDS not set: POST /api/admin/jwt/rotate will deny all callers until configured")
+	}
 
 	// Platform control plane (Session 9): fleet-wide tenant management
 	// authenticated by platform API keys, mounted under /api/platform
@@ -932,7 +1010,7 @@ func run() error {
 			})
 
 			r.Group(func(r chi.Router) {
-				r.Use(middleware.AuthMiddleware(cfg.JWTSecret, sessionChecker))
+				r.Use(middleware.AuthMiddlewareWithKeys(jwtKeyManager, sessionChecker))
 				r.Post("/logout", authHandler.Logout)
 				r.Post("/refresh", authHandler.Refresh)
 			})
@@ -957,7 +1035,7 @@ func run() error {
 					// a session JWT and is managing 2FA from
 					// account settings.
 					r.Group(func(r chi.Router) {
-						r.Use(middleware.AuthMiddleware(cfg.JWTSecret, sessionChecker))
+						r.Use(middleware.AuthMiddlewareWithKeys(jwtKeyManager, sessionChecker))
 						r.Post("/enroll/begin", totpHandler.EnrollBegin)
 						r.Post("/enroll/finalize", totpHandler.EnrollFinalize)
 						r.Post("/disable", totpHandler.Disable)
@@ -969,14 +1047,14 @@ func run() error {
 					// The enroll token authorises ONLY the
 					// enrollment endpoints — no data plane.
 					r.Group(func(r chi.Router) {
-						r.Use(middleware.PurposeMiddleware(cfg.JWTSecret, middleware.PurposeMFAEnroll))
+						r.Use(middleware.PurposeMiddlewareWithKeys(jwtKeyManager, middleware.PurposeMFAEnroll))
 						r.Post("/enroll/begin/required", totpHandler.EnrollBegin)
 						r.Post("/enroll/finalize/required", totpHandler.EnrollFinalize)
 					})
 					// Challenge-token path: complete the second
 					// factor and exchange for a real session JWT.
 					r.Group(func(r chi.Router) {
-						r.Use(middleware.PurposeMiddleware(cfg.JWTSecret, middleware.PurposeMFAChallenge))
+						r.Use(middleware.PurposeMiddlewareWithKeys(jwtKeyManager, middleware.PurposeMFAChallenge))
 						r.Post("/verify", totpHandler.Verify)
 					})
 				})
@@ -990,7 +1068,7 @@ func run() error {
 		// frame, and TenantGuard's HTTP-method assumptions trip on
 		// the upgrade handshake.
 		r.Group(func(r chi.Router) {
-			r.Use(middleware.AuthMiddleware(cfg.JWTSecret, sessionChecker))
+			r.Use(middleware.AuthMiddlewareWithKeys(jwtKeyManager, sessionChecker))
 			r.Get("/ws", wsHandler.ServeWS)
 			// Collab WS endpoint: per-document Yjs relay. Mounted
 			// next to /ws because both are long-lived upgrade
@@ -1004,9 +1082,17 @@ func run() error {
 		})
 
 		r.Group(func(r chi.Router) {
-			r.Use(middleware.AuthMiddleware(cfg.JWTSecret, sessionChecker))
+			r.Use(middleware.AuthMiddlewareWithKeys(jwtKeyManager, sessionChecker))
 			r.Use(middleware.TenantGuard())
 			r.Use(middleware.SuspensionGuard(platformSvc))
+			// IP allowlist enforcement runs after the tenant guard
+			// has resolved the workspace. It is a no-op for any
+			// workspace that has not enabled the feature. Mounted on
+			// the data-plane group only — NOT the /admin group below
+			// — so an admin who misconfigures the allowlist can still
+			// reach the management endpoints to fix it and cannot
+			// lock themselves out of their own workspace.
+			r.Use(middleware.IPAllowlist(ipAllowSvc, cfg.TrustedProxyDepth))
 			r.Use(rateLimiter())
 
 			r.Get("/workspaces", driveHandler.ListWorkspaces)
@@ -1041,6 +1127,8 @@ func run() error {
 			r.Get("/files/{id}/versions", driveHandler.ListFileVersions)
 			r.Get("/files/{id}/download-url", driveHandler.DownloadURL)
 			r.Get("/files/{id}/preview-url", driveHandler.PreviewURL)
+			r.Get("/files/{id}/editor-config", driveHandler.EditorConfig)
+			r.Get("/onlyoffice/status", driveHandler.OnlyOfficeStatus)
 			r.Get("/files/{id}/tags", driveHandler.ListFileTags)
 			r.Post("/files/{id}/tags", driveHandler.AddFileTag)
 			r.Delete("/files/{id}/tags/{tag}", driveHandler.RemoveFileTag)
@@ -1086,7 +1174,7 @@ func run() error {
 		})
 
 		r.Route("/admin", func(r chi.Router) {
-			r.Use(middleware.AuthMiddleware(cfg.JWTSecret, sessionChecker))
+			r.Use(middleware.AuthMiddlewareWithKeys(jwtKeyManager, sessionChecker))
 			r.Use(middleware.TenantGuard())
 			r.Use(middleware.SuspensionGuard(platformSvc))
 			r.Use(middleware.AdminOnly())
@@ -1102,9 +1190,13 @@ func run() error {
 		})
 
 		r.Route("/kchat", func(r chi.Router) {
-			r.Use(middleware.AuthMiddleware(cfg.JWTSecret, sessionChecker))
+			r.Use(middleware.AuthMiddlewareWithKeys(jwtKeyManager, sessionChecker))
 			r.Use(middleware.TenantGuard())
 			r.Use(middleware.SuspensionGuard(platformSvc))
+			// kchat is a data-plane feature (attachment uploads, room
+			// creation, member sync), so it must honour the workspace IP
+			// allowlist exactly like the main data-plane group above.
+			r.Use(middleware.IPAllowlist(ipAllowSvc, cfg.TrustedProxyDepth))
 			r.Use(rateLimiter())
 			kchatHandler.RegisterRoutes(r)
 		})
@@ -1138,6 +1230,14 @@ func run() error {
 		// Stripe-Signature header rather than a JWT, which the
 		// handler verifies against STRIPE_WEBHOOK_SECRET.
 		r.Post("/webhooks/stripe", stripeService.HandleWebhook)
+
+		// ONLYOFFICE Document Server save callback — outside the
+		// session-auth group because the Document Server holds no ZK
+		// Drive JWT. It is authenticated by the ONLYOFFICE-signed
+		// body/header token (verified against ONLYOFFICE_SECRET) plus
+		// the workspace_id query param the editor-config embedded in
+		// the callbackUrl.
+		r.Post("/files/{id}/editor-callback", driveHandler.EditorCallback)
 	})
 
 	if cfg.StaticDir != "" {

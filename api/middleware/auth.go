@@ -71,11 +71,58 @@ const (
 // below remains the public entrypoint for handler code so other
 // packages don't grow a direct import on tenantctx.
 
+// Signer abstracts JWT signing and verification so the auth handler
+// and middleware can issue/verify session tokens through either the
+// legacy HS256 secret or the asymmetric ES256 KeyManager
+// (internal/crypto) without this package importing it — which would
+// form an import cycle. Both *crypto.KeyManager and the internal
+// hmacSigner satisfy it.
+//
+// Sign produces a signed token string for the supplied claims. Parse
+// verifies a raw token into the supplied claims pointer, returning the
+// parsed *jwt.Token (whose Valid field the caller must check).
+type Signer interface {
+	Sign(claims jwt.Claims) (string, error)
+	Parse(raw string, into jwt.Claims) (*jwt.Token, error)
+}
+
+// HMACSigner returns a Signer that signs and verifies tokens with the
+// HS256 secret. It lets callers (e.g. api/auth) hold a Signer
+// uniformly and swap in the ES256 KeyManager later without branching
+// on whether asymmetric keys are configured.
+func HMACSigner(secret string) Signer { return hmacSigner{secret} }
+
+// hmacSigner is the HS256 implementation backing the secret-based
+// IssueToken / ParseToken / AuthMiddleware entry points. It preserves
+// the historical behaviour exactly: sign with HS256, and reject any
+// non-HMAC signing method on verify.
+type hmacSigner struct{ secret string }
+
+func (s hmacSigner) Sign(claims jwt.Claims) (string, error) {
+	tok := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
+	return tok.SignedString([]byte(s.secret))
+}
+
+func (s hmacSigner) Parse(raw string, into jwt.Claims) (*jwt.Token, error) {
+	return jwt.ParseWithClaims(raw, into, func(t *jwt.Token) (interface{}, error) {
+		if _, ok := t.Method.(*jwt.SigningMethodHMAC); !ok {
+			return nil, errors.New("unexpected signing method")
+		}
+		return []byte(s.secret), nil
+	})
+}
+
 // IssueToken signs and returns a new session JWT with zk-drive's
-// standard claims. Purpose is left empty so AuthMiddleware accepts
-// the token on every protected endpoint.
+// standard claims using the HS256 secret. Purpose is left empty so
+// AuthMiddleware accepts the token on every protected endpoint.
 func IssueToken(secret string, userID, workspaceID uuid.UUID, role string, ttl time.Duration) (string, time.Time, error) {
-	return issueWithPurpose(secret, userID, workspaceID, role, "", ttl)
+	return IssueTokenWith(hmacSigner{secret}, userID, workspaceID, role, ttl)
+}
+
+// IssueTokenWith is IssueToken parameterised by a Signer, so callers
+// holding a KeyManager mint ES256 (or HS256-fallback) tokens.
+func IssueTokenWith(s Signer, userID, workspaceID uuid.UUID, role string, ttl time.Duration) (string, time.Time, error) {
+	return issueWithPurpose(s, userID, workspaceID, role, "", ttl)
 }
 
 // IssueMFAChallengeToken signs a short-lived JWT marked with
@@ -83,12 +130,18 @@ func IssueToken(secret string, userID, workspaceID uuid.UUID, role string, ttl t
 // /auth/totp/verify endpoint will accept it as proof that the
 // password factor has been satisfied.
 func IssueMFAChallengeToken(secret string, userID, workspaceID uuid.UUID) (string, time.Time, error) {
+	return IssueMFAChallengeTokenWith(hmacSigner{secret}, userID, workspaceID)
+}
+
+// IssueMFAChallengeTokenWith is IssueMFAChallengeToken parameterised
+// by a Signer.
+func IssueMFAChallengeTokenWith(s Signer, userID, workspaceID uuid.UUID) (string, time.Time, error) {
 	// Role is intentionally empty: a challenge token must not carry
 	// authority on the data plane, and emitting the user's role
 	// here would invite a future bug where some handler bypasses
 	// AuthMiddleware's purpose check and treats the challenge as a
 	// session.
-	return issueWithPurpose(secret, userID, workspaceID, "", PurposeMFAChallenge, MFAChallengeTokenTTL)
+	return issueWithPurpose(s, userID, workspaceID, "", PurposeMFAChallenge, MFAChallengeTokenTTL)
 }
 
 // IssueMFAEnrollToken signs a short-lived JWT marked with
@@ -96,10 +149,16 @@ func IssueMFAChallengeToken(secret string, userID, workspaceID uuid.UUID) (strin
 // for a user on a workspace that requires MFA but has not yet
 // completed enrollment.
 func IssueMFAEnrollToken(secret string, userID, workspaceID uuid.UUID) (string, time.Time, error) {
-	return issueWithPurpose(secret, userID, workspaceID, "", PurposeMFAEnroll, MFAChallengeTokenTTL)
+	return IssueMFAEnrollTokenWith(hmacSigner{secret}, userID, workspaceID)
 }
 
-func issueWithPurpose(secret string, userID, workspaceID uuid.UUID, role, purpose string, ttl time.Duration) (string, time.Time, error) {
+// IssueMFAEnrollTokenWith is IssueMFAEnrollToken parameterised by a
+// Signer.
+func IssueMFAEnrollTokenWith(s Signer, userID, workspaceID uuid.UUID) (string, time.Time, error) {
+	return issueWithPurpose(s, userID, workspaceID, "", PurposeMFAEnroll, MFAChallengeTokenTTL)
+}
+
+func issueWithPurpose(s Signer, userID, workspaceID uuid.UUID, role, purpose string, ttl time.Duration) (string, time.Time, error) {
 	if ttl == 0 {
 		ttl = TokenTTL
 	}
@@ -115,24 +174,24 @@ func issueWithPurpose(secret string, userID, workspaceID uuid.UUID, role, purpos
 			ExpiresAt: jwt.NewNumericDate(exp),
 		},
 	}
-	tok := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
-	s, err := tok.SignedString([]byte(secret))
+	tokStr, err := s.Sign(claims)
 	if err != nil {
 		return "", time.Time{}, err
 	}
-	return s, exp, nil
+	return tokStr, exp, nil
 }
 
-// ParseToken verifies the token signature and expiry and returns the parsed
-// claims.
+// ParseToken verifies the token signature and expiry against the HS256
+// secret and returns the parsed claims.
 func ParseToken(secret, raw string) (*Claims, error) {
+	return ParseTokenWith(hmacSigner{secret}, raw)
+}
+
+// ParseTokenWith is ParseToken parameterised by a Signer, so callers
+// holding a KeyManager verify ES256 tokens (falling back to HS256).
+func ParseTokenWith(s Signer, raw string) (*Claims, error) {
 	claims := &Claims{}
-	tok, err := jwt.ParseWithClaims(raw, claims, func(t *jwt.Token) (interface{}, error) {
-		if _, ok := t.Method.(*jwt.SigningMethodHMAC); !ok {
-			return nil, errors.New("unexpected signing method")
-		}
-		return []byte(secret), nil
-	})
+	tok, err := s.Parse(raw, claims)
 	if err != nil {
 		return nil, err
 	}
@@ -188,6 +247,14 @@ const SessionCheckTimeout = 1 * time.Second
 // retained for tests and the (deprecated) in-memory deployment path
 // where Redis isn't wired.
 func AuthMiddleware(secret string, checker SessionChecker) func(http.Handler) http.Handler {
+	return AuthMiddlewareWithKeys(hmacSigner{secret}, checker)
+}
+
+// AuthMiddlewareWithKeys is AuthMiddleware parameterised by a Signer.
+// Production wiring passes the ES256 KeyManager so tokens are verified
+// against the asymmetric keys first, with automatic HS256 fallback for
+// sessions issued before the cutover.
+func AuthMiddlewareWithKeys(signer Signer, checker SessionChecker) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			raw, ok := extractBearerToken(r)
@@ -195,7 +262,7 @@ func AuthMiddleware(secret string, checker SessionChecker) func(http.Handler) ht
 				RespondError(w, http.StatusUnauthorized, ErrCodeAuthMissingToken, "missing bearer token")
 				return
 			}
-			claims, err := ParseToken(secret, raw)
+			claims, err := ParseTokenWith(signer, raw)
 			if err != nil {
 				RespondError(w, http.StatusUnauthorized, ErrCodeAuthInvalidToken, "invalid token")
 				return
@@ -460,6 +527,13 @@ func tokenFromSubprotocols(raw string) (string, bool) {
 // benefit since the token expires before any revocation window
 // would be meaningful.
 func PurposeMiddleware(secret, want string) func(http.Handler) http.Handler {
+	return PurposeMiddlewareWithKeys(hmacSigner{secret}, want)
+}
+
+// PurposeMiddlewareWithKeys is PurposeMiddleware parameterised by a
+// Signer so the MFA challenge / enroll routes verify ES256 tokens
+// (with HS256 fallback) the same way AuthMiddlewareWithKeys does.
+func PurposeMiddlewareWithKeys(signer Signer, want string) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			header := r.Header.Get("Authorization")
@@ -468,7 +542,7 @@ func PurposeMiddleware(secret, want string) func(http.Handler) http.Handler {
 				return
 			}
 			raw := strings.TrimPrefix(header, "Bearer ")
-			claims, err := ParseToken(secret, raw)
+			claims, err := ParseTokenWith(signer, raw)
 			if err != nil {
 				RespondError(w, http.StatusUnauthorized, ErrCodeAuthInvalidToken, "invalid token")
 				return

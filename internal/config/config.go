@@ -6,14 +6,67 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/google/uuid"
 )
 
 // Config holds runtime configuration for the zk-drive server and worker
 // binaries. All values are sourced from environment variables so deployments
 // can inject them uniformly.
 type Config struct {
-	DatabaseURL   string
-	JWTSecret     string
+	DatabaseURL string
+	JWTSecret   string
+
+	// DB connection-pool sizing. These tune the pgxpool created by
+	// internal/database.ConnectWithPool. Sourced from DB_MAX_CONNS,
+	// DB_MIN_CONNS, and DB_MAX_CONN_IDLE_TIME. DBMaxConns is clamped
+	// to [2, 200] and DBMinConns to [0, DBMaxConns] at load time so a
+	// fat-fingered env var cannot starve the pool (max < min) or
+	// exhaust Postgres' max_connections.
+	DBMaxConns        int32
+	DBMinConns        int32
+	DBMaxConnIdleTime time.Duration
+
+	// JWTAlgorithm selects the session-token signing algorithm:
+	//   - "auto" (default): sign with ES256 when an active asymmetric
+	//     signing key exists in jwt_signing_keys, otherwise fall back
+	//     to HS256 using JWTSecret. Verification always accepts both.
+	//   - "ES256": force ES256 signing (still verifies HS256 tokens
+	//     issued before the cutover so existing sessions survive).
+	//   - "HS256": force HS256 signing (legacy behaviour).
+	// Parsed case-insensitively; unrecognised values fall back to
+	// "auto".
+	JWTAlgorithm string
+
+	// JWTKeyRefreshInterval is how often each replica re-reads the
+	// jwt_signing_keys table so that a key rotation performed on one
+	// replica (POST /api/admin/jwt/rotate) propagates to all others
+	// without a restart. Sourced from JWT_KEY_REFRESH_INTERVAL and
+	// clamped to [10s, 1h]; a non-positive value disables the
+	// background refresh (single-replica deployments). Default 60s.
+	JWTKeyRefreshInterval time.Duration
+
+	// PlatformAdminUserIDs lists the user IDs permitted to perform
+	// platform-wide administrative operations that affect every
+	// workspace — currently rotating the platform JWT signing key
+	// (POST /api/admin/jwt/rotate). The data model has a single
+	// "admin" role scoped per workspace, so the AdminOnly gate alone
+	// would let any workspace admin rotate the shared platform key and
+	// thereby affect all tenants. This allowlist narrows the rotate
+	// endpoint to designated platform operators. Sourced from
+	// PLATFORM_ADMIN_USER_IDS (comma-separated UUIDs). Empty by
+	// default, which denies the gated operations until an operator
+	// configures the list (deny-by-default for a cross-tenant action).
+	PlatformAdminUserIDs []uuid.UUID
+
+	// PlatformAdminUserIDsInvalid holds the raw PLATFORM_ADMIN_USER_IDS
+	// entries that failed to parse as UUIDs. They are dropped from the
+	// allowlist (a malformed entry can only narrow access, never widen
+	// it) but retained here so cmd/server can warn the operator at
+	// startup — otherwise a typo'd UUID would silently exclude an
+	// intended platform admin with no signal.
+	PlatformAdminUserIDsInvalid []string
+
 	ListenAddr    string
 	S3Endpoint    string
 	S3Bucket      string
@@ -40,6 +93,16 @@ type Config struct {
 	// not accidentally disable rate limiting entirely.
 	RateLimitPerUser      int
 	RateLimitPerWorkspace int
+
+	// TrustedProxyDepth is the number of trusted reverse proxies in
+	// front of the server. It governs how the IP-allowlist
+	// middleware resolves the client IP from X-Forwarded-For: the
+	// real client address is taken TrustedProxyDepth entries from
+	// the right of the header (entries further left are
+	// client-supplied and spoofable). Sourced from
+	// TRUSTED_PROXY_DEPTH; defaults to defaultTrustedProxyDepth
+	// (single load balancer).
+	TrustedProxyDepth int
 
 	// RedisURL switches the rate limiter and session store from
 	// in-memory state to a Redis-backed implementation so limits and
@@ -303,6 +366,22 @@ type Config struct {
 	// forever) or force-expire on every read (sub-second TTLs
 	// busy-loop the cache without serving hits).
 	PerformanceCacheTTL time.Duration
+
+	// OnlyOfficeURL is the base URL of the ONLYOFFICE Document Server
+	// (e.g. "https://onlyoffice.example.com"). When empty,
+	// collaborative office-document editing is disabled: the
+	// /api/files/{id}/editor-config endpoint reports the feature as
+	// unavailable and the frontend hides the "Open in Editor" button
+	// (graceful degradation). Set via ONLYOFFICE_URL.
+	OnlyOfficeURL string
+	// OnlyOfficeSecret is the shared JWT secret configured on the
+	// ONLYOFFICE Document Server (its JWT_ENABLED / JWT_SECRET pair).
+	// The server signs the editor config it hands the browser and
+	// verifies the JWT on inbound Document Server save callbacks with
+	// this value. When empty, the config is emitted unsigned and the
+	// callback skips token verification — acceptable only for trusted
+	// local development. Set via ONLYOFFICE_SECRET.
+	OnlyOfficeSecret string
 }
 
 // Load reads configuration from environment variables and returns a populated
@@ -341,36 +420,48 @@ func Load() (*Config, error) {
 // function so adding a new field doesn't require touching multiple
 // constructors.
 func buildConfigFromEnv() *Config {
+	// Read DB_MAX_CONNS once: DBMinConns is clamped against the same
+	// resolved maximum, so re-reading the env var would be redundant.
+	dbMaxConns := dbMaxConnsFromEnv()
+	platformAdmins, invalidPlatformAdmins := platformAdminUserIDsFromEnv()
 	return &Config{
-		DatabaseURL:           os.Getenv("DATABASE_URL"),
-		JWTSecret:             os.Getenv("JWT_SECRET"),
-		ListenAddr:            getEnvDefault("LISTEN_ADDR", ":8080"),
-		S3Endpoint:            os.Getenv("S3_ENDPOINT"),
-		S3Bucket:              os.Getenv("S3_BUCKET"),
-		S3AccessKey:           os.Getenv("S3_ACCESS_KEY"),
-		S3SecretKey:           os.Getenv("S3_SECRET_KEY"),
-		MigrationsDir:         getEnvDefault("MIGRATIONS_DIR", "migrations"),
-		NATSURL:               os.Getenv("NATS_URL"),
-		ClamAVAddress:         os.Getenv("CLAMAV_ADDRESS"),
-		GoogleClientID:        os.Getenv("GOOGLE_CLIENT_ID"),
-		GoogleClientSecret:    os.Getenv("GOOGLE_CLIENT_SECRET"),
-		GoogleRedirectURL:     os.Getenv("GOOGLE_REDIRECT_URL"),
-		MicrosoftClientID:     os.Getenv("MICROSOFT_CLIENT_ID"),
-		MicrosoftClientSecret: os.Getenv("MICROSOFT_CLIENT_SECRET"),
-		MicrosoftRedirectURL:  os.Getenv("MICROSOFT_REDIRECT_URL"),
-		RateLimitPerUser:        parseIntDefault(os.Getenv("RATE_LIMIT_PER_USER"), 0),
-		RateLimitPerWorkspace:   parseIntDefault(os.Getenv("RATE_LIMIT_PER_WORKSPACE"), 0),
-		RedisURL:                os.Getenv("REDIS_URL"),
-		FabricConsoleURL:        os.Getenv("FABRIC_CONSOLE_URL"),
-		FabricConsoleAdminToken: os.Getenv("FABRIC_CONSOLE_ADMIN_TOKEN"),
-		FabricBucketTemplate:    getEnvDefault("FABRIC_BUCKET_TEMPLATE", "zk-drive-{tenant}"),
-		FabricDefaultPlacementRef: getEnvDefault("FABRIC_DEFAULT_PLACEMENT_REF", "b2c_pooled_default"),
-		StaticDir:                 os.Getenv("STATIC_DIR"),
-		StripeWebhookSecret:       os.Getenv("STRIPE_WEBHOOK_SECRET"),
-		StripeSecretKey:           os.Getenv("STRIPE_SECRET_KEY"),
-		StripePriceTierMap:        parsePriceTierMap(os.Getenv("STRIPE_PRICE_TIER_MAP")),
-		OllamaURL:                 os.Getenv("OLLAMA_URL"),
-		OllamaModel:               os.Getenv("OLLAMA_MODEL"),
+		DatabaseURL:                 os.Getenv("DATABASE_URL"),
+		JWTSecret:                   os.Getenv("JWT_SECRET"),
+		DBMaxConns:                  dbMaxConns,
+		DBMinConns:                  dbMinConnsFromEnv(dbMaxConns),
+		DBMaxConnIdleTime:           parseDurationDefault(os.Getenv("DB_MAX_CONN_IDLE_TIME"), defaultDBMaxConnIdleTime),
+		JWTAlgorithm:                normaliseJWTAlgorithm(os.Getenv("JWT_ALGORITHM")),
+		JWTKeyRefreshInterval:       jwtKeyRefreshIntervalFromEnv(),
+		PlatformAdminUserIDs:        platformAdmins,
+		PlatformAdminUserIDsInvalid: invalidPlatformAdmins,
+		ListenAddr:                  getEnvDefault("LISTEN_ADDR", ":8080"),
+		S3Endpoint:                  os.Getenv("S3_ENDPOINT"),
+		S3Bucket:                    os.Getenv("S3_BUCKET"),
+		S3AccessKey:                 os.Getenv("S3_ACCESS_KEY"),
+		S3SecretKey:                 os.Getenv("S3_SECRET_KEY"),
+		MigrationsDir:               getEnvDefault("MIGRATIONS_DIR", "migrations"),
+		NATSURL:                     os.Getenv("NATS_URL"),
+		ClamAVAddress:               os.Getenv("CLAMAV_ADDRESS"),
+		GoogleClientID:              os.Getenv("GOOGLE_CLIENT_ID"),
+		GoogleClientSecret:          os.Getenv("GOOGLE_CLIENT_SECRET"),
+		GoogleRedirectURL:           os.Getenv("GOOGLE_REDIRECT_URL"),
+		MicrosoftClientID:           os.Getenv("MICROSOFT_CLIENT_ID"),
+		MicrosoftClientSecret:       os.Getenv("MICROSOFT_CLIENT_SECRET"),
+		MicrosoftRedirectURL:        os.Getenv("MICROSOFT_REDIRECT_URL"),
+		RateLimitPerUser:            parseIntDefault(os.Getenv("RATE_LIMIT_PER_USER"), 0),
+		RateLimitPerWorkspace:       parseIntDefault(os.Getenv("RATE_LIMIT_PER_WORKSPACE"), 0),
+		TrustedProxyDepth:           parseNonNegativeIntDefault(os.Getenv("TRUSTED_PROXY_DEPTH"), defaultTrustedProxyDepth),
+		RedisURL:                    os.Getenv("REDIS_URL"),
+		FabricConsoleURL:            os.Getenv("FABRIC_CONSOLE_URL"),
+		FabricConsoleAdminToken:     os.Getenv("FABRIC_CONSOLE_ADMIN_TOKEN"),
+		FabricBucketTemplate:        getEnvDefault("FABRIC_BUCKET_TEMPLATE", "zk-drive-{tenant}"),
+		FabricDefaultPlacementRef:   getEnvDefault("FABRIC_DEFAULT_PLACEMENT_REF", "b2c_pooled_default"),
+		StaticDir:                   os.Getenv("STATIC_DIR"),
+		StripeWebhookSecret:         os.Getenv("STRIPE_WEBHOOK_SECRET"),
+		StripeSecretKey:             os.Getenv("STRIPE_SECRET_KEY"),
+		StripePriceTierMap:          parsePriceTierMap(os.Getenv("STRIPE_PRICE_TIER_MAP")),
+		OllamaURL:                   os.Getenv("OLLAMA_URL"),
+		OllamaModel:                 os.Getenv("OLLAMA_MODEL"),
 
 		SecurityHeadersDisableHSTS:     parseBoolDefault(os.Getenv("SECURITY_HEADERS_DISABLE_HSTS"), false),
 		SecurityHeadersCSPReportOnly:   parseBoolDefault(os.Getenv("SECURITY_HEADERS_CSP_REPORT_ONLY"), false),
@@ -413,6 +504,9 @@ func buildConfigFromEnv() *Config {
 
 		PerformanceCacheEnabled: parseBoolDefault(os.Getenv("PERFORMANCE_CACHE_ENABLED"), defaultPerformanceCacheEnabled),
 		PerformanceCacheTTL:     clampPerformanceCacheTTL(parseDurationDefault(os.Getenv("PERFORMANCE_CACHE_TTL"), defaultPerformanceCacheTTL)),
+
+		OnlyOfficeURL:    strings.TrimSpace(os.Getenv("ONLYOFFICE_URL")),
+		OnlyOfficeSecret: os.Getenv("ONLYOFFICE_SECRET"),
 	}
 }
 
@@ -672,6 +766,110 @@ func parseDurationDefault(s string, def time.Duration) time.Duration {
 	return d
 }
 
+// DB connection-pool defaults and bounds. The pool is created by
+// internal/database.ConnectWithPool; these mirror the documented
+// defaults in docs/CONFIGURATION.md.
+const (
+	defaultDBMaxConns = 20
+	minDBMaxConns     = 2
+	maxDBMaxConns     = 200
+	defaultDBMinConns = 2
+
+	defaultDBMaxConnIdleTime = 30 * time.Minute
+)
+
+// dbMaxConnsFromEnv parses DB_MAX_CONNS and clamps the result to
+// [minDBMaxConns, maxDBMaxConns]. An unset / non-positive / malformed
+// value falls back to defaultDBMaxConns (operators most likely forgot
+// to set it), and an out-of-range value clamps to the nearest bound
+// so a typo can neither starve the pool nor exhaust Postgres'
+// max_connections.
+func dbMaxConnsFromEnv() int32 {
+	n := parseIntDefault(os.Getenv("DB_MAX_CONNS"), defaultDBMaxConns)
+	if n < minDBMaxConns {
+		n = minDBMaxConns
+	}
+	if n > maxDBMaxConns {
+		n = maxDBMaxConns
+	}
+	return int32(n)
+}
+
+// dbMinConnsFromEnv parses DB_MIN_CONNS and clamps it to
+// [0, maxConns]. Unlike parseIntDefault it honours an explicit 0
+// (a zero floor is legal — the pool simply opens connections lazily),
+// so the parse is done directly here. A value above maxConns clamps
+// down to maxConns so MinConns can never exceed MaxConns (pgxpool
+// rejects that configuration at NewWithConfig time).
+func dbMinConnsFromEnv(maxConns int32) int32 {
+	// n stays non-negative by construction: it starts at the default and
+	// is only reassigned from an explicitly-parsed value when v >= 0, so a
+	// negative DB_MIN_CONNS is ignored (default retained) rather than
+	// clamped — no separate floor check is needed.
+	n := defaultDBMinConns
+	if s := strings.TrimSpace(os.Getenv("DB_MIN_CONNS")); s != "" {
+		if v, err := strconv.Atoi(s); err == nil && v >= 0 {
+			n = v
+		}
+	}
+	if int32(n) > maxConns {
+		return maxConns
+	}
+	return int32(n)
+}
+
+// normaliseJWTAlgorithm canonicalises the JWT_ALGORITHM env var to
+// one of "auto", "ES256", or "HS256". Parsing is case-insensitive and
+// whitespace-tolerant; an empty or unrecognised value falls back to
+// "auto" so a typo can't silently disable asymmetric signing.
+func normaliseJWTAlgorithm(s string) string {
+	switch strings.ToUpper(strings.TrimSpace(s)) {
+	case "ES256":
+		return "ES256"
+	case "HS256":
+		return "HS256"
+	default:
+		return "auto"
+	}
+}
+
+// JWT signing-key background-refresh defaults and bounds. Mirrors the
+// documented values in docs/CONFIGURATION.md.
+const (
+	defaultJWTKeyRefreshInterval = 60 * time.Second
+	minJWTKeyRefreshInterval     = 10 * time.Second
+	maxJWTKeyRefreshInterval     = time.Hour
+)
+
+// jwtKeyRefreshIntervalFromEnv parses JWT_KEY_REFRESH_INTERVAL. An
+// unset or malformed value falls back to defaultJWTKeyRefreshInterval.
+// An explicit non-positive value (e.g. "0") disables the background
+// refresh and is returned as 0 — appropriate for single-replica
+// deployments where rotation already reloads locally. Any positive
+// value is clamped to [minJWTKeyRefreshInterval, maxJWTKeyRefreshInterval]
+// so an over-eager "1s" cannot hammer the database and a "24h" typo
+// cannot effectively defeat cross-replica propagation.
+func jwtKeyRefreshIntervalFromEnv() time.Duration {
+	s := strings.TrimSpace(os.Getenv("JWT_KEY_REFRESH_INTERVAL"))
+	if s == "" {
+		return defaultJWTKeyRefreshInterval
+	}
+	d, err := time.ParseDuration(s)
+	if err != nil {
+		return defaultJWTKeyRefreshInterval
+	}
+	if d <= 0 {
+		return 0
+	}
+	if d < minJWTKeyRefreshInterval {
+		return minJWTKeyRefreshInterval
+	}
+	if d > maxJWTKeyRefreshInterval {
+		return maxJWTKeyRefreshInterval
+	}
+	return d
+}
+
 // normaliseArchivePrefix ensures the prefix ends with exactly one
 // trailing slash so callers can concatenate the per-workspace key
 // suffix without bookkeeping. Empty input falls back to the default
@@ -710,6 +908,39 @@ func parseBoolDefault(s string, def bool) bool {
 	}
 }
 
+// platformAdminUserIDsFromEnv parses PLATFORM_ADMIN_USER_IDS, a
+// comma-separated list of user UUIDs permitted to perform
+// platform-wide administrative operations that affect every workspace
+// — currently just rotating the platform JWT signing key
+// (POST /api/admin/jwt/rotate). Workspace "admin" role alone is not
+// sufficient for these operations because the data model has a single
+// admin role shared across tenants. Blank and unparseable entries are
+// dropped (rather than aborting startup) so one malformed ID cannot
+// widen access; an empty result means no one may perform the gated
+// operation until the operator configures the list (deny-by-default).
+// The second return value carries any entries that failed to parse so
+// the caller can warn the operator about a typo that silently dropped
+// an intended admin.
+func platformAdminUserIDsFromEnv() (ids []uuid.UUID, invalid []string) {
+	raw := parseCSVList(os.Getenv("PLATFORM_ADMIN_USER_IDS"))
+	if len(raw) == 0 {
+		return nil, nil
+	}
+	out := make([]uuid.UUID, 0, len(raw))
+	for _, s := range raw {
+		id, err := uuid.Parse(s)
+		if err != nil {
+			invalid = append(invalid, s)
+			continue
+		}
+		out = append(out, id)
+	}
+	if len(out) == 0 {
+		return nil, invalid
+	}
+	return out, invalid
+}
+
 // parseCSVList splits a comma-separated env-var value into a
 // trimmed slice, dropping empty entries. Returns nil for empty
 // input so the caller's omit-empty default kicks in.
@@ -737,6 +968,31 @@ func parseIntDefault(s string, def int) int {
 	}
 	v, err := strconv.Atoi(s)
 	if err != nil || v <= 0 {
+		return def
+	}
+	return v
+}
+
+// defaultTrustedProxyDepth is the assumed number of trusted reverse
+// proxies in front of the server when TRUSTED_PROXY_DEPTH is unset.
+// One matches the common single-load-balancer deployment. The
+// IP-allowlist middleware consumes the resolved value; this package
+// owns the default because it owns env-var resolution.
+const defaultTrustedProxyDepth = 1
+
+// parseNonNegativeIntDefault is like parseIntDefault but treats an
+// explicit 0 as a valid value rather than falling back to def. Only an
+// unset/empty var, a parse error, or a negative value yields def. This
+// matters for TRUSTED_PROXY_DEPTH where 0 ("trust no proxy; use the raw
+// peer address") is a meaningful, documented setting distinct from the
+// default of 1.
+func parseNonNegativeIntDefault(s string, def int) int {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return def
+	}
+	v, err := strconv.Atoi(s)
+	if err != nil || v < 0 {
 		return def
 	}
 	return v

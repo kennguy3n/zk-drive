@@ -113,7 +113,11 @@ func run() error {
 		}
 	}()
 
-	pool, err := database.Connect(ctx, cfg.DatabaseURL)
+	pool, err := database.ConnectWithPool(ctx, cfg.DatabaseURL, database.PoolConfig{
+		MaxConns:        cfg.DBMaxConns,
+		MinConns:        cfg.DBMinConns,
+		MaxConnIdleTime: cfg.DBMaxConnIdleTime,
+	})
 	if err != nil {
 		cancel()
 		return fmt.Errorf("connect postgres: %w", err)

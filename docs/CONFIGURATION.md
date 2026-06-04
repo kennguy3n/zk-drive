@@ -27,6 +27,100 @@ is read-only against S3.
 | `LISTEN_ADDR`    | `:8080`      | HTTP listen address for the API server.                                                       |
 | `MIGRATIONS_DIR` | `migrations` | Path to SQL migrations applied by `migrate` (read-only by `server` / `worker`).                |
 | `STATIC_DIR`     | _empty_      | Optional path to the frontend Vite build. When set, the server serves the SPA from this dir.   |
+| `TRUSTED_PROXY_DEPTH` | `1`     | Number of trusted reverse proxies in front of the server. Governs how the IP-allowlist middleware resolves the client IP from `X-Forwarded-For`. See [IP allowlisting](#ip-allowlisting-trusted_proxy_depth).  |
+
+### IP allowlisting (`TRUSTED_PROXY_DEPTH`)
+
+Workspaces may restrict access to a set of public CIDR ranges
+(conditional access). When a workspace enables its allowlist, the
+server enforces it on every authenticated data-plane request by
+resolving the client IP and rejecting any address not covered by a
+rule with `403 Forbidden` and an `X-ZkDrive-IP-Blocked: true` header.
+
+`TRUSTED_PROXY_DEPTH` tells the server how many reverse proxies (load
+balancers, CDNs) sit in front of it so it can trust the right entry in
+the `X-Forwarded-For` header. The header is a left-to-right list of
+addresses appended by each hop; only the right-most entries — those
+added by infrastructure you control — are trustworthy, because a
+client can forge any value to the left. The middleware takes the
+address `TRUSTED_PROXY_DEPTH` entries from the **right**:
+
+- `1` (default): a single trusted proxy (e.g. one ALB/nginx). The
+  client IP is the last `X-Forwarded-For` entry.
+- `2`: two trusted hops (e.g. CDN → load balancer). The client IP is
+  the second-from-last entry.
+- `0`: no trusted proxy; ignore `X-Forwarded-For` entirely and use the
+  raw TCP peer address (`RemoteAddr`).
+
+If the header is absent or has fewer entries than the configured
+depth, the server falls back to `RemoteAddr`. **Set this to the actual
+number of proxies in your deployment** — too low admits spoofed
+addresses, too high trusts a client-supplied entry. Because the
+allowlist only accepts public ranges, the resolved client IP must be a
+routable public address, so it must reflect the real external client
+rather than an internal proxy hop.
+
+**Allowlistable ranges.** Only publicly routable CIDRs are accepted.
+Private (RFC1918 / RFC4193), loopback, link-local, unspecified,
+multicast, and RFC 6598 carrier-grade-NAT shared space
+(`100.64.0.0/10`) are rejected, because an internet-facing gateway
+never legitimately observes them as a client source address.
+
+**Enabling requires at least one rule.** Because matching fails
+closed, turning the allowlist on for a workspace with no rules would
+block every data-plane request for that workspace. The policy endpoint
+therefore rejects an enable with no rules (`409`,
+`IP_ALLOWLIST_NO_RULES`); add a rule first. Disabling is always
+allowed.
+
+**Cannot remove the last rule while enabled.** For the same
+fail-closed reason, deleting the final rule of an *enabled* allowlist
+is rejected (`409`, `IP_ALLOWLIST_LAST_RULE`) — it would leave the
+workspace enabled with zero rules and lock everyone out. Disable the
+allowlist first, then remove the rule. Both this guard and the
+enable-requires-a-rule guard are enforced atomically under a
+per-workspace row lock, so concurrent "enable" and "remove last rule"
+requests can never race the workspace into the locked-out state.
+
+**Enforcement scope.** The allowlist is enforced on authenticated
+data-plane HTTP requests — the main drive routes and the `/api/kchat`
+routes. The `/api/admin` routes are intentionally exempt so an admin
+who misconfigures the allowlist can still reach the management
+endpoints to fix it.
+
+The long-lived WebSocket endpoints (`/api/ws` and
+`/api/documents/{id}/ws`) are a known limitation: they authenticate the
+upgrade request but deliberately sit outside the per-request middleware
+stack (`TenantGuard` + the IP-allowlist middleware), because that stack
+assumes ordinary request/response semantics and would otherwise charge
+per WS frame. As a result the IP allowlist is **not** applied to
+WebSocket traffic today. The practical exposure is bounded: a client
+must already hold a valid session (JWT) to open a socket, and all
+allowlist-gated REST endpoints — including the upload-URL / confirm
+handshakes used to move file bytes — remain enforced. If you require
+strict connection-time IP enforcement for real-time editing, terminate
+WebSocket traffic at a proxy that applies the same CIDR allowlist.
+
+## Database connection pool
+
+These tune the pgxpool created at startup by `server` and `worker`.
+Values are clamped at load time so a typo can neither starve the pool
+nor exhaust Postgres' `max_connections`. Other binaries (`migrate`,
+`reconciler`, `orphan-gc`, `audit-archiver`) use the default sizing.
+
+| Variable                 | Default | Purpose                                                                                                  |
+| ------------------------ | ------- | -------------------------------------------------------------------------------------------------------- |
+| `DB_MAX_CONNS`           | `20`    | Maximum open connections in the pool. Clamped to `[2, 200]`.                                              |
+| `DB_MIN_CONNS`           | `2`     | Minimum idle connections kept warm. Clamped to `[0, DB_MAX_CONNS]`.                                       |
+| `DB_MAX_CONN_IDLE_TIME`  | `30m`   | How long an idle connection is kept before being closed. Go duration string (e.g. `45s`, `5m`, `1h`).     |
+
+## JWT signing
+
+| Variable                   | Default | Purpose                                                                                                                                            |
+| -------------------------- | ------- | -------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `JWT_ALGORITHM`            | `auto`  | Session-token signing algorithm. `auto` signs with ES256 when an active asymmetric key exists in `jwt_signing_keys`, else HS256 (`JWT_SECRET`). `ES256` forces asymmetric signing — if no active key has been rotated in yet, token signing **fails** rather than silently downgrading to HS256 (run `POST /api/admin/jwt/rotate` first). `HS256` forces legacy symmetric signing. Verification always accepts both, so rotating to ES256 never invalidates existing HS256 sessions. |
+| `JWT_KEY_REFRESH_INTERVAL` | `60s`   | How often each replica re-reads `jwt_signing_keys` so a key rotation performed on one replica propagates to all others without a restart. Go duration string, clamped to `[10s, 1h]`. A non-positive value (e.g. `0`) disables the background refresh — appropriate for single-replica deployments. |
+| `PLATFORM_ADMIN_USER_IDS`  | _(empty)_ | Comma-separated list of user UUIDs allowed to rotate the **platform-wide** JWT signing key (`POST /api/admin/jwt/rotate`). The data model has a single per-workspace `admin` role, so `AdminOnly` alone would let any workspace admin rotate the key shared by every tenant; this allowlist narrows that to designated platform operators. **Deny-by-default:** when unset, the rotate endpoint returns `403 PLATFORM_ADMIN_ACCESS_REQUIRED` for every caller (and audits the attempt as `admin.jwt_rotate_denied`) until an operator opts specific users in. Blank/malformed entries are ignored. |
 
 ## Storage (zk-object-fabric S3 gateway)
 
@@ -113,6 +207,47 @@ console URL empty to disable the advanced storage admin surface.
 | -------------- | ------- | --------------------------------------------------------------------------------------------------------- |
 | `OLLAMA_URL`   | _empty_ | Base URL of a local Ollama server (e.g. `http://ollama:11434`). When unset the summariser falls back to a deterministic rule-based mode. |
 | `OLLAMA_MODEL` | _empty_ | Model name to request (e.g. `llama3:8b`). Ignored when `OLLAMA_URL` is unset.                              |
+
+## Collaborative office editing (ONLYOFFICE)
+
+Lets users open office documents (`.docx`, `.xlsx`, `.pptx`, `.odt`,
+`.csv`, …) in an embedded [ONLYOFFICE Document
+Server](https://www.onlyoffice.com/) editor. The server hands the
+browser a presigned GET URL for the current version; when the user
+finishes editing, the Document Server POSTs the edited bytes back to a
+ZK Drive callback, which stores them as a **new file version**.
+
+Office editing requires the server to read and write the document, so
+it is available **only for `managed_encrypted` folders**. Files in
+`strict_zk` (zero-knowledge) folders return `403` — the server holds no
+key and must not see plaintext.
+
+| Variable            | Default | Purpose                                                                                                                                                             |
+| ------------------- | ------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `ONLYOFFICE_URL`    | _empty_ | Base URL of the ONLYOFFICE Document Server (e.g. `https://onlyoffice.example.com`). When empty, office editing is disabled: `/api/onlyoffice/status` reports `enabled:false`, the editor-config endpoint returns `503`, and the frontend hides the "Edit" / "Open in editor" affordances. |
+| `ONLYOFFICE_SECRET` | _empty_ | Shared JWT secret matching the Document Server's `JWT_SECRET` (`JWT_ENABLED=true`). ZK Drive signs the editor config with it (HS256) and verifies the inbound save callback against it. When empty, the config is emitted unsigned and the callback skips verification — acceptable only for trusted local development. |
+
+The callback URL the Document Server posts to is composed from
+[`PUBLIC_URL`](#transactional-email-guest-invite-delivery): `${PUBLIC_URL}/api/files/{id}/editor-callback?workspace_id={ws}`.
+Ensure `PUBLIC_URL` is reachable from the Document Server's network and
+that the Document Server's cache URL is reachable from ZK Drive (the
+callback fetches the edited bytes from it).
+
+Setup:
+
+1. Deploy a Document Server (see the optional `onlyoffice` service in
+   [`deploy/docker-compose.prod.yml`](../deploy/docker-compose.prod.yml)).
+2. Set `JWT_ENABLED=true` and a strong `JWT_SECRET` on the Document
+   Server.
+3. Set `ONLYOFFICE_URL` and a matching `ONLYOFFICE_SECRET` on the ZK
+   Drive server.
+4. Confirm `/api/onlyoffice/status` returns `{"enabled":true}` once
+   authenticated.
+
+> **CSP note:** the embedded editor loads `api.js` from the Document
+> Server and renders inside an iframe. Add the Document Server origin to
+> the relevant `SECURITY_HEADERS_CSP_*` allowances (script / frame /
+> connect sources) so the browser can load it.
 
 ## Browser security headers
 

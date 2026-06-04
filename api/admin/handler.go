@@ -1,7 +1,10 @@
 // Package admin serves the admin-only HTTP endpoints: audit log,
 // retention policy CRUD, user management, and workspace storage
 // stats. All routes require the admin role — enforced by the
-// middleware.AdminOnly wrapper in cmd/server/main.go.
+// middleware.AdminOnly wrapper in cmd/server/main.go. POST /jwt/rotate
+// additionally requires the caller to be a configured platform admin
+// (PLATFORM_ADMIN_USER_IDS) because it rotates the platform-wide
+// signing key shared by every workspace.
 package admin
 
 import (
@@ -61,6 +64,30 @@ type Handler struct {
 	provisioner  *fabric.Provisioner
 	storeFactory *storage.ClientFactory
 	webhooks     MemberEventPublisher
+	ipAllow      *workspace.IPAllowService
+	jwtKeys      JWTRotator
+	// platformAdmins is the operator-configured allowlist of user IDs
+	// permitted to rotate the platform-wide JWT signing key. Empty
+	// means deny-by-default: rotation affects every workspace, so the
+	// per-workspace admin role (already enforced by AdminOnly) is not
+	// sufficient on its own. See WithPlatformAdmins.
+	platformAdmins []uuid.UUID
+}
+
+// JWTRotator is the subset of *crypto.KeyManager the admin handler
+// needs to rotate the platform JWT signing key. Declared as an
+// interface so the rotate endpoint stays unit-testable without a live
+// key store. The returned record carries only public metadata — the
+// KeyManager never hands back private key material.
+type JWTRotator interface {
+	RotateKey(ctx context.Context) (cryptopkg.SigningKeyRecord, error)
+	// Algorithm reports the algorithm the manager will actually sign
+	// the next token with (ES256 once an active asymmetric key is
+	// selected, else HS256). Surfaced in the rotate response so an
+	// operator can tell whether the freshly-stored key is live yet —
+	// it is not, e.g., while JWT_ALGORITHM=HS256 forces symmetric
+	// signing despite a key having been provisioned.
+	Algorithm() string
 }
 
 // NewHandler constructs a Handler. Pass nil for services that are
@@ -111,6 +138,54 @@ func (h *Handler) WithWebhooks(p MemberEventPublisher) *Handler {
 	return h
 }
 
+// WithJWTRotator wires the JWT signing-key manager so POST
+// /jwt/rotate can rotate the platform ES256 key. Optional: when nil
+// the route responds 501 Not Implemented (e.g. deployments still on
+// HS256-only signing).
+func (h *Handler) WithJWTRotator(r JWTRotator) *Handler {
+	// Mirror WithWebhooks: a typed-nil *crypto.KeyManager wrapped in
+	// the JWTRotator interface compares != nil, so the h.jwtKeys == nil
+	// guard in RotateJWTKey would pass and then NPE inside RotateKey.
+	// Collapse it back to a real nil so the route cleanly responds 501.
+	if r == nil {
+		h.jwtKeys = nil
+		return h
+	}
+	if km, ok := r.(*cryptopkg.KeyManager); ok && km == nil {
+		h.jwtKeys = nil
+		return h
+	}
+	h.jwtKeys = r
+	return h
+}
+
+// WithPlatformAdmins wires the allowlist of user IDs permitted to
+// rotate the platform-wide JWT signing key (POST /jwt/rotate). The
+// data model has a single "admin" role scoped per workspace, so the
+// AdminOnly middleware alone would let any workspace admin rotate the
+// shared platform key and disrupt every tenant. Restricting rotation
+// to a deployment-controlled set of platform operators closes that
+// gap. An empty (or nil) list denies all rotation attempts
+// (deny-by-default) — the operator must explicitly designate platform
+// admins via PLATFORM_ADMIN_USER_IDS before the endpoint will rotate.
+func (h *Handler) WithPlatformAdmins(ids []uuid.UUID) *Handler {
+	h.platformAdmins = ids
+	return h
+}
+
+// isPlatformAdmin reports whether id is in the configured platform
+// admin allowlist. An empty allowlist returns false for everyone
+// (deny-by-default), so a cross-tenant signing-key rotation cannot
+// happen until an operator opts specific users in.
+func (h *Handler) isPlatformAdmin(id uuid.UUID) bool {
+	for _, a := range h.platformAdmins {
+		if a == id {
+			return true
+		}
+	}
+	return false
+}
+
 // WithFabric wires the placement-policy admin endpoints. The
 // FabricClient talks to the upstream zk-object-fabric console; the
 // provisioner is used to look up the per-workspace tenant ID and
@@ -149,6 +224,85 @@ func (h *Handler) RegisterRoutes(r chi.Router) {
 	r.Patch("/workspace/mfa-policy", h.UpdateMFAPolicy)
 	r.Get("/workspace/search-language", h.GetSearchLanguage)
 	r.Put("/workspace/search-language", h.UpdateSearchLanguage)
+	r.Get("/ip-allowlist", h.ListIPAllowRules)
+	r.Post("/ip-allowlist", h.AddIPAllowRule)
+	r.Delete("/ip-allowlist/{id}", h.RemoveIPAllowRule)
+	r.Patch("/ip-allowlist/policy", h.UpdateIPAllowPolicy)
+	r.Post("/jwt/rotate", h.RotateJWTKey)
+}
+
+// jwtRotateResponse returns the public metadata of the freshly
+// activated signing key. Private key material is never serialised.
+type jwtRotateResponse struct {
+	KeyID     string    `json:"key_id"`
+	Algorithm string    `json:"algorithm"`
+	CreatedAt time.Time `json:"created_at"`
+	// SigningAlgorithm is what the manager will actually sign with now.
+	// It equals "ES256" once the new key is live, but stays "HS256"
+	// when JWT_ALGORITHM=HS256 forces symmetric signing — signalling
+	// that the key was stored for later activation, not made active.
+	SigningAlgorithm string `json:"signing_algorithm"`
+}
+
+// RotateJWTKey generates a new ES256 signing key, marks it active,
+// retires the previous one, and reloads the in-memory key set. Tokens
+// signed by the retired key keep verifying until they expire. The
+// action is audited; the response carries only public key metadata.
+//
+// Because the signing key is platform-wide (it signs sessions for
+// every workspace), the caller must be in the platform-admin allowlist
+// in addition to clearing the workspace AdminOnly gate; otherwise the
+// request is denied and the attempt audited.
+func (h *Handler) RotateJWTKey(w http.ResponseWriter, r *http.Request) {
+	if h.jwtKeys == nil {
+		middleware.RespondError(w, http.StatusNotImplemented, middleware.ErrCodeUnsupportedOp, "jwt key manager not wired")
+		return
+	}
+	workspaceID, ok := middleware.WorkspaceIDFromContext(r.Context())
+	if !ok {
+		middleware.RespondError(w, http.StatusInternalServerError, middleware.ErrCodeInternal, "workspace not in context")
+		return
+	}
+	actorID, _ := middleware.UserIDFromContext(r.Context())
+
+	// Platform-admin gate. The route is already behind AdminOnly, but
+	// "admin" is a per-workspace role while the signing key is
+	// platform-wide (workspace_id IS NULL) — so any workspace admin
+	// reaching here would otherwise rotate the key for every tenant.
+	// Restrict the cross-tenant action to the operator-configured
+	// allowlist; deny (and audit the attempt) otherwise.
+	if !h.isPlatformAdmin(actorID) {
+		logging.FromContext(r.Context()).Warn("denied jwt key rotation: caller is not a configured platform admin",
+			"actor_id", actorID.String(), "workspace_id", workspaceID.String())
+		if h.audit != nil {
+			actor := actorID
+			h.audit.LogAction(r.Context(), workspaceID, &actor, audit.ActionAdminJWTRotateDenied, "", nil, r, nil)
+		}
+		middleware.RespondError(w, http.StatusForbidden, middleware.ErrCodePlatformAdminOnly,
+			"platform admin access required to rotate the platform signing key")
+		return
+	}
+
+	rec, err := h.jwtKeys.RotateKey(r.Context())
+	if err != nil {
+		middleware.RespondInternalError(w, r, "rotate jwt key", err)
+		return
+	}
+
+	if h.audit != nil {
+		actor := actorID
+		h.audit.LogAction(r.Context(), workspaceID, &actor, audit.ActionAdminJWTRotate, "", nil, r, map[string]any{
+			"key_id":    rec.ID.String(),
+			"algorithm": rec.Algorithm,
+		})
+	}
+
+	writeJSON(w, http.StatusOK, jwtRotateResponse{
+		KeyID:            rec.ID.String(),
+		Algorithm:        rec.Algorithm,
+		CreatedAt:        rec.CreatedAt,
+		SigningAlgorithm: h.jwtKeys.Algorithm(),
+	})
 }
 
 // updateMFAPolicyRequest carries the boolean toggle for the

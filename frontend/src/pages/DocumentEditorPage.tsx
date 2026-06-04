@@ -162,6 +162,9 @@ export default function DocumentEditorPage() {
     const provider = new CollabProvider({
       url: documentCollabURL(id),
       token,
+      // Re-read the JWT on every reconnect so a long editing session
+      // survives token rotation without dropping the live document.
+      tokenProvider: () => currentToken(),
       doc: nextYDoc,
       awareness: nextAwareness ?? undefined,
       presenceAllowed,

@@ -1,0 +1,83 @@
+# ZK Drive desktop sync client (Tauri v2 host).
+#
+# This crate is intentionally NOT a member of the `sdk/` workspace
+# (see sdk/README.md "Driving the shell from a GUI host"): it pulls
+# the pure-Rust `zk-sync-shell` as a path dependency and layers the
+# GUI framework on top. Keeping it out of `sdk/Cargo.toml` means the
+# headless `cargo test --workspace` SDK CI job doesn't have to pull
+# in webkit2gtk-4.1 / Cocoa / WebView2 dev headers. The empty
+# `[workspace]` table below makes this its own workspace root so a
+# `cargo` invocation from `desktop/src-tauri` never gets absorbed by
+# a parent workspace.
+[workspace]
+
+[package]
+name = "zk-drive-desktop"
+version = "0.1.0"
+description = "ZK Drive desktop sync client"
+authors = ["ZK Drive Engineering <eng@uney.com>"]
+license = "Apache-2.0"
+repository = "https://github.com/kennguy3n/zk-drive"
+edition = "2021"
+rust-version = "1.86"
+
+# The library target holds the actual app wiring so it can be shared
+# with a future mobile (`tauri android`/`ios`) entrypoint; `main.rs`
+# is a thin shim that calls `run()`. This mirrors the standard
+# Tauri v2 project layout.
+[lib]
+name = "zk_drive_desktop_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+# Tauri core + plugins. `tray-icon` gates the system-tray API used
+# by tray.rs; `protocol-asset` lets the bundled SPA load local
+# assets through the asset protocol.
+tauri = { version = "2", features = ["tray-icon", "image-png"] }
+tauri-plugin-shell = "2"
+tauri-plugin-fs = "2"
+tauri-plugin-dialog = "2"
+tauri-plugin-notification = "2"
+tauri-plugin-updater = "2"
+
+# ZK Drive sync SDK (path deps — see comment above on why this crate
+# lives outside the sdk workspace).
+zk-sync-shell = { path = "../../sdk/crates/desktop-shell" }
+zk-sync-api = { path = "../../sdk/crates/api-client" }
+zk-sync-auth = { path = "../../sdk/crates/auth" }
+
+# Async runtime + helpers.
+tokio = { version = "1", features = ["full"] }
+async-trait = "0.1"
+
+# Serialization.
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Errors / logging.
+anyhow = "1"
+thiserror = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# IDs / URLs / paths / time.
+uuid = { version = "1", features = ["v4", "serde"] }
+url = "2"
+dirs = "5"
+chrono = { version = "0.4", features = ["serde"] }
+
+# OAuth2 PKCE code exchange (the auth crate vends the challenge +
+# keychain store + refresher; the desktop host performs the one-off
+# authorization-code exchange against the backend itself).
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+
+# Open the system browser for the OAuth2 authorization step.
+open = "5"
+
+[features]
+# Enables Tauri's custom-protocol asset loading in release bundles.
+# The `tauri build` toolchain sets this automatically.
+custom-protocol = ["tauri/custom-protocol"]

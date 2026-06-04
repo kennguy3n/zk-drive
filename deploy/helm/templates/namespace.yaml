@@ -1,0 +1,8 @@
+{{- if .Values.namespace.create }}
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: {{ include "zk-drive.namespace" . }}
+  labels:
+    {{- include "zk-drive.labels" . | nindent 4 }}
+{{- end }}
