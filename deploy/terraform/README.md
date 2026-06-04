@@ -211,10 +211,20 @@ done
 - **Scheduled jobs (AWS).** `reconciler` (hourly :17), `orphan-gc` (every
   6 h :37), and `audit-archiver` (daily 03:47) run as one-shot ECS tasks
   via EventBridge Scheduler — matching the cadences in
-  `deploy/k8s/*-cronjob.yaml`. On GCP these run as the worker's in-process
-  loops (`RECONCILE_INTERVAL_MINUTES` / `GC_INTERVAL_MINUTES`), since the
-  worker Cloud Run service is kept warm (`min_instances >= 1`,
-  `cpu_idle = false`).
+  `deploy/k8s/*-cronjob.yaml`. On GCP, `reconciler` and `orphan-gc` run as
+  the worker's in-process loops (`RECONCILE_INTERVAL_MINUTES` /
+  `GC_INTERVAL_MINUTES`), since the worker Cloud Run service is kept warm
+  (`min_instances >= 1`, `cpu_idle = false`).
+- **Scheduled jobs (GCP).** The `audit-archiver` is a separate binary the
+  worker does NOT run in-process, so the GCP module schedules it the
+  cloud-native way: a **Cloud Run Job** (`cronjobs.tf`) triggered daily at
+  03:47 UTC by **Cloud Scheduler** (parity with the AWS EventBridge task).
+  Unlike the server/worker, the job connects straight to Cloud SQL's private
+  IP via a direct `DATABASE_URL_DIRECT` secret (no Cloud SQL Proxy sidecar — a
+  non-exiting proxy would keep the one-shot task from completing). A dedicated
+  `*-scheduler` service account holds `run.invoker` on just this job. Cloud
+  Scheduler requires the `cloudscheduler.googleapis.com` API (enabled by the
+  module) and an available scheduler location in `var.region`.
   - **Belt-and-suspenders / tuning (AWS).** The AWS worker still runs its
     in-process reconcile/GC loops at their defaults (60 min / 360 min)
     *alongside* the EventBridge-scheduled tasks. This is intentional and

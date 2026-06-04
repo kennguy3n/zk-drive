@@ -50,6 +50,8 @@ locals {
     "servicenetworking.googleapis.com",
     "vpcaccess.googleapis.com",
     "monitoring.googleapis.com",
+    # Cloud Scheduler triggers the audit-archiver Cloud Run Job (cronjobs.tf).
+    "cloudscheduler.googleapis.com",
   ]
 }
 

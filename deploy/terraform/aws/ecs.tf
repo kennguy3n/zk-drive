@@ -177,6 +177,36 @@ resource "aws_iam_role_policy_attachment" "task_execution_infra_managed" {
   policy_arn = "arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy"
 }
 
+# Dedicated execution role for the cron tasks (reconciler, orphan-gc,
+# audit-archiver). Identical managed permissions (ECR pull + CloudWatch logs)
+# as task_execution, but its secrets-read policy is scoped to local.cron_secret_arns
+# — the exact set the cron tasks inject — instead of the full app_secret_arns.
+# So even though cron_secrets already omits Stripe/Redis/PgBouncer DATABASE_URL
+# from the task definition, the cron execution role also cannot read them,
+# matching least-privilege at the IAM layer (parity with the lean infra role).
+resource "aws_iam_role" "cron_execution" {
+  name               = "${local.name}-task-execution-cron"
+  assume_role_policy = data.aws_iam_policy_document.ecs_assume.json
+}
+
+resource "aws_iam_role_policy_attachment" "cron_execution_managed" {
+  role       = aws_iam_role.cron_execution.name
+  policy_arn = "arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy"
+}
+
+data "aws_iam_policy_document" "cron_secrets_read" {
+  statement {
+    actions   = ["secretsmanager:GetSecretValue"]
+    resources = local.cron_secret_arns
+  }
+}
+
+resource "aws_iam_role_policy" "cron_execution_secrets" {
+  name   = "${local.name}-cron-secrets-read"
+  role   = aws_iam_role.cron_execution.id
+  policy = data.aws_iam_policy_document.cron_secrets_read.json
+}
+
 # Task role: the application's own AWS identity. Minimal today (CloudWatch
 # metric publishing for the worker's NATS-pending gauge); extend as the app
 # integrates more AWS services.

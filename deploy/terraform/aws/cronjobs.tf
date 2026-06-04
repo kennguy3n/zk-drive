@@ -44,7 +44,7 @@ resource "aws_ecs_task_definition" "cron" {
   network_mode             = "awsvpc"
   cpu                      = 512
   memory                   = 1024
-  execution_role_arn       = aws_iam_role.task_execution.arn
+  execution_role_arn       = aws_iam_role.cron_execution.arn
   task_role_arn            = aws_iam_role.task.arn
 
   container_definitions = jsonencode([

@@ -88,6 +88,30 @@ resource "google_secret_manager_secret_version" "database_url" {
   secret_data = "postgres://${var.db_username}:${random_password.db.result}@127.0.0.1:5432/${var.db_name}?sslmode=disable"
 }
 
+# Direct DATABASE_URL for the short-lived audit-archiver Cloud Run Job, which
+# does not run a Cloud SQL Proxy sidecar (a non-exiting proxy container would
+# keep a one-shot job task from completing — the same rationale the AWS module
+# uses for database_url_direct on its cron tasks). The job reaches the instance
+# at its private IP over the VPC connector; the instance is private-IP only
+# (cloudsql.tf ipv4_enabled=false) and does not require SSL, so traffic stays on
+# the VPC. The long-lived server/worker keep the proxy-terminated 127.0.0.1 URL.
+resource "google_secret_manager_secret" "database_url_direct" {
+  secret_id = "${local.name}-DATABASE_URL_DIRECT"
+
+  labels = local.common_labels
+
+  replication {
+    auto {}
+  }
+
+  depends_on = [google_project_service.this]
+}
+
+resource "google_secret_manager_secret_version" "database_url_direct" {
+  secret      = google_secret_manager_secret.database_url_direct.id
+  secret_data = "postgres://${var.db_username}:${random_password.db.result}@${google_sql_database_instance.this.private_ip_address}:5432/${var.db_name}?sslmode=disable"
+}
+
 # Stripe keys are created (and injected into Cloud Run) ONLY when billing is
 # configured. Previously they were always created and seeded with a single
 # space when unset (Secret Manager rejects empty payloads). config.go reads
@@ -207,6 +231,7 @@ locals {
     jwt                       = google_secret_manager_secret.jwt.secret_id
     credential_encryption_key = google_secret_manager_secret.credential_encryption_key.secret_id
     database_url              = google_secret_manager_secret.database_url.secret_id
+    database_url_direct       = google_secret_manager_secret.database_url_direct.secret_id
     s3_access_key             = google_secret_manager_secret.s3_access_key.secret_id
     s3_secret_key             = google_secret_manager_secret.s3_secret_key.secret_id
   }, local.stripe_secret_ids)

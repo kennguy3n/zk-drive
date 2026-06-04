@@ -278,4 +278,14 @@ locals {
     aws_secretsmanager_secret.s3_secret_key.arn,
     aws_secretsmanager_secret.db_password.arn,
   ], local.stripe_secret_arns, local.redis_url_arns)
+
+  # ARNs the dedicated cron execution role may read — exactly the secrets the
+  # cron_secrets injection above lists, and nothing more. This deliberately
+  # omits Stripe, the Redis URL secret, the PgBouncer DATABASE_URL, and the raw
+  # DB password: the reconciler/orphan-gc/audit-archiver tasks never inject
+  # them, so their execution role shouldn't be able to read them either (the
+  # injection was already scoped via cron_secrets; this closes the matching gap
+  # at the IAM layer). Mirrors the lean task_execution_infra split for
+  # NATS/ClamAV.
+  cron_secret_arns = [for s in local.cron_secrets : s.valueFrom]
 }

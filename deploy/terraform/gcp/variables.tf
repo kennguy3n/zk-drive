@@ -299,3 +299,9 @@ variable "labels" {
   type        = map(string)
   default     = {}
 }
+
+variable "audit_log_archive_enabled" {
+  description = "Sets AUDIT_LOG_ARCHIVE_ENABLED on the daily audit-archiver Cloud Run Job (cronjobs.tf). The audit-archiver binary is opt-in (defaults to false) and exits as a no-op until this is true, so the scheduled job does nothing until enabled. Leave false until zk-object-fabric storage (fabric_endpoint/bucket) is configured and the archive prefix is confirmed writable. Parity with the AWS module's audit-archiver scheduled task."
+  type        = bool
+  default     = false
+}
