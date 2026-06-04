@@ -228,6 +228,18 @@ done
   cannot verify when dialing by private IP, so enabling it cleanly requires
   an app-side change (plumbing the server CA into the Redis client) and is
   intentionally left off here — see the comment in `gcp/memorystore.tf`.
+- **CloudFront → ALB hop (AWS).** CloudFront terminates viewer TLS and reaches
+  the ALB over plain **HTTP** on port 80. This is the standard CloudFront→ALB
+  pattern: an HTTPS origin would fail the TLS handshake because the ACM
+  certificate covers `var.domain_name`, not the ALB's auto-generated
+  `*.elb.amazonaws.com` name that CloudFront dials. The hop is not exposed —
+  the ALB security group restricts ingress to AWS's
+  `com.amazonaws.global.cloudfront.origin-facing` managed prefix list, so the
+  ALB can't be reached directly from the internet — but the CloudFront→ALB
+  segment itself is unencrypted (it stays within the AWS network). Compliance
+  regimes that mandate encryption on every hop should front the ALB with its
+  own ACM cert on a subdomain CloudFront can validate and switch
+  `cloudfront.tf`'s ALB origin to `origin_protocol_policy = "https-only"`.
 
 ---
 
