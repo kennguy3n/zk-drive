@@ -38,8 +38,12 @@ export default function EnableNotificationsButton({
   const onClick = useCallback(async () => {
     setBusy(true);
     try {
-      const result = await enablePushNotifications();
-      setState(result);
+      const { permission, subscribed } = await enablePushNotifications();
+      // If the prompt was granted but registration didn't actually
+      // complete (VAPID fetch / network error), keep the button visible
+      // (treat as undecided) so the user can retry rather than believing
+      // push is on. usePushNotifications also retries on the next login.
+      setState(permission === "granted" && !subscribed ? "default" : permission);
     } finally {
       setBusy(false);
     }

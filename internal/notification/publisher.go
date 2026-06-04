@@ -184,14 +184,16 @@ type WebPushPublisher struct {
 // treated as offline); push must be non-nil for the wrapper to add
 // value, but a nil push degrades to plain inner-publish behaviour.
 //
-// conns and push are normalised through typednil.IsTypedNil: a caller
-// that passes a typed-nil concrete value (e.g. a nil *WebPushService
-// wrapped in the PushSender interface) is treated as the plain-nil
-// case, so the `p.push == nil` short-circuit in Publish actually fires
-// instead of spawning a goroutine that calls into a nil receiver. This
-// matches the With* setter convention used elsewhere in the codebase
-// (api/drive, internal/ai).
+// inner, conns and push are all normalised through typednil.IsTypedNil: a
+// caller that passes a typed-nil concrete value (e.g. a nil *WebPushService
+// wrapped in the PushSender interface) is treated as the plain-nil case, so
+// the `p.push == nil` / `p.inner != nil` guards in Publish actually fire
+// instead of dispatching to a nil receiver. This matches the With* setter
+// convention used elsewhere in the codebase (api/drive, internal/ai).
 func NewWebPushPublisher(inner WSPublisher, conns ConnectionChecker, push PushSender) *WebPushPublisher {
+	if typednil.IsTypedNil(inner) {
+		inner = nil
+	}
 	if typednil.IsTypedNil(conns) {
 		conns = nil
 	}

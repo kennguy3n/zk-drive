@@ -71,23 +71,28 @@ function pushSupported(): boolean {
 // When permission is already "granted" both paths (re)subscribe so a
 // returning user's subscription is kept current (e.g. after VAPID key
 // rotation) without any prompt.
-async function ensurePushSubscription(promptIfDefault: boolean): Promise<void> {
+// Resolves true only when a subscription was actually registered with the
+// server; false for every no-op exit (unsupported, not granted, web push
+// disabled). Callers use this to distinguish "permission granted AND
+// subscribed" from "permission granted but registration failed" so the UI
+// doesn't claim push is on when it isn't.
+async function ensurePushSubscription(promptIfDefault: boolean): Promise<boolean> {
   if (!pushSupported()) {
-    return;
+    return false;
   }
   if (Notification.permission === "default") {
     if (!promptIfDefault) {
       // No decision yet and we're not allowed to prompt here (no user
       // gesture). Leave it to the explicit Enable-notifications control.
-      return;
+      return false;
     }
     const permission = await Notification.requestPermission();
     if (permission !== "granted") {
-      return;
+      return false;
     }
   }
   if (Notification.permission !== "granted") {
-    return;
+    return false;
   }
 
   let publicKey: string;
@@ -95,10 +100,10 @@ async function ensurePushSubscription(promptIfDefault: boolean): Promise<void> {
     publicKey = await getVapidPublicKey();
   } catch {
     // 501 (web push disabled) or network error — nothing to subscribe to.
-    return;
+    return false;
   }
   if (!publicKey) {
-    return;
+    return false;
   }
 
   const applicationServerKey = urlBase64ToUint8Array(publicKey);
@@ -120,6 +125,7 @@ async function ensurePushSubscription(promptIfDefault: boolean): Promise<void> {
   }
 
   await registerPushSubscription(subscription.toJSON() as PushSubscriptionJSON);
+  return true;
 }
 
 // usePushNotifications wires browser Web Push for the logged-in user.
@@ -144,23 +150,37 @@ export function usePushNotifications(token: string | null): void {
   }, [token]);
 }
 
+// EnablePushResult reports both the terminal permission and whether a
+// subscription was actually registered. The two can diverge: the user may
+// grant the prompt (permission "granted") but the follow-up VAPID fetch /
+// registration can still fail (server 501, network error), leaving push
+// not actually wired. The caller needs both to avoid showing push as "on"
+// when only the permission — not the subscription — succeeded.
+export interface EnablePushResult {
+  permission: NotificationPermission;
+  subscribed: boolean;
+}
+
 // enablePushNotifications is the gesture-triggered opt-in: call it from a
 // click handler (the "Enable notifications" button) so the browser's
-// permission prompt is allowed to appear. Resolves to the resulting
-// Notification.permission so the caller can update its UI; resolves to
-// "denied" when the browser lacks push support. Subscription failures
-// after a granted prompt are swallowed (logged) like the on-login path.
-export async function enablePushNotifications(): Promise<NotificationPermission> {
+// permission prompt is allowed to appear. Resolves to the terminal
+// permission plus whether a subscription was actually registered; resolves
+// to denied/false when the browser lacks push support. Subscription
+// failures after a granted prompt are swallowed (logged) like the on-login
+// path, but surface as subscribed=false so the caller can keep the opt-in
+// control visible for a retry instead of silently claiming success.
+export async function enablePushNotifications(): Promise<EnablePushResult> {
   if (!pushSupported()) {
-    return "denied";
+    return { permission: "denied", subscribed: false };
   }
+  let subscribed = false;
   try {
-    await ensurePushSubscription(true);
+    subscribed = await ensurePushSubscription(true);
   } catch (err) {
     // eslint-disable-next-line no-console
     console.warn("web push subscription failed", err);
   }
-  return Notification.permission;
+  return { permission: Notification.permission, subscribed };
 }
 
 // pushPermissionState reports the current opt-in state for UI gating
