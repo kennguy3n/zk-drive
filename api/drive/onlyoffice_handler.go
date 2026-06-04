@@ -59,6 +59,52 @@ const onlyOfficeMaxDocumentBytes = 100 << 20 // 100 MiB
 // the save callback. Shared so connections are reused across callbacks.
 var onlyOfficeHTTPClient = &http.Client{Timeout: onlyOfficeFetchTimeout}
 
+// onlyOfficeAPIContainerMemoryBytes mirrors the API server container's
+// memory limit (zk-drive-server in deploy/docker-compose.prod.yml).
+// Used only to size the save concurrency cap below; keep in sync if the
+// deploy limit changes.
+const onlyOfficeAPIContainerMemoryBytes = 512 << 20 // 512 MiB
+
+// onlyOfficeSaveMemoryBudget is the share of the container's memory the
+// save path may buffer concurrently. Half the container leaves headroom
+// for the Go runtime, caches, and the rest of the request load — the
+// save path must never be allowed to claim the whole container, or a
+// burst of large saves would OOM everything else.
+const onlyOfficeSaveMemoryBudget = onlyOfficeAPIContainerMemoryBytes / 2 // 256 MiB
+
+// onlyOfficeMaxConcurrentSaves bounds how many save callbacks may be
+// buffering an edited document in memory at once. The editor-callback
+// route runs outside the per-user/-workspace rate limiter (the Document
+// Server holds no ZK Drive JWT), so without this a burst of callbacks
+// could each buffer up to onlyOfficeMaxDocumentBytes and exhaust the
+// container.
+//
+// The cap is DERIVED from the memory budget so the worst case
+// (onlyOfficeMaxConcurrentSaves * onlyOfficeMaxDocumentBytes) stays
+// within budget by construction. It was previously a hand-picked 8,
+// which at 100 MiB per doc implied an 800 MiB worst case — overrunning
+// the very 512 MiB container the cap exists to protect. Deriving it
+// keeps the invariant true even if either constant changes later.
+// Excess callbacks are shed with a retryable error (the edited bytes
+// stay in the Document Server's cache and it retries) rather than
+// blocking a goroutine, so a storm degrades gracefully instead of
+// OOMing.
+const onlyOfficeMaxConcurrentSaves = onlyOfficeSaveMemoryBudget / onlyOfficeMaxDocumentBytes // = 2
+
+// Compile-time guards (a negative untyped constant converted to uint is
+// a build error): the derived cap must be positive — a budget below one
+// document would shed every save — and the worst-case concurrent
+// buffering must not exceed the budget. Both hold by construction today;
+// these fail the build if a future edit to the constants above breaks
+// the invariant.
+const _ = uint(onlyOfficeMaxConcurrentSaves - 1)                                                  // cap >= 1
+const _ = uint(onlyOfficeSaveMemoryBudget - onlyOfficeMaxConcurrentSaves*onlyOfficeMaxDocumentBytes) // worst case <= budget
+
+// onlyOfficeSaveSem is the counting semaphore enforcing
+// onlyOfficeMaxConcurrentSaves. A buffered channel slot is held for the
+// duration of the memory-heavy fetch+write in saveEditedVersion.
+var onlyOfficeSaveSem = make(chan struct{}, onlyOfficeMaxConcurrentSaves)
+
 // ONLYOFFICE callback status codes (Document Server → ZK Drive).
 const (
 	onlyOfficeStatusReadyForSaving = 2 // editing finished, save now
@@ -76,6 +122,54 @@ const (
 func (h *Handler) WithOnlyOffice(serverURL, jwtSecret, publicURL string) *Handler {
 	h.onlyOffice = collab.NewOnlyOfficeService(serverURL, jwtSecret, publicURL, &driveEditorData{h: h})
 	return h
+}
+
+// WithSuspensionChecker wires the workspace-suspension checker used to
+// freeze callback-driven writes (the ONLYOFFICE save path) for a
+// suspended workspace. The save callback runs outside the session-auth
+// middleware group — the Document Server holds no ZK Drive JWT — so it
+// also runs outside SuspensionGuard; this lets saveEditedVersion
+// re-check suspension at the write boundary. A nil checker disables the
+// check (e.g. metadata-only test wiring with no control plane), exactly
+// as SuspensionGuard is a no-op when its checker is nil.
+//
+// The isTypedNil guard mirrors WithWebhooks / WithTagSuggester: a
+// caller passing a typed-nil concrete pointer (e.g.
+// (*platform.Service)(nil)) wrapped in the interface would otherwise
+// compare != nil and then NPE inside ensureNotSuspended's
+// WorkspaceSuspension call. Collapsing it to a real nil keeps the
+// no-op-when-unwired contract intact under future conditional wiring.
+func (h *Handler) WithSuspensionChecker(c middleware.WorkspaceSuspensionChecker) *Handler {
+	if isTypedNil(c) {
+		h.suspension = nil
+		return h
+	}
+	h.suspension = c
+	return h
+}
+
+// ensureNotSuspended returns collab.ErrWorkspaceSuspended when the
+// workspace has been suspended by the platform control plane. It is a
+// no-op when no checker is wired (metadata-only test wiring), and fails
+// OPEN on a lookup error — exactly like SuspensionGuard — because
+// suspension is an availability control rather than a security
+// boundary, so a transient DB blip must not silently drop a user's
+// edited bytes. Used by the ONLYOFFICE save callback, which runs
+// outside the SuspensionGuard middleware group.
+func (h *Handler) ensureNotSuspended(ctx context.Context, workspaceID uuid.UUID) error {
+	if h.suspension == nil {
+		return nil
+	}
+	suspended, _, err := h.suspension.WorkspaceSuspension(ctx, workspaceID)
+	if err != nil {
+		logging.FromContext(ctx).Warn("onlyoffice save: suspension lookup failed; allowing write",
+			"workspace_id", workspaceID, "err", err)
+		return nil
+	}
+	if suspended {
+		return collab.ErrWorkspaceSuspended
+	}
+	return nil
 }
 
 // driveEditorData adapts the drive Handler's services to the
@@ -264,32 +358,33 @@ func (h *Handler) EditorCallback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Verify the ONLYOFFICE token when a secret is configured. The
-	// token (Authorization: Bearer <jwt> header, else body.token)
-	// wraps the callback fields, so on success the signed claims — not
-	// the unsigned request body — are the sole source of truth for
-	// status/url/users, defeating a spoofed body paired with a stolen
-	// but unrelated token.
+	// Authenticate the callback when a secret is configured. The token
+	// (Authorization: Bearer <jwt> header, else body.token) is the
+	// Document Server's JWT over the ENTIRE callback payload. On
+	// success we rebuild the callback solely from the verified claims
+	// and discard the unsigned body, so a spoofed body cannot steer
+	// which URL we fetch or whom the save is attributed to. When no
+	// secret is set the deployment is in the explicit insecure
+	// local-dev mode (config.Load refuses ONLYOFFICE_URL without
+	// ONLYOFFICE_SECRET unless ONLYOFFICE_ALLOW_INSECURE is set), so
+	// the unsigned body is used as-is.
 	if secret := h.onlyOffice.JWTSecret(); secret != "" {
 		token := bearerToken(r.Header.Get("Authorization"))
 		if token == "" {
 			token = cb.Token
 		}
-		claims, vErr := h.onlyOffice.VerifyCallbackToken(token)
-		if vErr != nil || claims == nil {
+		payload, vErr := h.onlyOffice.VerifyCallback(token)
+		if vErr != nil || payload == nil {
 			logging.FromContext(r.Context()).Warn("onlyoffice callback token verification failed", "file_id", fileID, "err", vErr)
 			writeOnlyOfficeAck(w, http.StatusForbidden, 1)
 			return
 		}
-		status, url, users, ok := collab.CallbackClaims(claims)
-		if !ok {
-			logging.FromContext(r.Context()).Warn("onlyoffice callback token missing status claim", "file_id", fileID)
-			writeOnlyOfficeAck(w, http.StatusForbidden, 1)
-			return
+		cb = onlyOfficeCallback{
+			Status: payload.Status,
+			URL:    payload.URL,
+			Key:    payload.Key,
+			Users:  payload.Users,
 		}
-		// Overwrite from the verified claims unconditionally so the
-		// unsigned body cannot influence what we fetch or attribute.
-		cb.Status, cb.URL, cb.Users = status, url, users
 	}
 
 	// Only the "ready for saving" / "force save" statuses carry new
@@ -312,6 +407,21 @@ func (h *Handler) EditorCallback(w http.ResponseWriter, r *http.Request) {
 	// correctly scoped. The editing user is injected inside
 	// saveEditedVersion once the file's fallback creator is known.
 	ctx := middleware.WithWorkspaceID(r.Context(), workspaceID)
+
+	// Bound concurrent in-memory document buffering (see
+	// onlyOfficeMaxConcurrentSaves). At capacity, shed load with a
+	// retryable ack so the Document Server keeps the bytes and retries,
+	// rather than reading another document into memory now.
+	select {
+	case onlyOfficeSaveSem <- struct{}{}:
+		defer func() { <-onlyOfficeSaveSem }()
+	default:
+		logging.FromContext(ctx).Warn("onlyoffice save concurrency limit reached; asking document server to retry",
+			"file_id", fileID, "limit", onlyOfficeMaxConcurrentSaves)
+		writeOnlyOfficeAck(w, http.StatusServiceUnavailable, 1)
+		return
+	}
+
 	if err := h.saveEditedVersion(ctx, workspaceID, fileID, cb); err != nil {
 		logging.FromContext(ctx).Error("onlyoffice save edited version failed", "file_id", fileID, "err", err)
 		// Non-zero error tells the Document Server to retry later;
@@ -330,18 +440,26 @@ func (h *Handler) saveEditedVersion(ctx context.Context, workspaceID, fileID uui
 	if err != nil {
 		return err
 	}
-	// Re-check the folder's encryption mode at save time, not just when
-	// the editor config was issued. An admin can flip a folder
-	// managed_encrypted -> strict_zk during an active edit session;
-	// without this guard the callback would write Document-Server
-	// plaintext into what is now a zero-knowledge folder, breaking the
-	// strict-ZK contract. Mirrors the check in GenerateEditorConfig.
+	// Defense-in-depth at the write boundary: re-verify the file's
+	// folder is not strict-ZK before writing plaintext bytes back.
+	// GenerateEditorConfig already refuses strict-ZK at editor-open, so
+	// a strict-ZK file can never legitimately reach a save callback;
+	// rechecking here ensures a crafted/replayed callback can never
+	// cause the server to write plaintext into a zero-knowledge folder.
 	encMode, err := folder.EncryptionModeForFile(ctx, h.pool, fileID)
 	if err != nil {
 		return err
 	}
 	if encMode == folder.EncryptionStrictZK {
 		return collab.ErrStrictZKForbidden
+	}
+	// Suspension re-check at the write boundary. The callback runs
+	// outside SuspensionGuard (the Document Server has no JWT), so a
+	// suspended workspace would otherwise still accept callback-driven
+	// version writes while every REST write returns 503. Mirror that
+	// 503 here by refusing the save.
+	if err := h.ensureNotSuspended(ctx, workspaceID); err != nil {
+		return err
 	}
 	// Attribute the save to the callback's editing user (falling back to
 	// the file creator) so the activity log, changefeed, and webhook
@@ -351,6 +469,14 @@ func (h *Handler) saveEditedVersion(ctx context.Context, workspaceID, fileID uui
 	store := h.resolveStorage(ctx, workspaceID)
 	if store == nil {
 		return errors.New("drive: storage not configured")
+	}
+
+	// SSRF guard at the write boundary: the edited bytes are served
+	// from the Document Server's own cache, so the callback url must
+	// share the configured Document Server origin. This matters most in
+	// the insecure no-secret mode, where cb.URL arrives unsigned.
+	if err := h.onlyOffice.ValidateDocumentURL(cb.URL); err != nil {
+		return err
 	}
 
 	data, err := fetchEditedDocument(ctx, cb.URL)
@@ -426,16 +552,23 @@ func fetchEditedDocument(ctx context.Context, url string) ([]byte, error) {
 		return nil, errors.New("onlyoffice: unexpected status fetching edited document: " + resp.Status)
 	}
 	// Cap the read so a hostile / runaway Document Server response cannot
-	// exhaust memory; office documents are far below this bound. Read one
-	// byte past the cap so an over-limit response is detected and rejected
-	// rather than silently truncated and stored as a corrupt version — a
-	// non-zero ack keeps the bytes in the Document Server's cache.
-	data, err := io.ReadAll(io.LimitReader(resp.Body, onlyOfficeMaxDocumentBytes+1))
+	// exhaust memory; office documents are far below this bound.
+	return readLimited(resp.Body, onlyOfficeMaxDocumentBytes)
+}
+
+// readLimited reads up to max bytes from r and errors (rather than
+// silently truncating) when the source is larger. It reads max+1 bytes
+// so an over-read is detectable: truncating at exactly max would persist
+// a corrupt, partial document version with no error surfaced to the
+// Document Server or the user, so we fail the save instead and let the
+// Document Server retain the bytes for retry.
+func readLimited(r io.Reader, max int64) ([]byte, error) {
+	data, err := io.ReadAll(io.LimitReader(r, max+1))
 	if err != nil {
 		return nil, err
 	}
-	if int64(len(data)) > onlyOfficeMaxDocumentBytes {
-		return nil, errors.New("onlyoffice: edited document exceeds maximum allowed size")
+	if int64(len(data)) > max {
+		return nil, errors.New("onlyoffice: edited document exceeds the maximum allowed size")
 	}
 	return data, nil
 }

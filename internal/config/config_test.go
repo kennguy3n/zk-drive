@@ -82,6 +82,19 @@ func requireEnv(t *testing.T, envs map[string]string) {
 		// and tests asserting on the default-on / clamped-TTL
 		// behaviour MUST see the production "unset" state.
 		"PERFORMANCE_CACHE_ENABLED", "PERFORMANCE_CACHE_TTL",
+		// ONLYOFFICE Document Server integration env vars. Same
+		// convention as the blocks above: validateOnlyOfficeGroup
+		// fails closed when ONLYOFFICE_URL is set without a secret, so
+		// tests asserting that guard MUST see the production "unset"
+		// state and not a value bled in from the CI runner.
+		"ONLYOFFICE_URL", "ONLYOFFICE_SECRET", "ONLYOFFICE_ALLOW_INSECURE",
+		// Preview pipeline scaling env vars. Same convention as the
+		// blocks above: buildConfigFromEnv reads each of these via
+		// parseIntDefault, treating an empty value identically to unset
+		// (fall back to the clamped default), so a CI runner that exports
+		// e.g. PREVIEW_PRIORITY_WORKERS=1 must not bleed into tests that
+		// exercise the preview-default paths.
+		"PREVIEW_BUDGET_PER_WORKSPACE_HOUR", "PREVIEW_PRIORITY_WORKERS", "PREVIEW_STANDARD_WORKERS",
 		// Platform-admin allowlist (JWT key-rotation gate). Same
 		// convention as the blocks above: buildConfigFromEnv reads
 		// PLATFORM_ADMIN_USER_IDS via platformAdminUserIDsFromEnv, so
@@ -244,6 +257,64 @@ func TestLoadCompleteS3(t *testing.T) {
 	}
 	if cfg.MigrationsDir != "/srv/migrations" {
 		t.Fatalf("expected MigrationsDir override, got %q", cfg.MigrationsDir)
+	}
+}
+
+// TestLoadOnlyOfficeURLWithoutSecretFails verifies the fail-closed
+// guard: setting ONLYOFFICE_URL without ONLYOFFICE_SECRET refuses to
+// start because the editor-callback endpoint would be unauthenticated.
+func TestLoadOnlyOfficeURLWithoutSecretFails(t *testing.T) {
+	requireEnv(t, map[string]string{
+		"DATABASE_URL":   "postgres://x/y",
+		"JWT_SECRET":     "secret",
+		"ONLYOFFICE_URL": "https://docs.example.com",
+		// Intentionally no ONLYOFFICE_SECRET / ONLYOFFICE_ALLOW_INSECURE.
+	})
+	_, err := Load()
+	if err == nil {
+		t.Fatal("expected error when ONLYOFFICE_URL is set but ONLYOFFICE_SECRET is empty")
+	}
+	for _, sub := range []string{"ONLYOFFICE_SECRET", "ONLYOFFICE_ALLOW_INSECURE"} {
+		if !strings.Contains(err.Error(), sub) {
+			t.Fatalf("expected error to mention %s, got %v", sub, err)
+		}
+	}
+}
+
+// TestLoadOnlyOfficeInsecureOptIn verifies the explicit local-dev
+// escape hatch: ONLYOFFICE_ALLOW_INSECURE=true permits ONLYOFFICE_URL
+// without a secret.
+func TestLoadOnlyOfficeInsecureOptIn(t *testing.T) {
+	requireEnv(t, map[string]string{
+		"DATABASE_URL":              "postgres://x/y",
+		"JWT_SECRET":                "secret",
+		"ONLYOFFICE_URL":            "https://docs.example.com",
+		"ONLYOFFICE_ALLOW_INSECURE": "true",
+	})
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load failed with explicit insecure opt-in: %v", err)
+	}
+	if !cfg.OnlyOfficeAllowInsecure {
+		t.Fatal("expected OnlyOfficeAllowInsecure to be true")
+	}
+}
+
+// TestLoadOnlyOfficeWithSecret verifies the secure happy path: a
+// configured URL + secret loads cleanly.
+func TestLoadOnlyOfficeWithSecret(t *testing.T) {
+	requireEnv(t, map[string]string{
+		"DATABASE_URL":      "postgres://x/y",
+		"JWT_SECRET":        "secret",
+		"ONLYOFFICE_URL":    "https://docs.example.com",
+		"ONLYOFFICE_SECRET": "office-callback-secret",
+	})
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load failed: %v", err)
+	}
+	if cfg.OnlyOfficeURL != "https://docs.example.com" || cfg.OnlyOfficeSecret != "office-callback-secret" {
+		t.Fatalf("OnlyOffice fields not propagated: %+v", cfg)
 	}
 }
 

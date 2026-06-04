@@ -288,7 +288,7 @@ func run() error {
 	// when an active asymmetric key exists in jwt_signing_keys
 	// (migration 034), and otherwise falls back to HS256 using
 	// cfg.JWTSecret. Verification always accepts both, so rotating to
-	// ES256 (POST /api/admin/jwt/rotate) never invalidates sessions
+	// ES256 (POST /api/platform/jwt/rotate) never invalidates sessions
 	// issued before the cutover. JWT_ALGORITHM forces a mode; the
 	// default ("auto") picks ES256-when-available.
 	jwtKeyManager, err := cryptopkg.NewKeyManager(
@@ -305,7 +305,7 @@ func run() error {
 	slog.Info("jwt signing", "algorithm", jwtKeyManager.Algorithm())
 
 	// Cross-replica key-rotation propagation. RotateKey only reloads
-	// the replica that served POST /api/admin/jwt/rotate; every other
+	// the replica that served POST /api/platform/jwt/rotate; every other
 	// replica must re-read jwt_signing_keys to learn the new key's
 	// public half, or it would 401 tokens signed by it. This loop
 	// polls the table every cfg.JWTKeyRefreshInterval (default 60s)
@@ -751,16 +751,7 @@ func run() error {
 		WithFabric(fabricClient, provisioner, storageFactory).
 		WithWorkspaces(wsSvc).
 		WithWebhooks(webhookPublisher).
-		WithIPAllow(ipAllowSvc).
-		WithJWTRotator(jwtKeyManager).
-		WithPlatformAdmins(cfg.PlatformAdminUserIDs)
-	if len(cfg.PlatformAdminUserIDsInvalid) > 0 {
-		slog.Warn("ignoring malformed PLATFORM_ADMIN_USER_IDS entries (not valid UUIDs); affected admins will be excluded from JWT key rotation",
-			"entries", cfg.PlatformAdminUserIDsInvalid)
-	}
-	if len(cfg.PlatformAdminUserIDs) == 0 {
-		slog.Warn("PLATFORM_ADMIN_USER_IDS not set: POST /api/admin/jwt/rotate will deny all callers until configured")
-	}
+		WithIPAllow(ipAllowSvc)
 
 	// Platform control plane (Session 9): fleet-wide tenant management
 	// authenticated by platform API keys, mounted under /api/platform
@@ -774,7 +765,20 @@ func run() error {
 	if sessionStore != nil {
 		platformSvc = platformSvc.WithSessions(sessionStore)
 	}
-	platformHandler := apiplatform.NewHandler(platformSvc, platformKeyStore)
+	// JWT signing-key rotation is a fleet-wide operation (the platform
+	// signing key has workspace_id IS NULL), so it lives on the platform
+	// control plane behind the keys:manage capability rather than the
+	// per-workspace admin API. The PLATFORM_ADMIN_USER_IDS allowlist that
+	// origin/main's #100 added to gate the (now-removed) admin-API
+	// rotation is therefore redundant here: the platform key's
+	// keys:manage capability already restricts rotation to fleet
+	// operators, so we surface a startup hint if the legacy env var is
+	// still set rather than silently ignoring it.
+	if len(cfg.PlatformAdminUserIDs) > 0 || len(cfg.PlatformAdminUserIDsInvalid) > 0 {
+		slog.Warn("PLATFORM_ADMIN_USER_IDS is set but no longer used: JWT key rotation moved to the platform control plane (POST /api/platform/jwt/rotate), gated by the keys:manage platform-API-key capability")
+	}
+	platformHandler := apiplatform.NewHandler(platformSvc, platformKeyStore).
+		WithJWTRotator(jwtKeyManager)
 
 	// Outbound-webhook subscription admin handler. Mounted
 	// under /api/admin/webhooks so it inherits the admin-only +
@@ -840,7 +844,14 @@ func run() error {
 	}
 	driveHandler = driveHandler.
 		WithTagSuggester(tagSuggestSvc).
-		WithQueryExpander(queryExpandSvc)
+		WithQueryExpander(queryExpandSvc).
+		// The ONLYOFFICE save callback runs outside the session-auth /
+		// SuspensionGuard group (the Document Server holds no JWT), so
+		// give the handler the same suspension checker to re-enforce the
+		// freeze at the write boundary. Wired here rather than at the
+		// initial NewHandler chain above because platformSvc is built
+		// after it.
+		WithSuspensionChecker(platformSvc)
 	kchatHandler := apikchat.NewHandler(kchatSvc, summarySvc)
 
 	// metrics owns a private prometheus.Registry, the HTTP
@@ -1099,6 +1110,29 @@ func run() error {
 		// the upgrade handshake.
 		r.Group(func(r chi.Router) {
 			r.Use(middleware.AuthMiddlewareWithKeys(jwtKeyManager, sessionChecker))
+			// Suspension enforcement applies to the WS upgrade too: a
+			// suspended workspace must not be able to keep realtime sync
+			// or collaborative editing alive when every REST call is
+			// already returning 503. SuspensionGuard needs only the
+			// workspace id (bound by the auth middleware above) and runs
+			// on the initial HTTP request before the upgrade, so — unlike
+			// TenantGuard/rateLimiter — it has no handshake or per-frame
+			// cost concerns and is safe to mount here. Ordered before
+			// IPAllowlist to match the REST data-plane group's precedence
+			// (SuspensionGuard → IPAllowlist), so a suspended workspace
+			// gets the same 503 regardless of transport rather than a 503
+			// on REST but a 403 on the WS upgrade.
+			r.Use(middleware.SuspensionGuard(platformSvc))
+			// IP allowlist enforcement applies to the WS upgrade too:
+			// conditional access must gate EVERY entry into a
+			// workspace, not just the REST data plane, else a blocked
+			// network could still open the realtime sync / collab
+			// channels. IPAllowlist only needs the workspace id, which
+			// the auth middleware above binds from the JWT claims, so
+			// it works without TenantGuard (which is skipped here for
+			// the upgrade-handshake reasons noted below) and runs on
+			// the initial HTTP request before the upgrade.
+			r.Use(middleware.IPAllowlist(ipAllowSvc, cfg.TrustedProxyDepth))
 			r.Get("/ws", wsHandler.ServeWS)
 			// Collab WS endpoint: per-document Yjs relay. Mounted
 			// next to /ws because both are long-lived upgrade
@@ -1242,7 +1276,19 @@ func run() error {
 		// deliberately NOT behind the workspace JWT AuthMiddleware /
 		// TenantGuard chain, since these endpoints operate across the
 		// whole fleet rather than within a single workspace.
+		//
+		// Because this group runs outside the per-user/-workspace
+		// rate limiter (there's no JWT to key on), a per-client-IP
+		// limiter runs FIRST as defense-in-depth: it bounds an
+		// unauthenticated flood of bogus `pk_` tokens before any auth
+		// work happens. Fails open if Redis is down so a hiccup never
+		// locks operators out of the control plane.
 		r.Route("/platform", func(r chi.Router) {
+			// ipAllowRedis (not redisClient) is a true-nil interface when
+			// Redis is unconfigured; passing the typed-nil *redis.Client
+			// here would defeat IPRateLimiter's nil-check and skip its
+			// in-memory fallback.
+			r.Use(middleware.IPRateLimiter(ipAllowRedis, middleware.DefaultPlatformIPRate, cfg.TrustedProxyDepth))
 			r.Use(middleware.PlatformAuth(platformHandler))
 			platformHandler.RegisterRoutes(r)
 		})

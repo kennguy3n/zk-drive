@@ -73,6 +73,7 @@ type Handler struct {
 	webhooks       WebhookEventPublisher
 	collab         *collab.DocumentHub
 	onlyOffice     *collab.OnlyOfficeService
+	suspension     middleware.WorkspaceSuspensionChecker
 	tagSuggest     TagSuggester
 	queryExpand    QueryExpander
 }

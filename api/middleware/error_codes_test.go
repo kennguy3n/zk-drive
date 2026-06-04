@@ -99,7 +99,6 @@ func TestErrorCodes_DistinctValues(t *testing.T) {
 		ErrCodeMFAEnrollNeeded,
 		ErrCodeForbidden,
 		ErrCodeAdminOnly,
-		ErrCodePlatformAdminOnly,
 		ErrCodeReadOnly,
 		ErrCodeWrongTenant,
 		ErrCodeNoWorkspace,

@@ -90,7 +90,7 @@ func (h *Handler) CreateShareLink(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	h.notify(r.Context(), func(n *notification.Service) error {
-		return n.NotifyShareLinkCreated(r.Context(), workspaceID, userID, link.ID, req.ResourceType, resourceID)
+		return n.NotifyShareLinkCreated(r.Context(), workspaceID, userID, req.ResourceType, resourceID)
 	})
 	writeJSON(w, http.StatusCreated, link)
 }
@@ -209,7 +209,7 @@ func (h *Handler) CreateGuestInvite(w http.ResponseWriter, r *http.Request) {
 	if h.users != nil && h.notifications != nil {
 		if u, uerr := h.users.GetByEmail(r.Context(), workspaceID, req.Email); uerr == nil && u != nil {
 			h.notify(r.Context(), func(n *notification.Service) error {
-				return n.NotifyGuestInviteSent(r.Context(), workspaceID, u.ID, inv.ID, folderID, req.Email)
+				return n.NotifyGuestInviteSent(r.Context(), workspaceID, u.ID, folderID, req.Email)
 			})
 		}
 	}
@@ -364,7 +364,7 @@ func (h *Handler) AcceptGuestInvite(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	h.notify(r.Context(), func(n *notification.Service) error {
-		return n.NotifyGuestInviteAccepted(r.Context(), workspaceID, inv.CreatedBy, inv.ID, inv.Email)
+		return n.NotifyGuestInviteAccepted(r.Context(), workspaceID, inv.CreatedBy, inv.FolderID, inv.Email)
 	})
 	writeJSON(w, http.StatusOK, inv)
 }

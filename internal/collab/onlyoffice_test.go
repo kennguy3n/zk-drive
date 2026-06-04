@@ -243,73 +243,94 @@ func TestVerifyCallbackToken_DisabledWhenNoSecret(t *testing.T) {
 	}
 }
 
-func TestCallbackClaims(t *testing.T) {
-	cases := []struct {
-		name       string
-		claims     jwt.MapClaims
-		wantStatus int
-		wantURL    string
-		wantUsers  []string
-		wantOK     bool
-	}{
-		{
-			name:       "flat body-token claims",
-			claims:     jwt.MapClaims{"status": float64(2), "url": "https://office/cache/out.docx", "users": []any{"u1", "u2"}},
-			wantStatus: 2,
-			wantURL:    "https://office/cache/out.docx",
-			wantUsers:  []string{"u1", "u2"},
-			wantOK:     true,
-		},
-		{
-			name: "nested header-token payload",
-			claims: jwt.MapClaims{"payload": map[string]any{
-				"status": float64(6), "url": "https://office/cache/fs.docx", "users": []any{"u3"},
-			}},
-			wantStatus: 6,
-			wantURL:    "https://office/cache/fs.docx",
-			wantUsers:  []string{"u3"},
-			wantOK:     true,
-		},
-		{
-			name:       "status-only (editing) has no url",
-			claims:     jwt.MapClaims{"status": float64(1)},
-			wantStatus: 1,
-			wantURL:    "",
-			wantUsers:  nil,
-			wantOK:     true,
-		},
-		{
-			name:   "missing status rejected",
-			claims: jwt.MapClaims{"url": "https://office/cache/out.docx"},
-			wantOK: false,
-		},
-		{
-			name:       "non-string users filtered",
-			claims:     jwt.MapClaims{"status": float64(2), "users": []any{"u1", 42, nil, "u2"}},
-			wantStatus: 2,
-			wantUsers:  []string{"u1", "u2"},
-			wantOK:     true,
-		},
+func TestVerifyCallback_ProjectsSignedClaims(t *testing.T) {
+	secret := "callback-secret"
+	svc := NewOnlyOfficeService("https://office.example.com", secret, "https://drive.example.com", newTestData())
+
+	tok := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.MapClaims{
+		"status": float64(2),
+		"url":    "https://office.example.com/cache/out.docx",
+		"key":    "doc-key-123",
+		"users":  []any{"11111111-1111-1111-1111-111111111111", 42, "22222222-2222-2222-2222-222222222222"},
+	})
+	signed, err := tok.SignedString([]byte(secret))
+	if err != nil {
+		t.Fatalf("sign: %v", err)
 	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			status, url, users, ok := CallbackClaims(tc.claims)
-			if ok != tc.wantOK {
-				t.Fatalf("ok = %v, want %v", ok, tc.wantOK)
-			}
-			if !tc.wantOK {
-				return
-			}
-			if status != tc.wantStatus {
-				t.Errorf("status = %d, want %d", status, tc.wantStatus)
-			}
-			if url != tc.wantURL {
-				t.Errorf("url = %q, want %q", url, tc.wantURL)
-			}
-			if strings.Join(users, ",") != strings.Join(tc.wantUsers, ",") {
-				t.Errorf("users = %v, want %v", users, tc.wantUsers)
-			}
-		})
+	p, err := svc.VerifyCallback(signed)
+	if err != nil {
+		t.Fatalf("VerifyCallback: %v", err)
+	}
+	if p == nil {
+		t.Fatal("expected non-nil payload")
+	}
+	if p.Status != 2 || p.URL != "https://office.example.com/cache/out.docx" || p.Key != "doc-key-123" {
+		t.Errorf("unexpected payload: %+v", p)
+	}
+	// Non-string entries in the users array are dropped, not coerced.
+	if len(p.Users) != 2 || p.Users[0] != "11111111-1111-1111-1111-111111111111" || p.Users[1] != "22222222-2222-2222-2222-222222222222" {
+		t.Errorf("users not projected from signed claims: %+v", p.Users)
+	}
+}
+
+func TestVerifyCallback_RejectsTamperedToken(t *testing.T) {
+	svc := NewOnlyOfficeService("https://office.example.com", "right", "https://drive.example.com", newTestData())
+	tok := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.MapClaims{"status": float64(2), "url": "https://evil.example/x"})
+	signed, _ := tok.SignedString([]byte("wrong"))
+	if _, err := svc.VerifyCallback(signed); err == nil {
+		t.Fatal("expected VerifyCallback to reject a token signed with the wrong secret")
+	}
+}
+
+func TestVerifyCallback_MissingClaimsYieldZeroValues(t *testing.T) {
+	secret := "callback-secret"
+	svc := NewOnlyOfficeService("https://office.example.com", secret, "https://drive.example.com", newTestData())
+	// A verified token that omits url/status (e.g. a non-save status)
+	// must project to zero values so the caller treats it as
+	// non-actionable rather than falling back to an unsigned body.
+	tok := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.MapClaims{"key": "k"})
+	signed, _ := tok.SignedString([]byte(secret))
+	p, err := svc.VerifyCallback(signed)
+	if err != nil {
+		t.Fatalf("VerifyCallback: %v", err)
+	}
+	if p.Status != 0 || p.URL != "" || len(p.Users) != 0 {
+		t.Errorf("expected zero values for absent claims, got %+v", p)
+	}
+}
+
+// TestVerifyCallback_NestedHeaderPayload covers JWT_HEADER transport
+// mode, where the Document Server nests the callback fields under a
+// "payload" object instead of placing them at the top level. The
+// verified claims must stay authoritative regardless of transport.
+func TestVerifyCallback_NestedHeaderPayload(t *testing.T) {
+	secret := "callback-secret"
+	svc := NewOnlyOfficeService("https://office.example.com", secret, "https://drive.example.com", newTestData())
+
+	tok := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.MapClaims{
+		"payload": map[string]any{
+			"status": float64(6),
+			"url":    "https://office.example.com/cache/fs.docx",
+			"key":    "doc-key-456",
+			"users":  []any{"33333333-3333-3333-3333-333333333333"},
+		},
+	})
+	signed, err := tok.SignedString([]byte(secret))
+	if err != nil {
+		t.Fatalf("sign: %v", err)
+	}
+	p, err := svc.VerifyCallback(signed)
+	if err != nil {
+		t.Fatalf("VerifyCallback: %v", err)
+	}
+	if p == nil {
+		t.Fatal("expected non-nil payload")
+	}
+	if p.Status != 6 || p.URL != "https://office.example.com/cache/fs.docx" || p.Key != "doc-key-456" {
+		t.Errorf("nested payload not projected: %+v", p)
+	}
+	if len(p.Users) != 1 || p.Users[0] != "33333333-3333-3333-3333-333333333333" {
+		t.Errorf("users not projected from nested payload: %+v", p.Users)
 	}
 }
 
@@ -333,5 +354,39 @@ func TestDocumentKey_SanitisesAndBounds(t *testing.T) {
 	long := strings.Repeat("a/", 200)
 	if got := documentKey(long); len(got) > 128 {
 		t.Errorf("key not bounded to 128: len=%d", len(got))
+	}
+}
+
+func TestValidateDocumentURL(t *testing.T) {
+	svc := NewOnlyOfficeService("https://office.example.com", "secret", "https://drive.example.com", newTestData())
+	cases := []struct {
+		name    string
+		raw     string
+		wantErr error
+	}{
+		{"same origin https", "https://office.example.com/cache/files/output.docx?md5=abc", nil},
+		{"same host explicit default port", "https://office.example.com:443/cache/x", nil},
+		{"same host different scheme/port rejected", "http://office.example.com/cache/x", ErrCallbackURLNotAllowed},
+		{"scheme downgrade with matching port rejected", "http://office.example.com:443/cache/x", ErrCallbackURLNotAllowed},
+		{"same host elasticsearch port rejected", "https://office.example.com:9200/", ErrCallbackURLNotAllowed},
+		{"same host redis port rejected", "https://office.example.com:6379/", ErrCallbackURLNotAllowed},
+		{"foreign host rejected", "https://evil.example.com/x", ErrCallbackURLNotAllowed},
+		{"internal metadata host rejected", "http://169.254.169.254/latest/meta-data/", ErrCallbackURLNotAllowed},
+		{"non-http scheme rejected", "file:///etc/passwd", ErrCallbackURLNotAllowed},
+		{"garbage rejected", "://not a url", ErrCallbackURLNotAllowed},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := svc.ValidateDocumentURL(tc.raw); !errors.Is(err, tc.wantErr) {
+				t.Fatalf("ValidateDocumentURL(%q) = %v, want %v", tc.raw, err, tc.wantErr)
+			}
+		})
+	}
+}
+
+func TestValidateDocumentURL_DisabledService(t *testing.T) {
+	svc := NewOnlyOfficeService("", "secret", "https://drive.example.com", newTestData())
+	if err := svc.ValidateDocumentURL("https://office.example.com/x"); !errors.Is(err, ErrOnlyOfficeNotConfigured) {
+		t.Fatalf("got %v, want ErrOnlyOfficeNotConfigured", err)
 	}
 }

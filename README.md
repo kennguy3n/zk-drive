@@ -112,6 +112,45 @@ per-seat), workspace-level data residency through zk-object-fabric
 placement policies, and direct-to-storage uploads via presigned PUT /
 GET URLs — ZK Drive never proxies file bytes.
 
+**Collaborative editing.** Real-time co-editing of ZK Drive documents
+via a Yjs CRDT hub (`internal/collab/`) with a TipTap/ProseMirror
+editor and live presence, plus optional [ONLYOFFICE](https://www.onlyoffice.com/)
+integration for office documents (`.docx` / `.xlsx` / `.pptx`) in
+`managed_encrypted` folders. Both degrade gracefully when unconfigured.
+
+**Web Push.** PWA users receive notifications even with no tab open,
+via Web Push (RFC 8030 + VAPID). Push is delivered only to users with
+no live WebSocket connection, so an open tab keeps using the realtime
+path. Disabled automatically when VAPID keys are unset.
+
+**Conditional access.** Per-workspace IP allowlisting lets admins
+restrict data-plane access to trusted public networks (office ranges,
+VPN egress); a no-op until enabled.
+
+## Desktop sync
+
+A cross-platform desktop sync client lives in [`desktop/`](desktop/) —
+a Tauri v2 shell driving the Rust sync SDK in [`sdk/crates/`](sdk/).
+It provides OAuth2 PKCE login (token stored in the OS keychain), a
+local SQLite catalogue with a filesystem watcher, WebSocket-based
+change polling against `/api/changes`, last-writer-wins conflict
+resolution, selective (per-folder) sync, and a system-tray status
+surface. `tauri build` produces `.dmg` / `.msi` / `.AppImage`
+artifacts. See [`desktop/README.md`](desktop/README.md) for build and
+architecture notes.
+
+## Platform control plane API
+
+A separate super-admin API under `/api/platform/` manages the fleet of
+workspaces independently of any single tenant
+(`internal/platform/`, `api/platform/`). It is authenticated by a
+**platform API key** (`Authorization: Bearer pk_...`), not a workspace
+JWT, and covers automated provisioning, suspension / resume (which
+revokes sessions and returns `503` for the suspended workspace),
+paginated workspace listing with usage reports, Stripe billing
+reconciliation, and usage-alert rules (webhook / email). Suspended
+workspaces are enforced by a guard on the data-plane middleware chain.
+
 ## Relationship to zk-object-fabric
 
 ZK Drive is an application layer on top of zk-object-fabric. It does

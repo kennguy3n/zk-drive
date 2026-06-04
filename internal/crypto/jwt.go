@@ -243,7 +243,7 @@ func (km *KeyManager) Sign(claims jwt.Claims) (string, error) {
 	// downgrading here would hand out symmetric tokens to a deployment
 	// that believes it is asymmetric-only.
 	if km.algoPref == AlgES256 {
-		return "", errors.New("crypto: JWT_ALGORITHM=ES256 but no active asymmetric signing key (run POST /api/admin/jwt/rotate first)")
+		return "", errors.New("crypto: JWT_ALGORITHM=ES256 but no active asymmetric signing key (run POST /api/platform/jwt/rotate first)")
 	}
 	if km.hmacSecret == "" {
 		return "", errors.New("crypto: no signing key and empty HS256 secret")

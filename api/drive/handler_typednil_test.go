@@ -73,6 +73,18 @@ func (*nilWebhookPublisher) PublishPermissionEvent(ctx context.Context, t webhoo
 	return nil
 }
 
+// nilSuspensionChecker is a typed-nil concrete pointer satisfying
+// middleware.WorkspaceSuspensionChecker used to exercise the
+// WithSuspensionChecker guard. The receiver method dereferences a
+// field so a NPE surfaces immediately if the guard fails to collapse
+// the typed-nil to a real nil.
+type nilSuspensionChecker struct{ marker int }
+
+func (c *nilSuspensionChecker) WorkspaceSuspension(ctx context.Context, workspaceID uuid.UUID) (bool, string, error) {
+	_ = c.marker
+	return false, "", nil
+}
+
 // TestIsTypedNil pins the reflect-based detection for nil concrete
 // pointers wrapped in non-nil interface values. Added as part of
 // Devin Review's elevated finding on api/drive/handler.go:203 that
@@ -194,5 +206,34 @@ func TestWithWebhooksNormalisesTypedNil(t *testing.T) {
 	h.WithWebhooks(nil)
 	if h.webhooks != nil {
 		t.Errorf("WithWebhooks(nil) should clear h.webhooks, got non-nil")
+	}
+}
+
+// TestWithSuspensionCheckerNormalisesTypedNil pins the
+// WithSuspensionChecker guard. Without it, a typed-nil
+// (*platform.Service)(nil) wrapped in WorkspaceSuspensionChecker
+// would leave h.suspension != nil, so ensureNotSuspended's
+// h.suspension == nil short-circuit would be skipped and the
+// WorkspaceSuspension call would NPE on the ONLYOFFICE save path.
+func TestWithSuspensionCheckerNormalisesTypedNil(t *testing.T) {
+	h := &Handler{}
+	h.WithSuspensionChecker((*nilSuspensionChecker)(nil))
+	if h.suspension != nil {
+		t.Errorf("WithSuspensionChecker(typed-nil) should leave h.suspension as nil interface, got non-nil")
+	}
+	// ensureNotSuspended must treat the normalised nil as "no checker
+	// wired" and return nil without dereferencing.
+	if err := h.ensureNotSuspended(context.Background(), uuid.New()); err != nil {
+		t.Errorf("ensureNotSuspended with typed-nil checker should be a no-op, got %v", err)
+	}
+
+	h.WithSuspensionChecker(&nilSuspensionChecker{})
+	if h.suspension == nil {
+		t.Errorf("WithSuspensionChecker(non-nil) should set h.suspension, got nil")
+	}
+
+	h.WithSuspensionChecker(nil)
+	if h.suspension != nil {
+		t.Errorf("WithSuspensionChecker(nil) should clear h.suspension, got non-nil")
 	}
 }

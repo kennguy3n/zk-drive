@@ -44,19 +44,6 @@ const (
 	ActionAdminBillingUpdate    = "admin.billing_update"
 	ActionAdminBillingCheckout  = "admin.billing_checkout_session"
 	ActionAdminBillingPortal    = "admin.billing_portal_session"
-	// JWT signing-key rotation. Recorded whenever an admin rotates
-	// the platform's ES256 session-signing key (POST
-	// /api/admin/jwt/rotate); the metadata blob carries the new
-	// key id and algorithm so a rotation can be correlated with the
-	// jwt_signing_keys table without exposing key material.
-	ActionAdminJWTRotate = "admin.jwt_rotate"
-	// Denied platform-admin JWT rotation attempt. Recorded when a
-	// workspace admin clears AdminOnly but is not in the configured
-	// platform-admin allowlist (PLATFORM_ADMIN_USER_IDS) and is thus
-	// forbidden from rotating the platform-wide signing key. Logged so
-	// a cross-tenant privilege probe leaves an audit trail; no key is
-	// generated or stored.
-	ActionAdminJWTRotateDenied = "admin.jwt_rotate_denied"
 	// Guest-invite delivery. Recorded on the same audit_log
 	// stream as the auth + permission events so operators can join
 	// "invite created → email delivered" on resource_id and surface

@@ -172,19 +172,43 @@ either a tenant hammering uploads or an under-provisioned budget; if
 it is a legitimate workload, raise `PREVIEW_BUDGET_PER_WORKSPACE_HOUR`
 and/or add worker replicas.
 
-### Upgrade note: JWT key rotation now requires PLATFORM_ADMIN_USER_IDS
+### JWT key rotation: platform control plane (`keys:manage`)
 
-`POST /api/admin/jwt/rotate` rotates the **platform-wide** signing key
-shared by every tenant. It is now gated behind the
-`PLATFORM_ADMIN_USER_IDS` allowlist **in addition to** the existing
-`AdminOnly` check, and is **deny-by-default**: until you set the env var
-to the UUID(s) of your platform operators, every rotate call returns
-`403 PLATFORM_ADMIN_ACCESS_REQUIRED`. Deployments that previously let any
-workspace admin rotate the key must set `PLATFORM_ADMIN_USER_IDS` before
-upgrading, or the endpoint will be unavailable. The server logs a startup
-warning when the var is unset (and another naming any malformed entries
-that were dropped). See [`CONFIGURATION.md`](CONFIGURATION.md) for the
-field definition.
+`POST /api/platform/jwt/rotate` rotates the **fleet-wide** ES256 signing
+key shared by every tenant: it mints a new active key, retires the
+previous one, and reloads the in-memory key set (tokens signed by the
+retired key keep verifying until they expire). The endpoint lives on the
+**platform control plane** and is gated by the `keys:manage` capability
+on a **platform API key** — it is *not* part of the per-workspace admin
+API, so no individual workspace admin can rotate the fleet key. Mint a
+platform API key with `keys:manage` (see the platform API-key section)
+and call:
+
+```
+curl -X POST https://<host>/api/platform/jwt/rotate \
+  -H "Authorization: Bearer <platform-api-key>"
+```
+
+The response carries only public key metadata (`key_id`, `algorithm`,
+`signing_algorithm`, `created_at`) — never private key material.
+`algorithm` is the rotated key's own algorithm (always `ES256`);
+`signing_algorithm` is what the manager will actually sign with now, so
+when `JWT_ALGORITHM=HS256` pins signing the response shows `algorithm:
+ES256` (key stored + verifying) but `signing_algorithm: HS256` (not yet
+used to sign), letting an operator confirm whether the rotation is live.
+The rotation is recorded via
+structured logs (`slog`: `"platform jwt signing key rotated"` with
+`key_id` / `algorithm`); forward these to your log aggregator for an
+audit trail, since the platform plane has no workspace scope and so does
+not write to the per-workspace `audit_log` table.
+
+> **Upgrade note (legacy `PLATFORM_ADMIN_USER_IDS`):** earlier releases
+> gated rotation on the per-workspace admin endpoint
+> `POST /api/admin/jwt/rotate` behind a `PLATFORM_ADMIN_USER_IDS`
+> allowlist. That admin-API endpoint has been **removed** — rotation now
+> only happens on the platform control plane above. `PLATFORM_ADMIN_USER_IDS`
+> is no longer consulted; the server logs a startup warning if it is
+> still set so you can drop it from your config.
 
 ## Observability
 

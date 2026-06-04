@@ -67,44 +67,55 @@ func (s *Service) MarkAllRead(ctx context.Context, workspaceID, userID uuid.UUID
 
 // NotifyShareLinkCreated informs the resource owner that a new share
 // link was minted for one of their resources.
-func (s *Service) NotifyShareLinkCreated(ctx context.Context, workspaceID, ownerID, linkID uuid.UUID, resourceType string, resourceID uuid.UUID) error {
+func (s *Service) NotifyShareLinkCreated(ctx context.Context, workspaceID, ownerID uuid.UUID, resourceType string, resourceID uuid.UUID) error {
 	return s.create(ctx, &Notification{
 		WorkspaceID:  workspaceID,
 		UserID:       ownerID,
 		Type:         TypeShareLinkCreated,
 		Title:        "Share link created",
 		Body:         fmt.Sprintf("A new share link was created for a %s.", resourceType),
-		ResourceType: stringPtr("share_link"),
-		ResourceID:   &linkID,
+		// Deep-link the owner to the shared resource itself. The event
+		// kind is already captured by Type; ResourceType/ResourceID name
+		// the navigable target ("file"/"folder") so push clicks open it.
+		// The share link's own id is intentionally not referenced — it
+		// maps to no SPA route, so it isn't a useful deep-link target.
+		ResourceType: stringPtr(resourceType),
+		ResourceID:   &resourceID,
 	})
 }
 
 // NotifyGuestInviteSent informs an invitee (identified by user_id
 // inside this workspace). Callers that can't resolve the invitee to a
 // user (external email, new account) should skip this call.
-func (s *Service) NotifyGuestInviteSent(ctx context.Context, workspaceID, inviteeUserID, inviteID, folderID uuid.UUID, email string) error {
+func (s *Service) NotifyGuestInviteSent(ctx context.Context, workspaceID, inviteeUserID, folderID uuid.UUID, email string) error {
 	return s.create(ctx, &Notification{
 		WorkspaceID:  workspaceID,
 		UserID:       inviteeUserID,
 		Type:         TypeGuestInviteSent,
 		Title:        "You were invited to a folder",
 		Body:         fmt.Sprintf("%s was invited as a guest.", email),
-		ResourceType: stringPtr("guest_invite"),
-		ResourceID:   &inviteID,
+		// Deep-link the invitee to the folder they can now access.
+		ResourceType: stringPtr("folder"),
+		ResourceID:   &folderID,
 	})
 }
 
 // NotifyGuestInviteAccepted informs the invite creator that the
 // invitee accepted.
-func (s *Service) NotifyGuestInviteAccepted(ctx context.Context, workspaceID, creatorID, inviteID uuid.UUID, email string) error {
+func (s *Service) NotifyGuestInviteAccepted(ctx context.Context, workspaceID, creatorID, folderID uuid.UUID, email string) error {
 	return s.create(ctx, &Notification{
-		WorkspaceID:  workspaceID,
-		UserID:       creatorID,
-		Type:         TypeGuestInviteAccepted,
-		Title:        "Guest invite accepted",
-		Body:         fmt.Sprintf("%s accepted your invitation.", email),
-		ResourceType: stringPtr("guest_invite"),
-		ResourceID:   &inviteID,
+		WorkspaceID: workspaceID,
+		UserID:      creatorID,
+		Type:        TypeGuestInviteAccepted,
+		Title:       "Guest invite accepted",
+		Body:        fmt.Sprintf("%s accepted your invitation.", email),
+		// Deep-link the creator to the folder the guest just joined,
+		// mirroring NotifyGuestInviteSent — the "folder" resource type
+		// resolves to /drive/folder/:id in deepLinkFor, whereas the
+		// previous "guest_invite" (an event id with no route) forced the
+		// push click to the generic /drive fallback.
+		ResourceType: stringPtr("folder"),
+		ResourceID:   &folderID,
 	})
 }
 
@@ -124,14 +135,16 @@ func (s *Service) NotifyQuarantine(ctx context.Context, workspaceID, fileID, ver
 			Type:         TypeScanQuarantined,
 			Title:        title,
 			Body:         body,
-			ResourceType: stringPtr("file_version"),
-			ResourceID:   &versionID,
+			// Deep-link admins to the affected file so they can review or
+			// purge it. fileID (not versionID) is what the file route resolves.
+			ResourceType: stringPtr("file"),
+			ResourceID:   &fileID,
 		}
 		if err := s.create(ctx, n); err != nil {
 			return err
 		}
 	}
-	_ = fileID // reserved for future per-file deep links
+	_ = versionID // the file route resolves by fileID; versionID is not navigable
 	return nil
 }
 

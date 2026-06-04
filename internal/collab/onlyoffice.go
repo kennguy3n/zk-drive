@@ -27,6 +27,7 @@ package collab
 import (
 	"context"
 	"errors"
+	"net/url"
 	"path/filepath"
 	"strings"
 	"time"
@@ -59,6 +60,15 @@ var (
 	// strict_zk folder. The Document Server would need plaintext
 	// access, which strict-ZK deliberately denies.
 	ErrStrictZKForbidden = errors.New("collab: onlyoffice editing forbidden for strict_zk folder")
+	// ErrWorkspaceSuspended is returned when a save callback targets a
+	// workspace the platform control plane has suspended. The callback
+	// path runs outside the session-auth middleware (the Document
+	// Server holds no ZK Drive JWT) and therefore outside
+	// SuspensionGuard, so the save path re-checks suspension at the
+	// write boundary to keep a suspended workspace frozen against
+	// callback-driven version writes, consistent with the 503 every
+	// REST write already returns.
+	ErrWorkspaceSuspended = errors.New("collab: workspace suspended")
 	// ErrEditorAccessDenied is returned when the user lacks even
 	// viewer access to the file.
 	ErrEditorAccessDenied = errors.New("collab: insufficient permission to open editor")
@@ -68,6 +78,12 @@ var (
 	// ErrUnsupportedDocumentType is returned when the file's name /
 	// extension does not map to an ONLYOFFICE document type.
 	ErrUnsupportedDocumentType = errors.New("collab: unsupported document type for onlyoffice")
+	// ErrCallbackURLNotAllowed is returned when a save callback's
+	// edited-document URL does not share the configured Document
+	// Server origin. The callback path fetches this URL server-side,
+	// so an attacker-controlled value (possible in the unsigned
+	// insecure mode) would otherwise be an SSRF vector.
+	ErrCallbackURLNotAllowed = errors.New("collab: callback document url not allowed")
 )
 
 // EditorFile is the minimal projection of a file the OnlyOffice
@@ -150,6 +166,72 @@ func (s *OnlyOfficeService) JWTSecret() string {
 		return ""
 	}
 	return s.jwtSecret
+}
+
+// ValidateDocumentURL guards the save-callback fetch against SSRF. The
+// edited bytes are always served from the Document Server's own cache,
+// so the callback's url must share the configured Document Server's
+// scheme and host. This matters most in the insecure no-secret mode,
+// where the callback body (and therefore the url) is unsigned and an
+// attacker could otherwise steer the server into fetching an arbitrary
+// internal/external address. Same-origin is enforced rather than a
+// private-range block because the Document Server is routinely
+// co-located on a private network, where a blanket private-IP rejection
+// would break legitimate deployments.
+func (s *OnlyOfficeService) ValidateDocumentURL(raw string) error {
+	if !s.Enabled() {
+		return ErrOnlyOfficeNotConfigured
+	}
+	srv, err := url.Parse(s.serverURL)
+	if err != nil || srv.Hostname() == "" {
+		// A misconfigured server URL means we cannot establish the
+		// trusted origin, so fail closed rather than fetch blindly.
+		return ErrCallbackURLNotAllowed
+	}
+	u, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil {
+		return ErrCallbackURLNotAllowed
+	}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return ErrCallbackURLNotAllowed
+	}
+	if !strings.EqualFold(u.Hostname(), srv.Hostname()) {
+		return ErrCallbackURLNotAllowed
+	}
+	// Enforce the scheme too. Without this, http://office.example.com:443
+	// would pass against an https Document Server (identical effective
+	// port), letting a callback downgrade the fetch to cleartext or steer
+	// it at a co-located plaintext service. The doc comment's same-origin
+	// contract is host + scheme + port.
+	if !strings.EqualFold(u.Scheme, srv.Scheme) {
+		return ErrCallbackURLNotAllowed
+	}
+	// Match the port too, not just the host: a same-hostname URL on a
+	// different port (e.g. office.example.com:9200 Elasticsearch,
+	// :6379 Redis) would otherwise pass and let the callback reach a
+	// co-located service. Compare effective ports so an explicit
+	// default (":443"/":80") still matches an omitted one.
+	if effectivePort(u) != effectivePort(srv) {
+		return ErrCallbackURLNotAllowed
+	}
+	return nil
+}
+
+// effectivePort returns the URL's port, defaulting to the well-known
+// port for its scheme when none is explicit so that
+// "https://h" and "https://h:443" compare equal.
+func effectivePort(u *url.URL) string {
+	if p := u.Port(); p != "" {
+		return p
+	}
+	switch u.Scheme {
+	case "https":
+		return "443"
+	case "http":
+		return "80"
+	default:
+		return ""
+	}
 }
 
 // EditorConfig is the payload returned to the browser. DocumentServerURL
@@ -356,35 +438,80 @@ func (s *OnlyOfficeService) VerifyCallbackToken(token string) (jwt.MapClaims, er
 	return claims, nil
 }
 
-// CallbackClaims extracts the authoritative status / url / users from a
-// verified callback token's claims, so the signed values — not the
-// unsigned request body — drive the save. ONLYOFFICE places the
-// callback payload at the top level when the token is delivered in the
-// body (the default), but nests it under a "payload" object when the
-// token arrives via the Authorization header (JWT_HEADER mode); both
-// layouts are handled so verification stays authoritative regardless of
-// the Document Server's token transport. ok is false when the verified
-// claims carry no status field, which the caller should treat as a
-// malformed/unexpected token and reject rather than falling back to the
-// unsigned body.
-func CallbackClaims(claims jwt.MapClaims) (status int, url string, users []string, ok bool) {
+// CallbackPayload is the authenticated subset of an ONLYOFFICE save
+// callback the drive layer acts on. When JWT verification is enabled
+// every field is sourced from the verified token claims (never the
+// unsigned request body), so a spoofed body cannot influence which URL
+// the server fetches or whom the save is attributed to.
+type CallbackPayload struct {
+	Status int
+	URL    string
+	Key    string
+	Users  []string
+}
+
+// VerifyCallback verifies an inbound Document Server callback token and
+// returns the authenticated payload built ENTIRELY from the signed
+// claims. A nil error with a nil payload means verification is disabled
+// (no secret configured); callers gate on JWTSecret() before relying on
+// this. A non-nil error means the token failed verification and the
+// callback must be rejected.
+func (s *OnlyOfficeService) VerifyCallback(token string) (*CallbackPayload, error) {
+	claims, err := s.VerifyCallbackToken(token)
+	if err != nil {
+		return nil, err
+	}
+	if claims == nil {
+		return nil, nil
+	}
+	return callbackPayloadFromClaims(claims), nil
+}
+
+// callbackPayloadFromClaims projects verified JWT claims into a
+// CallbackPayload. Missing / mistyped claims yield zero values, which
+// the caller treats as a non-actionable callback rather than trusting
+// any unsigned fallback.
+//
+// ONLYOFFICE places the callback fields at the top level when the token
+// is delivered in the request body (the default), but nests them under
+// a "payload" object when the token arrives via the Authorization
+// header (JWT_HEADER mode). Both layouts are handled so the verified
+// claims stay authoritative regardless of the Document Server's token
+// transport.
+func callbackPayloadFromClaims(claims jwt.MapClaims) *CallbackPayload {
 	src := map[string]any(claims)
-	if payload, isMap := claims["payload"].(map[string]any); isMap {
-		src = payload
+	if nested, ok := claims["payload"].(map[string]any); ok {
+		src = nested
 	}
-	st, hasStatus := src["status"].(float64)
-	if !hasStatus {
-		return 0, "", nil, false
+	p := &CallbackPayload{}
+	if status, ok := src["status"].(float64); ok {
+		p.Status = int(status)
 	}
-	url, _ = src["url"].(string)
-	if raw, isArr := src["users"].([]any); isArr {
-		for _, e := range raw {
-			if s, isStr := e.(string); isStr {
-				users = append(users, s)
-			}
+	if url, ok := src["url"].(string); ok {
+		p.URL = url
+	}
+	if key, ok := src["key"].(string); ok {
+		p.Key = key
+	}
+	p.Users = stringsFromClaim(src["users"])
+	return p
+}
+
+// stringsFromClaim coerces a JWT claim that should be an array of
+// strings (e.g. the ONLYOFFICE "users" list) into []string, ignoring
+// any non-string entries.
+func stringsFromClaim(v any) []string {
+	raw, ok := v.([]any)
+	if !ok {
+		return nil
+	}
+	out := make([]string, 0, len(raw))
+	for _, e := range raw {
+		if s, ok := e.(string); ok {
+			out = append(out, s)
 		}
 	}
-	return int(st), url, users, true
+	return out
 }
 
 // documentKey derives the ONLYOFFICE document key from a version's

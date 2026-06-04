@@ -12,6 +12,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"log/slog"
 	"net/http"
 	"strconv"
 	"strings"
@@ -21,21 +22,69 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/kennguy3n/zk-drive/api/middleware"
+	cryptopkg "github.com/kennguy3n/zk-drive/internal/crypto"
 	platformsvc "github.com/kennguy3n/zk-drive/internal/platform"
 )
 
-// Handler serves the /api/platform routes. Both dependencies are
-// required: svc performs the control-plane operations and keys backs
-// both the api-keys endpoints and (via AuthenticateKey) the
-// PlatformAuth middleware.
+// Handler serves the /api/platform routes. svc performs the
+// control-plane operations and keys backs both the api-keys endpoints
+// and (via AuthenticateKey) the PlatformAuth middleware. jwtKeys is
+// optional and powers the fleet-wide JWT signing-key rotation endpoint.
 type Handler struct {
-	svc  *platformsvc.PlatformService
-	keys *platformsvc.APIKeyStore
+	svc     *platformsvc.PlatformService
+	keys    *platformsvc.APIKeyStore
+	jwtKeys JWTRotator
+}
+
+// JWTRotator is the subset of *crypto.KeyManager needed to rotate the
+// platform JWT signing key. Declared as an interface so the rotate
+// endpoint stays unit-testable without a live key store. The returned
+// record carries only public metadata — the KeyManager never hands
+// back private key material.
+//
+// Rotation lives on the platform control plane (not the per-workspace
+// admin API) because RotateKey rotates the PLATFORM-WIDE signing key
+// (workspace_id IS NULL), which signs tokens for every tenant. Gating
+// it behind a per-workspace AdminOnly check would let any single
+// workspace admin rotate the signing key for the entire fleet — a
+// privilege escalation. Here it is gated on the platform-level
+// keys:manage capability instead.
+type JWTRotator interface {
+	RotateKey(ctx context.Context) (cryptopkg.SigningKeyRecord, error)
+	// Algorithm reports the algorithm the manager will actually use to
+	// sign the next token (AlgES256 once an active asymmetric key is
+	// loaded, otherwise AlgHS256). Surfaced in the rotate response so an
+	// operator can tell a key that is stored-but-not-signing (HS256
+	// forced) apart from one that is live (ES256).
+	Algorithm() string
 }
 
 // NewHandler constructs a platform Handler.
 func NewHandler(svc *platformsvc.PlatformService, keys *platformsvc.APIKeyStore) *Handler {
 	return &Handler{svc: svc, keys: keys}
+}
+
+// WithJWTRotator wires the platform JWT signing-key manager so POST
+// /api/platform/jwt/rotate can rotate the fleet-wide ES256 key.
+// Optional: when nil the route responds 501 Not Implemented (e.g.
+// deployments still on HS256-only signing).
+func (h *Handler) WithJWTRotator(r JWTRotator) *Handler {
+	// Collapse a typed-nil *crypto.KeyManager wrapped in the JWTRotator
+	// interface back to a real nil. Otherwise h.jwtKeys would compare
+	// != nil (an interface holding a typed-nil), the h.jwtKeys == nil
+	// guard in RotateJWTKey would pass, and h.jwtKeys.RotateKey() would
+	// NPE. Mirrors the guard on every other With* setter (e.g.
+	// admin.Handler.WithWebhooks, drive.Handler.WithWebhooks).
+	if r == nil {
+		h.jwtKeys = nil
+		return h
+	}
+	if km, ok := r.(*cryptopkg.KeyManager); ok && km == nil {
+		h.jwtKeys = nil
+		return h
+	}
+	h.jwtKeys = r
+	return h
 }
 
 // AuthenticateKey implements middleware.PlatformAuthenticator by
@@ -79,6 +128,52 @@ func (h *Handler) RegisterRoutes(r chi.Router) {
 	r.With(requireKeys).Post("/api-keys", h.CreateAPIKey)
 	r.With(requireKeys).Get("/api-keys", h.ListAPIKeys)
 	r.With(requireKeys).Delete("/api-keys/{id}", h.RevokeAPIKey)
+
+	// Fleet-wide JWT signing-key rotation: a platform operation gated
+	// on keys:manage, NOT the per-workspace admin API.
+	r.With(requireKeys).Post("/jwt/rotate", h.RotateJWTKey)
+}
+
+// jwtRotateResponse returns the public metadata of the freshly
+// activated signing key (never any private key material). Algorithm is
+// the newly minted key's own algorithm (always ES256); SigningAlgorithm
+// is what the manager will actually sign with now — these differ when
+// signing is pinned to HS256, in which case the rotated ES256 key is
+// stored and verifies but is not yet used to sign.
+type jwtRotateResponse struct {
+	KeyID            string    `json:"key_id"`
+	Algorithm        string    `json:"algorithm"`
+	SigningAlgorithm string    `json:"signing_algorithm"`
+	CreatedAt        time.Time `json:"created_at"`
+}
+
+// RotateJWTKey handles POST /api/platform/jwt/rotate. It generates a
+// new ES256 signing key, marks it active, retires the previous one,
+// and reloads the in-memory key set. Tokens signed by the retired key
+// keep verifying until they expire. The response carries only public
+// key metadata. Gated on keys:manage by RegisterRoutes.
+func (h *Handler) RotateJWTKey(w http.ResponseWriter, r *http.Request) {
+	if h.jwtKeys == nil {
+		middleware.RespondError(w, http.StatusNotImplemented, middleware.ErrCodeUnsupportedOp, "jwt key manager not wired")
+		return
+	}
+	rec, err := h.jwtKeys.RotateKey(r.Context())
+	if err != nil {
+		middleware.RespondInternalError(w, r, "rotate jwt key", err)
+		return
+	}
+	// Fleet-wide key rotation is high-impact; log it for the audit
+	// trail (the per-workspace audit_log does not apply to a
+	// platform-plane operation with no workspace scope).
+	slog.InfoContext(r.Context(), "platform jwt signing key rotated",
+		"key_id", rec.ID.String(), "algorithm", rec.Algorithm)
+
+	middleware.WriteJSON(w, http.StatusOK, jwtRotateResponse{
+		KeyID:            rec.ID.String(),
+		Algorithm:        rec.Algorithm,
+		SigningAlgorithm: h.jwtKeys.Algorithm(),
+		CreatedAt:        rec.CreatedAt,
+	})
 }
 
 // ---- workspaces -----------------------------------------------------

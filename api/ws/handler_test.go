@@ -3,6 +3,7 @@ package ws_test
 import (
 	"context"
 	"encoding/json"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -16,6 +17,7 @@ import (
 
 	"github.com/kennguy3n/zk-drive/api/middleware"
 	"github.com/kennguy3n/zk-drive/api/ws"
+	"github.com/kennguy3n/zk-drive/internal/workspace"
 )
 
 // TestWSReceivesFileUploadEvent stands up a hub, dials a real
@@ -240,6 +242,99 @@ func TestBroadcastJSONWorkspace_FansToEveryUserInWorkspace(t *testing.T) {
 	}
 }
 
+// blockedIPChecker is an IPAllowChecker that denies every request, so
+// the WS composition test can assert the upgrade is refused before the
+// handshake completes.
+type blockedIPChecker struct{}
+
+func (blockedIPChecker) CheckAccess(_ context.Context, _ uuid.UUID, _ net.IP) error {
+	return workspace.ErrIPBlocked
+}
+
+// TestServeWSEnforcesIPAllowlist asserts that the IP-allowlist
+// middleware, composed in front of ServeWS the way cmd/server wires
+// it, rejects a connection from a blocked network with 403 +
+// X-ZkDrive-IP-Blocked BEFORE the WebSocket upgrade — closing the
+// conditional-access bypass that previously left WS traffic ungated.
+func TestServeWSEnforcesIPAllowlist(t *testing.T) {
+	t.Parallel()
+
+	hub := ws.NewHub()
+	serveWS := ws.NewHandler(hub).ServeWS
+	// Inject a workspace id the way the auth middleware does, then run
+	// the IP-allowlist middleware in front of the handler.
+	withWorkspace := func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			ctx := middleware.WithWorkspaceID(r.Context(), uuid.New())
+			next.ServeHTTP(w, r.WithContext(ctx))
+		})
+	}
+	handler := withWorkspace(middleware.IPAllowlist(blockedIPChecker{}, 1)(http.HandlerFunc(serveWS)))
+	srv := httptest.NewServer(handler)
+	defer srv.Close()
+
+	resp, err := http.Get(srv.URL)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("status: got %d, want %d", resp.StatusCode, http.StatusForbidden)
+	}
+	if resp.Header.Get(middleware.IPBlockedHeader) != "true" {
+		t.Fatalf("expected %s: true header, got %q", middleware.IPBlockedHeader, resp.Header.Get(middleware.IPBlockedHeader))
+	}
+}
+
+// suspendedChecker is a WorkspaceSuspensionChecker that reports every
+// workspace as suspended, so the WS composition test can assert the
+// upgrade is refused with 503 before the handshake completes.
+type suspendedChecker struct{}
+
+func (suspendedChecker) WorkspaceSuspension(_ context.Context, _ uuid.UUID) (bool, string, error) {
+	return true, "nonpayment", nil
+}
+
+// TestServeWSEnforcesSuspensionGuard asserts that SuspensionGuard,
+// composed in front of ServeWS the way cmd/server wires it, rejects a
+// connection for a suspended workspace with 503 BEFORE the WebSocket
+// upgrade — so a suspended workspace cannot keep realtime sync / collab
+// alive while every REST call already returns 503.
+func TestServeWSEnforcesSuspensionGuard(t *testing.T) {
+	t.Parallel()
+
+	hub := ws.NewHub()
+	serveWS := ws.NewHandler(hub).ServeWS
+	withWorkspace := func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			ctx := middleware.WithWorkspaceID(r.Context(), uuid.New())
+			next.ServeHTTP(w, r.WithContext(ctx))
+		})
+	}
+	handler := withWorkspace(middleware.SuspensionGuard(suspendedChecker{})(http.HandlerFunc(serveWS)))
+	srv := httptest.NewServer(handler)
+	defer srv.Close()
+
+	resp, err := http.Get(srv.URL)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("status: got %d, want %d", resp.StatusCode, http.StatusServiceUnavailable)
+	}
+	var body struct {
+		Error  string `json:"error"`
+		Reason string `json:"reason"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatalf("decode body: %v", err)
+	}
+	if body.Error != "workspace_suspended" {
+		t.Fatalf("error: got %q, want workspace_suspended", body.Error)
+	}
+}
+
 // TestServeWSRejectsUnauthenticated asserts that ServeWS returns 401
 // when invoked without a valid bearer token (i.e. the middleware
 // chain never populates the auth context). Belt-and-braces over the
@@ -261,5 +356,3 @@ func TestServeWSRejectsUnauthenticated(t *testing.T) {
 		t.Fatalf("status: got %d, want %d", resp.StatusCode, http.StatusUnauthorized)
 	}
 }
-
-
