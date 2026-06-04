@@ -209,7 +209,7 @@ func (h *Handler) CreateGuestInvite(w http.ResponseWriter, r *http.Request) {
 	if h.users != nil && h.notifications != nil {
 		if u, uerr := h.users.GetByEmail(r.Context(), workspaceID, req.Email); uerr == nil && u != nil {
 			h.notify(r.Context(), func(n *notification.Service) error {
-				return n.NotifyGuestInviteSent(r.Context(), workspaceID, u.ID, inv.ID, folderID, req.Email)
+				return n.NotifyGuestInviteSent(r.Context(), workspaceID, u.ID, folderID, req.Email)
 			})
 		}
 	}

@@ -87,7 +87,7 @@ func (s *Service) NotifyShareLinkCreated(ctx context.Context, workspaceID, owner
 // NotifyGuestInviteSent informs an invitee (identified by user_id
 // inside this workspace). Callers that can't resolve the invitee to a
 // user (external email, new account) should skip this call.
-func (s *Service) NotifyGuestInviteSent(ctx context.Context, workspaceID, inviteeUserID, inviteID, folderID uuid.UUID, email string) error {
+func (s *Service) NotifyGuestInviteSent(ctx context.Context, workspaceID, inviteeUserID, folderID uuid.UUID, email string) error {
 	return s.create(ctx, &Notification{
 		WorkspaceID:  workspaceID,
 		UserID:       inviteeUserID,
