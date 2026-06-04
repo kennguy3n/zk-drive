@@ -155,6 +155,16 @@ done
 > (AWS's own default is 30) to protect against accidental deletion. For
 > short-lived dev/test stacks you iterate on, set `secret_recovery_window_days
 > = 0` so a destroy frees the names immediately and re-apply works right away.
+>
+> The same reservation applies when **toggling billing on AWS**: the Stripe
+> secrets are count-gated on `stripe_secret_key`/`stripe_webhook_secret`, so
+> clearing those variables on a subsequent apply *destroys* the
+> `…/STRIPE_SECRET_KEY` / `…/STRIPE_WEBHOOK_SECRET` secrets. Re-enabling billing
+> within the recovery window then fails with "already scheduled for deletion".
+> If you need to disable and re-enable billing quickly, either keep the
+> variables set (billing is detected by the app, not by the secret's mere
+> existence) or run with `secret_recovery_window_days = 0`. GCP Secret Manager
+> has no recovery-window reservation, so the toggle is seamless there.
 
 ### GCP-specific
 
@@ -182,6 +192,12 @@ done
   GCP runs a Cloud SQL Proxy sidecar in each Cloud Run service. The app
   always reaches Postgres at `127.0.0.1` and never holds the DB password
   itself (it reads a `DATABASE_URL` from Secrets Manager / Secret Manager).
+  On GCP the sidecar's `cpu = "1"` adds to the instance total, so a Cloud Run
+  instance allocates `<service>_cpu + 1` vCPU. This only matters for billing on
+  the **worker**: its `cpu_idle = false` keeps the whole instance (sidecar
+  included) CPU-backed continuously, whereas the server's `cpu_idle = true`
+  means CPU — sidecar included — is only billed while a request (or open
+  WebSocket) is in flight.
 - **Autoscaling.** The server scales on request volume (ALB request count
   per target ≈ 200 req/s per instance on AWS; Cloud Run request
   concurrency on GCP). The worker scales independently on NATS JetStream
@@ -289,7 +305,7 @@ on-demand (no committed-use / savings plans).
 | --- | --- | --- |
 | Cloud SQL `db-custom-2-8192` HA | primary | ~$200 |
 | Cloud SQL read replica | zonal | ~$100 |
-| Cloud Run — server + worker | warm min-1 each | ~$70 |
+| Cloud Run — server + worker | warm min-1 each (worker bills `worker_cpu + 1` vCPU always-on) | ~$70 |
 | Memorystore Redis STANDARD_HA | 1 GB | ~$70 |
 | External HTTPS LB + Cloud CDN | forwarding + egress | ~$25 |
 | Serverless VPC connector | 2–3 e2-micro | ~$30 |
