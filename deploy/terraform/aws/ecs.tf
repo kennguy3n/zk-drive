@@ -47,7 +47,16 @@ locals {
   clamav_address = "clamav.${local.namespace}:3310"
   redis_scheme   = var.redis_transit_encryption ? "rediss" : "redis"
   redis_url      = "${local.redis_scheme}://${aws_elasticache_replication_group.this.primary_endpoint_address}:6379"
-  public_url     = local.has_domain ? "https://${var.domain_name}" : ""
+
+  # PUBLIC_URL is the externally-reachable base URL the email service uses to
+  # build invite-accept links; config.go forcibly disables transactional email
+  # when it's empty. With a custom domain we use it; otherwise fall back to the
+  # CloudFront distribution domain, which is the URL users actually reach the
+  # SPA on when no domain is wired (CloudFront serves the SPA for non-/api
+  # paths, so invite links resolve). This keeps email functional out of the box
+  # for domainless deployments instead of silently disabling it. No dependency
+  # cycle: CloudFront depends only on the S3 bucket + ALB, not on ECS.
+  public_url = local.has_domain ? "https://${var.domain_name}" : "https://${aws_cloudfront_distribution.this.domain_name}"
 
   # Non-secret application config shared by server + worker, in the ECS
   # `environment` shape ({ name, value }). Names mirror the env vars read
