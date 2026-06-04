@@ -59,17 +59,46 @@ const onlyOfficeMaxDocumentBytes = 100 << 20 // 100 MiB
 // the save callback. Shared so connections are reused across callbacks.
 var onlyOfficeHTTPClient = &http.Client{Timeout: onlyOfficeFetchTimeout}
 
+// onlyOfficeAPIContainerMemoryBytes mirrors the API server container's
+// memory limit (zk-drive-server in deploy/docker-compose.prod.yml).
+// Used only to size the save concurrency cap below; keep in sync if the
+// deploy limit changes.
+const onlyOfficeAPIContainerMemoryBytes = 512 << 20 // 512 MiB
+
+// onlyOfficeSaveMemoryBudget is the share of the container's memory the
+// save path may buffer concurrently. Half the container leaves headroom
+// for the Go runtime, caches, and the rest of the request load — the
+// save path must never be allowed to claim the whole container, or a
+// burst of large saves would OOM everything else.
+const onlyOfficeSaveMemoryBudget = onlyOfficeAPIContainerMemoryBytes / 2 // 256 MiB
+
 // onlyOfficeMaxConcurrentSaves bounds how many save callbacks may be
 // buffering an edited document in memory at once. The editor-callback
 // route runs outside the per-user/-workspace rate limiter (the Document
 // Server holds no ZK Drive JWT), so without this a burst of callbacks
 // could each buffer up to onlyOfficeMaxDocumentBytes and exhaust the
-// container. Peak save-path memory is therefore bounded to roughly
-// onlyOfficeMaxConcurrentSaves * onlyOfficeMaxDocumentBytes. Excess
-// callbacks are shed with a retryable error (the edited bytes stay in
-// the Document Server's cache and it retries), rather than blocking a
-// goroutine, so a storm degrades gracefully instead of OOMing.
-const onlyOfficeMaxConcurrentSaves = 8
+// container.
+//
+// The cap is DERIVED from the memory budget so the worst case
+// (onlyOfficeMaxConcurrentSaves * onlyOfficeMaxDocumentBytes) stays
+// within budget by construction. It was previously a hand-picked 8,
+// which at 100 MiB per doc implied an 800 MiB worst case — overrunning
+// the very 512 MiB container the cap exists to protect. Deriving it
+// keeps the invariant true even if either constant changes later.
+// Excess callbacks are shed with a retryable error (the edited bytes
+// stay in the Document Server's cache and it retries) rather than
+// blocking a goroutine, so a storm degrades gracefully instead of
+// OOMing.
+const onlyOfficeMaxConcurrentSaves = onlyOfficeSaveMemoryBudget / onlyOfficeMaxDocumentBytes // = 2
+
+// Compile-time guards (a negative untyped constant converted to uint is
+// a build error): the derived cap must be positive — a budget below one
+// document would shed every save — and the worst-case concurrent
+// buffering must not exceed the budget. Both hold by construction today;
+// these fail the build if a future edit to the constants above breaks
+// the invariant.
+const _ = uint(onlyOfficeMaxConcurrentSaves - 1)                                                  // cap >= 1
+const _ = uint(onlyOfficeSaveMemoryBudget - onlyOfficeMaxConcurrentSaves*onlyOfficeMaxDocumentBytes) // worst case <= budget
 
 // onlyOfficeSaveSem is the counting semaphore enforcing
 // onlyOfficeMaxConcurrentSaves. A buffered channel slot is held for the

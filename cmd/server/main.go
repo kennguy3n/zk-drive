@@ -1266,7 +1266,15 @@ func run() error {
 		// deliberately NOT behind the workspace JWT AuthMiddleware /
 		// TenantGuard chain, since these endpoints operate across the
 		// whole fleet rather than within a single workspace.
+		//
+		// Because this group runs outside the per-user/-workspace
+		// rate limiter (there's no JWT to key on), a per-client-IP
+		// limiter runs FIRST as defense-in-depth: it bounds an
+		// unauthenticated flood of bogus `pk_` tokens before any auth
+		// work happens. Fails open if Redis is down so a hiccup never
+		// locks operators out of the control plane.
 		r.Route("/platform", func(r chi.Router) {
+			r.Use(middleware.IPRateLimiter(redisClient, middleware.DefaultPlatformIPRate, cfg.TrustedProxyDepth))
 			r.Use(middleware.PlatformAuth(platformHandler))
 			platformHandler.RegisterRoutes(r)
 		})
