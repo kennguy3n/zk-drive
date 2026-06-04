@@ -132,7 +132,18 @@ func (h *Handler) WithOnlyOffice(serverURL, jwtSecret, publicURL string) *Handle
 // re-check suspension at the write boundary. A nil checker disables the
 // check (e.g. metadata-only test wiring with no control plane), exactly
 // as SuspensionGuard is a no-op when its checker is nil.
+//
+// The isTypedNil guard mirrors WithWebhooks / WithTagSuggester: a
+// caller passing a typed-nil concrete pointer (e.g.
+// (*platform.Service)(nil)) wrapped in the interface would otherwise
+// compare != nil and then NPE inside ensureNotSuspended's
+// WorkspaceSuspension call. Collapsing it to a real nil keeps the
+// no-op-when-unwired contract intact under future conditional wiring.
 func (h *Handler) WithSuspensionChecker(c middleware.WorkspaceSuspensionChecker) *Handler {
+	if isTypedNil(c) {
+		h.suspension = nil
+		return h
+	}
 	h.suspension = c
 	return h
 }

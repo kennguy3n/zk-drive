@@ -88,6 +88,13 @@ func requireEnv(t *testing.T, envs map[string]string) {
 		// tests asserting that guard MUST see the production "unset"
 		// state and not a value bled in from the CI runner.
 		"ONLYOFFICE_URL", "ONLYOFFICE_SECRET", "ONLYOFFICE_ALLOW_INSECURE",
+		// Preview pipeline scaling env vars. Same convention as the
+		// blocks above: buildConfigFromEnv reads each of these via
+		// parseIntDefault, treating an empty value identically to unset
+		// (fall back to the clamped default), so a CI runner that exports
+		// e.g. PREVIEW_PRIORITY_WORKERS=1 must not bleed into tests that
+		// exercise the preview-default paths.
+		"PREVIEW_BUDGET_PER_WORKSPACE_HOUR", "PREVIEW_PRIORITY_WORKERS", "PREVIEW_STANDARD_WORKERS",
 		// Platform-admin allowlist (JWT key-rotation gate). Same
 		// convention as the blocks above: buildConfigFromEnv reads
 		// PLATFORM_ADMIN_USER_IDS via platformAdminUserIDsFromEnv, so
