@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/kennguy3n/zk-drive/internal/typednil"
+
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -25,12 +27,76 @@ type Repository interface {
 
 // PostgresRepository implements Repository against Postgres.
 type PostgresRepository struct {
-	pool *pgxpool.Pool
+	pool   *pgxpool.Pool
+	cipher SubscriptionCipher
 }
 
 // NewPostgresRepository returns a PostgresRepository using the supplied pool.
 func NewPostgresRepository(pool *pgxpool.Pool) *PostgresRepository {
 	return &PostgresRepository{pool: pool}
+}
+
+// WithSubscriptionCipher injects the cipher used to encrypt the
+// p256dh / auth key material of web-push subscriptions at rest. When
+// nil (the default), the keys are stored as-is — matching the
+// pass-through behaviour of crypto.Codec in mode "none". cipher is
+// normalised through typednil.IsTypedNil so a typed-nil concrete value
+// wrapped in the interface engages the plaintext path rather than
+// NPE-ing, consistent with the With* setters elsewhere in the codebase.
+// Fluent so it composes with the constructor.
+func (r *PostgresRepository) WithSubscriptionCipher(cipher SubscriptionCipher) *PostgresRepository {
+	if r != nil {
+		if typednil.IsTypedNil(cipher) {
+			cipher = nil
+		}
+		r.cipher = cipher
+	}
+	return r
+}
+
+// encryptKeys seals the p256dh / auth key material for storage. A nil
+// cipher passes the plaintext through unchanged.
+//
+// Only p256dh and auth are encrypted; endpoint is stored as plaintext by
+// design. endpoint is part of the UNIQUE(workspace_id, user_id, endpoint)
+// constraint and the WHERE endpoint = $ lookup in DeleteSubscription, and
+// AES-GCM is non-deterministic, so encrypting it would break those exact
+// matches. It is also not sensitive — a push-service URL
+// (e.g. https://fcm.googleapis.com/fcm/send/...) — whereas p256dh (the
+// subscriber ECDH public key) and auth (the 16-byte shared secret) are
+// the credentials worth protecting at rest.
+func (r *PostgresRepository) encryptKeys(ctx context.Context, sub PushSubscription) (p256dh, auth string, err error) {
+	if r.cipher == nil {
+		return sub.P256dh, sub.Auth, nil
+	}
+	if p256dh, err = r.cipher.Encrypt(ctx, sub.P256dh); err != nil {
+		return "", "", fmt.Errorf("encrypt p256dh: %w", err)
+	}
+	if auth, err = r.cipher.Encrypt(ctx, sub.Auth); err != nil {
+		return "", "", fmt.Errorf("encrypt auth: %w", err)
+	}
+	return p256dh, auth, nil
+}
+
+// decryptKeys opens key material read back from storage. A nil cipher
+// returns the values unchanged; crypto.Codec additionally returns
+// historical plaintext rows (no ciphertext prefix) verbatim, so a
+// mid-rollout mix of encrypted and plaintext rows both decode.
+func (r *PostgresRepository) decryptKeys(ctx context.Context, sub PushSubscription) (PushSubscription, error) {
+	if r.cipher == nil {
+		return sub, nil
+	}
+	p256dh, err := r.cipher.Decrypt(ctx, sub.P256dh)
+	if err != nil {
+		return PushSubscription{}, fmt.Errorf("decrypt p256dh: %w", err)
+	}
+	auth, err := r.cipher.Decrypt(ctx, sub.Auth)
+	if err != nil {
+		return PushSubscription{}, fmt.Errorf("decrypt auth: %w", err)
+	}
+	sub.P256dh = p256dh
+	sub.Auth = auth
+	return sub, nil
 }
 
 const notificationColumns = "id, workspace_id, user_id, type, title, body, resource_type, resource_id, read_at, created_at"
@@ -150,6 +216,67 @@ func (r *PostgresRepository) ListWorkspaceAdmins(ctx context.Context, workspaceI
 			return nil, err
 		}
 		out = append(out, id)
+	}
+	return out, rows.Err()
+}
+
+// SaveSubscription upserts a browser push subscription. The
+// UNIQUE(workspace_id, user_id, endpoint) constraint (migration 038)
+// means re-registering the same endpoint refreshes its keys instead of
+// inserting a duplicate row. The upsert also bumps updated_at so a live
+// browser (which re-subscribes on each load) keeps its row fresh, and
+// rows left stale are identifiable orphans an operator can prune.
+func (r *PostgresRepository) SaveSubscription(ctx context.Context, workspaceID, userID uuid.UUID, sub PushSubscription) error {
+	p256dh, auth, err := r.encryptKeys(ctx, sub)
+	if err != nil {
+		return fmt.Errorf("save webpush subscription: %w", err)
+	}
+	const q = `
+INSERT INTO webpush_subscriptions (workspace_id, user_id, endpoint, p256dh, auth)
+VALUES ($1, $2, $3, $4, $5)
+ON CONFLICT (workspace_id, user_id, endpoint)
+DO UPDATE SET p256dh = EXCLUDED.p256dh, auth = EXCLUDED.auth, updated_at = now()`
+	if _, err := r.pool.Exec(ctx, q, workspaceID, userID, sub.Endpoint, p256dh, auth); err != nil {
+		return fmt.Errorf("save webpush subscription: %w", err)
+	}
+	return nil
+}
+
+// DeleteSubscription removes a single push subscription by endpoint.
+// Missing rows are not an error (idempotent unsubscribe).
+func (r *PostgresRepository) DeleteSubscription(ctx context.Context, workspaceID, userID uuid.UUID, endpoint string) error {
+	if _, err := r.pool.Exec(ctx,
+		`DELETE FROM webpush_subscriptions
+         WHERE workspace_id = $1 AND user_id = $2 AND endpoint = $3`,
+		workspaceID, userID, endpoint); err != nil {
+		return fmt.Errorf("delete webpush subscription: %w", err)
+	}
+	return nil
+}
+
+// ListSubscriptions returns every push subscription for (workspace,
+// user). Used by the publisher to fan a notification out to all of a
+// user's offline devices.
+func (r *PostgresRepository) ListSubscriptions(ctx context.Context, workspaceID, userID uuid.UUID) ([]PushSubscription, error) {
+	rows, err := r.pool.Query(ctx,
+		`SELECT endpoint, p256dh, auth FROM webpush_subscriptions
+         WHERE workspace_id = $1 AND user_id = $2`,
+		workspaceID, userID)
+	if err != nil {
+		return nil, fmt.Errorf("list webpush subscriptions: %w", err)
+	}
+	defer rows.Close()
+	var out []PushSubscription
+	for rows.Next() {
+		var sub PushSubscription
+		if err := rows.Scan(&sub.Endpoint, &sub.P256dh, &sub.Auth); err != nil {
+			return nil, err
+		}
+		decoded, err := r.decryptKeys(ctx, sub)
+		if err != nil {
+			return nil, fmt.Errorf("list webpush subscriptions: %w", err)
+		}
+		out = append(out, decoded)
 	}
 	return out, rows.Err()
 }

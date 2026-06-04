@@ -208,6 +208,40 @@ console URL empty to disable the advanced storage admin surface.
 | `OLLAMA_URL`   | _empty_ | Base URL of a local Ollama server (e.g. `http://ollama:11434`). When unset the summariser falls back to a deterministic rule-based mode. |
 | `OLLAMA_MODEL` | _empty_ | Model name to request (e.g. `llama3:8b`). Ignored when `OLLAMA_URL` is unset.                              |
 
+## Web Push notifications (optional)
+
+PWA users receive notifications (share-link created, etc.) even when no
+browser tab is open via Web Push (RFC 8030 + VAPID). The server delivers
+a push only to users who have registered a subscription **and** have no
+live WebSocket connection, so an open tab still uses the realtime path.
+
+| Variable             | Default | Purpose                                                                                                       |
+| -------------------- | ------- | ------------------------------------------------------------------------------------------------------------- |
+| `VAPID_PUBLIC_KEY`   | _empty_ | VAPID application-server **public** key. Sent to the browser as `applicationServerKey` and in the VAPID header. |
+| `VAPID_PRIVATE_KEY`  | _empty_ | VAPID application-server **private** key used to sign the VAPID JWT. Keep secret.                              |
+| `VAPID_SUBSCRIBER`   | _built-in placeholder_ | `sub` claim in the VAPID JWT — a `mailto:` or `https:` URI push services use to contact you about a misbehaving sender. Set to a monitored mailbox (e.g. `mailto:ops@yourdomain.com`) for production push traffic. |
+
+When **either** key is empty, Web Push is disabled (graceful
+degradation): the `/api/push/*` endpoints respond `501 Not Implemented`,
+the frontend skips the subscription flow, and the notification publisher
+skips the push fan-out — the in-app + WebSocket notification path is
+unaffected.
+
+Generate a key pair once and inject the same pair into every replica:
+
+```sh
+npx web-push generate-vapid-keys
+# =>
+# Public Key:  BMod_...           # set as VAPID_PUBLIC_KEY
+# Private Key: 3K...              # set as VAPID_PRIVATE_KEY
+```
+
+The two keys are a matched pair: rotating them invalidates every
+existing browser subscription (clients re-subscribe automatically on
+next login). The browser fetches the public key from
+`GET /api/push/vapid-public-key`; subscriptions are registered via
+`POST /api/push/subscribe` and removed via `DELETE /api/push/subscribe`.
+
 ## Collaborative office editing (ONLYOFFICE)
 
 Lets users open office documents (`.docx`, `.xlsx`, `.pptx`, `.odt`,
