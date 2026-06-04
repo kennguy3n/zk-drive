@@ -124,6 +124,32 @@ resource "aws_cloudfront_distribution" "this" {
     max_ttl     = 0
   }
 
+  # Bare "/api" (no trailing slash): "/api/*" does not match it, so without
+  # this it would fall through to the S3 default behavior and the SPA function
+  # would rewrite it to /index.html instead of reaching the ALB. Mirror the
+  # "/api/*" forwarding so the API root behaves identically to the GCP URL map,
+  # which matches both "/api" and "/api/*" (lb.tf).
+  ordered_cache_behavior {
+    path_pattern           = "/api"
+    target_origin_id       = local.alb_origin_id
+    viewer_protocol_policy = "redirect-to-https"
+    allowed_methods        = ["GET", "HEAD", "OPTIONS", "PUT", "POST", "PATCH", "DELETE"]
+    cached_methods         = ["GET", "HEAD"]
+    compress               = true
+
+    forwarded_values {
+      query_string = true
+      headers      = ["*"]
+      cookies {
+        forward = "all"
+      }
+    }
+
+    min_ttl     = 0
+    default_ttl = 0
+    max_ttl     = 0
+  }
+
   # Health check passthrough.
   ordered_cache_behavior {
     path_pattern           = "/healthz"

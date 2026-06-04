@@ -195,8 +195,11 @@ locals {
   ], local.stripe_secrets)
 
   # Same set as app_secrets but pointing at the direct DATABASE_URL, for
-  # the short-lived cron tasks that don't run a PgBouncer sidecar.
-  cron_secrets = concat([
+  # the short-lived cron tasks that don't run a PgBouncer sidecar. Stripe is
+  # deliberately omitted: the reconciler/orphan-gc/audit-archiver binaries never
+  # touch billing, so injecting STRIPE_* would hand them credentials they don't
+  # use (least privilege). Only the server/worker (app_secrets) get Stripe.
+  cron_secrets = [
     {
       name      = "DATABASE_URL"
       valueFrom = aws_secretsmanager_secret.database_url_direct.arn
@@ -217,7 +220,7 @@ locals {
       name      = "S3_SECRET_KEY"
       valueFrom = aws_secretsmanager_secret.s3_secret_key.arn
     },
-  ], local.stripe_secrets)
+  ]
 
   # ARNs the task execution role must be allowed to read.
   app_secret_arns = concat([
