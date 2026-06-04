@@ -6,6 +6,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/google/uuid"
 )
 
 // Config holds runtime configuration for the zk-drive server and worker
@@ -43,6 +45,19 @@ type Config struct {
 	// clamped to [10s, 1h]; a non-positive value disables the
 	// background refresh (single-replica deployments). Default 60s.
 	JWTKeyRefreshInterval time.Duration
+
+	// PlatformAdminUserIDs lists the user IDs permitted to perform
+	// platform-wide administrative operations that affect every
+	// workspace — currently rotating the platform JWT signing key
+	// (POST /api/admin/jwt/rotate). The data model has a single
+	// "admin" role scoped per workspace, so the AdminOnly gate alone
+	// would let any workspace admin rotate the shared platform key and
+	// thereby affect all tenants. This allowlist narrows the rotate
+	// endpoint to designated platform operators. Sourced from
+	// PLATFORM_ADMIN_USER_IDS (comma-separated UUIDs). Empty by
+	// default, which denies the gated operations until an operator
+	// configures the list (deny-by-default for a cross-tenant action).
+	PlatformAdminUserIDs []uuid.UUID
 
 	ListenAddr    string
 	S3Endpoint    string
@@ -382,6 +397,7 @@ func buildConfigFromEnv() *Config {
 		DBMaxConnIdleTime:     parseDurationDefault(os.Getenv("DB_MAX_CONN_IDLE_TIME"), defaultDBMaxConnIdleTime),
 		JWTAlgorithm:          normaliseJWTAlgorithm(os.Getenv("JWT_ALGORITHM")),
 		JWTKeyRefreshInterval: jwtKeyRefreshIntervalFromEnv(),
+		PlatformAdminUserIDs:  platformAdminUserIDsFromEnv(),
 		ListenAddr:            getEnvDefault("LISTEN_ADDR", ":8080"),
 		S3Endpoint:            os.Getenv("S3_ENDPOINT"),
 		S3Bucket:              os.Getenv("S3_BUCKET"),
@@ -850,6 +866,35 @@ func parseBoolDefault(s string, def bool) bool {
 	default:
 		return def
 	}
+}
+
+// platformAdminUserIDsFromEnv parses PLATFORM_ADMIN_USER_IDS, a
+// comma-separated list of user UUIDs permitted to perform
+// platform-wide administrative operations that affect every workspace
+// — currently just rotating the platform JWT signing key
+// (POST /api/admin/jwt/rotate). Workspace "admin" role alone is not
+// sufficient for these operations because the data model has a single
+// admin role shared across tenants. Blank and unparseable entries are
+// dropped (rather than aborting startup) so one malformed ID cannot
+// widen access; an empty result means no one may perform the gated
+// operation until the operator configures the list (deny-by-default).
+func platformAdminUserIDsFromEnv() []uuid.UUID {
+	raw := parseCSVList(os.Getenv("PLATFORM_ADMIN_USER_IDS"))
+	if len(raw) == 0 {
+		return nil
+	}
+	out := make([]uuid.UUID, 0, len(raw))
+	for _, s := range raw {
+		id, err := uuid.Parse(s)
+		if err != nil {
+			continue
+		}
+		out = append(out, id)
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 // parseCSVList splits a comma-separated env-var value into a

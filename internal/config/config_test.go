@@ -6,6 +6,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
+
 	"github.com/kennguy3n/zk-drive/internal/audit"
 )
 
@@ -505,6 +507,55 @@ func TestJWTKeyRefreshIntervalFromEnv(t *testing.T) {
 			}
 			if got := jwtKeyRefreshIntervalFromEnv(); got != tc.want {
 				t.Errorf("jwtKeyRefreshIntervalFromEnv() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestPlatformAdminUserIDsFromEnv(t *testing.T) {
+	id1 := uuid.New()
+	id2 := uuid.New()
+
+	tests := []struct {
+		name  string
+		set   bool
+		value string
+		want  []uuid.UUID
+	}{
+		{name: "unset_is_empty", set: false, want: nil},
+		{name: "blank_is_empty", set: true, value: "   ", want: nil},
+		{name: "single_id", set: true, value: id1.String(), want: []uuid.UUID{id1}},
+		{
+			name:  "multiple_ids_trimmed",
+			set:   true,
+			value: "  " + id1.String() + " , " + id2.String() + "  ",
+			want:  []uuid.UUID{id1, id2},
+		},
+		{
+			name:  "invalid_entries_dropped",
+			set:   true,
+			value: "not-a-uuid," + id1.String() + ",,also-bad",
+			want:  []uuid.UUID{id1},
+		},
+		{name: "all_invalid_is_empty", set: true, value: "nope,still-nope", want: nil},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.set {
+				t.Setenv("PLATFORM_ADMIN_USER_IDS", tc.value)
+			} else {
+				if err := os.Unsetenv("PLATFORM_ADMIN_USER_IDS"); err != nil {
+					t.Fatalf("Unsetenv: %v", err)
+				}
+			}
+			got := platformAdminUserIDsFromEnv()
+			if len(got) != len(tc.want) {
+				t.Fatalf("platformAdminUserIDsFromEnv() = %v, want %v", got, tc.want)
+			}
+			for i := range tc.want {
+				if got[i] != tc.want[i] {
+					t.Errorf("index %d = %v, want %v", i, got[i], tc.want[i])
+				}
 			}
 		})
 	}

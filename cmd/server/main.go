@@ -693,7 +693,11 @@ func run() error {
 		WithFabric(fabricClient, provisioner, storageFactory).
 		WithWorkspaces(wsSvc).
 		WithWebhooks(webhookPublisher).
-		WithJWTRotator(jwtKeyManager)
+		WithJWTRotator(jwtKeyManager).
+		WithPlatformAdmins(cfg.PlatformAdminUserIDs)
+	if len(cfg.PlatformAdminUserIDs) == 0 {
+		slog.Warn("PLATFORM_ADMIN_USER_IDS not set: POST /api/admin/jwt/rotate will deny all callers until configured")
+	}
 
 	// Outbound-webhook subscription admin handler. Mounted
 	// under /api/admin/webhooks so it inherits the admin-only +
