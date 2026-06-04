@@ -89,6 +89,19 @@ func requireEnv(t *testing.T, envs map[string]string) {
 		// exported would bleed UUIDs into PlatformAdminUserIDs for any
 		// test exercising the "unset → deny-by-default" state.
 		"PLATFORM_ADMIN_USER_IDS",
+		// DB connection-pool sizing + JWT signing/refresh env vars.
+		// Same convention as the blocks above: buildConfigFromEnv reads
+		// each of these (dbMaxConnsFromEnv / dbMinConnsFromEnv /
+		// parseDurationDefault(DB_MAX_CONN_IDLE_TIME) /
+		// normaliseJWTAlgorithm / jwtKeyRefreshIntervalFromEnv), and all
+		// of them treat an empty value identically to unset (fall back to
+		// the clamped default), so a CI runner that exports e.g.
+		// DB_MAX_CONNS=2 or JWT_ALGORITHM=ES256 would otherwise bleed into
+		// tests exercising those default paths. Tests that assert on
+		// non-default values (e.g. TestJWTKeyRefreshInterval) t.Setenv the
+		// specific var themselves after requireEnv runs.
+		"DB_MAX_CONNS", "DB_MIN_CONNS", "DB_MAX_CONN_IDLE_TIME",
+		"JWT_ALGORITHM", "JWT_KEY_REFRESH_INTERVAL",
 	}
 	// WORKER_METRICS_ADDR is intentionally NOT included in the keys
 	// list above. t.Setenv(k, "") makes os.LookupEnv return
