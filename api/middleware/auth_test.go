@@ -261,7 +261,7 @@ func TestAuthMiddleware_RejectsPurposeToken(t *testing.T) {
 		purpose := purpose
 		t.Run(purpose, func(t *testing.T) {
 			t.Parallel()
-			token, _, err := issueWithPurpose(secret, uuid.New(), uuid.New(), "", purpose, time.Hour)
+			token, _, err := issueWithPurpose(hmacSigner{secret}, uuid.New(), uuid.New(), "", purpose, time.Hour)
 			if err != nil {
 				t.Fatalf("issue purpose token: %v", err)
 			}

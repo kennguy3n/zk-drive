@@ -1,0 +1,76 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: zk-drive-worker
+  namespace: {{ include "zk-drive.namespace" . }}
+  labels:
+    {{- include "zk-drive.labels" . | nindent 4 }}
+spec:
+  {{- if not .Values.worker.hpa.enabled }}
+  replicas: {{ .Values.worker.replicas }}
+  {{- end }}
+  selector:
+    matchLabels:
+      app: zk-drive-worker
+  template:
+    metadata:
+      labels:
+        app: zk-drive-worker
+        {{- include "zk-drive.labels" . | nindent 8 }}
+      {{- if .Values.worker.metricsEnabled }}
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: {{ .Values.worker.metricsPort | quote }}
+        prometheus.io/path: "/metrics"
+      {{- end }}
+    spec:
+      {{- include "zk-drive.imagePullSecrets" . | nindent 6 }}
+      {{- if .Values.worker.spread.enabled }}
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchLabels:
+                    app: zk-drive-worker
+                topologyKey: {{ .Values.worker.spread.topologyKey }}
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: {{ .Values.worker.spread.zoneKey }}
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app: zk-drive-worker
+      {{- end }}
+      containers:
+        - name: worker
+          image: {{ include "zk-drive.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["/app/worker"]
+          {{- include "zk-drive.envFrom" . | nindent 10 }}
+          {{- if .Values.worker.metricsEnabled }}
+          ports:
+            - name: metrics
+              containerPort: {{ .Values.worker.metricsPort }}
+              protocol: TCP
+          readinessProbe:
+            httpGet:
+              path: {{ .Values.worker.readinessProbe.path }}
+              port: metrics
+            initialDelaySeconds: {{ .Values.worker.readinessProbe.initialDelaySeconds }}
+            periodSeconds: {{ .Values.worker.readinessProbe.periodSeconds }}
+            timeoutSeconds: {{ .Values.worker.readinessProbe.timeoutSeconds }}
+            successThreshold: 1
+            failureThreshold: {{ .Values.worker.readinessProbe.failureThreshold }}
+          livenessProbe:
+            httpGet:
+              path: {{ .Values.worker.livenessProbe.path }}
+              port: metrics
+            initialDelaySeconds: {{ .Values.worker.livenessProbe.initialDelaySeconds }}
+            periodSeconds: {{ .Values.worker.livenessProbe.periodSeconds }}
+            timeoutSeconds: {{ .Values.worker.livenessProbe.timeoutSeconds }}
+            failureThreshold: {{ .Values.worker.livenessProbe.failureThreshold }}
+          {{- end }}
+          resources:
+            {{- toYaml .Values.worker.resources | nindent 12 }}

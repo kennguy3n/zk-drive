@@ -1,0 +1,19 @@
+apiVersion: v2
+name: zk-drive
+description: ZK Drive — secure document management & collaboration platform (Go API server, async worker, Postgres, NATS JetStream, ClamAV)
+type: application
+# Chart version — bump on every chart change (SemVer).
+version: 0.1.0
+# Default application version this chart deploys; overridable via
+# .Values.image.tag. Kept in sync with the image tags in deploy/k8s/.
+appVersion: "0.1.0"
+keywords:
+  - documents
+  - collaboration
+  - storage
+  - zero-knowledge
+home: https://github.com/kennguy3n/zk-drive
+sources:
+  - https://github.com/kennguy3n/zk-drive
+maintainers:
+  - name: zk-drive maintainers

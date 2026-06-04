@@ -1,0 +1,14 @@
+# PodDisruptionBudget for the async worker. minAvailable: 1 keeps at
+# least one JetStream consumer running through voluntary disruptions so
+# the job queue keeps draining during node maintenance. Paired with the
+# HPA minReplicas: 2 this allows one worker pod to be evicted at a time.
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: zk-drive-worker
+  namespace: zk-drive
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: zk-drive-worker
