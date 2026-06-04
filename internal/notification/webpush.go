@@ -270,7 +270,7 @@ func (s *WebPushService) Unsubscribe(ctx context.Context, workspaceID, userID uu
 		return nil
 	}
 	if endpoint == "" {
-		return fmt.Errorf("webpush: endpoint is required")
+		return fmt.Errorf("%w: endpoint is required", ErrInvalidSubscription)
 	}
 	return s.repo.DeleteSubscription(ctx, workspaceID, userID, endpoint)
 }

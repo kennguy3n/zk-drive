@@ -346,8 +346,8 @@ func TestWebPushService_Unsubscribe(t *testing.T) {
 	if err := svc.Subscribe(ctx, ws, user, sub); err != nil {
 		t.Fatal(err)
 	}
-	if err := svc.Unsubscribe(ctx, ws, user, ""); err == nil {
-		t.Error("expected error on empty endpoint")
+	if err := svc.Unsubscribe(ctx, ws, user, ""); !errors.Is(err, ErrInvalidSubscription) {
+		t.Errorf("empty endpoint should wrap ErrInvalidSubscription (maps to 400), got %v", err)
 	}
 	if err := svc.Unsubscribe(ctx, ws, user, sub.Endpoint); err != nil {
 		t.Fatalf("Unsubscribe: %v", err)
