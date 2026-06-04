@@ -96,10 +96,20 @@ func IPAllowlist(checker IPAllowChecker, trustedProxyDepth int) func(http.Handle
 // misconfiguration), it falls back to the TCP peer in RemoteAddr,
 // which cannot be spoofed. Returns nil only when no usable address
 // can be parsed.
+//
+// All X-Forwarded-For header lines are joined before splitting, not
+// just the first. Standard proxies merge XFF into one comma-separated
+// value, but a client can send its own X-Forwarded-For and a proxy
+// that appends a *separate* header line (rather than merging) would
+// otherwise leave http.Header.Get reading only the client's spoofed
+// line — so the right-anchored "trusted" entry would actually be
+// attacker-controlled. Joining Values preserves hop order (each
+// proxy's appended entry stays to the right of earlier ones), so the
+// depth-from-right index still selects the closest trusted proxy.
 func ClientIPFromRequest(r *http.Request, trustedProxyDepth int) net.IP {
 	if trustedProxyDepth > 0 {
-		if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
-			parts := strings.Split(xff, ",")
+		if values := r.Header.Values("X-Forwarded-For"); len(values) > 0 {
+			parts := strings.Split(strings.Join(values, ","), ",")
 			idx := len(parts) - trustedProxyDepth
 			if idx >= 0 && idx < len(parts) {
 				if ip := net.ParseIP(strings.TrimSpace(parts[idx])); ip != nil {
