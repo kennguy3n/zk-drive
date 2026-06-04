@@ -50,6 +50,32 @@ imagePullSecrets:
 {{- end }}
 {{- end -}}
 
+{{/*
+Egress rule to a backend dependency (Postgres / NATS / ClamAV).
+When the in-cluster dependency is enabled, egress is scoped to its pod via
+podSelector (tight). When it is disabled — i.e. a managed/external endpoint
+(RDS, Cloud SQL, NGS, managed ClamAV) with no in-cluster pod to select — the
+chart falls back to a port-only rule so traffic can reach the managed
+endpoint's IP under default-deny, mirroring the Redis/S3 egress rules.
+Usage:
+  {{- include "zk-drive.backendEgress" (dict "enabled" .Values.postgres.enabled "app" "postgres" "port" .Values.networkPolicy.postgresPort) | nindent 4 }}
+*/}}
+{{- define "zk-drive.backendEgress" -}}
+{{- if .enabled -}}
+- to:
+    - podSelector:
+        matchLabels:
+          app: {{ .app }}
+  ports:
+    - protocol: TCP
+      port: {{ .port }}
+{{- else -}}
+- ports:
+    - protocol: TCP
+      port: {{ .port }}
+{{- end -}}
+{{- end -}}
+
 {{/* envFrom block shared by all app workloads. */}}
 {{- define "zk-drive.envFrom" -}}
 envFrom:
