@@ -60,6 +60,15 @@ client.interceptors.response.use(
       const data = err.response.data as { code?: string } | undefined;
       const code = typeof data?.code === "string" ? data.code : null;
       if (!is401SoftFailure(code)) {
+        // Mirror logout(): tear down the browser push subscription so a
+        // forcibly-expired/revoked session stops receiving pushes that
+        // can carry workspace-sensitive content. Capture the (now-stale)
+        // token before clearing storage — the server DELETE may itself
+        // 401 and is swallowed, but the browser-side unsubscribe() always
+        // runs and stops delivery, and the server row is auto-pruned on
+        // the next 410. Without this, only an explicit logout() cleaned
+        // up; an idle-timeout / server-side revocation left the sub live.
+        tearDownPushSubscription(currentToken());
         localStorage.removeItem(TOKEN_STORAGE_KEY);
         localStorage.removeItem(WORKSPACE_STORAGE_KEY);
         localStorage.removeItem(ROLE_STORAGE_KEY);

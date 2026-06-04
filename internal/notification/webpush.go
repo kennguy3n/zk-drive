@@ -12,6 +12,7 @@ import (
 	"strings"
 
 	"github.com/kennguy3n/zk-drive/internal/logging"
+	"github.com/kennguy3n/zk-drive/internal/typednil"
 
 	webpush "github.com/SherClockHolmes/webpush-go"
 	"github.com/google/uuid"
@@ -162,9 +163,16 @@ func (s *WebPushService) WithHTTPClient(c httpDoer) *WebPushService {
 // to vet push endpoints at subscribe and delivery time. Production
 // wires a *webhooks.URLValidator; when nil the service falls back to
 // the lightweight literal-IP checks in validatePushEndpoint (which do
-// not resolve DNS).
+// not resolve DNS). v is normalised through typednil.IsTypedNil so a
+// caller passing a typed-nil concrete pointer wrapped in the interface
+// (e.g. a nil *webhooks.URLValidator) is treated as plain nil and
+// engages the fallback rather than NPE-ing on Validate — matching the
+// established pattern in NewWebPushPublisher and the api/drive setters.
 func (s *WebPushService) WithEndpointValidator(v EndpointValidator) *WebPushService {
 	if s != nil {
+		if typednil.IsTypedNil(v) {
+			v = nil
+		}
 		s.validator = v
 	}
 	return s

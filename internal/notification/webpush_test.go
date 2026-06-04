@@ -271,6 +271,32 @@ func TestWebPushService_DeliverFallbackValidationWithoutValidator(t *testing.T) 
 	}
 }
 
+// TestWebPushService_WithEndpointValidatorTypedNilFallsBack proves that
+// a typed-nil concrete validator (a nil *fakeEndpointValidator wrapped
+// in the EndpointValidator interface) is normalised to plain nil by the
+// setter, so the literal-IP fallback engages instead of dispatching
+// Validate on a nil receiver (which would NPE). Without the
+// typednil.IsTypedNil guard, `s.validator != nil` would be true and the
+// first Subscribe would panic.
+func TestWebPushService_WithEndpointValidatorTypedNilFallsBack(t *testing.T) {
+	repo := newFakeWebPushRepo()
+	svc, _ := newTestService(t, repo, http.StatusCreated)
+	var typedNil *fakeEndpointValidator // nil concrete pointer
+	svc.WithEndpointValidator(typedNil) // wrapped in EndpointValidator interface
+	ctx := context.Background()
+	ws, user := uuid.New(), uuid.New()
+
+	// Fallback literal-IP check must still reject a loopback endpoint
+	// (rather than panicking on the typed-nil validator).
+	if err := svc.Subscribe(ctx, ws, user, testSubscription(t, "https://127.0.0.1/x")); !errors.Is(err, ErrInvalidSubscription) {
+		t.Errorf("expected fallback to reject loopback, got %v", err)
+	}
+	// A normal public https endpoint is still accepted via the fallback.
+	if err := svc.Subscribe(ctx, ws, user, testSubscription(t, "https://fcm.googleapis.com/fcm/send/abc")); err != nil {
+		t.Errorf("expected public endpoint accepted via fallback, got %v", err)
+	}
+}
+
 // TestWebPushService_InjectedValidatorGatesSubscribeAndDeliver proves
 // the injected DNS-resolving validator runs both at subscribe time and
 // again before each delivery — the latter being the DNS-rebinding
