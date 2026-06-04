@@ -94,6 +94,16 @@ type Config struct {
 	RateLimitPerUser      int
 	RateLimitPerWorkspace int
 
+	// TrustedProxyDepth is the number of trusted reverse proxies in
+	// front of the server. It governs how the IP-allowlist
+	// middleware resolves the client IP from X-Forwarded-For: the
+	// real client address is taken TrustedProxyDepth entries from
+	// the right of the header (entries further left are
+	// client-supplied and spoofable). Sourced from
+	// TRUSTED_PROXY_DEPTH; defaults to defaultTrustedProxyDepth
+	// (single load balancer).
+	TrustedProxyDepth int
+
 	// RedisURL switches the rate limiter and session store from
 	// in-memory state to a Redis-backed implementation so limits and
 	// session revocation work across replicas. When empty, the
@@ -440,6 +450,7 @@ func buildConfigFromEnv() *Config {
 		MicrosoftRedirectURL:        os.Getenv("MICROSOFT_REDIRECT_URL"),
 		RateLimitPerUser:            parseIntDefault(os.Getenv("RATE_LIMIT_PER_USER"), 0),
 		RateLimitPerWorkspace:       parseIntDefault(os.Getenv("RATE_LIMIT_PER_WORKSPACE"), 0),
+		TrustedProxyDepth:           parseNonNegativeIntDefault(os.Getenv("TRUSTED_PROXY_DEPTH"), defaultTrustedProxyDepth),
 		RedisURL:                    os.Getenv("REDIS_URL"),
 		FabricConsoleURL:            os.Getenv("FABRIC_CONSOLE_URL"),
 		FabricConsoleAdminToken:     os.Getenv("FABRIC_CONSOLE_ADMIN_TOKEN"),
@@ -957,6 +968,31 @@ func parseIntDefault(s string, def int) int {
 	}
 	v, err := strconv.Atoi(s)
 	if err != nil || v <= 0 {
+		return def
+	}
+	return v
+}
+
+// defaultTrustedProxyDepth is the assumed number of trusted reverse
+// proxies in front of the server when TRUSTED_PROXY_DEPTH is unset.
+// One matches the common single-load-balancer deployment. The
+// IP-allowlist middleware consumes the resolved value; this package
+// owns the default because it owns env-var resolution.
+const defaultTrustedProxyDepth = 1
+
+// parseNonNegativeIntDefault is like parseIntDefault but treats an
+// explicit 0 as a valid value rather than falling back to def. Only an
+// unset/empty var, a parse error, or a negative value yields def. This
+// matters for TRUSTED_PROXY_DEPTH where 0 ("trust no proxy; use the raw
+// peer address") is a meaningful, documented setting distinct from the
+// default of 1.
+func parseNonNegativeIntDefault(s string, def int) int {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return def
+	}
+	v, err := strconv.Atoi(s)
+	if err != nil || v < 0 {
 		return def
 	}
 	return v
