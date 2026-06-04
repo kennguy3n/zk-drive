@@ -126,6 +126,20 @@ type PlatformService struct {
 // NewService constructs a PlatformService. pool, workspaces, users and
 // billing are required; pass the optional collaborators via With*.
 func NewService(pool *pgxpool.Pool, workspaces *workspace.Service, users *user.Service, billing *billing.Service) *PlatformService {
+	// Fail fast on a wiring mistake: these are dereferenced on the
+	// request path (e.g. billing in GetWorkspaceUsage), so a nil here
+	// would otherwise surface as a confusing deferred nil-panic deep in
+	// a handler instead of an obvious startup error naming the gap.
+	switch {
+	case pool == nil:
+		panic("platform: NewService requires a non-nil pool")
+	case workspaces == nil:
+		panic("platform: NewService requires a non-nil workspace.Service")
+	case users == nil:
+		panic("platform: NewService requires a non-nil user.Service")
+	case billing == nil:
+		panic("platform: NewService requires a non-nil billing.Service")
+	}
 	s := &PlatformService{
 		pool:          pool,
 		workspaces:    workspaces,

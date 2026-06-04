@@ -8,10 +8,24 @@ import (
 	"testing"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"golang.org/x/crypto/bcrypt"
 
 	"github.com/kennguy3n/zk-drive/internal/billing"
+	"github.com/kennguy3n/zk-drive/internal/user"
+	"github.com/kennguy3n/zk-drive/internal/workspace"
 )
+
+// newLogicService builds a PlatformService for the pure-logic unit
+// tests below, which never reach the database. The four required deps
+// are non-nil but inert: NewService only nil-checks them, and the
+// exercised paths (reconcileOne, dispatchFiring, CreateAlertRule's SSRF
+// pre-check) never dereference them. Using inert pointers instead of
+// nil keeps these tests valid now that NewService fails fast on a nil
+// required dependency.
+func newLogicService() *PlatformService {
+	return NewService(&pgxpool.Pool{}, &workspace.Service{}, &user.Service{}, &billing.Service{})
+}
 
 // --- pure-logic unit tests (no database) -----------------------------
 
@@ -174,8 +188,35 @@ func (f fakeInspector) SubscriptionStatus(_ context.Context, _ string) (string, 
 
 func strptr(s string) *string { return &s }
 
+func TestNewServiceRequiresDeps(t *testing.T) {
+	pool, ws, us, bl := &pgxpool.Pool{}, &workspace.Service{}, &user.Service{}, &billing.Service{}
+	// Each required dep is dereferenced on the request path, so a nil
+	// must fail loudly at construction rather than as a deferred
+	// nil-panic deep in a handler.
+	cases := map[string]func(){
+		"nil pool":       func() { NewService(nil, ws, us, bl) },
+		"nil workspaces": func() { NewService(pool, nil, us, bl) },
+		"nil users":      func() { NewService(pool, ws, nil, bl) },
+		"nil billing":    func() { NewService(pool, ws, us, nil) },
+	}
+	for name, fn := range cases {
+		t.Run(name, func(t *testing.T) {
+			defer func() {
+				if recover() == nil {
+					t.Fatalf("NewService(%s) should have panicked", name)
+				}
+			}()
+			fn()
+		})
+	}
+	// A fully-wired construction must not panic.
+	if newLogicService() == nil {
+		t.Fatal("newLogicService returned nil")
+	}
+}
+
 func TestReconcileOneWithoutInspector(t *testing.T) {
-	s := NewService(nil, nil, nil, nil)
+	s := newLogicService()
 	id := uuid.New()
 
 	// Free tier without a customer is consistent.
@@ -196,25 +237,25 @@ func TestReconcileOneWithInspector(t *testing.T) {
 	id := uuid.New()
 
 	// Matching tier and active subscription -> no mismatch.
-	s := NewService(nil, nil, nil, nil).WithSubscriptionInspector(fakeInspector{status: "active", tier: billing.TierBusiness})
+	s := newLogicService().WithSubscriptionInspector(fakeInspector{status: "active", tier: billing.TierBusiness})
 	if entry, mismatch := s.reconcileOne(context.Background(), id, billing.TierBusiness, strptr("cus_ok")); mismatch {
 		t.Errorf("matching tier should reconcile cleanly, got reason %q", entry.Reason)
 	}
 
 	// Tier drift -> mismatch.
-	s = NewService(nil, nil, nil, nil).WithSubscriptionInspector(fakeInspector{status: "active", tier: billing.TierStarter})
+	s = newLogicService().WithSubscriptionInspector(fakeInspector{status: "active", tier: billing.TierStarter})
 	if _, mismatch := s.reconcileOne(context.Background(), id, billing.TierBusiness, strptr("cus_drift")); !mismatch {
 		t.Errorf("tier drift should be a mismatch")
 	}
 
 	// No subscription found for a linked customer -> mismatch.
-	s = NewService(nil, nil, nil, nil).WithSubscriptionInspector(fakeInspector{status: ""})
+	s = newLogicService().WithSubscriptionInspector(fakeInspector{status: ""})
 	if _, mismatch := s.reconcileOne(context.Background(), id, billing.TierBusiness, strptr("cus_none")); !mismatch {
 		t.Errorf("missing subscription should be a mismatch")
 	}
 
 	// Inspector error -> mismatch with reason.
-	s = NewService(nil, nil, nil, nil).WithSubscriptionInspector(fakeInspector{err: errors.New("boom")})
+	s = newLogicService().WithSubscriptionInspector(fakeInspector{err: errors.New("boom")})
 	if entry, mismatch := s.reconcileOne(context.Background(), id, billing.TierFree, strptr("cus_err")); !mismatch || !strings.Contains(entry.Reason, "boom") {
 		t.Errorf("inspector error should surface as a mismatch, got mismatch=%v reason=%q", mismatch, entry.Reason)
 	}
@@ -245,7 +286,7 @@ func (d *captureDispatcher) DispatchEmail(_ context.Context, _ string, f AlertFi
 
 func TestDispatchFiringConsistentSnapshot(t *testing.T) {
 	d := &captureDispatcher{}
-	s := NewService(nil, nil, nil, nil).WithAlertDispatcher(d)
+	s := newLogicService().WithAlertDispatcher(d)
 	rule := AlertRule{
 		ID:         uuid.New(),
 		WebhookURL: "https://example.com/hook",
@@ -292,7 +333,7 @@ func TestCreateAlertRuleRejectsBlockedWebhookURL(t *testing.T) {
 	// A wired validator that blocks the URL must surface as a 400-class
 	// ErrInvalidArgument before any DB work, so the nil pool is never
 	// touched. This is the SSRF guard at rule-creation time.
-	s := NewService(nil, nil, nil, nil).
+	s := newLogicService().
 		WithURLValidator(fakeURLValidator{blockErr: errors.New("blocked")})
 	wsID := uuid.New()
 	_, err := s.CreateAlertRule(context.Background(), AlertRule{
@@ -334,7 +375,7 @@ func TestCreateAPIKeyRejectsUnknownPermission(t *testing.T) {
 
 func TestDispatchFiringRecordsPerChannelFailure(t *testing.T) {
 	d := &captureDispatcher{whErr: errors.New("webhook down")}
-	s := NewService(nil, nil, nil, nil).WithAlertDispatcher(d)
+	s := newLogicService().WithAlertDispatcher(d)
 	rule := AlertRule{ID: uuid.New(), WebhookURL: "https://x/y", Email: "ops@example.com"}
 	firing := AlertFiring{RuleID: rule.ID, Value: 12}
 
