@@ -198,13 +198,15 @@ resource "google_cloud_run_v2_service" "server" {
   }
 
   # Cloud Run resolves secret_key_ref version="latest" at deploy time, so the
-  # service must not be created before the secret *versions* exist. The
-  # template only references the secret shells (secret_id), which makes the
-  # versions siblings (not ancestors) of this service in the graph; without
+  # service must not be created before the secret *versions* exist AND the
+  # service account holds secretAccessor on them. The template only references
+  # the secret shells (secret_id), which makes the versions and the IAM
+  # bindings siblings (not ancestors) of this service in the graph; without
   # this, Terraform can create the service first and the apply fails with a
-  # secret-resolution error. Depend on every version the app actually consumes
-  # (stripe entries are count-gated and resolve to an empty set when billing is
-  # off, which depends_on tolerates).
+  # secret-resolution / permission error. Depend on every version the app
+  # actually consumes plus the secretAccessor grant (stripe entries are
+  # count-gated and resolve to an empty set when billing is off, which
+  # depends_on tolerates).
   depends_on = [
     google_project_service.this,
     google_secret_manager_secret_version.database_url,
@@ -214,6 +216,7 @@ resource "google_cloud_run_v2_service" "server" {
     google_secret_manager_secret_version.s3_secret_key,
     google_secret_manager_secret_version.stripe_secret_key,
     google_secret_manager_secret_version.stripe_webhook_secret,
+    google_secret_manager_secret_iam_member.app,
   ]
 }
 
@@ -354,8 +357,9 @@ resource "google_cloud_run_v2_service" "worker" {
     }
   }
 
-  # Same secret-version race as the server (see the note there): the worker
-  # also reads secret_key_ref version="latest" and must wait for the versions.
+  # Same secret-version + secretAccessor race as the server (see the note
+  # there): the worker also reads secret_key_ref version="latest" and must wait
+  # for the versions and the IAM grant before it can resolve them.
   depends_on = [
     google_project_service.this,
     google_secret_manager_secret_version.database_url,
@@ -365,6 +369,7 @@ resource "google_cloud_run_v2_service" "worker" {
     google_secret_manager_secret_version.s3_secret_key,
     google_secret_manager_secret_version.stripe_secret_key,
     google_secret_manager_secret_version.stripe_webhook_secret,
+    google_secret_manager_secret_iam_member.app,
   ]
 }
 

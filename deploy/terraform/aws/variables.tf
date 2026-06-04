@@ -219,6 +219,12 @@ variable "server_target_requests_per_instance" {
   default     = 12000
 }
 
+variable "alb_idle_timeout" {
+  description = "ALB connection idle timeout (seconds). The app's WebSocket endpoints (/api/ws, /api/documents/{id}/ws) ping every ~54s (pingPeriod = pongWait*9/10, pongWait=60s), so the AWS default of 60s leaves only a ~6s margin: a delayed ping (GC pause, slow write, network jitter) could trip the idle timeout and drop a live collab session. Default 300s gives comfortable headroom over the ping period while still reaping genuinely idle connections. (This is an idle timeout, reset by the keepalive ping — unlike GCP's backend_timeout_sec, which is a max connection lifetime.)"
+  type        = number
+  default     = 300
+}
+
 variable "worker_cpu" {
   description = "Fargate CPU units for the worker task (1024 = 1 vCPU)."
   type        = number

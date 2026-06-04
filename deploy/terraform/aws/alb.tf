@@ -12,6 +12,11 @@ resource "aws_lb" "this" {
   drop_invalid_header_fields = true
   enable_http2               = true
 
+  # Headroom over the app's ~54s WebSocket keepalive ping (see
+  # var.alb_idle_timeout) so a delayed ping doesn't drop a live collab session
+  # at the AWS default of 60s.
+  idle_timeout = var.alb_idle_timeout
+
   tags = {
     Name = "${local.name}-alb"
   }
