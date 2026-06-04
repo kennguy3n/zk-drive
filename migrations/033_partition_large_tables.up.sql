@@ -34,17 +34,40 @@
 --
 -- Conversion strategy (per table, all inside this migration's single
 -- transaction — the migrate runner wraps each file in a tx):
---   1. CREATE a new `<t>_partitioned` parent PARTITION BY HASH
+--   1. LOCK the old table in ACCESS EXCLUSIVE mode up-front. This is
+--      load-bearing for correctness, not just statement ordering: the
+--      copy in step 3 is INSERT...SELECT, and that SELECT only takes an
+--      ACCESS SHARE lock, which is compatible with the ROW EXCLUSIVE
+--      lock concurrent INSERTs hold. Without an explicit exclusive
+--      lock, another session could COMMIT a new row AFTER the SELECT's
+--      snapshot but BEFORE the DROP in step 4 — that row would then be
+--      destroyed by the DROP and lost forever. Taking ACCESS EXCLUSIVE
+--      first blocks all concurrent writers for the whole copy, so the
+--      set of rows the SELECT sees is exactly the set the DROP removes;
+--      no write can slip through the gap.
+--   2. CREATE a new `<t>_partitioned` parent PARTITION BY HASH
 --      (workspace_id) with 64 partitions named `<t>_pNN`.
---   2. Copy every row from the old table into the new parent (tuple
+--   3. Copy every row from the old table into the new parent (tuple
 --      routing distributes rows across partitions).
---   3. DROP the old table — this frees the original index / constraint
+--   4. DROP the old table — this frees the original index / constraint
 --      / policy names so the partitioned table can reuse them exactly.
---   4. RENAME the new parent to the original name.
---   5. Recreate the primary key (now including workspace_id, as a hash
+--   5. RENAME the new parent to the original name.
+--   6. Recreate the primary key (now including workspace_id, as a hash
 --      partition's PK must contain the partition key), the secondary
 --      indexes, the foreign keys, the CHECK constraints, and the RLS
 --      policies under their original names.
+--
+-- Operational note (large tables)
+-- -------------------------------
+-- The copy is a single in-transaction INSERT...SELECT, so for a table
+-- with hundreds of millions of rows it holds the ACCESS EXCLUSIVE lock
+-- (all writes blocked) for the full copy and generates WAL for the
+-- entire dataset. Run this migration inside a maintenance window /
+-- write quiesce. If any of these tables ever outgrows what a window can
+-- absorb, replace this copy-drop-rename with an online strategy
+-- (pg_partman, logical replication, or chunked CREATE TABLE ... ATTACH
+-- PARTITION) rather than a single bulk copy. At current volumes the
+-- three logs copy comfortably within a maintenance window.
 --
 -- Primary-key note
 -- ----------------
@@ -85,6 +108,8 @@
 -- ===========================================================
 -- activity_log
 -- ===========================================================
+LOCK TABLE activity_log IN ACCESS EXCLUSIVE MODE;
+
 CREATE TABLE activity_log_partitioned (
     id UUID NOT NULL DEFAULT uuid_generate_v4(),
     workspace_id UUID NOT NULL,
@@ -136,6 +161,8 @@ ALTER TABLE activity_log FORCE ROW LEVEL SECURITY;
 -- ===========================================================
 -- audit_log
 -- ===========================================================
+LOCK TABLE audit_log IN ACCESS EXCLUSIVE MODE;
+
 CREATE TABLE audit_log_partitioned (
     id UUID NOT NULL DEFAULT uuid_generate_v4(),
     workspace_id UUID NOT NULL,
@@ -187,6 +214,8 @@ ALTER TABLE audit_log FORCE ROW LEVEL SECURITY;
 -- ===========================================================
 -- change_log
 -- ===========================================================
+LOCK TABLE change_log IN ACCESS EXCLUSIVE MODE;
+
 -- Detach the global sequence so the upcoming DROP TABLE of the old
 -- change_log does not cascade-drop it; we re-attach it to the new
 -- column once the partitioned table owns the name.
@@ -245,3 +274,28 @@ CREATE INDEX idx_change_log_workspace_sequence
     ON change_log(workspace_id, sequence);
 CREATE INDEX idx_change_log_workspace_occurred_at
     ON change_log(workspace_id, occurred_at DESC);
+
+-- Tenant isolation for change_log (newly added here)
+-- --------------------------------------------------
+-- change_log was created in migration 029, AFTER the RLS migration 024,
+-- so it never received a tenant_isolation policy — it is the only
+-- workspace-scoped append-only log without one. Since this migration is
+-- already rebuilding the table, we close that defense-in-depth gap so
+-- change_log matches activity_log and audit_log. The predicate is
+-- identical to migration 024: when the app.workspace_id GUC is unset
+-- (migrations and background workers — e.g. the changefeed paths in
+-- cmd/worker that deliberately run without the GUC) the
+-- app_current_workspace_id() IS NULL branch keeps those paths
+-- unrestricted, and request-context connections only ever read/write
+-- change_log for their own bound workspace, so the policy is a no-op on
+-- the happy path and a backstop against a future query that forgets the
+-- workspace_id filter. (The down migration intentionally does NOT
+-- recreate this policy: reverting 033 must restore the pre-033 state,
+-- in which change_log had no RLS.)
+CREATE POLICY tenant_isolation ON change_log
+    USING (app_current_workspace_id() IS NULL
+           OR workspace_id = app_current_workspace_id())
+    WITH CHECK (app_current_workspace_id() IS NULL
+                OR workspace_id = app_current_workspace_id());
+ALTER TABLE change_log ENABLE ROW LEVEL SECURITY;
+ALTER TABLE change_log FORCE ROW LEVEL SECURITY;

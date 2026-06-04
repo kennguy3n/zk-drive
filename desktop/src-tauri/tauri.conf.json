@@ -24,12 +24,6 @@
     ],
     "security": {
       "csp": "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; connect-src 'self' ipc: http://ipc.localhost"
-    },
-    "trayIcon": {
-      "id": "zk-drive-tray",
-      "iconPath": "icons/128x128.png",
-      "iconAsTemplate": true,
-      "tooltip": "ZK Drive"
     }
   },
   "bundle": {

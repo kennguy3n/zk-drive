@@ -210,23 +210,32 @@ impl KeychainTokenProvider {
             return Err(ApiError::Status { status, body });
         }
         let parsed: TokenResponse = resp.json().await.map_err(ApiError::from)?;
+        // A hostile / misconfigured server can return an
+        // astronomically large `expires_in`. chrono's `Add` panics on
+        // overflow, so guard with `try_seconds` + `checked_add_signed`
+        // and surface it as a 401 rather than crashing the task — same
+        // discipline as the SDK's `HttpRefresher` (auth/src/token.rs).
+        let lifetime = ChronoDuration::try_seconds(parsed.expires_in).ok_or_else(|| {
+            ApiError::Status {
+                status: 401,
+                body: format!("non-representable expires_in: {}", parsed.expires_in),
+            }
+        })?;
         let expires_at = Utc::now()
-            .checked_add_signed(ChronoDuration::seconds(parsed.expires_in.max(0)))
+            .checked_add_signed(lifetime)
             .ok_or_else(|| ApiError::Status {
                 status: 401,
-                body: "expires_in overflow".into(),
+                body: format!("expires_in would overflow expires_at: {}", parsed.expires_in),
             })?;
         let new = TokenSet {
             access_token: parsed.access_token,
-            // A refresh response may omit a new refresh token; keep
-            // the existing one in that case.
-            refresh_token: if parsed.refresh_token.is_empty() {
-                refresh_token.to_string()
-            } else {
-                parsed.refresh_token
-            },
+            // A refresh response may omit (or null out) a new refresh
+            // token; keep the existing one in that case.
+            refresh_token: parsed
+                .refresh_token
+                .unwrap_or_else(|| refresh_token.to_string()),
             expires_at,
-            scope: parsed.scope,
+            scope: parsed.scope.unwrap_or_default(),
         };
         self.store.save(&new).await.map_err(unauthorized)?;
         Ok(new)
@@ -299,9 +308,10 @@ async fn wait_for_callback(
     let accept = async {
         loop {
             let (mut stream, _) = listener.accept().await?;
-            let mut buf = vec![0u8; 8192];
-            let n = stream.read(&mut buf).await?;
-            let request = String::from_utf8_lossy(&buf[..n]);
+            let Some(request) = read_request_head(&mut stream).await else {
+                write_response(&mut stream, "Invalid request").await;
+                continue;
+            };
             let Some(target) = request.lines().next().and_then(parse_request_target) else {
                 write_response(&mut stream, "Invalid request").await;
                 continue;
@@ -349,6 +359,37 @@ async fn wait_for_callback(
     }
 }
 
+/// Read the HTTP request head (up to and including the blank-line
+/// `\r\n\r\n` terminator) from the loopback stream.
+///
+/// A single `TcpStream::read` can return a partial request — a browser
+/// may split the request line from the headers across segments, or
+/// send a large cookie jar — so accumulate until the head is complete,
+/// the peer closes, or a sane cap is hit, rather than trusting one
+/// read to capture the whole request line. Returns `None` if the peer
+/// sends nothing. The outer `CALLBACK_TIMEOUT` bounds a peer that
+/// never finishes the head.
+async fn read_request_head(stream: &mut tokio::net::TcpStream) -> Option<String> {
+    /// Cap so a hostile local client can't make us buffer unbounded.
+    const MAX_HEAD: usize = 64 * 1024;
+    let mut buf = Vec::with_capacity(1024);
+    let mut chunk = [0u8; 4096];
+    loop {
+        let n = stream.read(&mut chunk).await.ok()?;
+        if n == 0 {
+            break; // peer closed the connection
+        }
+        buf.extend_from_slice(&chunk[..n]);
+        if buf.windows(4).any(|w| w == b"\r\n\r\n") || buf.len() >= MAX_HEAD {
+            break;
+        }
+    }
+    if buf.is_empty() {
+        return None;
+    }
+    Some(String::from_utf8_lossy(&buf).into_owned())
+}
+
 /// Parse the request-target (the middle token of `GET <target>
 /// HTTP/1.1`) into an absolute URL rooted at the loopback host so we
 /// can use `url`'s query parser.
@@ -357,31 +398,44 @@ fn parse_request_target(request_line: &str) -> Option<Url> {
     Url::parse(&format!("http://127.0.0.1{target}")).ok()
 }
 
-async fn write_response(stream: &mut tokio::net::TcpStream, body: &str) {
-    // Render the HTML body first and derive Content-Length from its
-    // actual byte length. A previous magic-constant offset under-counted
-    // the wrapper, so the header advertised more bytes than were sent and
-    // a strict HTTP client could hang waiting for the missing tail.
-    let html = format!(
-        "<!doctype html><html><body style=\"font-family:system-ui;padding:3rem;text-align:center\"><h2>{body}</h2></body></html>"
+/// Build the full HTTP/1.1 200 response (headers + body) for the
+/// loopback page. Kept pure (no I/O) so the framing — in particular
+/// that `Content-Length` equals the exact body byte count — is unit
+/// testable. Computing the length from the assembled body can't drift
+/// the way a hardcoded wrapper-size constant would.
+fn render_callback_response(message: &str) -> String {
+    let body = format!(
+        "<!doctype html><html><body style=\"font-family:system-ui;padding:3rem;text-align:center\"><h2>{message}</h2></body></html>"
     );
-    let payload = format!(
-        "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{html}",
-        html.len()
-    );
+    format!(
+        "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.len()
+    )
+}
+
+async fn write_response(stream: &mut tokio::net::TcpStream, message: &str) {
+    let payload = render_callback_response(message);
     let _ = stream.write_all(payload.as_bytes()).await;
     let _ = stream.flush().await;
 }
 
 /// Token-endpoint response shape (the common OAuth2 token response).
+///
+/// `refresh_token` and `scope` are `Option<String>` rather than
+/// `String` + `#[serde(default)]` so an explicit JSON `null` (which
+/// some providers — e.g. Azure AD when it declines to rotate the
+/// refresh token — emit) deserializes to `None` instead of failing the
+/// whole decode. This mirrors the SDK's `HttpRefresher::Resp`
+/// (`sdk/crates/auth/src/token.rs`). A bare `Option` field is already
+/// optional-on-missing; `#[serde(default)]` on `scope` is kept only to
+/// match the SDK verbatim.
 #[derive(Debug, Deserialize)]
 struct TokenResponse {
     access_token: String,
-    #[serde(default)]
-    refresh_token: String,
+    refresh_token: Option<String>,
     expires_in: i64,
     #[serde(default)]
-    scope: String,
+    scope: Option<String>,
 }
 
 /// Exchange the authorization code for a [`TokenSet`], sending the
@@ -427,13 +481,184 @@ async fn exchange_code(
         .await
         .map_err(|e| DesktopError::Auth(format!("decode token response: {e}")))?;
 
+    // Guard against a non-representable / overflowing `expires_in` so a
+    // bad token response is a typed error, not a panic (see `refresh`).
+    let lifetime = ChronoDuration::try_seconds(parsed.expires_in).ok_or_else(|| {
+        DesktopError::Auth(format!(
+            "non-representable expires_in: {}",
+            parsed.expires_in
+        ))
+    })?;
     let expires_at = Utc::now()
-        .checked_add_signed(ChronoDuration::seconds(parsed.expires_in.max(0)))
-        .ok_or_else(|| DesktopError::Auth("expires_in overflow".into()))?;
+        .checked_add_signed(lifetime)
+        .ok_or_else(|| DesktopError::Auth("expires_in would overflow expires_at".into()))?;
     Ok(TokenSet {
         access_token: parsed.access_token,
-        refresh_token: parsed.refresh_token,
+        refresh_token: parsed.refresh_token.unwrap_or_default(),
         expires_at,
-        scope: parsed.scope,
+        scope: parsed.scope.unwrap_or_default(),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Split a raw HTTP/1.1 response into (headers, body) on the
+    /// blank-line terminator.
+    fn split_response(raw: &str) -> (&str, &str) {
+        raw.split_once("\r\n\r\n")
+            .expect("response must have a header/body separator")
+    }
+
+    fn header_value<'a>(headers: &'a str, name: &str) -> Option<&'a str> {
+        headers.lines().find_map(|line| {
+            let (k, v) = line.split_once(':')?;
+            k.trim()
+                .eq_ignore_ascii_case(name)
+                .then(|| v.trim())
+        })
+    }
+
+    #[test]
+    fn callback_response_content_length_matches_body_bytes() {
+        // The Content-Length must equal the exact byte count of the
+        // body — regression for the off-by-9 hardcoded wrapper size.
+        for message in ["Login complete — you can close this window.", "Invalid request", ""] {
+            let raw = render_callback_response(message);
+            let (headers, body) = split_response(&raw);
+            let declared: usize = header_value(headers, "Content-Length")
+                .expect("Content-Length header present")
+                .parse()
+                .expect("Content-Length is a number");
+            assert_eq!(
+                declared,
+                body.len(),
+                "declared Content-Length must equal body byte length for {message:?}"
+            );
+            assert!(body.contains(message), "body should embed the message");
+        }
+    }
+
+    #[test]
+    fn parse_request_target_extracts_query() {
+        let url = parse_request_target("GET /callback?code=abc123&state=xyz HTTP/1.1")
+            .expect("valid request target parses");
+        assert_eq!(url.path(), "/callback");
+        let pairs: std::collections::HashMap<_, _> = url.query_pairs().into_owned().collect();
+        assert_eq!(pairs.get("code").map(String::as_str), Some("abc123"));
+        assert_eq!(pairs.get("state").map(String::as_str), Some("xyz"));
+    }
+
+    #[test]
+    fn parse_request_target_rejects_malformed_line() {
+        assert!(parse_request_target("garbage-without-a-target").is_none());
+    }
+
+    #[test]
+    fn build_authorize_url_carries_pkce_and_state() {
+        let pkce = PkceChallenge::generate();
+        let url = build_authorize_url(
+            "https://drive.example.com/",
+            Provider::Google,
+            "http://127.0.0.1:51789/callback",
+            &pkce,
+            "state-token",
+        )
+        .expect("authorize url builds");
+
+        assert_eq!(url.path(), "/api/auth/oauth/google");
+        let pairs: std::collections::HashMap<_, _> = url.query_pairs().into_owned().collect();
+        assert_eq!(pairs.get("response_type").map(String::as_str), Some("code"));
+        assert_eq!(
+            pairs.get("code_challenge_method").map(String::as_str),
+            Some("S256")
+        );
+        assert_eq!(
+            pairs.get("code_challenge").map(String::as_str),
+            Some(pkce.challenge.as_str())
+        );
+        assert_eq!(pairs.get("state").map(String::as_str), Some("state-token"));
+        assert_eq!(
+            pairs.get("redirect_uri").map(String::as_str),
+            Some("http://127.0.0.1:51789/callback")
+        );
+    }
+
+    #[test]
+    fn microsoft_provider_uses_its_slug() {
+        let pkce = PkceChallenge::generate();
+        let url = build_authorize_url(
+            "https://drive.example.com",
+            Provider::Microsoft,
+            "http://127.0.0.1:1/callback",
+            &pkce,
+            "s",
+        )
+        .expect("authorize url builds");
+        assert_eq!(url.path(), "/api/auth/oauth/microsoft");
+    }
+
+    #[test]
+    fn token_response_accepts_null_and_missing_optional_fields() {
+        // Azure AD (and others) emit `refresh_token: null` when they
+        // decline to rotate it; the field (and `scope`) may also be
+        // absent. Both must deserialize to `None` rather than failing
+        // the whole token decode — regression for the `String` +
+        // `#[serde(default)]` shape that errored on explicit `null`.
+        let null_rt: TokenResponse =
+            serde_json::from_str(r#"{"access_token":"a","refresh_token":null,"expires_in":3600}"#)
+                .expect("explicit null refresh_token deserializes");
+        assert_eq!(null_rt.refresh_token, None);
+        assert_eq!(null_rt.scope, None);
+
+        let missing: TokenResponse =
+            serde_json::from_str(r#"{"access_token":"a","expires_in":3600}"#)
+                .expect("missing refresh_token deserializes");
+        assert_eq!(missing.refresh_token, None);
+
+        let present: TokenResponse = serde_json::from_str(
+            r#"{"access_token":"a","refresh_token":"r","expires_in":3600,"scope":"files"}"#,
+        )
+        .expect("present fields deserialize");
+        assert_eq!(present.refresh_token.as_deref(), Some("r"));
+        assert_eq!(present.scope.as_deref(), Some("files"));
+    }
+
+    #[test]
+    fn read_request_head_assembles_split_reads() {
+        use tokio::io::AsyncWriteExt;
+
+        // A browser may split the request line from the headers across
+        // TCP segments; `read_request_head` must reassemble them rather
+        // than truncating on the first partial read.
+        let rt = tokio::runtime::Runtime::new().expect("runtime");
+        rt.block_on(async {
+            let listener = TcpListener::bind(("127.0.0.1", 0)).await.expect("bind");
+            let addr = listener.local_addr().expect("addr");
+            let writer = tokio::spawn(async move {
+                let mut client = tokio::net::TcpStream::connect(addr).await.expect("connect");
+                client.write_all(b"GET /callback?code=ab").await.expect("w1");
+                client.flush().await.expect("f1");
+                tokio::time::sleep(Duration::from_millis(20)).await;
+                client
+                    .write_all(b"c&state=xyz HTTP/1.1\r\nHost: x\r\n\r\n")
+                    .await
+                    .expect("w2");
+                client.flush().await.expect("f2");
+            });
+            let (mut stream, _) = listener.accept().await.expect("accept");
+            let head = read_request_head(&mut stream).await.expect("head read");
+            let target = head
+                .lines()
+                .next()
+                .and_then(parse_request_target)
+                .expect("request target parses");
+            let pairs: std::collections::HashMap<_, _> =
+                target.query_pairs().into_owned().collect();
+            assert_eq!(pairs.get("code").map(String::as_str), Some("abc"));
+            assert_eq!(pairs.get("state").map(String::as_str), Some("xyz"));
+            writer.await.expect("writer joins");
+        });
+    }
 }

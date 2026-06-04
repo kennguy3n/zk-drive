@@ -2,11 +2,14 @@
 # This is a YAML-formatted file. Override with `-f my-values.yaml` or
 # `--set key=value` at install/upgrade time.
 
-# -- Namespace the chart deploys into. The chart does NOT create the
-# namespace by default (set namespace.create=true to manage it here);
-# `helm install -n <ns> --create-namespace` is the common path.
+# -- Namespace the chart deploys into. Left empty so resources follow the
+# release namespace (`helm install -n <ns>`), the conventional Helm
+# behavior — `--set namespace.name=<ns>` only when you need to pin
+# resources to a namespace different from the release's. The chart does
+# NOT create the namespace by default (set namespace.create=true to manage
+# it here); `helm install -n zk-drive --create-namespace` is the common path.
 namespace:
-  name: zk-drive
+  name: ""
   create: false
 
 # Image used by server, worker, migrate Job, and all CronJobs — every
@@ -24,6 +27,15 @@ imagePullSecrets: []
 # via envFrom on every workload.
 config:
   DATABASE_URL: postgres://zkdrive:zkdrive@postgres.zk-drive.svc.cluster.local:5432/zkdrive?sslmode=disable
+  # Set true for production so DATABASE_URL is NOT rendered into the
+  # ConfigMap (which is unencrypted at rest and broadly RBAC-readable).
+  # When true, supply the real connection string — which embeds the DB
+  # password — via the Secret instead: either secrets.data.DATABASE_URL
+  # (with secrets.create=true) or an existingSecret carrying a
+  # DATABASE_URL key. Both flow through the same envFrom, so the value
+  # reaches every workload + the migrate Job. Default false keeps the
+  # in-cluster dev connection string above for local/staging use.
+  databaseUrlInSecret: false
   NATS_URL: nats://nats.zk-drive.svc.cluster.local:4222
   LISTEN_ADDR: ":8080"
   RATE_LIMIT_PER_USER: "100"
@@ -65,7 +77,14 @@ server:
     topologyKey: kubernetes.io/hostname
     zoneKey: topology.kubernetes.io/zone
   readinessProbe:
-    path: /healthz
+    # Deep readiness check: /readyz pings Postgres/Redis/S3/NATS (checks
+    # run concurrently under a 900ms per-check budget) so a pod that has
+    # lost a dependency is pulled from the Service endpoints instead of
+    # serving failing traffic. This is what cmd/server/main.go documents
+    # for the readiness probe; /healthz is the shallow liveness check
+    # below (a failing liveness probe restarts the pod, which is the
+    # wrong response to a transient dependency outage).
+    path: /readyz
     initialDelaySeconds: 5
     periodSeconds: 10
     timeoutSeconds: 3
@@ -163,6 +182,22 @@ cronjobs:
     activeDeadlineSeconds: 14400
     # Opt-in gate; archiver no-ops until true.
     enabledFlag: "true"
+    # The archiver is bound by S3 PUT latency and gzip CPU on the batch
+    # encoder; its memory limit is intentionally double the other
+    # CronJobs' (512Mi vs 256Mi) to hold the encoder working set +
+    # JSONL.gz scratch buffer — matching deploy/k8s/audit-archiver-cronjob.yaml.
+    # Each CronJob falls back to the shared cronjobs.resources below when
+    # its own .resources is unset, so only the archiver overrides it here.
+    resources:
+      requests:
+        cpu: 100m
+        memory: 128Mi
+      limits:
+        cpu: 500m
+        memory: 512Mi
+  # Shared default for any CronJob without its own .resources block
+  # (reconciler + orphan-gc; both are Postgres/S3-latency bound, not
+  # CPU/memory bound, so 256Mi is ample — see the raw manifests).
   resources:
     requests:
       cpu: 50m

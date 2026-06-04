@@ -73,15 +73,21 @@ every manifest in `k8s/` and adds the production-readiness objects:
   `worker.hpa.metric=custom`).
 - **PodDisruptionBudgets** — `minAvailable: 1` for server and worker so
   node drains / cluster upgrades never take a tier fully offline.
-- **NetworkPolicies** — default-deny ingress+egress with scoped allows
-  (ingress→server:8080, Prometheus→server:8080 / worker:9091,
-  server/worker→Postgres:5432 / Redis:6379 / NATS:4222 / S3:443,
-  worker→ClamAV:3310, a batch-egress policy for the migrate Job and
-  CronJobs (`app: zk-drive-batch`) covering the same backends, and DNS
-  egress to kube-dns). The S3 egress (443) is what lets the server run
-  its `/readyz` HeadBucket check and the worker reach zk-object-fabric
-  for previews, scanning, orphan GC, and audit archiving; set the port
-  via `networkPolicy.s3Port`.
+- **NetworkPolicies** — default-deny ingress+egress with scoped allows.
+  Because a connection requires **both** the source's egress *and* the
+  destination's ingress to be permitted, there are matching egress and
+  ingress rules for every flow: ingress→server:8080, Prometheus→server:8080
+  / worker:9091, server/worker→Postgres:5432 / Redis:6379 / NATS:4222 /
+  S3:443, worker→ClamAV:3310, a batch-egress policy for the migrate Job and
+  CronJobs (`app: zk-drive-batch`) covering the same backends, **ingress
+  policies on the in-cluster Postgres/NATS/ClamAV pods** accepting from
+  those tiers, a ClamAV egress (443) so `freshclam` can refresh virus
+  definitions, and DNS egress to kube-dns. The S3 egress (443) is what lets
+  the server run its `/readyz` HeadBucket check and the worker reach
+  zk-object-fabric for previews, scanning, orphan GC, and audit archiving;
+  set the port via `networkPolicy.s3Port`. The chart gates the
+  Postgres/NATS/ClamAV ingress policies on their `*.enabled` flags, so a
+  managed backend (no in-cluster pod) renders none of them.
 - **Pod anti-affinity + topology spread** so replicas spread across
   nodes and availability zones.
 - **Migration Job** as a `pre-install,pre-upgrade` hook so the schema is
@@ -109,23 +115,67 @@ requests/limits, image tag, env vars, ingress class, TLS secret name,
 StorageClass, HPA/PDB/NetworkPolicy toggles, and per-dependency enable
 flags).
 
+### Uninstall and cleanup
+
+```bash
+helm uninstall zk-drive -n zk-drive
+```
+
+`zk-drive-config` (ConfigMap) and `zk-drive-secrets` (Secret) are created
+as `pre-install,pre-upgrade` hooks so the migration Job can resolve their
+`envFrom` references on a first install (see the migration-hook note
+above). Helm does not track hook resources in the release manifest, so
+`helm uninstall` leaves them behind. Remove them manually if you want a
+clean teardown (skip the Secret if you supplied your own via
+`secrets.existingSecret`):
+
+```bash
+kubectl delete configmap zk-drive-config -n zk-drive
+kubectl delete secret zk-drive-secrets -n zk-drive   # chart-managed Secret only
+# The namespace itself (if created with --create-namespace) and any PVCs
+# from the bundled Postgres are also retained by design — delete them
+# explicitly when decommissioning:
+kubectl delete namespace zk-drive
+```
+
 ### Managed Postgres (recommended for production)
 
 The in-cluster Postgres StatefulSet is single-replica with a local PVC
 and is intended for dev/staging only. For production, use managed
 Postgres (RDS / Cloud SQL / Cloud SQL for PostgreSQL) and disable the
-bundled one:
+bundled one.
+
+Keep the credential-bearing `DATABASE_URL` out of the ConfigMap: set
+`config.databaseUrlInSecret=true` so the chart drops `DATABASE_URL` from
+`zk-drive-config` and instead sources it from the Secret. The
+connection string then lives only in the Secret (which can be encrypted
+at rest and is more tightly RBAC-scoped than a ConfigMap), and reaches
+the server, worker, and migrate Job through the same `envFrom`.
 
 ```bash
+# Credentials in a pre-provisioned Secret (preferred — populated by
+# External Secrets Operator, Sealed Secrets, or your cloud's secret
+# manager; the Secret must carry a DATABASE_URL key):
 helm upgrade zk-drive deploy/helm -n zk-drive \
   --set postgres.enabled=false \
-  --set config.DATABASE_URL='postgres://zkdrive:***@db.internal:5432/zkdrive?sslmode=require'
+  --set config.databaseUrlInSecret=true \
+  --set secrets.create=false \
+  --set secrets.existingSecret=zk-drive-db
+
+# Or let the chart manage the Secret (avoid plaintext --set in shell
+# history; prefer -f a gitignored values file):
+helm upgrade zk-drive deploy/helm -n zk-drive \
+  --set postgres.enabled=false \
+  --set config.databaseUrlInSecret=true \
+  --set secrets.data.DATABASE_URL='postgres://zkdrive:***@db.internal:5432/zkdrive?sslmode=require'
 ```
 
-Provide the credentials via a pre-provisioned Secret
-(`secrets.create=false`, `secrets.existingSecret=<name>`) populated by
-External Secrets Operator, Sealed Secrets, or your cloud's secret
-manager rather than chart `--set` values.
+> **Why not `--set config.DATABASE_URL=...`?** That renders the password
+> into the `zk-drive-config` ConfigMap, which is unencrypted at rest and
+> broadly readable via RBAC. `config.databaseUrlInSecret=true` is the
+> production path. (The raw `k8s/configmap.yaml` carries the same dev
+> default; when applying the raw manifests against a managed DB, move
+> `DATABASE_URL` into `k8s/secret.yaml` instead.)
 
 > **NetworkPolicy + managed endpoints.** The egress policies match the
 > bundled Postgres / NATS / ClamAV by in-cluster `podSelector`, so they

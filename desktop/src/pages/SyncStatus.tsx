@@ -5,6 +5,7 @@ import * as shell from "../api/shell";
 import ConflictDialog from "../components/ConflictDialog";
 import {
   healthLabel,
+  isRunning,
   pending,
   type WorkspaceState,
 } from "../types";
@@ -112,20 +113,59 @@ function WorkspaceRow({
   onChange: () => Promise<void> | void;
   onResolve: () => void;
 }) {
-  const running = ws.health !== "stopped";
+  // Match the SDK's `is_running()` semantics (excludes `error`)
+  // rather than treating everything-but-stopped as running.
+  const running = isRunning(ws.health);
+  const errored = ws.health === "error";
   const total = useMemo(() => Math.max(ws.summary.total_files, 1), [ws.summary.total_files]);
   const done = ws.summary.up_to_date;
   const pct = Math.round((done / total) * 100);
 
-  async function toggle() {
-    if (running) await shell.pauseSync(ws.workspace_id);
-    else await shell.resumeSync(ws.workspace_id);
-    await onChange();
+  // Running   -> Pause   (StopSync)
+  // Errored   -> Restart (StopSync then StartSync). The SDK's
+  //              `mark_task_failed` flips health to Error WITHOUT
+  //              aborting the sibling tasks, so a bare StartSync from
+  //              Error would overwrite — and leak — the still-live
+  //              handles. Stopping first aborts them, then a clean
+  //              StartSync restarts. This gives the user a one-click
+  //              recover instead of manual Pause-then-Resume.
+  // Stopped   -> Resume  (StartSync)
+  const actionLabel = running ? "Pause" : errored ? "Restart" : "Resume";
+
+  const [busy, setBusy] = useState(false);
+  const [actionError, setActionError] = useState<string | null>(null);
+
+  // Wrap the IPC calls so a rejected command surfaces to the user
+  // instead of being swallowed as an unhandled rejection by React's
+  // event system — same contract as `bind()` above.
+  async function run(action: () => Promise<void>) {
+    setBusy(true);
+    setActionError(null);
+    try {
+      await action();
+      await onChange();
+    } catch (err) {
+      setActionError(formatError(err));
+    } finally {
+      setBusy(false);
+    }
   }
 
-  async function remove() {
-    await shell.removeWorkspace(ws.workspace_id);
-    await onChange();
+  function toggle() {
+    return run(async () => {
+      if (running) {
+        await shell.pauseSync(ws.workspace_id);
+      } else if (errored) {
+        await shell.pauseSync(ws.workspace_id);
+        await shell.resumeSync(ws.workspace_id);
+      } else {
+        await shell.resumeSync(ws.workspace_id);
+      }
+    });
+  }
+
+  function remove() {
+    return run(() => shell.removeWorkspace(ws.workspace_id));
   }
 
   return (
@@ -149,15 +189,18 @@ function WorkspaceRow({
       </div>
 
       {ws.last_error && <div className="error small">{ws.last_error}</div>}
+      {actionError && <div className="error small">{actionError}</div>}
 
       <div className="ws-actions">
-        <button onClick={toggle}>{running ? "Pause" : "Resume"}</button>
+        <button onClick={toggle} disabled={busy}>
+          {actionLabel}
+        </button>
         {ws.summary.conflict > 0 && (
-          <button className="warn" onClick={onResolve}>
+          <button className="warn" onClick={onResolve} disabled={busy}>
             Resolve conflicts
           </button>
         )}
-        <button className="danger" onClick={remove}>
+        <button className="danger" onClick={remove} disabled={busy}>
           Remove
         </button>
       </div>
