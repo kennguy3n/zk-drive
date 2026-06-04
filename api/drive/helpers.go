@@ -10,6 +10,7 @@ import (
 	"github.com/kennguy3n/zk-drive/api/middleware"
 	"github.com/kennguy3n/zk-drive/internal/file"
 	"github.com/kennguy3n/zk-drive/internal/folder"
+	"github.com/kennguy3n/zk-drive/internal/notification"
 	"github.com/kennguy3n/zk-drive/internal/permission"
 	"github.com/kennguy3n/zk-drive/internal/user"
 	"github.com/kennguy3n/zk-drive/internal/workspace"
@@ -82,7 +83,8 @@ func writeServiceError(w http.ResponseWriter, r *http.Request, err error) {
 	case errors.Is(err, folder.ErrInvalidName),
 		errors.Is(err, folder.ErrInvalidParent),
 		errors.Is(err, folder.ErrInvalidEncryptionMode),
-		errors.Is(err, file.ErrInvalidName):
+		errors.Is(err, file.ErrInvalidName),
+		errors.Is(err, notification.ErrInvalidSubscription):
 		middleware.RespondError(w, http.StatusBadRequest, middleware.ErrCodeValidation, err.Error())
 	case errors.Is(err, folder.ErrEncryptionModeMismatch):
 		middleware.RespondError(w, http.StatusConflict, middleware.ErrCodeConflict, err.Error())

@@ -28,18 +28,39 @@ CREATE TABLE webpush_subscriptions (
     id           UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     workspace_id UUID NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
     user_id      UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-    endpoint     TEXT NOT NULL,
-    p256dh       TEXT NOT NULL,
-    auth         TEXT NOT NULL,
+    -- Real push-service endpoints are a few hundred bytes; cap at 2 KiB
+    -- as defence in depth against an authenticated client persisting
+    -- arbitrarily large strings. Mirrors maxPushEndpointLen in the
+    -- WebPushService (which rejects over-long endpoints with a 400
+    -- before they reach here).
+    endpoint     TEXT NOT NULL CHECK (length(endpoint) <= 2048),
+    -- p256dh / auth are tiny RFC 8291 key material (~88 and ~24 base64url
+    -- chars). The app rejects raw values over maxPushKeyLen (256 B) with a
+    -- 400 before storage; this CHECK is defence in depth on the stored
+    -- value, sized at 1 KiB so it also accommodates the at-rest AES-GCM
+    -- ciphertext ("aesgcm:" + base64(nonce||ct||tag)), which expands a
+    -- 256 B input to under ~400 B.
+    p256dh       TEXT NOT NULL CHECK (length(p256dh) <= 1024),
+    auth         TEXT NOT NULL CHECK (length(auth) <= 1024),
     created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+    -- Bumped to now() every time the client re-registers the endpoint
+    -- (the ON CONFLICT upsert in SaveSubscription). The frontend
+    -- re-subscribes on each load, so a live browser refreshes this
+    -- regularly; a row that has not been touched in a long time signals
+    -- a browser that was uninstalled / cleared without an explicit
+    -- unsubscribe and never returned 410, letting an operator prune
+    -- those orphans with a periodic `DELETE ... WHERE updated_at < ...`.
+    updated_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
     UNIQUE(workspace_id, user_id, endpoint)
 );
 
--- Hot path on every notification publish: "find every push
+-- The hot path on every notification publish — "find every push
 -- subscription for (workspace, user)" so we can fan out to a user's
--- registered devices when they're not connected via WebSocket.
-CREATE INDEX idx_webpush_subs_workspace_user
-    ON webpush_subscriptions (workspace_id, user_id);
+-- registered devices when they're offline — is already served by the
+-- UNIQUE(workspace_id, user_id, endpoint) constraint's backing B-tree:
+-- a leading-column prefix scan on (workspace_id, user_id) uses it
+-- directly. A separate index on (workspace_id, user_id) would be
+-- redundant (extra write amplification, no read benefit), so we omit it.
 
 ALTER TABLE webpush_subscriptions ENABLE ROW LEVEL SECURITY;
 ALTER TABLE webpush_subscriptions FORCE ROW LEVEL SECURITY;

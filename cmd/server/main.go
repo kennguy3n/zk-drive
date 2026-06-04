@@ -539,6 +539,15 @@ func run() error {
 		}()
 	}
 
+	// notifRepo backs both the notification service and the web-push
+	// service; they read/write the same Postgres tables via the shared
+	// pool, so one repository instance is reused rather than allocating
+	// a second identical wrapper. The credential codec encrypts the
+	// web-push p256dh / auth key material at rest (no-op pass-through
+	// when CREDENTIAL_ENCRYPTION is "none").
+	notifRepo := notification.NewPostgresRepository(pool).
+		WithSubscriptionCipher(credentialCodec)
+
 	// Web Push (RFC 8030 + VAPID). Constructed only when both VAPID
 	// keys are configured; otherwise webPushSvc stays nil and the
 	// /api/push/* endpoints respond 501. When enabled, wrap the
@@ -548,16 +557,18 @@ func run() error {
 	var webPushSvc *notification.WebPushService
 	if cfg.WebPushEnabled() {
 		webPushSvc = notification.NewWebPushService(
-			notification.NewPostgresRepository(pool),
+			notifRepo,
 			cfg.VAPIDPublicKey, cfg.VAPIDPrivateKey,
-		)
-		notificationPublisher = notification.NewWebPushPublisher(notificationPublisher, hub, webPushSvc)
+		).WithSubscriber(cfg.VAPIDSubscriber).
+			WithEndpointValidator(webhooks.NewURLValidator())
+		notificationPublisher = notification.NewWebPushPublisher(notificationPublisher, hub, webPushSvc).
+			WithWaitGroup(&bgGoroutines)
 		slog.Info("web push enabled, offline notifications will fan out via VAPID")
 	} else {
 		slog.Warn("web push disabled (VAPID_PUBLIC_KEY / VAPID_PRIVATE_KEY unset), /api/push/* will respond 501")
 	}
 
-	notificationSvc := notification.NewService(notification.NewPostgresRepository(pool)).
+	notificationSvc := notification.NewService(notifRepo).
 		WithPublisher(notificationPublisher)
 
 	// Change-feed service. Powers the GET /api/changes catch-up

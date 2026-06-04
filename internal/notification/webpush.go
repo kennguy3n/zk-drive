@@ -3,25 +3,63 @@ package notification
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
 	"net/url"
-	"syscall"
-	"time"
+	"strings"
 
 	"github.com/kennguy3n/zk-drive/internal/logging"
+	"github.com/kennguy3n/zk-drive/internal/typednil"
 
 	webpush "github.com/SherClockHolmes/webpush-go"
 	"github.com/google/uuid"
 )
+
+// ErrInvalidSubscription marks a push subscription the caller supplied
+// as unacceptable: missing fields, an over-long endpoint, or an
+// endpoint that fails SSRF validation (non-https / private / blocked
+// address). It is a client-caused error, so the HTTP layer maps it to
+// 400 Bad Request rather than logging a 500 — see writeServiceError in
+// api/drive/helpers.go. Validation failures are wrapped with this
+// sentinel via fmt.Errorf("%w: ...").
+var ErrInvalidSubscription = errors.New("webpush: invalid subscription")
+
+// maxPushEndpointLen bounds the stored endpoint URL. Real push-service
+// endpoints (FCM, Mozilla autopush, Apple) run a few hundred bytes; a
+// 2 KiB ceiling leaves generous headroom while stopping an
+// authenticated client from persisting arbitrarily large strings
+// (storage abuse). Enforced here for a clean 400 and mirrored by a
+// CHECK constraint in migration 038 as defence in depth.
+const maxPushEndpointLen = 2048
+
+// maxPushKeyLen bounds the p256dh and auth key material a client may
+// register. Real values are tiny — p256dh is a 65-byte uncompressed EC
+// point (~88 base64url chars) and auth a 16-byte secret (~24 chars) — so
+// a 256-byte ceiling is generous headroom while stopping an
+// authenticated client from persisting arbitrarily large blobs (storage
+// abuse, amplified once the at-rest cipher expands them). Bounded here
+// for a clean 400 before encryption; the stored column also carries a
+// generous CHECK in migration 038 sized for the resulting ciphertext.
+const maxPushKeyLen = 256
 
 // defaultVAPIDSubscriber is the `sub` claim embedded in the VAPID JWT
 // when the operator does not configure one explicitly. Push services
 // require a mailto: or https: subscriber so they can contact the
 // application-server operator about a misbehaving sender.
 const defaultVAPIDSubscriber = "mailto:ops@zk-drive.example.com"
+
+// pushTTLSeconds is the Time-To-Live the push service holds an
+// undelivered message for. The whole point of Web Push (vs the live
+// WebSocket path) is to reach a user whose device is briefly offline
+// — laptop asleep, phone in a tunnel — so a 30s TTL defeated the
+// feature. One day keeps a notification deliverable across an
+// overnight-offline window while still letting the push service expire
+// truly stale messages. The notification is persisted in Postgres
+// regardless, so this only governs the out-of-band push copy.
+const pushTTLSeconds = 24 * 60 * 60
 
 // PushSubscription mirrors the browser PushSubscription shape the
 // frontend POSTs to /api/push/subscribe. p256dh and auth are the
@@ -37,11 +75,19 @@ type PushSubscription struct {
 // worker's `push` event listener. The frontend reads Title / Body to
 // call self.registration.showNotification, and uses URL (when set) to
 // focus / open the relevant page on notificationclick.
+//
+// Tag is the per-notification collapse key the service worker passes as
+// Notification.tag. It is the notification's own id, so the browser only
+// coalesces a genuine re-delivery of the *same* notification (e.g. a
+// duplicate push) — distinct notifications, even of the same Type, each
+// stay visible. Empty Tag lets the service worker fall back to a generic
+// constant.
 type NotificationPayload struct {
 	Title string `json:"title"`
 	Body  string `json:"body"`
 	Type  string `json:"type,omitempty"`
 	URL   string `json:"url,omitempty"`
+	Tag   string `json:"tag,omitempty"`
 }
 
 // WebPushRepository persists browser push subscriptions. The Postgres
@@ -67,6 +113,40 @@ type httpDoer interface {
 	Do(*http.Request) (*http.Response, error)
 }
 
+// EndpointValidator performs DNS-resolving SSRF validation of a push
+// endpoint URL. It is satisfied by *webhooks.URLValidator, injected by
+// the server wiring via WithEndpointValidator. Defining it here (rather
+// than importing the webhooks package) keeps the notification package
+// free of that dependency and lets tests supply a fake-resolver
+// validator. Validate is called at subscribe time and again before each
+// delivery: re-resolving on every send is the DNS-rebinding defence —
+// a hostname that resolved to a public IP at subscribe time but is
+// later repointed at 169.254.169.254 is caught before we POST to it.
+type EndpointValidator interface {
+	Validate(ctx context.Context, raw string) (*url.URL, error)
+}
+
+// SubscriptionCipher encrypts and decrypts the RFC 8291 key material
+// (p256dh and auth) persisted with each push subscription. It is
+// satisfied by *crypto.Codec, injected into the Postgres repository by
+// the server wiring via WithSubscriptionCipher. Defining the interface
+// here (rather than importing the crypto package) keeps the
+// notification package free of that dependency and lets tests supply a
+// fake cipher.
+//
+// auth is a 16-byte shared secret and p256dh the subscriber's ECDH
+// public key; together with the VAPID private key they are everything
+// needed to forge or decrypt a push message for that subscription, so
+// encrypting them at rest keeps a database-only compromise from
+// yielding usable push credentials. Decrypt must round-trip plaintext
+// it does not recognise as its own ciphertext unchanged, so rows
+// written before encryption was enabled (or while in pass-through mode)
+// stay readable — *crypto.Codec already behaves this way.
+type SubscriptionCipher interface {
+	Encrypt(ctx context.Context, plaintext string) (string, error)
+	Decrypt(ctx context.Context, ciphertext string) (string, error)
+}
+
 // WebPushService delivers RFC 8030 / VAPID web-push messages to a
 // user's registered browser subscriptions. It is constructed only
 // when both VAPID keys are configured; callers treat a nil service as
@@ -77,6 +157,7 @@ type WebPushService struct {
 	vapidPrivateKey string
 	subscriber      string
 	httpClient      httpDoer
+	validator       EndpointValidator
 }
 
 // NewWebPushService returns a service that signs push messages with
@@ -93,12 +174,6 @@ func NewWebPushService(repo WebPushRepository, vapidPublicKey, vapidPrivateKey s
 		vapidPublicKey:  vapidPublicKey,
 		vapidPrivateKey: vapidPrivateKey,
 		subscriber:      defaultVAPIDSubscriber,
-		// Default to a client that re-checks the resolved IP at
-		// socket-connect time, closing the DNS-rebinding gap the
-		// parse-time endpoint check cannot (a hostname public at
-		// Subscribe can resolve to an internal address at Send).
-		// Tests override this via WithHTTPClient.
-		httpClient: newGuardedHTTPClient(),
 	}
 }
 
@@ -115,10 +190,29 @@ func (s *WebPushService) WithSubscriber(sub string) *WebPushService {
 
 // WithHTTPClient injects the HTTP client used to POST encrypted
 // payloads to push endpoints. Primarily a test seam; production wiring
-// keeps the constructor's connect-time-guarded client.
+// leaves it nil so webpush-go uses its default *http.Client.
 func (s *WebPushService) WithHTTPClient(c httpDoer) *WebPushService {
 	if s != nil {
 		s.httpClient = c
+	}
+	return s
+}
+
+// WithEndpointValidator injects the DNS-resolving SSRF validator used
+// to vet push endpoints at subscribe and delivery time. Production
+// wires a *webhooks.URLValidator; when nil the service falls back to
+// the lightweight literal-IP checks in validatePushEndpoint (which do
+// not resolve DNS). v is normalised through typednil.IsTypedNil so a
+// caller passing a typed-nil concrete pointer wrapped in the interface
+// (e.g. a nil *webhooks.URLValidator) is treated as plain nil and
+// engages the fallback rather than NPE-ing on Validate — matching the
+// established pattern in NewWebPushPublisher and the api/drive setters.
+func (s *WebPushService) WithEndpointValidator(v EndpointValidator) *WebPushService {
+	if s != nil {
+		if typednil.IsTypedNil(v) {
+			v = nil
+		}
+		s.validator = v
 	}
 	return s
 }
@@ -140,105 +234,86 @@ func (s *WebPushService) Subscribe(ctx context.Context, workspaceID, userID uuid
 		return nil
 	}
 	if sub.Endpoint == "" || sub.P256dh == "" || sub.Auth == "" {
-		return fmt.Errorf("webpush: subscription requires endpoint, p256dh and auth")
+		return fmt.Errorf("%w: endpoint, p256dh and auth are required", ErrInvalidSubscription)
 	}
-	if err := validatePushEndpoint(sub.Endpoint); err != nil {
+	if len(sub.P256dh) > maxPushKeyLen {
+		return fmt.Errorf("%w: p256dh exceeds %d bytes", ErrInvalidSubscription, maxPushKeyLen)
+	}
+	if len(sub.Auth) > maxPushKeyLen {
+		return fmt.Errorf("%w: auth exceeds %d bytes", ErrInvalidSubscription, maxPushKeyLen)
+	}
+	if err := s.validateEndpoint(ctx, sub.Endpoint); err != nil {
 		return err
 	}
 	return s.repo.SaveSubscription(ctx, workspaceID, userID, sub)
 }
 
-// validatePushEndpoint enforces that a browser-supplied push endpoint is
-// a plausible public push-service URL before we ever store it and POST
-// encrypted payloads to it in Send. Real push services (FCM, Mozilla
-// autopush, WNS) always expose https endpoints on public hosts, so we
-// require https and reject endpoints whose host is a literal loopback /
-// private / link-local / unspecified IP (e.g. the 169.254.169.254 cloud
-// metadata endpoint). This blocks the obvious SSRF vector where an
-// authenticated user registers an internal URL as their "subscription"
-// to make the server fan out requests to internal services.
-//
-// This is the cheap, early rejection. It deliberately does NOT resolve
-// hostnames: a hostname that resolves publicly now could be rebound to
-// an internal address before Send runs (a TOCTOU / DNS-rebinding gap).
-// That residual gap is closed at delivery time by newGuardedHTTPClient,
-// which re-checks the *resolved* IP at socket-connect time.
+// validateEndpoint enforces the length bound and runs SSRF validation,
+// returning every failure wrapped in ErrInvalidSubscription so the HTTP
+// layer answers 400 (not 500). When an EndpointValidator is injected it
+// does the full DNS-resolving check; otherwise it falls back to the
+// literal-IP checks. The detailed validator reason is logged (so an
+// operator can spot SSRF probes) but not echoed to the client.
+func (s *WebPushService) validateEndpoint(ctx context.Context, endpoint string) error {
+	if len(endpoint) > maxPushEndpointLen {
+		return fmt.Errorf("%w: endpoint exceeds %d bytes", ErrInvalidSubscription, maxPushEndpointLen)
+	}
+	if s.validator != nil {
+		if _, err := s.validator.Validate(ctx, endpoint); err != nil {
+			logging.FromContext(ctx).Warn("webpush rejected endpoint", "err", err)
+			return fmt.Errorf("%w: endpoint not allowed", ErrInvalidSubscription)
+		}
+		return nil
+	}
+	if err := validatePushEndpoint(endpoint); err != nil {
+		return fmt.Errorf("%w: %s", ErrInvalidSubscription, err.Error())
+	}
+	return nil
+}
+
+// validatePushEndpoint rejects endpoints that are not plausible public
+// push-service URLs. The endpoint is attacker-controlled (any logged-in
+// client picks it), and the server later POSTs to it on every
+// notification, so an unvalidated endpoint turns the server into a
+// blind SSRF probe against internal addresses (cloud metadata at
+// 169.254.169.254, loopback, RFC 1918). We require https and block
+// literal loopback / private / link-local / unspecified IPs and
+// localhost. Note: this does not resolve DNS, so a hostname pointing
+// at an internal IP is not caught here — defence against that belongs
+// in a custom http.Transport dialer (tracked as a follow-up); blocking
+// the literal-IP vectors closes the cheap, obvious holes.
 func validatePushEndpoint(endpoint string) error {
 	u, err := url.Parse(endpoint)
 	if err != nil {
 		return fmt.Errorf("webpush: invalid endpoint url: %w", err)
 	}
 	if u.Scheme != "https" {
-		return fmt.Errorf("webpush: endpoint must use https")
+		return fmt.Errorf("webpush: endpoint must be an https url")
 	}
 	host := u.Hostname()
 	if host == "" {
-		return fmt.Errorf("webpush: endpoint must have a host")
+		return fmt.Errorf("webpush: endpoint url missing host")
 	}
-	if ip := net.ParseIP(host); ip != nil && !isPublicIP(ip) {
-		return fmt.Errorf("webpush: endpoint host is not a public address")
+	lower := strings.ToLower(host)
+	if lower == "localhost" || strings.HasSuffix(lower, ".localhost") {
+		return fmt.Errorf("webpush: endpoint host not allowed")
 	}
-	return nil
-}
-
-// isPublicIP reports whether ip is a routable public address — i.e. not
-// loopback, private (RFC 1918 / ULA), link-local (incl. the
-// 169.254.169.254 cloud metadata range), multicast, or the unspecified
-// address. Shared by the parse-time endpoint check and the connect-time
-// dial guard so both apply identical policy, and kept aligned with
-// internal/workspace/ipallow.go's isPublicIP (which also rejects the
-// full multicast range, not just link-local multicast).
-func isPublicIP(ip net.IP) bool {
-	return !(ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() ||
-		ip.IsLinkLocalMulticast() || ip.IsMulticast() || ip.IsUnspecified())
-}
-
-// newGuardedHTTPClient builds the *http.Client webpush-go uses to POST
-// to push endpoints. Its dialer carries a Control hook that runs after
-// DNS resolution but before the socket connects, with the concrete
-// resolved IP Go is about to dial. Rejecting non-public IPs there —
-// rather than only checking the endpoint's literal host at Subscribe —
-// closes the DNS-rebinding window: an attacker who registers a hostname
-// that resolves publicly, then repoints it at 169.254.169.254 or an
-// internal service before delivery, is blocked at connect time.
-func newGuardedHTTPClient() *http.Client {
-	transport, ok := http.DefaultTransport.(*http.Transport)
-	var t *http.Transport
-	if ok {
-		t = transport.Clone()
-	} else {
-		t = &http.Transport{}
-	}
-	dialer := &net.Dialer{
-		Timeout:   10 * time.Second,
-		KeepAlive: 30 * time.Second,
-		Control:   guardedDialControl,
-	}
-	t.DialContext = dialer.DialContext
-	return &http.Client{
-		Timeout:   30 * time.Second,
-		Transport: t,
-	}
-}
-
-// guardedDialControl is the net.Dialer.Control hook that refuses to
-// connect to a non-public address. address is the concrete resolved
-// "ip:port" Go is about to dial (Control runs per candidate address
-// after resolution), so this sees through DNS rebinding. It fails
-// CLOSED: anything it cannot parse as a public IP is rejected.
-func guardedDialControl(_, address string, _ syscall.RawConn) error {
-	host, _, err := net.SplitHostPort(address)
-	if err != nil {
-		return fmt.Errorf("webpush: cannot parse dial address %q: %w", address, err)
-	}
-	ip := net.ParseIP(host)
-	if ip == nil {
-		return fmt.Errorf("webpush: dial address %q is not an IP literal", host)
-	}
-	if !isPublicIP(ip) {
-		return fmt.Errorf("webpush: refusing to connect to non-public address %s", ip)
+	if ip := net.ParseIP(host); ip != nil && isDisallowedIP(ip) {
+		return fmt.Errorf("webpush: endpoint host not allowed")
 	}
 	return nil
+}
+
+// isDisallowedIP reports whether ip is in a range a push endpoint must
+// never target: loopback, RFC 1918 private, link-local (incl. the
+// 169.254.0.0/16 cloud-metadata range), unspecified, or multicast.
+func isDisallowedIP(ip net.IP) bool {
+	return ip.IsLoopback() ||
+		ip.IsPrivate() ||
+		ip.IsLinkLocalUnicast() ||
+		ip.IsLinkLocalMulticast() ||
+		ip.IsUnspecified() ||
+		ip.IsMulticast()
 }
 
 // Unsubscribe removes a single subscription identified by its push
@@ -248,7 +323,7 @@ func (s *WebPushService) Unsubscribe(ctx context.Context, workspaceID, userID uu
 		return nil
 	}
 	if endpoint == "" {
-		return fmt.Errorf("webpush: endpoint is required")
+		return fmt.Errorf("%w: endpoint is required", ErrInvalidSubscription)
 	}
 	return s.repo.DeleteSubscription(ctx, workspaceID, userID, endpoint)
 }
@@ -297,11 +372,26 @@ func (s *WebPushService) Send(ctx context.Context, workspaceID, userID uuid.UUID
 // service's HTTP status code. The response body is always drained and
 // closed so the underlying connection can be reused.
 func (s *WebPushService) deliver(ctx context.Context, message []byte, sub PushSubscription) (int, error) {
+	// Re-validate immediately before sending so a subscription whose
+	// hostname was repointed at an internal address after it was stored
+	// is never POSTed to. Subscriptions are stored pre-validated, so
+	// this only trips on a deliberate DNS rebind. When an injected
+	// validator is present it re-resolves DNS (the actual rebinding
+	// defence); otherwise fall back to the same literal-IP checks used
+	// at subscribe time so the no-validator path still has a pre-send
+	// guard rather than skipping validation entirely.
+	if s.validator != nil {
+		if _, err := s.validator.Validate(ctx, sub.Endpoint); err != nil {
+			return 0, fmt.Errorf("webpush: endpoint failed pre-send revalidation: %w", err)
+		}
+	} else if err := validatePushEndpoint(sub.Endpoint); err != nil {
+		return 0, fmt.Errorf("webpush: endpoint failed pre-send validation: %w", err)
+	}
 	opts := &webpush.Options{
 		Subscriber:      s.subscriber,
 		VAPIDPublicKey:  s.vapidPublicKey,
 		VAPIDPrivateKey: s.vapidPrivateKey,
-		TTL:             30,
+		TTL:             pushTTLSeconds,
 	}
 	if s.httpClient != nil {
 		opts.HTTPClient = s.httpClient
@@ -316,9 +406,8 @@ func (s *WebPushService) deliver(ctx context.Context, message []byte, sub PushSu
 	if err != nil {
 		return 0, err
 	}
-	// Drain before closing so the underlying TCP+TLS connection can be
-	// returned to the pool and reused across the fan-out, instead of
-	// being torn down after every delivery. Push responses are tiny.
+	// Drain then close so the keep-alive connection can be reused for
+	// the next device in the fan-out regardless of response size.
 	defer func() {
 		_, _ = io.Copy(io.Discard, resp.Body)
 		_ = resp.Body.Close()

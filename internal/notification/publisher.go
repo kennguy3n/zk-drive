@@ -4,21 +4,24 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"sync"
 	"time"
 
 	"strings"
 
 	"github.com/kennguy3n/zk-drive/internal/logging"
+	"github.com/kennguy3n/zk-drive/internal/typednil"
 
 	"github.com/google/uuid"
 	"github.com/redis/go-redis/v9"
 )
 
-// webPushDispatchTimeout bounds a single detached push fan-out. Each
-// HTTPS POST already carries the push client's own per-request
-// timeout; this is a backstop so a wedged fan-out goroutine cannot
-// outlive the event by more than this window.
-const webPushDispatchTimeout = 60 * time.Second
+// pushDeliveryTimeout caps how long the detached Web Push fan-out may
+// run after the originating request returns. Push delivery makes
+// blocking HTTPS POSTs to third-party push services (FCM / Mozilla /
+// Apple), each 100-500ms; bounding the work keeps a slow push service
+// from leaking goroutines indefinitely.
+const pushDeliveryTimeout = 15 * time.Second
 
 // Event is the JSON envelope pushed to live WebSocket clients when a
 // notification is created. The shape mirrors api/ws.Event but is
@@ -173,28 +176,58 @@ type WebPushPublisher struct {
 	inner WSPublisher
 	conns ConnectionChecker
 	push  PushSender
-	// dispatch runs the best-effort push fan-out. In production it
-	// spawns a goroutine so the external HTTPS round trips never add
-	// latency to the (often request-path) notification-create call.
-	// Tests swap in a synchronous dispatcher for determinism.
-	dispatch func(func())
+	wg    *sync.WaitGroup
 }
 
 // NewWebPushPublisher wraps inner so notifications also fan out via
 // Web Push for offline users. conns may be nil (every user is then
 // treated as offline); push must be non-nil for the wrapper to add
 // value, but a nil push degrades to plain inner-publish behaviour.
+//
+// inner, conns and push are all normalised through typednil.IsTypedNil: a
+// caller that passes a typed-nil concrete value (e.g. a nil *WebPushService
+// wrapped in the PushSender interface) is treated as the plain-nil case, so
+// the `p.push == nil` / `p.inner != nil` guards in Publish actually fire
+// instead of dispatching to a nil receiver. This matches the With* setter
+// convention used elsewhere in the codebase (api/drive, internal/ai).
 func NewWebPushPublisher(inner WSPublisher, conns ConnectionChecker, push PushSender) *WebPushPublisher {
-	return &WebPushPublisher{
-		inner: inner, conns: conns, push: push,
-		dispatch: func(fn func()) { go fn() },
+	if typednil.IsTypedNil(inner) {
+		inner = nil
 	}
+	if typednil.IsTypedNil(conns) {
+		conns = nil
+	}
+	if typednil.IsTypedNil(push) {
+		push = nil
+	}
+	return &WebPushPublisher{inner: inner, conns: conns, push: push}
+}
+
+// WithWaitGroup registers wg so each detached Web Push goroutine is
+// tracked (Add before launch, Done on return). Wiring the server's
+// background-goroutine WaitGroup in lets graceful shutdown drain
+// in-flight push deliveries before the database pool is closed —
+// otherwise a push that hit a 410 mid-shutdown would call
+// DeleteSubscription against an already-closed pool. The per-delivery
+// pushDeliveryTimeout still bounds how long the drain can block.
+func (p *WebPushPublisher) WithWaitGroup(wg *sync.WaitGroup) *WebPushPublisher {
+	p.wg = wg
+	return p
 }
 
 // Publish delegates to the inner publisher, then best-effort delivers
 // a Web Push message to offline recipients. The inner publish error
 // (if any) is returned; push failures are swallowed by the service's
 // own logging so a push-service outage never masks the WS result.
+//
+// Web Push delivery runs in a detached goroutine: it performs blocking
+// HTTPS POSTs to external push services (hundreds of ms per device),
+// and the synchronous WebSocket publish is what the notification HTTP
+// handler actually waits on. Returning before the push completes keeps
+// that handler's latency independent of the push services' health. The
+// goroutine uses a cancellation-detached copy of ctx (so it survives
+// the request returning) with its own timeout, and still honours the
+// request's logger/trace values.
 func (p *WebPushPublisher) Publish(ctx context.Context, workspaceID, userID uuid.UUID, event Event) error {
 	var innerErr error
 	if p.inner != nil {
@@ -206,29 +239,30 @@ func (p *WebPushPublisher) Publish(ctx context.Context, workspaceID, userID uuid
 	if p.conns != nil && p.conns.IsConnected(workspaceID, userID) {
 		return innerErr
 	}
-	if payload, ok := pushPayloadFromEvent(event); ok {
-		// Web Push delivery is best-effort and external (FCM, Mozilla
-		// autopush): N sequential TLS POSTs for a user with multiple
-		// device registrations. Run it detached so it never blocks the
-		// caller (NotifyShareLinkCreated et al. publish on the request
-		// goroutine). WithoutCancel keeps log/trace values but severs
-		// cancellation so a returning handler can't abort an in-flight
-		// push; the timeout is a backstop around the whole fan-out.
-		pushCtx := context.WithoutCancel(ctx)
-		ws, uid := workspaceID, userID
-		dispatch := p.dispatch
-		if dispatch == nil {
-			dispatch = func(fn func()) { go fn() }
-		}
-		dispatch(func() {
-			dctx, cancel := context.WithTimeout(pushCtx, webPushDispatchTimeout)
-			defer cancel()
-			if err := p.push.Send(dctx, ws, uid, payload); err != nil {
-				logging.FromContext(dctx).Error("notification web push failed",
-					"workspace_id", ws, "user_id", uid, "err", err)
-			}
-		})
+	payload, ok := pushPayloadFromEvent(event)
+	if !ok {
+		return innerErr
 	}
+	pushCtx := context.WithoutCancel(ctx)
+	// Add before launching (not inside the goroutine) so a concurrent
+	// Wait at shutdown cannot observe the counter at zero between the
+	// `go` statement and the goroutine actually starting. The HTTP
+	// server is drained before bgGoroutines.Wait runs, so no Publish —
+	// hence no Add — races a Wait that has already begun.
+	if p.wg != nil {
+		p.wg.Add(1)
+	}
+	go func() {
+		if p.wg != nil {
+			defer p.wg.Done()
+		}
+		ctx, cancel := context.WithTimeout(pushCtx, pushDeliveryTimeout)
+		defer cancel()
+		if err := p.push.Send(ctx, workspaceID, userID, payload); err != nil {
+			logging.FromContext(ctx).Error("notification web push failed",
+				"workspace_id", workspaceID, "user_id", userID, "err", err)
+		}
+	}()
 	return innerErr
 }
 
@@ -247,26 +281,49 @@ func pushPayloadFromEvent(event Event) (NotificationPayload, bool) {
 		Title: n.Title,
 		Body:  n.Body,
 		Type:  n.Type,
-		URL:   composeNotificationURL(n.ResourceType, n.ResourceID),
+		URL:   deepLinkFor(n),
+		// Per-notification collapse key: the browser coalesces only a
+		// re-delivery of this same notification, so two distinct events
+		// of the same Type both stay visible (see NotificationPayload).
+		Tag: n.ID.String(),
 	}, true
 }
 
-// composeNotificationURL maps a notification's navigable resource to
-// the frontend route the push service worker should open when the user
-// clicks the notification. Only resource types backed by a real route
-// produce a URL; anything else returns "" so the service worker falls
-// back to /drive. Keep these paths in sync with the router in
-// frontend/src/App.tsx.
-func composeNotificationURL(resourceType *string, resourceID *uuid.UUID) string {
-	if resourceType == nil || resourceID == nil {
+// deepLinkFor maps a notification's resource to the SPA path the service
+// worker should open when the user clicks the push. It returns "" when
+// the resource has no dedicated route, in which case the service worker
+// falls back to /drive (see frontend/public/push-sw.js) — so an empty
+// result is the safe default, never a broken link.
+//
+// Only resource types that map to a real frontend route (App.tsx) and
+// whose ResourceID is the ID that route expects are linked here.
+// Today's notification resource types (share_link, guest_invite,
+// file_version) carry the *event* id (link / invite / version), not a
+// folder or document id, and the SPA has no route to view those by id,
+// so they intentionally fall through to the /drive default. Wiring the
+// URL end-to-end means the moment a notification references a folder or
+// document the click lands on it with no further plumbing.
+//
+// Contract with the service worker: every value returned here MUST be an
+// SPA-relative path (leading "/", no scheme or host). push-sw.js's
+// notificationclick handler matches an already-open tab by comparing this
+// value to new URL(client.url).pathname, so returning an absolute URL
+// (e.g. "https://host/drive/...") would never match and would force a
+// redundant navigation. Keep new cases returning bare paths only.
+func deepLinkFor(n *Notification) string {
+	if n == nil || n.ResourceType == nil || n.ResourceID == nil {
 		return ""
 	}
-	switch *resourceType {
-	case "file":
-		return "/drive/document/" + resourceID.String()
+	id := n.ResourceID.String()
+	switch *n.ResourceType {
 	case "folder":
-		return "/drive/folder/" + resourceID.String()
+		return "/drive/folder/" + id
+	case "document":
+		return "/drive/document/" + id
 	default:
+		// No dedicated route for this resource type — let the service
+		// worker apply its /drive fallback rather than emit a link that
+		// would 404 or land on an unrelated page.
 		return ""
 	}
 }

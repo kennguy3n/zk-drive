@@ -390,6 +390,15 @@ type Config struct {
 	VAPIDPublicKey  string
 	VAPIDPrivateKey string
 
+	// VAPIDSubscriber is the `sub` claim embedded in the VAPID JWT: a
+	// mailto: or https: URI push services (FCM, Mozilla autopush) use to
+	// contact the application-server operator about a misbehaving sender.
+	// Optional — when empty the WebPushService keeps its built-in
+	// placeholder. Operators running real push traffic should set this to
+	// a monitored mailbox (e.g. "mailto:ops@yourdomain.com") so abuse
+	// reports reach them.
+	VAPIDSubscriber string
+
 	// OnlyOfficeURL is the base URL of the ONLYOFFICE Document Server
 	// (e.g. "https://onlyoffice.example.com"). When empty,
 	// collaborative office-document editing is disabled: the
@@ -551,6 +560,7 @@ func buildConfigFromEnv() *Config {
 
 		VAPIDPublicKey:  strings.TrimSpace(os.Getenv("VAPID_PUBLIC_KEY")),
 		VAPIDPrivateKey: strings.TrimSpace(os.Getenv("VAPID_PRIVATE_KEY")),
+		VAPIDSubscriber: strings.TrimSpace(os.Getenv("VAPID_SUBSCRIBER")),
 
 		OnlyOfficeURL:           strings.TrimSpace(os.Getenv("ONLYOFFICE_URL")),
 		OnlyOfficeSecret:        os.Getenv("ONLYOFFICE_SECRET"),
