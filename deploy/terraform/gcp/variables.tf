@@ -160,6 +160,12 @@ variable "server_concurrency" {
   default     = 80
 }
 
+variable "backend_timeout_sec" {
+  description = "Backend service timeout (seconds) for the server's HTTPS LB backend. For WebSocket traffic the external HTTPS load balancer treats this as the MAXIMUM connection lifetime (not an idle timeout), so it must be large enough for long-lived /api/ws and /api/documents/{id}/ws sessions. Default 3600 (1h)."
+  type        = number
+  default     = 3600
+}
+
 variable "worker_cpu" {
   description = "Cloud Run CPU for the worker service."
   type        = string

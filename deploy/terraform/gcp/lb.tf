@@ -19,7 +19,15 @@ resource "google_compute_backend_service" "app" {
   protocol              = "HTTP"
   load_balancing_scheme = "EXTERNAL_MANAGED"
   port_name             = "http"
-  timeout_sec           = 60
+  # For WebSocket traffic the external HTTPS LB interprets timeout_sec as the
+  # MAXIMUM lifetime of the connection (not an idle timeout), so it caps even
+  # active, ping/pong-kept-alive sockets. The app exposes long-lived WebSockets
+  # at /api/ws (notification hub) and /api/documents/{id}/ws (collab editor);
+  # the previous 60s value would have force-closed every editor session each
+  # minute. Default to 1h (var.backend_timeout_sec) so normal sessions are never
+  # interrupted while still bounding orphaned connections. (AWS doesn't need this
+  # because CloudFront's WebSocket idle timeout already defaults to 10 minutes.)
+  timeout_sec = var.backend_timeout_sec
 
   backend {
     group = google_compute_region_network_endpoint_group.server.id
@@ -37,8 +45,14 @@ resource "google_compute_url_map" "this" {
   # Static assets from the CDN bucket by default.
   default_service = google_compute_backend_bucket.frontend.id
 
+  # Match every host ("*") rather than only var.domain_name so the /api/* and
+  # /healthz path rules apply regardless of the Host header — otherwise a
+  # request to the raw LB IP (e.g. during initial setup before DNS propagates)
+  # falls through to the frontend bucket for ALL paths, making the API
+  # unreachable by IP. The managed SSL cert still only covers the domain, so
+  # this only affects which backend serves a given path, not TLS.
   host_rule {
-    hosts        = [var.domain_name]
+    hosts        = ["*"]
     path_matcher = "main"
   }
 
