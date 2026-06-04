@@ -403,11 +403,16 @@ func (s *OnlyOfficeService) signConfig(cfg *EditorConfig) (string, error) {
 		return "", nil
 	}
 	// Sign only the fields the Document Server validates against the
-	// payload it receives — documentType, document, editorConfig.
+	// payload it receives — documentType, document, editorConfig — plus
+	// an exp tied to the embedded presigned URL's lifetime. The token is
+	// consumed once at editor open (well within the window); bounding it
+	// keeps a leaked config from being replayed after its download URL
+	// has already expired.
 	claims := jwt.MapClaims{
 		"documentType": cfg.DocumentType,
 		"document":     cfg.Document,
 		"editorConfig": cfg.EditorConfig,
+		"exp":          s.now().Add(onlyOfficePresignTTL).Unix(),
 	}
 	tok := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
 	return tok.SignedString([]byte(s.jwtSecret))
@@ -466,18 +471,29 @@ func (s *OnlyOfficeService) VerifyCallback(token string) (*CallbackPayload, erro
 // CallbackPayload. Missing / mistyped claims yield zero values, which
 // the caller treats as a non-actionable callback rather than trusting
 // any unsigned fallback.
+//
+// ONLYOFFICE places the callback fields at the top level when the token
+// is delivered in the request body (the default), but nests them under
+// a "payload" object when the token arrives via the Authorization
+// header (JWT_HEADER mode). Both layouts are handled so the verified
+// claims stay authoritative regardless of the Document Server's token
+// transport.
 func callbackPayloadFromClaims(claims jwt.MapClaims) *CallbackPayload {
+	src := map[string]any(claims)
+	if nested, ok := claims["payload"].(map[string]any); ok {
+		src = nested
+	}
 	p := &CallbackPayload{}
-	if status, ok := claims["status"].(float64); ok {
+	if status, ok := src["status"].(float64); ok {
 		p.Status = int(status)
 	}
-	if url, ok := claims["url"].(string); ok {
+	if url, ok := src["url"].(string); ok {
 		p.URL = url
 	}
-	if key, ok := claims["key"].(string); ok {
+	if key, ok := src["key"].(string); ok {
 		p.Key = key
 	}
-	p.Users = stringsFromClaim(claims["users"])
+	p.Users = stringsFromClaim(src["users"])
 	return p
 }
 

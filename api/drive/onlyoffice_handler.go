@@ -48,10 +48,12 @@ import (
 const onlyOfficeFetchTimeout = 60 * time.Second
 
 // onlyOfficeMaxDocumentBytes caps how many bytes the save callback will
-// read from the Document Server's edited-document URL, so a hostile or
-// runaway response cannot exhaust memory. Office documents are far
-// below this bound.
-const onlyOfficeMaxDocumentBytes = 512 << 20 // 512 MiB
+// buffer in memory from the Document Server's edited-document URL, so a
+// hostile or runaway response cannot exhaust the API container (which
+// deploy/docker-compose.prod.yml limits to 512 MiB). 100 MiB matches the
+// repo's other bounded-in-memory job cap (index.MaxDownloadBytes) and is
+// far above any real office document.
+const onlyOfficeMaxDocumentBytes = 100 << 20 // 100 MiB
 
 // onlyOfficeHTTPClient pulls edited bytes from the Document Server in
 // the save callback. Shared so connections are reused across callbacks.
@@ -410,6 +412,15 @@ func (h *Handler) saveEditedVersion(ctx context.Context, workspaceID, fileID uui
 		return err
 	}
 
+	// Enforce the storage quota before committing the new version, the
+	// same pre-flight every other write path runs (ConfirmUpload,
+	// BulkCopy). Returning the error makes the callback ack non-zero, so
+	// the Document Server keeps the edited bytes and retries rather than
+	// silently letting the workspace exceed its plan.
+	if err := h.billing.CheckStorageQuota(ctx, workspaceID, int64(len(data))); err != nil {
+		return err
+	}
+
 	versionID := uuid.New()
 	objectKey := storage.NewObjectKey(workspaceID, f.ID, versionID)
 	contentType := "application/octet-stream"
@@ -429,6 +440,13 @@ func (h *Handler) saveEditedVersion(ctx context.Context, workspaceID, fileID uui
 	}
 	fresh, err := h.files.ConfirmVersion(ctx, workspaceID, v)
 	if err != nil {
+		// The object is already in storage but no version row references
+		// it. Unlike the direct-upload path, this server-side save sets
+		// no pending_upload_object_key marker, so the orphan GC would
+		// never reclaim it; best-effort delete it here to avoid leaking.
+		if delErr := store.DeleteObject(ctx, objectKey); delErr != nil {
+			logging.FromContext(ctx).Warn("onlyoffice: failed to delete orphaned object after confirm failure", "object_key", objectKey, "err", delErr)
+		}
 		return err
 	}
 	if fresh {
@@ -437,9 +455,7 @@ func (h *Handler) saveEditedVersion(ctx context.Context, workspaceID, fileID uui
 			"size_bytes": v.SizeBytes,
 			"source":     "onlyoffice",
 		})
-		if h.billing != nil {
-			h.billing.RecordUpload(ctx, workspaceID, v.SizeBytes)
-		}
+		h.billing.RecordUpload(ctx, workspaceID, v.SizeBytes)
 		// Re-run preview / scan / index on the new bytes, mirroring
 		// the direct-upload confirm path.
 		h.publishPostUploadJobs(ctx, f.ID, v.ID)

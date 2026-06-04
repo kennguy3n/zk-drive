@@ -103,6 +103,14 @@ func TestGenerateEditorConfig_EditMode(t *testing.T) {
 	if cfg.Token == "" {
 		t.Error("expected signed token")
 	}
+	// The signed config token carries an exp tied to the presign TTL.
+	parsed, err := jwt.Parse(cfg.Token, func(*jwt.Token) (any, error) { return []byte("topsecret"), nil })
+	if err != nil || !parsed.Valid {
+		t.Fatalf("parse signed token: valid=%v err=%v", parsed.Valid, err)
+	}
+	if _, err := parsed.Claims.GetExpirationTime(); err != nil {
+		t.Errorf("token exp claim: %v", err)
+	}
 	// The key must be derived from the object key and contain no path
 	// separators.
 	if strings.Contains(cfg.Document.Key, "/") || cfg.Document.Key == "" {
@@ -288,6 +296,41 @@ func TestVerifyCallback_MissingClaimsYieldZeroValues(t *testing.T) {
 	}
 	if p.Status != 0 || p.URL != "" || len(p.Users) != 0 {
 		t.Errorf("expected zero values for absent claims, got %+v", p)
+	}
+}
+
+// TestVerifyCallback_NestedHeaderPayload covers JWT_HEADER transport
+// mode, where the Document Server nests the callback fields under a
+// "payload" object instead of placing them at the top level. The
+// verified claims must stay authoritative regardless of transport.
+func TestVerifyCallback_NestedHeaderPayload(t *testing.T) {
+	secret := "callback-secret"
+	svc := NewOnlyOfficeService("https://office.example.com", secret, "https://drive.example.com", newTestData())
+
+	tok := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.MapClaims{
+		"payload": map[string]any{
+			"status": float64(6),
+			"url":    "https://office.example.com/cache/fs.docx",
+			"key":    "doc-key-456",
+			"users":  []any{"33333333-3333-3333-3333-333333333333"},
+		},
+	})
+	signed, err := tok.SignedString([]byte(secret))
+	if err != nil {
+		t.Fatalf("sign: %v", err)
+	}
+	p, err := svc.VerifyCallback(signed)
+	if err != nil {
+		t.Fatalf("VerifyCallback: %v", err)
+	}
+	if p == nil {
+		t.Fatal("expected non-nil payload")
+	}
+	if p.Status != 6 || p.URL != "https://office.example.com/cache/fs.docx" || p.Key != "doc-key-456" {
+		t.Errorf("nested payload not projected: %+v", p)
+	}
+	if len(p.Users) != 1 || p.Users[0] != "33333333-3333-3333-3333-333333333333" {
+		t.Errorf("users not projected from nested payload: %+v", p.Users)
 	}
 }
 
