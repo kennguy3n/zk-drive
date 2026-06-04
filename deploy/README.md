@@ -87,7 +87,10 @@ every manifest in `k8s/` and adds the production-readiness objects:
   zk-object-fabric for previews, scanning, orphan GC, and audit archiving;
   set the port via `networkPolicy.s3Port`. The chart gates the
   Postgres/NATS/ClamAV ingress policies on their `*.enabled` flags, so a
-  managed backend (no in-cluster pod) renders none of them.
+  managed backend (no in-cluster pod) renders none of them — and renders
+  that backend's **egress** rule port-only (instead of a `podSelector` that
+  would match no managed IP), so the app still reaches it under default-deny
+  (see "NetworkPolicy + managed endpoints" below).
 - **Pod anti-affinity + topology spread** so replicas spread across
   nodes and availability zones.
 - **Migration Job** as a `pre-install,pre-upgrade` hook so the schema is
@@ -177,17 +180,26 @@ helm upgrade zk-drive deploy/helm -n zk-drive \
 > default; when applying the raw manifests against a managed DB, move
 > `DATABASE_URL` into `k8s/secret.yaml` instead.)
 
-> **NetworkPolicy + managed endpoints.** The egress policies match the
-> bundled Postgres / NATS / ClamAV by in-cluster `podSelector`, so they
-> only permit traffic to pods carrying those labels. A managed Postgres
-> or NATS (RDS, Cloud SQL, NGS) has no in-cluster pod to select, so the
-> `podSelector` rule won't match its IP and the connection is dropped
-> under default-deny. Redis and S3 are already allowed **port-only** for
-> exactly this reason. When you point the app at a managed backend,
-> relax that backend's rule to a port-only `egress` entry (drop the
-> `to.podSelector`) — or, on Cilium/Calico, use a CIDR/FQDN selector
-> scoped to the provider — in both `k8s/networkpolicy.yaml` and the
-> chart's `templates/networkpolicy.yaml`.
+> **NetworkPolicy + managed endpoints.** When a backend runs in-cluster,
+> its egress rule is scoped tightly to the backend pod by `podSelector`
+> (`app: postgres` / `nats` / `clamav`). A managed Postgres or NATS (RDS,
+> Cloud SQL, NGS) has no in-cluster pod to select, so a `podSelector` rule
+> would match no IP and the connection would be dropped under default-deny.
+> **The Helm chart handles this automatically:** when you disable a bundled
+> dependency (`postgres.enabled=false` / `nats.enabled=false` /
+> `clamav.enabled=false`), the chart renders that backend's egress as a
+> **port-only** rule (the same way Redis and S3 are always allowed
+> port-only), so traffic reaches the managed endpoint's IP. If the managed
+> endpoint listens on a non-standard port (e.g. a PgBouncer / RDS Proxy
+> pooler on 6432), set `networkPolicy.postgresPort` (or `natsPort` /
+> `clamavPort`). For stricter egress, narrow these port-only rules to a
+> CIDR/FQDN selector scoped to the provider on Cilium/Calico.
+>
+> The **raw** `k8s/networkpolicy.yaml` is the in-cluster/dev path and keeps
+> the `podSelector` rules unconditionally; when applying it against a
+> managed backend, relax that backend's rule to a port-only `egress` entry
+> (drop the `to.podSelector`) by hand, or use the Helm chart, which does
+> this for you.
 
 ### PgBouncer sidecar / connection pooling
 
@@ -225,9 +237,11 @@ survive a node loss:
   `config.NATS_URL` at the cluster service, e.g.
   `nats://nats.messaging.svc.cluster.local:4222`.
 - Size JetStream replicas to 3 for the streams the worker consumes so a
-  single node failure doesn't lose acknowledged messages. If using
-  NetworkPolicies across namespaces, allow server/worker→NATS:4222 to
-  the messaging namespace.
+  single node failure doesn't lose acknowledged messages. With
+  `nats.enabled=false` the chart already renders the server/worker/batch
+  egress to 4222 as a port-only rule (so it reaches the cluster in another
+  namespace); the clustered NATS's own ingress policy is managed by its
+  upstream chart.
 
 ## Docker Compose (production-oriented)
 
