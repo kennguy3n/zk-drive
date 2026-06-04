@@ -185,6 +185,8 @@ func TestWebPushService_SubscribeRejectsSSRFEndpoints(t *testing.T) {
 		"https://169.254.169.254/latest", // link-local cloud metadata
 		"https://[::1]/abc",              // loopback v6
 		"https://0.0.0.0/abc",            // unspecified
+		"https://239.1.2.3/abc",          // non-link-local multicast (IPv4)
+		"https://[ff0e::1]/abc",          // global-scope multicast (IPv6)
 	}
 	for _, endpoint := range bad {
 		sub := testSubscription(t, endpoint)
@@ -400,6 +402,8 @@ func TestGuardedDialControl(t *testing.T) {
 		"[::1]:443",          // loopback v6
 		"[fe80::1]:443",      // link-local v6
 		"0.0.0.0:443",        // unspecified
+		"239.1.2.3:443",      // non-link-local multicast (IPv4)
+		"[ff0e::1]:443",      // global-scope multicast (IPv6)
 		"not-an-ip:443",      // unresolved host (fails closed)
 		"missing-port",       // unparseable (fails closed)
 	}

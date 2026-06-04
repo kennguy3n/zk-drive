@@ -183,12 +183,14 @@ func validatePushEndpoint(endpoint string) error {
 
 // isPublicIP reports whether ip is a routable public address — i.e. not
 // loopback, private (RFC 1918 / ULA), link-local (incl. the
-// 169.254.169.254 cloud metadata range), or the unspecified address.
-// Shared by the parse-time endpoint check and the connect-time dial
-// guard so both apply identical policy.
+// 169.254.169.254 cloud metadata range), multicast, or the unspecified
+// address. Shared by the parse-time endpoint check and the connect-time
+// dial guard so both apply identical policy, and kept aligned with
+// internal/workspace/ipallow.go's isPublicIP (which also rejects the
+// full multicast range, not just link-local multicast).
 func isPublicIP(ip net.IP) bool {
 	return !(ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() ||
-		ip.IsLinkLocalMulticast() || ip.IsUnspecified())
+		ip.IsLinkLocalMulticast() || ip.IsMulticast() || ip.IsUnspecified())
 }
 
 // newGuardedHTTPClient builds the *http.Client webpush-go uses to POST
