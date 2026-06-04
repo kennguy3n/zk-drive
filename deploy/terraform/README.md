@@ -240,6 +240,16 @@ done
   regimes that mandate encryption on every hop should front the ALB with its
   own ACM cert on a subdomain CloudFront can validate and switch
   `cloudfront.tf`'s ALB origin to `origin_protocol_policy = "https-only"`.
+- **NATS redeploys cause a brief gap (AWS).** JetStream's durable store lives on
+  a single EBS volume that can only attach to one task at a time, so the NATS
+  ECS service runs with `deployment_minimum_healthy_percent = 0` /
+  `deployment_maximum_percent = 100` — the old task is stopped before the
+  replacement starts, producing a short NATS outage on every NATS redeploy (a
+  new `nats_*` variable or image bump). This is safe: the server/worker use the
+  NATS Go client's built-in reconnect, JetStream consumers resume from durable
+  state once the task is back, and the worker's reconcile/GC loops are
+  idempotent. Expect a brief message-processing pause during a NATS deploy;
+  app and Postgres data are unaffected.
 
 ---
 
