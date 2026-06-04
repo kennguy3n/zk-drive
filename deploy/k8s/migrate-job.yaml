@@ -45,7 +45,9 @@ spec:
   template:
     metadata:
       labels:
-        app: zk-drive
+        # Batch label so the allow-batch-egress NetworkPolicy lets this
+        # pre-deploy Job reach Postgres (and S3) under default-deny.
+        app: zk-drive-batch
         component: migrate
     spec:
       restartPolicy: Never

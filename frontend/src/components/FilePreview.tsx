@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { getFilePreviewURL } from "../api/client";
+import { isOfficeDocument } from "../collab/office";
 
 // FilePreview renders the server-generated thumbnail for a file.
 // The preview endpoint 404s for unsupported types or versions the
@@ -18,6 +19,15 @@ export interface FilePreviewProps {
   mimeType: string | null;
   size?: "thumb" | "panel";
   alt?: string;
+  // fileName powers the office-document detection for the optional
+  // "Open in editor" button. When omitted the button never shows.
+  fileName?: string;
+  // onlyOfficeEnabled + onOpenEditor wire the office-editor affordance
+  // in the panel layout. The button only renders when office editing
+  // is configured, the file is an office document, and a handler is
+  // provided — so thumb usage in list rows is unaffected.
+  onlyOfficeEnabled?: boolean;
+  onOpenEditor?: () => void;
 }
 
 export default function FilePreview({
@@ -25,6 +35,9 @@ export default function FilePreview({
   mimeType,
   size = "thumb",
   alt,
+  fileName,
+  onlyOfficeEnabled,
+  onOpenEditor,
 }: FilePreviewProps) {
   const { t } = useTranslation();
   const [url, setUrl] = useState<string | null>(null);
@@ -60,8 +73,8 @@ export default function FilePreview({
     flexShrink: 0,
   };
 
-  if (url && !failed) {
-    return (
+  const previewNode =
+    url && !failed ? (
       <div style={wrapper}>
         <img
           src={url}
@@ -70,17 +83,41 @@ export default function FilePreview({
           onError={() => setFailed(true)}
         />
       </div>
+    ) : (
+      <div style={wrapper} aria-label={alt ?? t("preview.unavailable")}>
+        <span style={{ fontSize: size === "panel" ? 14 : 11, color: "#6b7280" }}>
+          {placeholderLabel(mimeType)}
+        </span>
+      </div>
     );
-  }
 
+  // The "Open in editor" affordance only appears in the panel layout
+  // when office editing is configured, a handler is wired, and the
+  // file is an office document. Inline thumbnails (list rows) never
+  // render it.
+  const showEditorButton =
+    size === "panel" && !!onOpenEditor && !!onlyOfficeEnabled && isOfficeDocument(fileName);
+  if (!showEditorButton) {
+    return previewNode;
+  }
   return (
-    <div style={wrapper} aria-label={alt ?? t("preview.unavailable")}>
-      <span style={{ fontSize: size === "panel" ? 14 : 11, color: "#6b7280" }}>
-        {placeholderLabel(mimeType)}
-      </span>
+    <div style={{ display: "inline-flex", flexDirection: "column", gap: 8, alignItems: "center" }}>
+      {previewNode}
+      <button onClick={onOpenEditor} style={openEditorBtnStyle}>
+        {t("onlyoffice.openInEditor")}
+      </button>
     </div>
   );
 }
+
+const openEditorBtnStyle: React.CSSProperties = {
+  padding: "6px 12px",
+  background: "white",
+  border: "1px solid #d1d5db",
+  borderRadius: 4,
+  fontSize: 13,
+  cursor: "pointer",
+};
 
 // placeholderLabel returns a short hint based on the mime type so the
 // placeholder at least communicates "this is a PDF" vs a generic file

@@ -276,3 +276,73 @@ describe("CollabProvider close-code policy", () => {
     provider.destroy();
   });
 });
+
+describe("CollabProvider token refresh", () => {
+  // Stub the global WebSocket so connect() doesn't open a real socket
+  // and we can capture the subprotocol pair (where the bearer token
+  // travels) the provider hands the constructor.
+  function withStubbedWS(fn: (captured: { protocols: string[][] }) => void) {
+    const captured = { protocols: [] as string[][] };
+    const original = globalThis.WebSocket;
+    class StubSocket {
+      static readonly OPEN = 1;
+      static readonly CONNECTING = 0;
+      readyState = 0;
+      onopen: (() => void) | null = null;
+      onmessage: (() => void) | null = null;
+      onerror: (() => void) | null = null;
+      onclose: (() => void) | null = null;
+      binaryType = "";
+      constructor(_url: string, protocols?: string | string[]) {
+        captured.protocols.push(
+          Array.isArray(protocols) ? protocols : protocols ? [protocols] : [],
+        );
+      }
+      send() {}
+      close() {}
+    }
+    (globalThis as unknown as { WebSocket: unknown }).WebSocket = StubSocket;
+    try {
+      fn(captured);
+    } finally {
+      (globalThis as unknown as { WebSocket: unknown }).WebSocket = original;
+    }
+  }
+
+  it("consults tokenProvider on connect and sends the refreshed token", () => {
+    withStubbedWS((captured) => {
+      let current = "fresh-token";
+      const doc = new Y.Doc();
+      const provider = new CollabProvider({
+        url: "ws://127.0.0.1:1/api/documents/x/ws",
+        token: "stale-token",
+        tokenProvider: () => current,
+        doc,
+      });
+      provider.connect();
+      expect(captured.protocols[0]).toEqual(["bearer", "fresh-token"]);
+
+      // A later reconnect picks up the rotated token.
+      current = "rotated-token";
+      (provider as unknown as { ws: unknown }).ws = null;
+      provider.connect();
+      expect(captured.protocols[1]).toEqual(["bearer", "rotated-token"]);
+      provider.destroy();
+    });
+  });
+
+  it("falls back to the static token when tokenProvider returns null", () => {
+    withStubbedWS((captured) => {
+      const doc = new Y.Doc();
+      const provider = new CollabProvider({
+        url: "ws://127.0.0.1:1/api/documents/x/ws",
+        token: "static-token",
+        tokenProvider: () => null,
+        doc,
+      });
+      provider.connect();
+      expect(captured.protocols[0]).toEqual(["bearer", "static-token"]);
+      provider.destroy();
+    });
+  });
+});

@@ -39,6 +39,12 @@ spec:
       backoffLimit: 2
       ttlSecondsAfterFinished: 86400
       template:
+        metadata:
+          labels:
+            # Batch label so allow-batch-egress permits DB/NATS/S3
+            # egress under the namespace default-deny policy.
+            app: zk-drive-batch
+            component: orphan-gc
         spec:
           # Same image as server/worker/migrate/reconciler — every
           # entrypoint ships in one tag (Dockerfile builds

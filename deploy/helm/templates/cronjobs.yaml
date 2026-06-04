@@ -1,0 +1,122 @@
+{{- if .Values.cronjobs.reconciler.enabled }}
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: zk-drive-reconciler
+  namespace: {{ include "zk-drive.namespace" . }}
+  labels:
+    {{- include "zk-drive.labels" . | nindent 4 }}
+spec:
+  schedule: {{ .Values.cronjobs.reconciler.schedule | quote }}
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  startingDeadlineSeconds: 300
+  jobTemplate:
+    spec:
+      activeDeadlineSeconds: {{ .Values.cronjobs.reconciler.activeDeadlineSeconds }}
+      backoffLimit: 2
+      ttlSecondsAfterFinished: 86400
+      template:
+        metadata:
+          labels:
+            # Batch label so allow-batch-egress permits DB/NATS/S3
+            # egress under the namespace default-deny policy.
+            app: zk-drive-batch
+            component: reconciler
+        spec:
+          restartPolicy: OnFailure
+          {{- include "zk-drive.imagePullSecrets" . | nindent 10 }}
+          containers:
+            - name: reconciler
+              image: {{ include "zk-drive.image" . }}
+              imagePullPolicy: {{ .Values.image.pullPolicy }}
+              command: ["/app/reconciler"]
+              {{- include "zk-drive.envFrom" . | nindent 14 }}
+              resources:
+                {{- toYaml (.Values.cronjobs.reconciler.resources | default .Values.cronjobs.resources) | nindent 16 }}
+{{- end }}
+{{- if .Values.cronjobs.orphanGc.enabled }}
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: zk-drive-orphan-gc
+  namespace: {{ include "zk-drive.namespace" . }}
+  labels:
+    {{- include "zk-drive.labels" . | nindent 4 }}
+spec:
+  schedule: {{ .Values.cronjobs.orphanGc.schedule | quote }}
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  startingDeadlineSeconds: 600
+  jobTemplate:
+    spec:
+      activeDeadlineSeconds: {{ .Values.cronjobs.orphanGc.activeDeadlineSeconds }}
+      backoffLimit: 2
+      ttlSecondsAfterFinished: 86400
+      template:
+        metadata:
+          labels:
+            # Batch label so allow-batch-egress permits DB/NATS/S3
+            # egress under the namespace default-deny policy.
+            app: zk-drive-batch
+            component: orphan-gc
+        spec:
+          restartPolicy: OnFailure
+          {{- include "zk-drive.imagePullSecrets" . | nindent 10 }}
+          containers:
+            - name: orphan-gc
+              image: {{ include "zk-drive.image" . }}
+              imagePullPolicy: {{ .Values.image.pullPolicy }}
+              command: ["/app/orphan-gc"]
+              {{- include "zk-drive.envFrom" . | nindent 14 }}
+              resources:
+                {{- toYaml (.Values.cronjobs.orphanGc.resources | default .Values.cronjobs.resources) | nindent 16 }}
+{{- end }}
+{{- if .Values.cronjobs.auditArchiver.enabled }}
+---
+# Requires migration 027_audit_log_archive_runs to be applied (the
+# migrate Job hook handles this). AUDIT_LOG_ARCHIVE_ENABLED is the
+# opt-in gate — archiver no-ops until set true.
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: zk-drive-audit-archiver
+  namespace: {{ include "zk-drive.namespace" . }}
+  labels:
+    {{- include "zk-drive.labels" . | nindent 4 }}
+spec:
+  schedule: {{ .Values.cronjobs.auditArchiver.schedule | quote }}
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  startingDeadlineSeconds: 600
+  jobTemplate:
+    spec:
+      activeDeadlineSeconds: {{ .Values.cronjobs.auditArchiver.activeDeadlineSeconds }}
+      backoffLimit: 2
+      ttlSecondsAfterFinished: 86400
+      template:
+        metadata:
+          labels:
+            # Batch label so allow-batch-egress permits DB/NATS/S3
+            # egress under the namespace default-deny policy.
+            app: zk-drive-batch
+            component: audit-archiver
+        spec:
+          restartPolicy: OnFailure
+          {{- include "zk-drive.imagePullSecrets" . | nindent 10 }}
+          containers:
+            - name: audit-archiver
+              image: {{ include "zk-drive.image" . }}
+              imagePullPolicy: {{ .Values.image.pullPolicy }}
+              command: ["/app/audit-archiver"]
+              env:
+                - name: AUDIT_LOG_ARCHIVE_ENABLED
+                  value: {{ .Values.cronjobs.auditArchiver.enabledFlag | quote }}
+              {{- include "zk-drive.envFrom" . | nindent 14 }}
+              resources:
+                {{- toYaml (.Values.cronjobs.auditArchiver.resources | default .Values.cronjobs.resources) | nindent 16 }}
+{{- end }}

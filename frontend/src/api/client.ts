@@ -572,6 +572,56 @@ export async function deleteFile(id: string): Promise<void> {
   await client.delete(`/files/${id}`);
 }
 
+// --- ONLYOFFICE office editing -------------------------------------------
+
+// OnlyOfficeEditorConfig mirrors the JSON the backend
+// (api/drive/onlyoffice_handler.go → internal/collab.EditorConfig)
+// hands to `new DocsAPI.DocEditor(...)`. documentServerUrl tells the
+// frontend which Document Server's api.js to load; the nested
+// document / editorConfig blocks are passed through to DocsAPI
+// verbatim, and token is the HS256 JWT the Document Server validates.
+export interface OnlyOfficeEditorConfig {
+  documentServerUrl: string;
+  documentType: string;
+  document: {
+    title: string;
+    url: string;
+    fileType: string;
+    key: string;
+    permissions: { edit: boolean; download: boolean; print: boolean };
+  };
+  editorConfig: {
+    mode: string;
+    callbackUrl: string;
+    lang?: string;
+    user: { id: string; name: string };
+  };
+  token?: string;
+}
+
+// getOnlyOfficeStatus reports whether collaborative office editing is
+// configured server-side (ONLYOFFICE_URL set). The frontend uses it to
+// gate the "Open in Editor" affordance so it stays hidden in
+// deployments without a Document Server.
+export async function getOnlyOfficeStatus(): Promise<boolean> {
+  const { data } = await client.get<{ enabled: boolean }>("/onlyoffice/status");
+  return data.enabled;
+}
+
+// getEditorConfig fetches the signed ONLYOFFICE editor config for a
+// file. mode is "edit" (default) or "view"; the server downgrades an
+// "edit" request to "view" when the caller lacks editor access.
+export async function getEditorConfig(
+  fileID: string,
+  mode: "edit" | "view" = "edit",
+): Promise<OnlyOfficeEditorConfig> {
+  const { data } = await client.get<OnlyOfficeEditorConfig>(
+    `/files/${fileID}/editor-config`,
+    { params: { mode } },
+  );
+  return data;
+}
+
 export async function renameFile(id: string, name: string): Promise<FileItem> {
   const { data } = await client.put<FileItem>(`/files/${id}`, { name });
   return data;
