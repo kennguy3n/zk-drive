@@ -102,6 +102,76 @@ the worker hasn't rolled yet — restart it and the `ensureStream`
 call adds the subject without losing the in-stream messages on
 existing subjects.
 
+## Preview pipeline scaling & per-tenant budgets
+
+The preview pipeline (document thumbnail generation) is designed to
+scale horizontally and to stay fair across tenants under load.
+
+### Horizontal scaling
+
+`DRIVE_JOBS` is a JetStream **work-queue** stream and every preview
+consumer is **durable** (`drive-preview`, `drive-preview-priority`,
+`drive-preview-standard`). Running N worker replicas therefore needs
+no special configuration: each replica binds the same durable
+consumers and JetStream load-balances delivery across all of them
+(at-most-one delivery per message while it is in flight). To add
+capacity, raise the worker `Deployment` replica count — there is no
+leader election or sharding to configure. Within a single replica,
+each preview subject is additionally fanned across a fixed goroutine
+pool (see below), so one replica already renders multiple previews
+concurrently.
+
+### Priority queue (paid tiers first)
+
+Preview jobs are routed onto two subjects by the originating
+workspace's billing tier:
+
+| Subject                            | Tiers                         | Worker pool (per replica)            |
+| ---------------------------------- | ----------------------------- | ------------------------------------ |
+| `drive.preview.generate.priority`  | `business`, `secure_business` | `PREVIEW_PRIORITY_WORKERS` (default 6) |
+| `drive.preview.generate.standard`  | `free`, `starter`             | `PREVIEW_STANDARD_WORKERS` (default 2) |
+| `drive.preview.generate` (legacy)  | un-routed / pre-upgrade jobs  | single inline goroutine (compat)     |
+
+The priority pool is sized ~3× the standard pool so paid tiers get
+proportionally more render concurrency when the queue is backed up.
+Tier is resolved from `workspace_plans.tier`, cached in Redis under
+`preview_tier:{workspace_id}` with a 5-minute TTL so a plan change
+(e.g. a Stripe upgrade) takes effect within a few minutes without a
+DB hit on every job. The legacy `drive.preview.generate` subject is
+retained so previews enqueued by a not-yet-upgraded API server during
+a rolling deploy are still processed.
+
+### Per-tenant budget
+
+To stop a single tenant (e.g. one bulk-importing thousands of files)
+from monopolising the shared worker fleet, each workspace has a
+**sliding-window** preview budget enforced via Redis:
+
+- Key `preview_budget:{workspace_id}` (a sorted set of admission
+  timestamps); admission is atomic via a Lua script.
+- Default **100 previews / hour / workspace**, configurable via
+  `PREVIEW_BUDGET_PER_WORKSPACE_HOUR`.
+- When a workspace is over budget the job is **NAK'd with an
+  exponential backoff** (15s, doubling, capped at 5 minutes) so it
+  re-enters the queue and is rendered once the trailing-hour window
+  drains — it is **not** dropped. The priority/standard consumers use
+  a higher `MaxDeliver` (50) than the legacy consumer precisely so
+  these legitimate budget deferrals are not terminated as if they were
+  poison payloads.
+- Each deferral increments `zkdrive_preview_budget_exceeded_total{tier}`.
+
+The budget and tier cache are **only active when `REDIS_URL` is
+set**. Without Redis (single-replica / local dev) the worker admits
+every preview and routing falls back to the standard behaviour — the
+budget is a fairness guard, never a correctness dependency, so a Redis
+outage fails **open** rather than blocking previews.
+
+**Suggested alert:** a sustained non-zero rate on
+`zkdrive_preview_budget_exceeded_total` for a single `tier` indicates
+either a tenant hammering uploads or an under-provisioned budget; if
+it is a legitimate workload, raise `PREVIEW_BUDGET_PER_WORKSPACE_HOUR`
+and/or add worker replicas.
+
 ### Upgrade note: JWT key rotation now requires PLATFORM_ADMIN_USER_IDS
 
 `POST /api/admin/jwt/rotate` rotates the **platform-wide** signing key
@@ -135,6 +205,7 @@ Exported series (under the `zkdrive_` prefix):
 - `zkdrive_http_in_flight_requests` — gauge
 - `zkdrive_worker_jobs_total{subject, result}` — counter (`result` ∈ `ok|skip|error|dropped`)
 - `zkdrive_worker_job_duration_seconds{subject}` — histogram
+- `zkdrive_preview_budget_exceeded_total{tier}` — counter; incremented each time a preview job is deferred because its workspace is over the per-tenant hourly budget (see [Preview pipeline scaling & per-tenant budgets](#preview-pipeline-scaling--per-tenant-budgets)). Labelled by billing `tier` (`free|starter|business|secure_business`) rather than `workspace_id` to keep cardinality bounded
 - `zkdrive_reconciler_runs_total{result}` — counter
 - `zkdrive_reconciler_workspaces_scanned_total` — counter
 - `zkdrive_reconciler_workspaces_updated_total` — counter

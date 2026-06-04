@@ -94,6 +94,17 @@ type Config struct {
 	RateLimitPerUser      int
 	RateLimitPerWorkspace int
 
+	// Preview pipeline scaling + per-tenant fairness. The budget is a
+	// Redis-backed sliding-window limit on previews generated per
+	// workspace per hour so one tenant bulk-uploading cannot starve
+	// the shared worker fleet; the priority / standard worker counts
+	// size the two goroutine pools the worker fans preview jobs
+	// across (paid tiers get the larger priority pool). All three
+	// fall back to their defaults when unset or <= 0.
+	PreviewBudgetPerWorkspaceHour int
+	PreviewPriorityWorkers        int
+	PreviewStandardWorkers        int
+
 	// TrustedProxyDepth is the number of trusted reverse proxies in
 	// front of the server. It governs how the IP-allowlist
 	// middleware resolves the client IP from X-Forwarded-For: the
@@ -453,43 +464,46 @@ func buildConfigFromEnv() *Config {
 	dbMaxConns := dbMaxConnsFromEnv()
 	platformAdmins, invalidPlatformAdmins := platformAdminUserIDsFromEnv()
 	return &Config{
-		DatabaseURL:                 os.Getenv("DATABASE_URL"),
-		JWTSecret:                   os.Getenv("JWT_SECRET"),
-		DBMaxConns:                  dbMaxConns,
-		DBMinConns:                  dbMinConnsFromEnv(dbMaxConns),
-		DBMaxConnIdleTime:           parseDurationDefault(os.Getenv("DB_MAX_CONN_IDLE_TIME"), defaultDBMaxConnIdleTime),
-		JWTAlgorithm:                normaliseJWTAlgorithm(os.Getenv("JWT_ALGORITHM")),
-		JWTKeyRefreshInterval:       jwtKeyRefreshIntervalFromEnv(),
-		PlatformAdminUserIDs:        platformAdmins,
-		PlatformAdminUserIDsInvalid: invalidPlatformAdmins,
-		ListenAddr:                  getEnvDefault("LISTEN_ADDR", ":8080"),
-		S3Endpoint:                  os.Getenv("S3_ENDPOINT"),
-		S3Bucket:                    os.Getenv("S3_BUCKET"),
-		S3AccessKey:                 os.Getenv("S3_ACCESS_KEY"),
-		S3SecretKey:                 os.Getenv("S3_SECRET_KEY"),
-		MigrationsDir:               getEnvDefault("MIGRATIONS_DIR", "migrations"),
-		NATSURL:                     os.Getenv("NATS_URL"),
-		ClamAVAddress:               os.Getenv("CLAMAV_ADDRESS"),
-		GoogleClientID:              os.Getenv("GOOGLE_CLIENT_ID"),
-		GoogleClientSecret:          os.Getenv("GOOGLE_CLIENT_SECRET"),
-		GoogleRedirectURL:           os.Getenv("GOOGLE_REDIRECT_URL"),
-		MicrosoftClientID:           os.Getenv("MICROSOFT_CLIENT_ID"),
-		MicrosoftClientSecret:       os.Getenv("MICROSOFT_CLIENT_SECRET"),
-		MicrosoftRedirectURL:        os.Getenv("MICROSOFT_REDIRECT_URL"),
-		RateLimitPerUser:            parseIntDefault(os.Getenv("RATE_LIMIT_PER_USER"), 0),
-		RateLimitPerWorkspace:       parseIntDefault(os.Getenv("RATE_LIMIT_PER_WORKSPACE"), 0),
-		TrustedProxyDepth:           parseNonNegativeIntDefault(os.Getenv("TRUSTED_PROXY_DEPTH"), defaultTrustedProxyDepth),
-		RedisURL:                    os.Getenv("REDIS_URL"),
-		FabricConsoleURL:            os.Getenv("FABRIC_CONSOLE_URL"),
-		FabricConsoleAdminToken:     os.Getenv("FABRIC_CONSOLE_ADMIN_TOKEN"),
-		FabricBucketTemplate:        getEnvDefault("FABRIC_BUCKET_TEMPLATE", "zk-drive-{tenant}"),
-		FabricDefaultPlacementRef:   getEnvDefault("FABRIC_DEFAULT_PLACEMENT_REF", "b2c_pooled_default"),
-		StaticDir:                   os.Getenv("STATIC_DIR"),
-		StripeWebhookSecret:         os.Getenv("STRIPE_WEBHOOK_SECRET"),
-		StripeSecretKey:             os.Getenv("STRIPE_SECRET_KEY"),
-		StripePriceTierMap:          parsePriceTierMap(os.Getenv("STRIPE_PRICE_TIER_MAP")),
-		OllamaURL:                   os.Getenv("OLLAMA_URL"),
-		OllamaModel:                 os.Getenv("OLLAMA_MODEL"),
+		DatabaseURL:                   os.Getenv("DATABASE_URL"),
+		JWTSecret:                     os.Getenv("JWT_SECRET"),
+		DBMaxConns:                    dbMaxConns,
+		DBMinConns:                    dbMinConnsFromEnv(dbMaxConns),
+		DBMaxConnIdleTime:             parseDurationDefault(os.Getenv("DB_MAX_CONN_IDLE_TIME"), defaultDBMaxConnIdleTime),
+		JWTAlgorithm:                  normaliseJWTAlgorithm(os.Getenv("JWT_ALGORITHM")),
+		JWTKeyRefreshInterval:         jwtKeyRefreshIntervalFromEnv(),
+		PlatformAdminUserIDs:          platformAdmins,
+		PlatformAdminUserIDsInvalid:   invalidPlatformAdmins,
+		ListenAddr:                    getEnvDefault("LISTEN_ADDR", ":8080"),
+		S3Endpoint:                    os.Getenv("S3_ENDPOINT"),
+		S3Bucket:                      os.Getenv("S3_BUCKET"),
+		S3AccessKey:                   os.Getenv("S3_ACCESS_KEY"),
+		S3SecretKey:                   os.Getenv("S3_SECRET_KEY"),
+		MigrationsDir:                 getEnvDefault("MIGRATIONS_DIR", "migrations"),
+		NATSURL:                       os.Getenv("NATS_URL"),
+		ClamAVAddress:                 os.Getenv("CLAMAV_ADDRESS"),
+		GoogleClientID:                os.Getenv("GOOGLE_CLIENT_ID"),
+		GoogleClientSecret:            os.Getenv("GOOGLE_CLIENT_SECRET"),
+		GoogleRedirectURL:             os.Getenv("GOOGLE_REDIRECT_URL"),
+		MicrosoftClientID:             os.Getenv("MICROSOFT_CLIENT_ID"),
+		MicrosoftClientSecret:         os.Getenv("MICROSOFT_CLIENT_SECRET"),
+		MicrosoftRedirectURL:          os.Getenv("MICROSOFT_REDIRECT_URL"),
+		RateLimitPerUser:              parseIntDefault(os.Getenv("RATE_LIMIT_PER_USER"), 0),
+		RateLimitPerWorkspace:         parseIntDefault(os.Getenv("RATE_LIMIT_PER_WORKSPACE"), 0),
+		PreviewBudgetPerWorkspaceHour: parseIntDefault(os.Getenv("PREVIEW_BUDGET_PER_WORKSPACE_HOUR"), 100),
+		PreviewPriorityWorkers:        parseIntDefault(os.Getenv("PREVIEW_PRIORITY_WORKERS"), 6),
+		PreviewStandardWorkers:        parseIntDefault(os.Getenv("PREVIEW_STANDARD_WORKERS"), 2),
+		TrustedProxyDepth:             parseNonNegativeIntDefault(os.Getenv("TRUSTED_PROXY_DEPTH"), defaultTrustedProxyDepth),
+		RedisURL:                      os.Getenv("REDIS_URL"),
+		FabricConsoleURL:              os.Getenv("FABRIC_CONSOLE_URL"),
+		FabricConsoleAdminToken:       os.Getenv("FABRIC_CONSOLE_ADMIN_TOKEN"),
+		FabricBucketTemplate:          getEnvDefault("FABRIC_BUCKET_TEMPLATE", "zk-drive-{tenant}"),
+		FabricDefaultPlacementRef:     getEnvDefault("FABRIC_DEFAULT_PLACEMENT_REF", "b2c_pooled_default"),
+		StaticDir:                     os.Getenv("STATIC_DIR"),
+		StripeWebhookSecret:           os.Getenv("STRIPE_WEBHOOK_SECRET"),
+		StripeSecretKey:               os.Getenv("STRIPE_SECRET_KEY"),
+		StripePriceTierMap:            parsePriceTierMap(os.Getenv("STRIPE_PRICE_TIER_MAP")),
+		OllamaURL:                     os.Getenv("OLLAMA_URL"),
+		OllamaModel:                   os.Getenv("OLLAMA_MODEL"),
 
 		SecurityHeadersDisableHSTS:     parseBoolDefault(os.Getenv("SECURITY_HEADERS_DISABLE_HSTS"), false),
 		SecurityHeadersCSPReportOnly:   parseBoolDefault(os.Getenv("SECURITY_HEADERS_CSP_REPORT_ONLY"), false),

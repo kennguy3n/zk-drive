@@ -259,6 +259,18 @@ type Metrics struct {
 	// adding a new layer adds a constant in the same file so
 	// the cardinality bound stays documented at the type.
 	cacheOpsTotal *prometheus.CounterVec
+
+	// previewBudgetExceededTotal counts preview-generation jobs that
+	// were deferred because the owning workspace had exhausted its
+	// per-window preview budget (see
+	// internal/preview.TenantPreviewBudget). Labelled by billing
+	// tier — a BOUNDED set (free/starter/business/secure_business) —
+	// NOT by workspace_id, which would be unbounded cardinality. A
+	// rising rate on a given tier is the signal that the budget for
+	// that tier is mis-sized or a tenant is bulk-importing; operators
+	// chase the specific workspace via the worker's structured logs
+	// (which DO carry workspace_id).
+	previewBudgetExceededTotal *prometheus.CounterVec
 }
 
 // New constructs a Metrics with a fresh private registry and the
@@ -377,6 +389,7 @@ func New() *Metrics {
 	m.registerWebhookMetrics(reg)
 	m.registerDBMetrics(reg)
 	m.registerCacheMetrics(reg)
+	m.registerPreviewMetrics(reg)
 
 	return m
 }
