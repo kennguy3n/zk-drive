@@ -33,11 +33,17 @@ type suspendedWorkspaceBody struct {
 // binds the workspace id) and is a no-op when no workspace is bound or
 // when checker is nil.
 //
-// It fails OPEN: if the suspension lookup errors (e.g. transient DB
-// blip) the request proceeds, since suspension is an availability
-// control rather than a security boundary and a lookup failure must not
-// lock the entire fleet out.
-func SuspensionGuard(checker WorkspaceSuspensionChecker) func(http.Handler) http.Handler {
+// failClosed selects the posture on a suspension-lookup error:
+//   - false (default): fail OPEN — the request proceeds, since
+//     suspension is an availability control rather than a security
+//     boundary and a transient DB blip must not lock the entire fleet
+//     out.
+//   - true: fail CLOSED — the request is rejected with 503. Intended
+//     for deployments that use suspension for compliance / legal holds,
+//     where a suspended workspace must never transact even during a
+//     database outage. The body distinguishes "can't confirm" from a
+//     confirmed suspension so platform tooling can tell them apart.
+func SuspensionGuard(checker WorkspaceSuspensionChecker, failClosed bool) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		if checker == nil {
 			return next
@@ -50,6 +56,12 @@ func SuspensionGuard(checker WorkspaceSuspensionChecker) func(http.Handler) http
 			}
 			suspended, reason, err := checker.WorkspaceSuspension(r.Context(), workspaceID)
 			if err != nil {
+				if failClosed {
+					logging.FromContext(r.Context()).Warn("suspension lookup failed; rejecting request (fail-closed)",
+						"workspace_id", workspaceID, "err", err)
+					writeSuspensionUnavailable(w)
+					return
+				}
 				logging.FromContext(r.Context()).Warn("suspension lookup failed; allowing request",
 					"workspace_id", workspaceID, "err", err)
 				next.ServeHTTP(w, r)
@@ -73,4 +85,19 @@ func writeSuspended(w http.ResponseWriter, reason string) {
 	w.Header().Set("Retry-After", "3600")
 	w.WriteHeader(http.StatusServiceUnavailable)
 	_ = json.NewEncoder(w).Encode(suspendedWorkspaceBody{Error: "workspace_suspended", Reason: reason})
+}
+
+// writeSuspensionUnavailable is the fail-CLOSED response when the
+// suspension lookup itself errored. It is deliberately distinct from
+// writeSuspended ("workspace_suspended"): the workspace's suspension
+// state is unknown, not confirmed-suspended, so platform tooling and
+// clients can distinguish "blocked because we cannot verify" from
+// "blocked because suspended". A shorter Retry-After reflects that this
+// is expected to clear as soon as the lookup backend recovers.
+func writeSuspensionUnavailable(w http.ResponseWriter) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.Header().Set("Retry-After", "30")
+	w.WriteHeader(http.StatusServiceUnavailable)
+	_ = json.NewEncoder(w).Encode(suspendedWorkspaceBody{Error: "suspension_check_unavailable"})
 }

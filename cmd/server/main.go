@@ -712,8 +712,13 @@ func run() error {
 		WithAudit(auditSvc).
 		WithBilling(billingSvc).
 		WithWebhooks(webhookPublisher).
-		WithOnlyOffice(cfg.OnlyOfficeURL, cfg.OnlyOfficeSecret, cfg.PublicURL)
+		WithOnlyOffice(cfg.OnlyOfficeURL, cfg.OnlyOfficeSecret, cfg.PublicURL).
+		WithOnlyOfficeSaveLimits(cfg.OnlyOfficeSaveMemoryBudgetBytes, cfg.OnlyOfficeMaxDocumentBytes)
 	if cfg.OnlyOfficeURL != "" {
+		slog.Info("onlyoffice save concurrency cap derived from memory budget",
+			"max_concurrent_saves", cfg.OnlyOfficeMaxConcurrentSaves(),
+			"save_memory_budget_mb", cfg.OnlyOfficeSaveMemoryBudgetBytes>>20,
+			"max_document_mb", cfg.OnlyOfficeMaxDocumentBytes>>20)
 		if cfg.OnlyOfficeSecret != "" {
 			slog.Info("onlyoffice integration enabled with callback JWT verification")
 		} else {
@@ -850,8 +855,13 @@ func run() error {
 		// give the handler the same suspension checker to re-enforce the
 		// freeze at the write boundary. Wired here rather than at the
 		// initial NewHandler chain above because platformSvc is built
-		// after it.
-		WithSuspensionChecker(platformSvc)
+		// after it. The fail-closed posture mirrors SuspensionGuard so
+		// the callback write boundary and the REST/WS middleware agree.
+		WithSuspensionChecker(platformSvc).
+		WithSuspensionFailClosed(cfg.SuspensionFailClosed)
+	if cfg.SuspensionFailClosed {
+		slog.Info("workspace suspension enforcement is fail-CLOSED: a suspension-lookup error returns 503 (compliance-hold posture)")
+	}
 	kchatHandler := apikchat.NewHandler(kchatSvc, summarySvc)
 
 	// metrics owns a private prometheus.Registry, the HTTP
@@ -1122,7 +1132,7 @@ func run() error {
 			// (SuspensionGuard → IPAllowlist), so a suspended workspace
 			// gets the same 503 regardless of transport rather than a 503
 			// on REST but a 403 on the WS upgrade.
-			r.Use(middleware.SuspensionGuard(platformSvc))
+			r.Use(middleware.SuspensionGuard(platformSvc, cfg.SuspensionFailClosed))
 			// IP allowlist enforcement applies to the WS upgrade too:
 			// conditional access must gate EVERY entry into a
 			// workspace, not just the REST data plane, else a blocked
@@ -1148,7 +1158,7 @@ func run() error {
 		r.Group(func(r chi.Router) {
 			r.Use(middleware.AuthMiddlewareWithKeys(jwtKeyManager, sessionChecker))
 			r.Use(middleware.TenantGuard())
-			r.Use(middleware.SuspensionGuard(platformSvc))
+			r.Use(middleware.SuspensionGuard(platformSvc, cfg.SuspensionFailClosed))
 			// IP allowlist enforcement runs after the tenant guard
 			// has resolved the workspace. It is a no-op for any
 			// workspace that has not enabled the feature. Mounted on
@@ -1246,7 +1256,7 @@ func run() error {
 		r.Route("/admin", func(r chi.Router) {
 			r.Use(middleware.AuthMiddlewareWithKeys(jwtKeyManager, sessionChecker))
 			r.Use(middleware.TenantGuard())
-			r.Use(middleware.SuspensionGuard(platformSvc))
+			r.Use(middleware.SuspensionGuard(platformSvc, cfg.SuspensionFailClosed))
 			r.Use(middleware.AdminOnly())
 			r.Use(rateLimiter())
 			adminHandler.RegisterRoutes(r)
@@ -1262,7 +1272,7 @@ func run() error {
 		r.Route("/kchat", func(r chi.Router) {
 			r.Use(middleware.AuthMiddlewareWithKeys(jwtKeyManager, sessionChecker))
 			r.Use(middleware.TenantGuard())
-			r.Use(middleware.SuspensionGuard(platformSvc))
+			r.Use(middleware.SuspensionGuard(platformSvc, cfg.SuspensionFailClosed))
 			// kchat is a data-plane feature (attachment uploads, room
 			// creation, member sync), so it must honour the workspace IP
 			// allowlist exactly like the main data-plane group above.

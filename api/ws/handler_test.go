@@ -311,7 +311,7 @@ func TestServeWSEnforcesSuspensionGuard(t *testing.T) {
 			next.ServeHTTP(w, r.WithContext(ctx))
 		})
 	}
-	handler := withWorkspace(middleware.SuspensionGuard(suspendedChecker{})(http.HandlerFunc(serveWS)))
+	handler := withWorkspace(middleware.SuspensionGuard(suspendedChecker{}, false)(http.HandlerFunc(serveWS)))
 	srv := httptest.NewServer(handler)
 	defer srv.Close()
 

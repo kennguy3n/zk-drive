@@ -74,8 +74,21 @@ type Handler struct {
 	collab         *collab.DocumentHub
 	onlyOffice     *collab.OnlyOfficeService
 	suspension     middleware.WorkspaceSuspensionChecker
-	tagSuggest     TagSuggester
-	queryExpand    QueryExpander
+	// suspensionFailClosed mirrors the SuspensionGuard policy for the
+	// ONLYOFFICE save callback (which runs outside the middleware): when
+	// true, a suspension-lookup error rejects the write instead of
+	// allowing it. Set via WithSuspensionFailClosed.
+	suspensionFailClosed bool
+	// onlyOfficeSaveSem bounds concurrent in-memory document buffering on
+	// the save callback; onlyOfficeMaxDocumentBytes caps a single
+	// document; onlyOfficeSaveConcurrency is the semaphore capacity (kept
+	// for logging). Defaulted in NewHandler, overridden by
+	// WithOnlyOfficeSaveLimits.
+	onlyOfficeSaveSem          chan struct{}
+	onlyOfficeMaxDocumentBytes int64
+	onlyOfficeSaveConcurrency  int
+	tagSuggest                 TagSuggester
+	queryExpand                QueryExpander
 }
 
 // TagSuggester is the narrow interface the drive handler needs from
@@ -144,6 +157,12 @@ func NewHandler(
 		storage:     st,
 		permissions: perms,
 		activity:    act,
+		// Safe defaults for the ONLYOFFICE save concurrency cap so the
+		// callback path is bounded even when WithOnlyOfficeSaveLimits is
+		// not wired (e.g. tests). Production overrides these from config.
+		onlyOfficeSaveSem:          make(chan struct{}, defaultOnlyOfficeMaxConcurrentSaves),
+		onlyOfficeMaxDocumentBytes: defaultOnlyOfficeMaxDocumentBytes,
+		onlyOfficeSaveConcurrency:  defaultOnlyOfficeMaxConcurrentSaves,
 	}
 }
 

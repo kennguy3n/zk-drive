@@ -2,6 +2,7 @@ package config
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"strconv"
 	"strings"
@@ -419,6 +420,49 @@ type Config struct {
 	// for trusted local development against a JWT-disabled Document
 	// Server. Set via ONLYOFFICE_ALLOW_INSECURE.
 	OnlyOfficeAllowInsecure bool
+	// OnlyOfficeMaxDocumentBytes caps how many bytes the save callback
+	// will read from the Document Server into memory before rejecting
+	// the document as oversized. Set via ONLYOFFICE_MAX_DOCUMENT_MB
+	// (megabytes); defaults to defaultOnlyOfficeMaxDocumentMB.
+	OnlyOfficeMaxDocumentBytes int64
+	// OnlyOfficeSaveMemoryBudgetBytes is the share of the API
+	// container's memory the save path may buffer concurrently. The
+	// concurrency cap (see OnlyOfficeMaxConcurrentSaves) is DERIVED as
+	// budget / max-document so the worst case
+	// (concurrency * max-document) stays within budget by construction.
+	// Set via ONLYOFFICE_SAVE_MEMORY_BUDGET_MB (megabytes); defaults to
+	// defaultOnlyOfficeSaveMemoryBudgetMB. Must be >= the per-document
+	// cap or the server refuses to start (a budget below one document
+	// would shed every save).
+	OnlyOfficeSaveMemoryBudgetBytes int64
+
+	// SuspensionFailClosed flips the workspace-suspension enforcement
+	// posture from fail-OPEN (default) to fail-CLOSED. Suspension is an
+	// availability control, so by default a suspension-lookup error
+	// (e.g. a transient DB blip) lets the request proceed rather than
+	// locking the fleet out. Deployments that use suspension for
+	// compliance / legal holds — where a suspended workspace must NEVER
+	// transact even during a database outage — can set
+	// SUSPENSION_FAIL_CLOSED=true to return 503 on a lookup error
+	// instead. Applies to both SuspensionGuard (REST/WS) and the
+	// ONLYOFFICE save-callback write boundary.
+	SuspensionFailClosed bool
+}
+
+// OnlyOfficeMaxConcurrentSaves derives how many save callbacks may
+// buffer an edited document in memory at once from the configured
+// memory budget and per-document cap. It is always >= 1 (Load
+// validates budget >= per-document so the floor division never yields
+// 0 for an enabled integration).
+func (c *Config) OnlyOfficeMaxConcurrentSaves() int {
+	if c.OnlyOfficeMaxDocumentBytes <= 0 {
+		return 1
+	}
+	n := int(c.OnlyOfficeSaveMemoryBudgetBytes / c.OnlyOfficeMaxDocumentBytes)
+	if n < 1 {
+		return 1
+	}
+	return n
 }
 
 // WebPushEnabled reports whether both VAPID keys are configured. When
@@ -559,9 +603,13 @@ func buildConfigFromEnv() *Config {
 		VAPIDPrivateKey: strings.TrimSpace(os.Getenv("VAPID_PRIVATE_KEY")),
 		VAPIDSubscriber: strings.TrimSpace(os.Getenv("VAPID_SUBSCRIBER")),
 
-		OnlyOfficeURL:           strings.TrimSpace(os.Getenv("ONLYOFFICE_URL")),
-		OnlyOfficeSecret:        os.Getenv("ONLYOFFICE_SECRET"),
-		OnlyOfficeAllowInsecure: parseBoolDefault(os.Getenv("ONLYOFFICE_ALLOW_INSECURE"), false),
+		OnlyOfficeURL:                   strings.TrimSpace(os.Getenv("ONLYOFFICE_URL")),
+		OnlyOfficeSecret:                os.Getenv("ONLYOFFICE_SECRET"),
+		OnlyOfficeAllowInsecure:         parseBoolDefault(os.Getenv("ONLYOFFICE_ALLOW_INSECURE"), false),
+		OnlyOfficeMaxDocumentBytes:      onlyOfficeBytesFromEnv("ONLYOFFICE_MAX_DOCUMENT_MB", defaultOnlyOfficeMaxDocumentMB),
+		OnlyOfficeSaveMemoryBudgetBytes: onlyOfficeBytesFromEnv("ONLYOFFICE_SAVE_MEMORY_BUDGET_MB", defaultOnlyOfficeSaveMemoryBudgetMB),
+
+		SuspensionFailClosed: parseBoolDefault(os.Getenv("SUSPENSION_FAIL_CLOSED"), false),
 	}
 }
 
@@ -631,6 +679,15 @@ func validateOnlyOfficeGroup(cfg *Config) error {
 	}
 	if strings.TrimSpace(cfg.OnlyOfficeSecret) == "" && !cfg.OnlyOfficeAllowInsecure {
 		return errors.New("ONLYOFFICE_URL is set but ONLYOFFICE_SECRET is empty: the editor-callback endpoint would be unauthenticated. Set ONLYOFFICE_SECRET (recommended), or set ONLYOFFICE_ALLOW_INSECURE=true to permit the unauthenticated callback for trusted local development")
+	}
+	// The save concurrency cap is derived as budget / per-document, so a
+	// budget below one document would floor to 0 and shed every save.
+	// Refuse to start on that misconfiguration rather than silently
+	// clamping to 1 (which would also break the worst-case-within-budget
+	// invariant the budget exists to enforce).
+	if cfg.OnlyOfficeSaveMemoryBudgetBytes < cfg.OnlyOfficeMaxDocumentBytes {
+		return fmt.Errorf("ONLYOFFICE_SAVE_MEMORY_BUDGET_MB (%d MiB) must be >= ONLYOFFICE_MAX_DOCUMENT_MB (%d MiB): a budget below one document would shed every save",
+			cfg.OnlyOfficeSaveMemoryBudgetBytes/bytesPerMB, cfg.OnlyOfficeMaxDocumentBytes/bytesPerMB)
 	}
 	return nil
 }
@@ -850,6 +907,31 @@ const (
 
 	defaultDBMaxConnIdleTime = 30 * time.Minute
 )
+
+// ONLYOFFICE save-path memory sizing (megabytes). The per-document cap
+// is deliberately generous (real office documents are 1–50 MB); the
+// budget is half the production API container (512 MiB in
+// deploy/docker-compose.prod.yml) so the save path can never claim the
+// whole container. The derived concurrency (budget / per-document) is
+// 256 / 100 = 2 by default — see Config.OnlyOfficeMaxConcurrentSaves.
+const (
+	defaultOnlyOfficeMaxDocumentMB      = 100
+	defaultOnlyOfficeSaveMemoryBudgetMB = 256
+	bytesPerMB                          = 1 << 20
+)
+
+// onlyOfficeBytesFromEnv parses a megabyte-valued env var into bytes,
+// falling back to defMB when unset / non-positive / malformed. Kept
+// permissive (clamp rather than error) so a typo degrades to the safe
+// default; the budget >= per-document invariant is enforced in
+// validateOnlyOfficeGroup, which fails the server start.
+func onlyOfficeBytesFromEnv(key string, defMB int) int64 {
+	mb := parseIntDefault(os.Getenv(key), defMB)
+	if mb <= 0 {
+		mb = defMB
+	}
+	return int64(mb) * bytesPerMB
+}
 
 // dbMaxConnsFromEnv parses DB_MAX_CONNS and clamps the result to
 // [minDBMaxConns, maxDBMaxConns]. An unset / non-positive / malformed
