@@ -27,6 +27,79 @@ is read-only against S3.
 | `LISTEN_ADDR`    | `:8080`      | HTTP listen address for the API server.                                                       |
 | `MIGRATIONS_DIR` | `migrations` | Path to SQL migrations applied by `migrate` (read-only by `server` / `worker`).                |
 | `STATIC_DIR`     | _empty_      | Optional path to the frontend Vite build. When set, the server serves the SPA from this dir.   |
+| `TRUSTED_PROXY_DEPTH` | `1`     | Number of trusted reverse proxies in front of the server. Governs how the IP-allowlist middleware resolves the client IP from `X-Forwarded-For`. See [IP allowlisting](#ip-allowlisting-trusted_proxy_depth).  |
+
+### IP allowlisting (`TRUSTED_PROXY_DEPTH`)
+
+Workspaces may restrict access to a set of public CIDR ranges
+(conditional access). When a workspace enables its allowlist, the
+server enforces it on every authenticated data-plane request by
+resolving the client IP and rejecting any address not covered by a
+rule with `403 Forbidden` and an `X-ZkDrive-IP-Blocked: true` header.
+
+`TRUSTED_PROXY_DEPTH` tells the server how many reverse proxies (load
+balancers, CDNs) sit in front of it so it can trust the right entry in
+the `X-Forwarded-For` header. The header is a left-to-right list of
+addresses appended by each hop; only the right-most entries — those
+added by infrastructure you control — are trustworthy, because a
+client can forge any value to the left. The middleware takes the
+address `TRUSTED_PROXY_DEPTH` entries from the **right**:
+
+- `1` (default): a single trusted proxy (e.g. one ALB/nginx). The
+  client IP is the last `X-Forwarded-For` entry.
+- `2`: two trusted hops (e.g. CDN → load balancer). The client IP is
+  the second-from-last entry.
+- `0`: no trusted proxy; ignore `X-Forwarded-For` entirely and use the
+  raw TCP peer address (`RemoteAddr`).
+
+If the header is absent or has fewer entries than the configured
+depth, the server falls back to `RemoteAddr`. **Set this to the actual
+number of proxies in your deployment** — too low admits spoofed
+addresses, too high trusts a client-supplied entry. Because the
+allowlist only accepts public ranges, the resolved client IP must be a
+routable public address, so it must reflect the real external client
+rather than an internal proxy hop.
+
+**Allowlistable ranges.** Only publicly routable CIDRs are accepted.
+Private (RFC1918 / RFC4193), loopback, link-local, unspecified,
+multicast, and RFC 6598 carrier-grade-NAT shared space
+(`100.64.0.0/10`) are rejected, because an internet-facing gateway
+never legitimately observes them as a client source address.
+
+**Enabling requires at least one rule.** Because matching fails
+closed, turning the allowlist on for a workspace with no rules would
+block every data-plane request for that workspace. The policy endpoint
+therefore rejects an enable with no rules (`409`,
+`IP_ALLOWLIST_NO_RULES`); add a rule first. Disabling is always
+allowed.
+
+**Cannot remove the last rule while enabled.** For the same
+fail-closed reason, deleting the final rule of an *enabled* allowlist
+is rejected (`409`, `IP_ALLOWLIST_LAST_RULE`) — it would leave the
+workspace enabled with zero rules and lock everyone out. Disable the
+allowlist first, then remove the rule. Both this guard and the
+enable-requires-a-rule guard are enforced atomically under a
+per-workspace row lock, so concurrent "enable" and "remove last rule"
+requests can never race the workspace into the locked-out state.
+
+**Enforcement scope.** The allowlist is enforced on authenticated
+data-plane HTTP requests — the main drive routes and the `/api/kchat`
+routes. The `/api/admin` routes are intentionally exempt so an admin
+who misconfigures the allowlist can still reach the management
+endpoints to fix it.
+
+The long-lived WebSocket endpoints (`/api/ws` and
+`/api/documents/{id}/ws`) are a known limitation: they authenticate the
+upgrade request but deliberately sit outside the per-request middleware
+stack (`TenantGuard` + the IP-allowlist middleware), because that stack
+assumes ordinary request/response semantics and would otherwise charge
+per WS frame. As a result the IP allowlist is **not** applied to
+WebSocket traffic today. The practical exposure is bounded: a client
+must already hold a valid session (JWT) to open a socket, and all
+allowlist-gated REST endpoints — including the upload-URL / confirm
+handshakes used to move file bytes — remain enforced. If you require
+strict connection-time IP enforcement for real-time editing, terminate
+WebSocket traffic at a proxy that applies the same CIDR allowlist.
 
 ## Database connection pool
 

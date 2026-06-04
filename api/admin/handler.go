@@ -64,6 +64,7 @@ type Handler struct {
 	provisioner  *fabric.Provisioner
 	storeFactory *storage.ClientFactory
 	webhooks     MemberEventPublisher
+	ipAllow      *workspace.IPAllowService
 	jwtKeys      JWTRotator
 	// platformAdmins is the operator-configured allowlist of user IDs
 	// permitted to rotate the platform-wide JWT signing key. Empty
@@ -223,6 +224,10 @@ func (h *Handler) RegisterRoutes(r chi.Router) {
 	r.Patch("/workspace/mfa-policy", h.UpdateMFAPolicy)
 	r.Get("/workspace/search-language", h.GetSearchLanguage)
 	r.Put("/workspace/search-language", h.UpdateSearchLanguage)
+	r.Get("/ip-allowlist", h.ListIPAllowRules)
+	r.Post("/ip-allowlist", h.AddIPAllowRule)
+	r.Delete("/ip-allowlist/{id}", h.RemoveIPAllowRule)
+	r.Patch("/ip-allowlist/policy", h.UpdateIPAllowPolicy)
 	r.Post("/jwt/rotate", h.RotateJWTKey)
 }
 
