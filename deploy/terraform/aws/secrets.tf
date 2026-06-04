@@ -142,6 +142,19 @@ resource "aws_secretsmanager_secret" "s3_access_key" {
 resource "aws_secretsmanager_secret_version" "s3_access_key" {
   secret_id     = aws_secretsmanager_secret.s3_access_key.id
   secret_string = var.fabric_access_key != "" ? var.fabric_access_key : " "
+
+  # Fail fast at plan time on the half-configured state (fabric_endpoint set
+  # but the credentials left blank) instead of letting the app boot, hit
+  # validateS3Group's TrimSpace check on the " " placeholder, and crash-loop.
+  # A precondition is used rather than a variable `validation` block because
+  # the condition spans multiple variables (cross-variable validation needs
+  # Terraform >= 1.9, but this module supports >= 1.5).
+  lifecycle {
+    precondition {
+      condition     = var.fabric_endpoint == "" || var.fabric_access_key != ""
+      error_message = "fabric_access_key must be set when fabric_endpoint is configured: the app's validateS3Group requires S3_ACCESS_KEY whenever S3_ENDPOINT is non-empty."
+    }
+  }
 }
 
 resource "aws_secretsmanager_secret" "s3_secret_key" {
@@ -153,6 +166,13 @@ resource "aws_secretsmanager_secret" "s3_secret_key" {
 resource "aws_secretsmanager_secret_version" "s3_secret_key" {
   secret_id     = aws_secretsmanager_secret.s3_secret_key.id
   secret_string = var.fabric_secret_key != "" ? var.fabric_secret_key : " "
+
+  lifecycle {
+    precondition {
+      condition     = var.fabric_endpoint == "" || var.fabric_secret_key != ""
+      error_message = "fabric_secret_key must be set when fabric_endpoint is configured: the app's validateS3Group requires S3_SECRET_KEY whenever S3_ENDPOINT is non-empty."
+    }
+  }
 }
 
 locals {
