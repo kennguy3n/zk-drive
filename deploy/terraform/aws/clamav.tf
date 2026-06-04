@@ -94,8 +94,13 @@ resource "aws_ecs_task_definition" "clamav" {
       mountPoints = [
         { sourceVolume = "signatures", containerPath = "/var/lib/clamav", readOnly = false },
       ]
+      # clamdcheck.sh is the image's own health helper: it sends PING to clamd
+      # on TCP 3310 and requires a PONG, so it actually proves the daemon is
+      # accepting scan requests. (The earlier `clamdscan --version` only printed
+      # the client version and never contacted clamd, so a crashed daemon would
+      # still report healthy and the worker's scans would silently fail.)
       healthCheck = {
-        command     = ["CMD-SHELL", "echo PING | clamdscan --version >/dev/null 2>&1 || exit 1"]
+        command     = ["CMD-SHELL", "clamdcheck.sh || exit 1"]
         interval    = 30
         timeout     = 10
         retries     = 3

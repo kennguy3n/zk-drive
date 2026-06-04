@@ -70,6 +70,11 @@ resource "google_monitoring_alert_policy" "cloudsql_connections" {
 # are scoped to this deployment's URL map (resource.label.url_map_name) so the
 # alert never fires on unrelated load balancers in a shared project — parity
 # with the AWS alarm, which scopes to aws_lb.this.arn_suffix.
+#
+# response_code_class is an INT64 label (200/300/400/500/0), so its value is
+# compared with a bare integer literal (= 500). Quoting it ("500") makes the
+# monitoring filter match zero time series, which would silently disable the
+# alert — so the numerator below deliberately uses the unquoted form.
 resource "google_monitoring_alert_policy" "lb_5xx_rate" {
   display_name = "${local.name} HTTPS LB 5xx rate > 1%"
   combiner     = "OR"
@@ -78,7 +83,7 @@ resource "google_monitoring_alert_policy" "lb_5xx_rate" {
     display_name = "5xx responses exceed 1% of requests"
 
     condition_threshold {
-      filter             = "resource.type = \"https_lb_rule\" AND metric.type = \"loadbalancing.googleapis.com/https/request_count\" AND resource.label.\"url_map_name\" = \"${google_compute_url_map.this.name}\" AND metric.label.\"response_code_class\" = \"500\""
+      filter             = "resource.type = \"https_lb_rule\" AND metric.type = \"loadbalancing.googleapis.com/https/request_count\" AND resource.label.\"url_map_name\" = \"${google_compute_url_map.this.name}\" AND metric.label.\"response_code_class\" = 500"
       denominator_filter = "resource.type = \"https_lb_rule\" AND metric.type = \"loadbalancing.googleapis.com/https/request_count\" AND resource.label.\"url_map_name\" = \"${google_compute_url_map.this.name}\""
       comparison         = "COMPARISON_GT"
       threshold_value    = 0.01
