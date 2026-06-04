@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -13,12 +14,35 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/redis/go-redis/v9"
 
 	"github.com/kennguy3n/zk-drive/internal/billing"
 	"github.com/kennguy3n/zk-drive/internal/fabric"
+	"github.com/kennguy3n/zk-drive/internal/logging"
 	"github.com/kennguy3n/zk-drive/internal/user"
 	"github.com/kennguy3n/zk-drive/internal/workspace"
 )
+
+// suspensionCacheTTL bounds the lifetime of a cached suspension
+// snapshot. It is short because SuspensionGuard sits on every
+// authenticated request: the cache exists to collapse the per-request
+// DB round trip into one read per workspace per TTL, not to be the
+// source of truth. Every suspend/resume busts the entry, so this TTL
+// is only the fallback window if a bust fails (a Redis blip) — and
+// suspension is an availability control, not a security boundary, so a
+// brief staleness is acceptable. Mirrors the IP-allowlist snapshot TTL.
+const suspensionCacheTTL = 30 * time.Second
+
+// suspensionCacheKeyPrefix namespaces the per-workspace suspension
+// snapshot keys in Redis.
+const suspensionCacheKeyPrefix = "platform:suspension"
+
+// suspensionSnapshot is the cached representation of a workspace's
+// suspension state served on the SuspensionGuard hot path.
+type suspensionSnapshot struct {
+	Suspended bool   `json:"suspended"`
+	Reason    string `json:"reason,omitempty"`
+}
 
 // sessionRevokeTTL bounds how long a per-user revocation cutoff lives
 // in the session store. It matches the API's default token lifetime
@@ -98,6 +122,7 @@ type PlatformService struct {
 	dispatcher    AlertDispatcher
 	subscriptions SubscriptionInspector
 
+	rdb    redis.UniversalClient
 	clock  func() time.Time
 	logger *slog.Logger
 }
@@ -113,6 +138,18 @@ func NewService(pool *pgxpool.Pool, workspaces *workspace.Service, users *user.S
 		clock:      time.Now,
 		logger:     slog.Default(),
 	}
+}
+
+// WithSuspensionCache wires a Redis client used to cache workspace
+// suspension state on the hot SuspensionGuard path, which runs on
+// every authenticated request. rdb may be nil (caching disabled —
+// every WorkspaceSuspension reads through to Postgres). The cache is a
+// pure accelerator: any Redis error falls through to the authoritative
+// store, and every suspend/resume busts the entry so a state change
+// takes effect immediately rather than after the TTL.
+func (s *PlatformService) WithSuspensionCache(rdb redis.UniversalClient) *PlatformService {
+	s.rdb = rdb
+	return s
 }
 
 // WithSessions wires the session store used to revoke a suspended
@@ -284,6 +321,7 @@ func (s *PlatformService) SuspendWorkspace(ctx context.Context, workspaceID uuid
 	if tag.RowsAffected() == 0 {
 		return ErrNotFound
 	}
+	s.bustSuspension(ctx, workspaceID)
 	s.revokeWorkspaceSessions(ctx, workspaceID)
 	return nil
 }
@@ -302,6 +340,7 @@ func (s *PlatformService) ResumeWorkspace(ctx context.Context, workspaceID uuid.
 	if tag.RowsAffected() == 0 {
 		return ErrNotFound
 	}
+	s.bustSuspension(ctx, workspaceID)
 	return nil
 }
 
@@ -348,6 +387,9 @@ func (s *PlatformService) revokeWorkspaceSessions(ctx context.Context, workspace
 // This is the lookup backing the api/middleware suspended-workspace
 // 503 guard.
 func (s *PlatformService) WorkspaceSuspension(ctx context.Context, workspaceID uuid.UUID) (bool, string, error) {
+	if snap, ok := s.cachedSuspension(ctx, workspaceID); ok {
+		return snap.Suspended, snap.Reason, nil
+	}
 	var (
 		suspendedAt *time.Time
 		reason      *string
@@ -358,18 +400,84 @@ func (s *PlatformService) WorkspaceSuspension(ctx context.Context, workspaceID u
 	).Scan(&suspendedAt, &reason)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
+			// Cache the negative so a flood of requests for an
+			// unknown/never-suspended workspace doesn't re-query.
+			s.cacheSuspension(ctx, workspaceID, suspensionSnapshot{})
 			return false, "", nil
 		}
 		return false, "", fmt.Errorf("platform: load suspension: %w", err)
 	}
-	if suspendedAt == nil {
-		return false, "", nil
+	snap := suspensionSnapshot{}
+	if suspendedAt != nil {
+		snap.Suspended = true
+		if reason != nil {
+			snap.Reason = *reason
+		}
 	}
-	r := ""
-	if reason != nil {
-		r = *reason
+	s.cacheSuspension(ctx, workspaceID, snap)
+	return snap.Suspended, snap.Reason, nil
+}
+
+// suspensionKey is the Redis key for a workspace's cached suspension
+// snapshot.
+func (s *PlatformService) suspensionKey(workspaceID uuid.UUID) string {
+	return fmt.Sprintf("%s:%s", suspensionCacheKeyPrefix, workspaceID.String())
+}
+
+// cachedSuspension returns the workspace's cached suspension snapshot
+// when Redis is wired and holds a fresh, parseable entry. A miss, a
+// disabled cache, or any Redis/parse error returns ok=false so the
+// caller reads through to the authoritative store.
+func (s *PlatformService) cachedSuspension(ctx context.Context, workspaceID uuid.UUID) (suspensionSnapshot, bool) {
+	if s.rdb == nil {
+		return suspensionSnapshot{}, false
 	}
-	return true, r, nil
+	raw, err := s.rdb.Get(ctx, s.suspensionKey(workspaceID)).Bytes()
+	if err != nil {
+		if !errors.Is(err, redis.Nil) {
+			logging.FromContext(ctx).Debug("platform: suspension cache read failed, falling through to store",
+				"workspace_id", workspaceID, "err", err)
+		}
+		return suspensionSnapshot{}, false
+	}
+	var snap suspensionSnapshot
+	if jerr := json.Unmarshal(raw, &snap); jerr != nil {
+		logging.FromContext(ctx).Warn("platform: discarding unparseable suspension cache entry",
+			"workspace_id", workspaceID)
+		return suspensionSnapshot{}, false
+	}
+	return snap, true
+}
+
+// cacheSuspension writes a snapshot back to Redis under the short TTL.
+// Best-effort: a failed write just means the next read re-queries.
+func (s *PlatformService) cacheSuspension(ctx context.Context, workspaceID uuid.UUID, snap suspensionSnapshot) {
+	if s.rdb == nil {
+		return
+	}
+	raw, err := json.Marshal(snap)
+	if err != nil {
+		return
+	}
+	if err := s.rdb.Set(ctx, s.suspensionKey(workspaceID), raw, suspensionCacheTTL).Err(); err != nil {
+		logging.FromContext(ctx).Debug("platform: suspension cache write failed",
+			"workspace_id", workspaceID, "err", err)
+	}
+}
+
+// bustSuspension removes the cached snapshot so the next
+// WorkspaceSuspension reloads from the store. Called on every
+// suspend/resume so the state change takes effect immediately.
+// Best-effort: a failed DEL just means the stale entry self-expires
+// within suspensionCacheTTL.
+func (s *PlatformService) bustSuspension(ctx context.Context, workspaceID uuid.UUID) {
+	if s.rdb == nil {
+		return
+	}
+	if err := s.rdb.Del(ctx, s.suspensionKey(workspaceID)).Err(); err != nil {
+		logging.FromContext(ctx).Debug("platform: suspension cache bust failed",
+			"workspace_id", workspaceID, "err", err)
+	}
 }
 
 // generateTempPassword returns a random URL-safe password used for the

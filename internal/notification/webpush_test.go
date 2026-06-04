@@ -7,6 +7,7 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"io"
+	"net"
 	"net/http"
 	"sync"
 	"testing"
@@ -337,3 +338,61 @@ func (r *recordingPushSender) Send(_ context.Context, _, userID uuid.UUID, _ Not
 type connSet map[uuid.UUID]bool
 
 func (c connSet) IsConnected(_, userID uuid.UUID) bool { return c[userID] }
+
+// TestGuardedDialControl verifies the connect-time SSRF guard used by
+// the production push HTTP client. Because it inspects the concrete
+// resolved address the dialer is about to connect to, it closes the
+// DNS-rebinding gap that the parse-time endpoint check cannot: a
+// hostname that resolved to a public IP at Subscribe time but later
+// points at an internal address is rejected here, at Send time.
+func TestGuardedDialControl(t *testing.T) {
+	blocked := []string{
+		"127.0.0.1:443",      // loopback
+		"10.0.0.5:443",       // private
+		"192.168.1.10:443",   // private
+		"172.16.5.4:443",     // private
+		"169.254.169.254:80", // link-local cloud metadata
+		"[::1]:443",          // loopback v6
+		"[fe80::1]:443",      // link-local v6
+		"0.0.0.0:443",        // unspecified
+		"not-an-ip:443",      // unresolved host (fails closed)
+		"missing-port",       // unparseable (fails closed)
+	}
+	for _, addr := range blocked {
+		if err := guardedDialControl("tcp", addr, nil); err == nil {
+			t.Errorf("expected guardedDialControl to block %q", addr)
+		}
+	}
+
+	allowed := []string{
+		"8.8.8.8:443",                  // public v4
+		"142.250.80.0:443",             // public v4 (Google)
+		"[2607:f8b0:4004:c07::64]:443", // public v6
+	}
+	for _, addr := range allowed {
+		if err := guardedDialControl("tcp", addr, nil); err != nil {
+			t.Errorf("expected guardedDialControl to allow %q, got %v", addr, err)
+		}
+	}
+}
+
+// TestNewGuardedHTTPClientRefusesInternalConnect end-to-end checks that
+// the production client actually refuses to connect to a loopback
+// address (i.e. the dialer Control hook is wired into the transport).
+func TestNewGuardedHTTPClientRefusesInternalConnect(t *testing.T) {
+	client := newGuardedHTTPClient()
+	// Listen on loopback so there IS a live socket to connect to —
+	// the guard must reject it before the connection completes.
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer ln.Close()
+
+	url := "http://" + ln.Addr().String() + "/"
+	resp, err := client.Get(url)
+	if err == nil {
+		resp.Body.Close()
+		t.Fatalf("expected connect to loopback %s to be refused", url)
+	}
+}

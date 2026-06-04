@@ -749,7 +749,13 @@ func run() error {
 	// below.
 	platformKeyStore := platform.NewAPIKeyStore(pool)
 	platformSvc := platform.NewService(pool, wsSvc, userSvc, billingSvc).
-		WithProvisioner(provisioner)
+		WithProvisioner(provisioner).
+		// Cache suspension state on the hot SuspensionGuard path
+		// (mounted on every authenticated tenant request below) so it
+		// is one Redis read per workspace per TTL instead of a DB round
+		// trip per request. Shares the same client as the IP allowlist
+		// cache; nil when Redis is unconfigured (caching disabled).
+		WithSuspensionCache(ipAllowRedis)
 	if sessionStore != nil {
 		platformSvc = platformSvc.WithSessions(sessionStore)
 	}

@@ -6,11 +6,84 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/alicebob/miniredis/v2"
 	"github.com/google/uuid"
+	"github.com/redis/go-redis/v9"
 	"golang.org/x/crypto/bcrypt"
 
 	"github.com/kennguy3n/zk-drive/internal/billing"
 )
+
+// newTestRedis spins up a miniredis-backed client for the suspension
+// cache tests and registers cleanup.
+func newTestRedis(t *testing.T) *redis.Client {
+	t.Helper()
+	mr, err := miniredis.Run()
+	if err != nil {
+		t.Fatalf("miniredis: %v", err)
+	}
+	c := redis.NewClient(&redis.Options{Addr: mr.Addr()})
+	t.Cleanup(func() {
+		_ = c.Close()
+		mr.Close()
+	})
+	return c
+}
+
+// TestSuspensionCache covers the Redis-backed snapshot on the
+// SuspensionGuard hot path: a write is read back, a bust forces a
+// miss, and a service with no Redis client never reports a hit (so
+// WorkspaceSuspension always reads through to the store).
+func TestSuspensionCache(t *testing.T) {
+	ctx := context.Background()
+	ws := uuid.New()
+
+	// No Redis wired: every lookup is a miss so the caller reads
+	// through to Postgres, and writes/busts are silent no-ops.
+	noCache := &PlatformService{}
+	if _, ok := noCache.cachedSuspension(ctx, ws); ok {
+		t.Fatal("expected miss when Redis is unconfigured")
+	}
+	noCache.cacheSuspension(ctx, ws, suspensionSnapshot{Suspended: true})
+	noCache.bustSuspension(ctx, ws)
+	if _, ok := noCache.cachedSuspension(ctx, ws); ok {
+		t.Fatal("expected miss after write with Redis unconfigured")
+	}
+
+	svc := &PlatformService{rdb: newTestRedis(t)}
+
+	// Cold cache: miss.
+	if _, ok := svc.cachedSuspension(ctx, ws); ok {
+		t.Fatal("expected miss on cold cache")
+	}
+
+	// Write a suspended snapshot, read it back.
+	svc.cacheSuspension(ctx, ws, suspensionSnapshot{Suspended: true, Reason: "nonpayment"})
+	snap, ok := svc.cachedSuspension(ctx, ws)
+	if !ok {
+		t.Fatal("expected hit after write")
+	}
+	if !snap.Suspended || snap.Reason != "nonpayment" {
+		t.Fatalf("unexpected snapshot: %+v", snap)
+	}
+
+	// A bust forces the next read to miss (so it reloads from store).
+	svc.bustSuspension(ctx, ws)
+	if _, ok := svc.cachedSuspension(ctx, ws); ok {
+		t.Fatal("expected miss after bust")
+	}
+
+	// A cached negative is a hit too (collapses the unknown-workspace
+	// flood into one read per TTL).
+	svc.cacheSuspension(ctx, ws, suspensionSnapshot{})
+	snap, ok = svc.cachedSuspension(ctx, ws)
+	if !ok {
+		t.Fatal("expected hit for cached negative")
+	}
+	if snap.Suspended {
+		t.Fatalf("expected not-suspended snapshot, got %+v", snap)
+	}
+}
 
 // --- pure-logic unit tests (no database) -----------------------------
 

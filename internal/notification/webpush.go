@@ -8,6 +8,8 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"syscall"
+	"time"
 
 	"github.com/kennguy3n/zk-drive/internal/logging"
 
@@ -91,6 +93,12 @@ func NewWebPushService(repo WebPushRepository, vapidPublicKey, vapidPrivateKey s
 		vapidPublicKey:  vapidPublicKey,
 		vapidPrivateKey: vapidPrivateKey,
 		subscriber:      defaultVAPIDSubscriber,
+		// Default to a client that re-checks the resolved IP at
+		// socket-connect time, closing the DNS-rebinding gap the
+		// parse-time endpoint check cannot (a hostname public at
+		// Subscribe can resolve to an internal address at Send).
+		// Tests override this via WithHTTPClient.
+		httpClient: newGuardedHTTPClient(),
 	}
 }
 
@@ -107,7 +115,7 @@ func (s *WebPushService) WithSubscriber(sub string) *WebPushService {
 
 // WithHTTPClient injects the HTTP client used to POST encrypted
 // payloads to push endpoints. Primarily a test seam; production wiring
-// leaves it nil so webpush-go uses its default *http.Client.
+// keeps the constructor's connect-time-guarded client.
 func (s *WebPushService) WithHTTPClient(c httpDoer) *WebPushService {
 	if s != nil {
 		s.httpClient = c
@@ -148,10 +156,13 @@ func (s *WebPushService) Subscribe(ctx context.Context, workspaceID, userID uuid
 // private / link-local / unspecified IP (e.g. the 169.254.169.254 cloud
 // metadata endpoint). This blocks the obvious SSRF vector where an
 // authenticated user registers an internal URL as their "subscription"
-// to make the server fan out requests to internal services. Hostnames
-// are not resolved here (the push service host resolves publicly and DNS
-// resolution would add a TOCTOU gap); the scheme + literal-IP checks
-// cover the practical vectors.
+// to make the server fan out requests to internal services.
+//
+// This is the cheap, early rejection. It deliberately does NOT resolve
+// hostnames: a hostname that resolves publicly now could be rebound to
+// an internal address before Send runs (a TOCTOU / DNS-rebinding gap).
+// That residual gap is closed at delivery time by newGuardedHTTPClient,
+// which re-checks the *resolved* IP at socket-connect time.
 func validatePushEndpoint(endpoint string) error {
 	u, err := url.Parse(endpoint)
 	if err != nil {
@@ -164,10 +175,66 @@ func validatePushEndpoint(endpoint string) error {
 	if host == "" {
 		return fmt.Errorf("webpush: endpoint must have a host")
 	}
-	if ip := net.ParseIP(host); ip != nil {
-		if ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsUnspecified() {
-			return fmt.Errorf("webpush: endpoint host is not a public address")
-		}
+	if ip := net.ParseIP(host); ip != nil && !isPublicIP(ip) {
+		return fmt.Errorf("webpush: endpoint host is not a public address")
+	}
+	return nil
+}
+
+// isPublicIP reports whether ip is a routable public address — i.e. not
+// loopback, private (RFC 1918 / ULA), link-local (incl. the
+// 169.254.169.254 cloud metadata range), or the unspecified address.
+// Shared by the parse-time endpoint check and the connect-time dial
+// guard so both apply identical policy.
+func isPublicIP(ip net.IP) bool {
+	return !(ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() ||
+		ip.IsLinkLocalMulticast() || ip.IsUnspecified())
+}
+
+// newGuardedHTTPClient builds the *http.Client webpush-go uses to POST
+// to push endpoints. Its dialer carries a Control hook that runs after
+// DNS resolution but before the socket connects, with the concrete
+// resolved IP Go is about to dial. Rejecting non-public IPs there —
+// rather than only checking the endpoint's literal host at Subscribe —
+// closes the DNS-rebinding window: an attacker who registers a hostname
+// that resolves publicly, then repoints it at 169.254.169.254 or an
+// internal service before delivery, is blocked at connect time.
+func newGuardedHTTPClient() *http.Client {
+	transport, ok := http.DefaultTransport.(*http.Transport)
+	var t *http.Transport
+	if ok {
+		t = transport.Clone()
+	} else {
+		t = &http.Transport{}
+	}
+	dialer := &net.Dialer{
+		Timeout:   10 * time.Second,
+		KeepAlive: 30 * time.Second,
+		Control:   guardedDialControl,
+	}
+	t.DialContext = dialer.DialContext
+	return &http.Client{
+		Timeout:   30 * time.Second,
+		Transport: t,
+	}
+}
+
+// guardedDialControl is the net.Dialer.Control hook that refuses to
+// connect to a non-public address. address is the concrete resolved
+// "ip:port" Go is about to dial (Control runs per candidate address
+// after resolution), so this sees through DNS rebinding. It fails
+// CLOSED: anything it cannot parse as a public IP is rejected.
+func guardedDialControl(_, address string, _ syscall.RawConn) error {
+	host, _, err := net.SplitHostPort(address)
+	if err != nil {
+		return fmt.Errorf("webpush: cannot parse dial address %q: %w", address, err)
+	}
+	ip := net.ParseIP(host)
+	if ip == nil {
+		return fmt.Errorf("webpush: dial address %q is not an IP literal", host)
+	}
+	if !isPublicIP(ip) {
+		return fmt.Errorf("webpush: refusing to connect to non-public address %s", ip)
 	}
 	return nil
 }
