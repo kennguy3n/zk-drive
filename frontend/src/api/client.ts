@@ -8,6 +8,19 @@ const client: AxiosInstance = axios.create({
   headers: { "Content-Type": "application/json" },
 });
 
+// pushTeardownClient is a bare Axios instance with NO request/response
+// interceptors, used solely for the best-effort DELETE /push/subscribe
+// in tearDownPushSubscription. Teardown is frequently triggered BY a
+// 401 (forced session death), and the captured token is already
+// expired, so routing that DELETE through the shared `client` would
+// return 401 and re-enter the 401 response interceptor — a needless
+// extra request and a duplicate teardown. The (stale) token is attached
+// explicitly as an Authorization header on each call instead.
+const pushTeardownClient: AxiosInstance = axios.create({
+  baseURL: "/api",
+  headers: { "Content-Type": "application/json" },
+});
+
 const TOKEN_STORAGE_KEY = "zkdrive.token";
 const WORKSPACE_STORAGE_KEY = "zkdrive.workspace_id";
 const ROLE_STORAGE_KEY = "zkdrive.role";
@@ -73,6 +86,13 @@ client.interceptors.response.use(
         localStorage.removeItem(WORKSPACE_STORAGE_KEY);
         localStorage.removeItem(ROLE_STORAGE_KEY);
         localStorage.removeItem(USER_STORAGE_KEY);
+        // Notify same-tab useAuth consumers that the session ended, for
+        // consistency with logout()/storeAuth(). The redirect below
+        // resets React state via full reload in the common case, but
+        // when already on /login that redirect is skipped, so without
+        // this event useAuth would keep stale state until the next
+        // unrelated render.
+        emitAuthChange();
         if (window.location.pathname !== "/login") {
           window.location.href = "/login";
         }
@@ -1148,12 +1168,14 @@ export async function unregisterPushSubscription(endpoint: string): Promise<void
 }
 
 // tearDownPushSubscription removes the browser PushSubscription and its
-// server-side row on logout so a browser that is no longer
-// authenticated stops receiving push notifications. The server DELETE
-// needs the auth token, which the caller captures *before* clearing
-// localStorage and passes here; it is sent as an explicit Authorization
-// header rather than relying on the request interceptor, which by the
-// time this request is built would read the already-cleared token.
+// server-side row on logout (and on forced 401 session death) so a
+// browser that is no longer authenticated stops receiving push
+// notifications. The server DELETE needs the auth token, which the
+// caller captures *before* clearing localStorage and passes here; it is
+// sent as an explicit Authorization header on pushTeardownClient — a
+// bare instance with no interceptors — so a stale token neither relies
+// on the request interceptor (which would read the already-cleared
+// token) nor re-enters the 401 response interceptor on rejection.
 // Entirely best-effort: push being unsupported, no active subscription,
 // or a network failure is swallowed so logout always completes.
 export function tearDownPushSubscription(token: string | null): void {
@@ -1171,7 +1193,7 @@ export function tearDownPushSubscription(token: string | null): void {
         return;
       }
       if (token) {
-        await client
+        await pushTeardownClient
           .delete("/push/subscribe", {
             data: { endpoint: subscription.endpoint },
             headers: { Authorization: `Bearer ${token}` },
