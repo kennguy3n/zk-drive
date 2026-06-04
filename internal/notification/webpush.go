@@ -4,7 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
+	"net"
 	"net/http"
+	"net/url"
 
 	"github.com/kennguy3n/zk-drive/internal/logging"
 
@@ -131,7 +134,42 @@ func (s *WebPushService) Subscribe(ctx context.Context, workspaceID, userID uuid
 	if sub.Endpoint == "" || sub.P256dh == "" || sub.Auth == "" {
 		return fmt.Errorf("webpush: subscription requires endpoint, p256dh and auth")
 	}
+	if err := validatePushEndpoint(sub.Endpoint); err != nil {
+		return err
+	}
 	return s.repo.SaveSubscription(ctx, workspaceID, userID, sub)
+}
+
+// validatePushEndpoint enforces that a browser-supplied push endpoint is
+// a plausible public push-service URL before we ever store it and POST
+// encrypted payloads to it in Send. Real push services (FCM, Mozilla
+// autopush, WNS) always expose https endpoints on public hosts, so we
+// require https and reject endpoints whose host is a literal loopback /
+// private / link-local / unspecified IP (e.g. the 169.254.169.254 cloud
+// metadata endpoint). This blocks the obvious SSRF vector where an
+// authenticated user registers an internal URL as their "subscription"
+// to make the server fan out requests to internal services. Hostnames
+// are not resolved here (the push service host resolves publicly and DNS
+// resolution would add a TOCTOU gap); the scheme + literal-IP checks
+// cover the practical vectors.
+func validatePushEndpoint(endpoint string) error {
+	u, err := url.Parse(endpoint)
+	if err != nil {
+		return fmt.Errorf("webpush: invalid endpoint url: %w", err)
+	}
+	if u.Scheme != "https" {
+		return fmt.Errorf("webpush: endpoint must use https")
+	}
+	host := u.Hostname()
+	if host == "" {
+		return fmt.Errorf("webpush: endpoint must have a host")
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		if ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsUnspecified() {
+			return fmt.Errorf("webpush: endpoint host is not a public address")
+		}
+	}
+	return nil
 }
 
 // Unsubscribe removes a single subscription identified by its push
@@ -209,6 +247,12 @@ func (s *WebPushService) deliver(ctx context.Context, message []byte, sub PushSu
 	if err != nil {
 		return 0, err
 	}
-	defer func() { _ = resp.Body.Close() }()
+	// Drain before closing so the underlying TCP+TLS connection can be
+	// returned to the pool and reused across the fan-out, instead of
+	// being torn down after every delivery. Push responses are tiny.
+	defer func() {
+		_, _ = io.Copy(io.Discard, resp.Body)
+		_ = resp.Body.Close()
+	}()
 	return resp.StatusCode, nil
 }

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -129,6 +130,63 @@ func TestRotateJWTKey_RequiresKeysManage(t *testing.T) {
 		resp := postRotate(t, mountRotate(km, platformsvc.PermKeysManage))
 		if resp.Code != http.StatusNotImplemented {
 			t.Fatalf("status = %d, want 501; body=%s", resp.Code, resp.Body.String())
+		}
+	})
+}
+
+// TestDecodeOptional covers the optional-body decode used by endpoints
+// like SuspendWorkspace. The bug it guards against: a bodyless POST with
+// no Content-Length header arrives with http.Request.ContentLength == -1,
+// which the old `if r.ContentLength != 0` guard treated as "has a body",
+// then failed to JSON-decode the empty body and returned a spurious 400.
+func TestDecodeOptional(t *testing.T) {
+	type body struct {
+		Reason string `json:"reason"`
+	}
+
+	t.Run("empty body with absent Content-Length (-1) succeeds", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodPost, "/x", http.NoBody)
+		req.ContentLength = -1 // simulate a missing Content-Length header
+		rec := httptest.NewRecorder()
+		var dst body
+		if !decodeOptional(rec, req, &dst) {
+			t.Fatalf("decodeOptional = false for empty body; code=%d body=%s", rec.Code, rec.Body.String())
+		}
+		if dst.Reason != "" {
+			t.Errorf("reason = %q, want empty", dst.Reason)
+		}
+	})
+
+	t.Run("empty body with Content-Length 0 succeeds", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodPost, "/x", strings.NewReader(""))
+		rec := httptest.NewRecorder()
+		var dst body
+		if !decodeOptional(rec, req, &dst) {
+			t.Fatalf("decodeOptional = false for empty body; code=%d", rec.Code)
+		}
+	})
+
+	t.Run("valid JSON body decodes", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodPost, "/x", strings.NewReader(`{"reason":"abuse"}`))
+		rec := httptest.NewRecorder()
+		var dst body
+		if !decodeOptional(rec, req, &dst) {
+			t.Fatalf("decodeOptional = false for valid body; code=%d", rec.Code)
+		}
+		if dst.Reason != "abuse" {
+			t.Errorf("reason = %q, want abuse", dst.Reason)
+		}
+	})
+
+	t.Run("malformed non-empty body is rejected with 400", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodPost, "/x", strings.NewReader(`{not json`))
+		rec := httptest.NewRecorder()
+		var dst body
+		if decodeOptional(rec, req, &dst) {
+			t.Fatal("decodeOptional = true for malformed body, want false")
+		}
+		if rec.Code != http.StatusBadRequest {
+			t.Errorf("status = %d, want 400", rec.Code)
 		}
 	})
 }

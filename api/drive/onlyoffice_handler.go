@@ -59,6 +59,23 @@ const onlyOfficeMaxDocumentBytes = 100 << 20 // 100 MiB
 // the save callback. Shared so connections are reused across callbacks.
 var onlyOfficeHTTPClient = &http.Client{Timeout: onlyOfficeFetchTimeout}
 
+// onlyOfficeMaxConcurrentSaves bounds how many save callbacks may be
+// buffering an edited document in memory at once. The editor-callback
+// route runs outside the per-user/-workspace rate limiter (the Document
+// Server holds no ZK Drive JWT), so without this a burst of callbacks
+// could each buffer up to onlyOfficeMaxDocumentBytes and exhaust the
+// container. Peak save-path memory is therefore bounded to roughly
+// onlyOfficeMaxConcurrentSaves * onlyOfficeMaxDocumentBytes. Excess
+// callbacks are shed with a retryable error (the edited bytes stay in
+// the Document Server's cache and it retries), rather than blocking a
+// goroutine, so a storm degrades gracefully instead of OOMing.
+const onlyOfficeMaxConcurrentSaves = 8
+
+// onlyOfficeSaveSem is the counting semaphore enforcing
+// onlyOfficeMaxConcurrentSaves. A buffered channel slot is held for the
+// duration of the memory-heavy fetch+write in saveEditedVersion.
+var onlyOfficeSaveSem = make(chan struct{}, onlyOfficeMaxConcurrentSaves)
+
 // ONLYOFFICE callback status codes (Document Server → ZK Drive).
 const (
 	onlyOfficeStatusReadyForSaving = 2 // editing finished, save now
@@ -350,6 +367,21 @@ func (h *Handler) EditorCallback(w http.ResponseWriter, r *http.Request) {
 	// correctly scoped. The editing user is injected inside
 	// saveEditedVersion once the file's fallback creator is known.
 	ctx := middleware.WithWorkspaceID(r.Context(), workspaceID)
+
+	// Bound concurrent in-memory document buffering (see
+	// onlyOfficeMaxConcurrentSaves). At capacity, shed load with a
+	// retryable ack so the Document Server keeps the bytes and retries,
+	// rather than reading another document into memory now.
+	select {
+	case onlyOfficeSaveSem <- struct{}{}:
+		defer func() { <-onlyOfficeSaveSem }()
+	default:
+		logging.FromContext(ctx).Warn("onlyoffice save concurrency limit reached; asking document server to retry",
+			"file_id", fileID, "limit", onlyOfficeMaxConcurrentSaves)
+		writeOnlyOfficeAck(w, http.StatusServiceUnavailable, 1)
+		return
+	}
+
 	if err := h.saveEditedVersion(ctx, workspaceID, fileID, cb); err != nil {
 		logging.FromContext(ctx).Error("onlyoffice save edited version failed", "file_id", fileID, "err", err)
 		// Non-zero error tells the Document Server to retry later;

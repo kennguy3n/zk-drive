@@ -168,6 +168,38 @@ func TestWebPushService_SubscribeValidation(t *testing.T) {
 	}
 }
 
+func TestWebPushService_SubscribeRejectsSSRFEndpoints(t *testing.T) {
+	repo := newFakeWebPushRepo()
+	svc, _ := newTestService(t, repo, http.StatusCreated)
+	ctx := context.Background()
+	ws, user := uuid.New(), uuid.New()
+
+	bad := []string{
+		"http://push.example.com/abc",    // non-https scheme
+		"ftp://push.example.com/abc",     // wrong scheme
+		"https://127.0.0.1/abc",          // loopback
+		"https://10.0.0.5/abc",           // private
+		"https://192.168.1.10/abc",       // private
+		"https://169.254.169.254/latest", // link-local cloud metadata
+		"https://[::1]/abc",              // loopback v6
+		"https://0.0.0.0/abc",            // unspecified
+	}
+	for _, endpoint := range bad {
+		sub := testSubscription(t, endpoint)
+		if err := svc.Subscribe(ctx, ws, user, sub); err == nil {
+			t.Errorf("expected Subscribe to reject SSRF-prone endpoint %q", endpoint)
+		}
+	}
+	if repo.count() != 0 {
+		t.Errorf("expected no SSRF-prone subscription stored, got %d", repo.count())
+	}
+
+	// A normal public https push endpoint is still accepted.
+	if err := svc.Subscribe(ctx, ws, user, testSubscription(t, "https://fcm.googleapis.com/fcm/send/xyz")); err != nil {
+		t.Fatalf("expected public https endpoint accepted: %v", err)
+	}
+}
+
 func TestWebPushService_SendDeliversToAllSubscriptions(t *testing.T) {
 	repo := newFakeWebPushRepo()
 	svc, stub := newTestService(t, repo, http.StatusCreated)

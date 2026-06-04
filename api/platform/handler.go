@@ -11,6 +11,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"log/slog"
 	"net/http"
 	"strconv"
@@ -238,11 +239,13 @@ func (h *Handler) SuspendWorkspace(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req suspendRequest
-	// Body is optional: a reason-less suspension is valid.
-	if r.ContentLength != 0 {
-		if !decode(w, r, &req) {
-			return
-		}
+	// Body is optional: a reason-less suspension is valid. decodeOptional
+	// tolerates an empty body regardless of how the client framed it
+	// (Content-Length: 0, an absent header where ContentLength == -1, or
+	// chunked transfer encoding) and only rejects a genuinely malformed
+	// non-empty body.
+	if !decodeOptional(w, r, &req) {
+		return
 	}
 	if err := h.svc.SuspendWorkspace(r.Context(), id, req.Reason); err != nil {
 		h.respondErr(w, err)
@@ -423,6 +426,25 @@ func decode(w http.ResponseWriter, r *http.Request, dst any) bool {
 	return true
 }
 
+// decodeOptional is like decode but for endpoints whose request body is
+// optional. A completely empty body (io.EOF before any JSON token) is
+// treated as success, leaving dst at its zero value. This is correct
+// regardless of how the client signalled the empty body — including a
+// missing Content-Length header, where http.Request.ContentLength is -1
+// (the old `if r.ContentLength != 0` guard treated -1 as "has body" and
+// produced a spurious 400 on a bodyless POST). A non-empty but malformed
+// body still yields a 400.
+func decodeOptional(w http.ResponseWriter, r *http.Request, dst any) bool {
+	if err := json.NewDecoder(r.Body).Decode(dst); err != nil {
+		if errors.Is(err, io.EOF) {
+			return true
+		}
+		middleware.RespondError(w, http.StatusBadRequest, middleware.ErrCodeMalformedJSON, "malformed JSON body")
+		return false
+	}
+	return true
+}
+
 // parseID parses the {id} path param as a UUID, writing a 400 and
 // returning false when invalid.
 func parseID(w http.ResponseWriter, r *http.Request) (uuid.UUID, bool) {
@@ -510,7 +532,15 @@ func (h *Handler) respondErr(w http.ResponseWriter, err error) {
 	case errors.Is(err, platformsvc.ErrNotFound):
 		middleware.RespondError(w, http.StatusNotFound, middleware.ErrCodeNotFound, "not found")
 	case errors.Is(err, platformsvc.ErrInvalidArgument):
-		middleware.RespondError(w, http.StatusBadRequest, middleware.ErrCodeValidation, err.Error())
+		// Surface the caller-actionable detail but strip the internal
+		// sentinel prefix ("platform: invalid argument: ") so the response
+		// doesn't leak the package-qualified error text. If the error is
+		// the bare sentinel with no detail, fall back to a generic message.
+		msg := strings.TrimPrefix(err.Error(), platformsvc.ErrInvalidArgument.Error()+": ")
+		if msg == err.Error() {
+			msg = "invalid argument"
+		}
+		middleware.RespondError(w, http.StatusBadRequest, middleware.ErrCodeValidation, msg)
 	default:
 		middleware.RespondError(w, http.StatusInternalServerError, middleware.ErrCodeInternal, "internal error")
 	}
