@@ -33,28 +33,20 @@ self.addEventListener("push", (event) => {
     tag: payload.tag || payload.type || "zk-drive-notification",
     data: { url: payload.url || "/drive" },
   };
-  event.waitUntil(
-    clients.matchAll({ type: "window", includeUncontrolled: true }).then((windowClients) => {
-      // If a ZK Drive tab is currently visible AND focused, the user is
-      // actively in the app and already received this notification over
-      // the live WebSocket (the in-app toast). The server-side fan-out
-      // is intentionally best-effort and replica-local ("favour delivery
-      // over suppression"), so an online user — especially in a
-      // multi-replica deployment where IsConnected only sees the local
-      // hub — can still get a push. Showing a native OS notification on
-      // top of the in-app one would be a visible duplicate, so suppress
-      // it here where we can actually observe foreground state. When no
-      // client is visible (tab backgrounded, minimised, or closed) we
-      // show the notification as normal — the whole point of web push.
-      const appInForeground = windowClients.some(
-        (c) => c.visibilityState === "visible" && c.focused,
-      );
-      if (appInForeground) {
-        return undefined;
-      }
-      return self.registration.showNotification(title, options);
-    }),
-  );
+  // Always show a notification for every push. The subscription is created
+  // with userVisibleOnly:true, so Chrome REQUIRES the push handler to call
+  // showNotification — if we skip it (e.g. to suppress a perceived
+  // duplicate when a tab is focused) Chrome substitutes its own generic
+  // "This site was updated in the background" notification, which is worse
+  // UX than showing the real content. There is also nothing to de-duplicate
+  // against on the client: the SPA does not currently open a notifications
+  // WebSocket (see api/ws/handler.go — that hub is only dialed by tests),
+  // so there is no live in-app toast competing with this OS notification.
+  // The per-notification `tag` already collapses a true re-delivery of the
+  // same notification (e.g. the best-effort, replica-local server fan-out
+  // sending to a user who is also connected on another replica), so distinct
+  // events each stay visible while duplicates of one event coalesce.
+  event.waitUntil(self.registration.showNotification(title, options));
 });
 
 // isEditorPath reports whether a pathname renders the TipTap/Yjs document
