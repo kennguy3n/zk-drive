@@ -1,0 +1,338 @@
+{{- if .Values.networkPolicy.enabled }}
+{{- $ns := include "zk-drive.namespace" . }}
+{{- $labels := include "zk-drive.labels" . }}
+# Default deny-all ingress + egress.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-all
+  namespace: {{ $ns }}
+  labels:
+    {{- $labels | nindent 4 }}
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+    - Egress
+---
+# Allow DNS egress to kube-dns for the whole namespace.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-dns-egress
+  namespace: {{ $ns }}
+  labels:
+    {{- $labels | nindent 4 }}
+spec:
+  podSelector: {}
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ .Values.networkPolicy.dnsNamespace }}
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+---
+# Server ingress: ingress controller + Prometheus on the HTTP port.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-server-ingress
+  namespace: {{ $ns }}
+  labels:
+    {{- $labels | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      app: zk-drive-server
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ .Values.networkPolicy.ingressNamespace }}
+      ports:
+        - protocol: TCP
+          port: {{ .Values.server.port }}
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ .Values.networkPolicy.monitoringNamespace }}
+      ports:
+        - protocol: TCP
+          port: {{ .Values.server.port }}
+---
+# Server egress: Postgres, NATS, Redis.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-server-egress
+  namespace: {{ $ns }}
+  labels:
+    {{- $labels | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      app: zk-drive-server
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              app: postgres
+      ports:
+        - protocol: TCP
+          port: 5432
+    - to:
+        - podSelector:
+            matchLabels:
+              app: nats
+      ports:
+        - protocol: TCP
+          port: 4222
+    - ports:
+        - protocol: TCP
+          port: {{ .Values.networkPolicy.redisPort }}
+    - ports:
+        - protocol: TCP
+          port: {{ .Values.networkPolicy.s3Port }}
+{{- if .Values.worker.metricsEnabled }}
+---
+# Worker ingress: Prometheus scraping /metrics.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-worker-ingress
+  namespace: {{ $ns }}
+  labels:
+    {{- $labels | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      app: zk-drive-worker
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ .Values.networkPolicy.monitoringNamespace }}
+      ports:
+        - protocol: TCP
+          port: {{ .Values.worker.metricsPort }}
+{{- end }}
+---
+# Worker egress: Postgres, NATS, ClamAV, Redis, S3.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-worker-egress
+  namespace: {{ $ns }}
+  labels:
+    {{- $labels | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      app: zk-drive-worker
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              app: postgres
+      ports:
+        - protocol: TCP
+          port: 5432
+    - to:
+        - podSelector:
+            matchLabels:
+              app: nats
+      ports:
+        - protocol: TCP
+          port: 4222
+    - to:
+        - podSelector:
+            matchLabels:
+              app: clamav
+      ports:
+        - protocol: TCP
+          port: 3310
+    - ports:
+        - protocol: TCP
+          port: {{ .Values.networkPolicy.redisPort }}
+    - ports:
+        - protocol: TCP
+          port: {{ .Values.networkPolicy.s3Port }}
+---
+# Batch egress: migrate Job + reconciler/orphan-gc/audit-archiver
+# CronJobs share the `app: zk-drive-batch` pod label and aren't matched
+# by the server/worker egress rules, so open the backends they touch
+# (Postgres, NATS, ClamAV, Redis, S3). DNS is via allow-dns-egress.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-batch-egress
+  namespace: {{ $ns }}
+  labels:
+    {{- $labels | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      app: zk-drive-batch
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              app: postgres
+      ports:
+        - protocol: TCP
+          port: 5432
+    - to:
+        - podSelector:
+            matchLabels:
+              app: nats
+      ports:
+        - protocol: TCP
+          port: 4222
+    - to:
+        - podSelector:
+            matchLabels:
+              app: clamav
+      ports:
+        - protocol: TCP
+          port: 3310
+    - ports:
+        - protocol: TCP
+          port: {{ .Values.networkPolicy.redisPort }}
+    - ports:
+        - protocol: TCP
+          port: {{ .Values.networkPolicy.s3Port }}
+{{- if .Values.postgres.enabled }}
+---
+# Postgres ingress: NetworkPolicy needs BOTH the source's egress AND the
+# destination's ingress to permit a connection, and default-deny-all
+# selects every pod — so the in-cluster Postgres needs an explicit
+# ingress allow or all app->DB traffic is dropped. Only rendered when the
+# bundled Postgres runs in-cluster; a managed endpoint has no pod to select.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-postgres-ingress
+  namespace: {{ $ns }}
+  labels:
+    {{- $labels | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      app: postgres
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchExpressions:
+              - key: app
+                operator: In
+                values:
+                  - zk-drive-server
+                  - zk-drive-worker
+                  - zk-drive-batch
+      ports:
+        - protocol: TCP
+          port: 5432
+{{- end }}
+{{- if .Values.nats.enabled }}
+---
+# NATS ingress: accept 4222 from server, worker, and batch.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-nats-ingress
+  namespace: {{ $ns }}
+  labels:
+    {{- $labels | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      app: nats
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchExpressions:
+              - key: app
+                operator: In
+                values:
+                  - zk-drive-server
+                  - zk-drive-worker
+                  - zk-drive-batch
+      ports:
+        - protocol: TCP
+          port: 4222
+{{- end }}
+{{- if .Values.clamav.enabled }}
+---
+# ClamAV ingress: accept 3310 (clamd) from worker + batch (the server
+# does not talk to ClamAV). Plus egress 443 so freshclam can refresh
+# virus definitions over HTTPS; without it the default-deny egress
+# freezes definitions at the image's build-time snapshot.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-clamav-ingress
+  namespace: {{ $ns }}
+  labels:
+    {{- $labels | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      app: clamav
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchExpressions:
+              - key: app
+                operator: In
+                values:
+                  - zk-drive-worker
+                  - zk-drive-batch
+      ports:
+        - protocol: TCP
+          port: 3310
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-clamav-egress
+  namespace: {{ $ns }}
+  labels:
+    {{- $labels | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      app: clamav
+  policyTypes:
+    - Egress
+  egress:
+    - ports:
+        - protocol: TCP
+          # freshclam reaches the public ClamAV CDN (database.clamav.net)
+          # over HTTPS, which is always 443 — unrelated to networkPolicy.s3Port
+          # (the object-store endpoint, which may be a non-standard port like
+          # MinIO's 9000). Hardcoded to match deploy/k8s/networkpolicy.yaml.
+          port: 443
+{{- end }}
+{{- end }}
