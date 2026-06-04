@@ -90,7 +90,7 @@ func (h *Handler) CreateShareLink(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	h.notify(r.Context(), func(n *notification.Service) error {
-		return n.NotifyShareLinkCreated(r.Context(), workspaceID, userID, link.ID, req.ResourceType, resourceID)
+		return n.NotifyShareLinkCreated(r.Context(), workspaceID, userID, req.ResourceType, resourceID)
 	})
 	writeJSON(w, http.StatusCreated, link)
 }

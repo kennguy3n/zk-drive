@@ -67,7 +67,7 @@ func (s *Service) MarkAllRead(ctx context.Context, workspaceID, userID uuid.UUID
 
 // NotifyShareLinkCreated informs the resource owner that a new share
 // link was minted for one of their resources.
-func (s *Service) NotifyShareLinkCreated(ctx context.Context, workspaceID, ownerID, linkID uuid.UUID, resourceType string, resourceID uuid.UUID) error {
+func (s *Service) NotifyShareLinkCreated(ctx context.Context, workspaceID, ownerID uuid.UUID, resourceType string, resourceID uuid.UUID) error {
 	return s.create(ctx, &Notification{
 		WorkspaceID:  workspaceID,
 		UserID:       ownerID,
@@ -77,7 +77,8 @@ func (s *Service) NotifyShareLinkCreated(ctx context.Context, workspaceID, owner
 		// Deep-link the owner to the shared resource itself. The event
 		// kind is already captured by Type; ResourceType/ResourceID name
 		// the navigable target ("file"/"folder") so push clicks open it.
-		// linkID is not a navigable route, so it is not stored here.
+		// The share link's own id is intentionally not referenced — it
+		// maps to no SPA route, so it isn't a useful deep-link target.
 		ResourceType: stringPtr(resourceType),
 		ResourceID:   &resourceID,
 	})
