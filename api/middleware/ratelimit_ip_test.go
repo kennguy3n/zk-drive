@@ -4,6 +4,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+
+	"github.com/redis/go-redis/v9"
 )
 
 // newIPLimitHandler wraps a 200-returning handler in the per-IP limiter
@@ -62,6 +64,29 @@ func TestIPRateLimiter_IndependentPerIP(t *testing.T) {
 	// A different IP must be unaffected by the first IP's flood.
 	if rec := doGet(h, "198.51.100.2:2222"); rec.Code != http.StatusOK {
 		t.Fatalf("second IP should not be throttled: got %d", rec.Code)
+	}
+}
+
+// TestIPRateLimiter_TypedNilRedisClientUsesMemory guards the typed-nil
+// interface gotcha: a (*redis.Client)(nil) passed into the
+// redis.UniversalClient param must engage the in-memory fallback rather
+// than entering the Redis path and panicking on a nil-client Run().
+func TestIPRateLimiter_TypedNilRedisClientUsesMemory(t *testing.T) {
+	var typedNil *redis.Client // nil pointer, non-nil when boxed in the interface
+	next := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
+
+	const perIP = 1
+	h := IPRateLimiter(typedNil, perIP, 0)(next)
+
+	const ip = "192.0.2.50:4444"
+	cap := perIP * burstMultiplier
+	for i := 0; i < cap; i++ {
+		if rec := doGet(h, ip); rec.Code != http.StatusOK {
+			t.Fatalf("request %d within burst: got %d, want 200 (no panic, in-memory path)", i+1, rec.Code)
+		}
+	}
+	if rec := doGet(h, ip); rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("past burst: got %d, want 429 — in-memory limiter should be active", rec.Code)
 	}
 }
 

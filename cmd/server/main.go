@@ -1274,7 +1274,11 @@ func run() error {
 		// work happens. Fails open if Redis is down so a hiccup never
 		// locks operators out of the control plane.
 		r.Route("/platform", func(r chi.Router) {
-			r.Use(middleware.IPRateLimiter(redisClient, middleware.DefaultPlatformIPRate, cfg.TrustedProxyDepth))
+			// ipAllowRedis (not redisClient) is a true-nil interface when
+			// Redis is unconfigured; passing the typed-nil *redis.Client
+			// here would defeat IPRateLimiter's nil-check and skip its
+			// in-memory fallback.
+			r.Use(middleware.IPRateLimiter(ipAllowRedis, middleware.DefaultPlatformIPRate, cfg.TrustedProxyDepth))
 			r.Use(middleware.PlatformAuth(platformHandler))
 			platformHandler.RegisterRoutes(r)
 		})

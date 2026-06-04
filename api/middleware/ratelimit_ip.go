@@ -4,6 +4,7 @@ import (
 	"context"
 	"math"
 	"net/http"
+	"reflect"
 	"strconv"
 	"sync"
 	"time"
@@ -54,6 +55,14 @@ func IPRateLimiter(client redis.UniversalClient, perIP, trustedProxyDepth int) f
 	if perIP <= 0 {
 		perIP = DefaultPlatformIPRate
 	}
+	// Normalise a typed-nil client (e.g. a (*redis.Client)(nil) passed
+	// into this interface param) to a true nil so the in-memory fallback
+	// engages instead of the Redis path dereferencing a nil client on
+	// the first request. Callers should already pass a true-nil
+	// interface, but this makes the gotcha non-fatal.
+	if isNilRedisClient(client) {
+		client = nil
+	}
 	l := &ipRateLimiter{
 		client:            client,
 		rate:              perIP,
@@ -83,6 +92,18 @@ func IPRateLimiter(client redis.UniversalClient, perIP, trustedProxyDepth int) f
 			next.ServeHTTP(w, r)
 		})
 	}
+}
+
+// isNilRedisClient reports whether c is either a true-nil interface or
+// a typed-nil pointer wrapped in the interface (the classic Go gotcha
+// where `var p *redis.Client; var i redis.UniversalClient = p` yields
+// i != nil). Both must be treated as "no Redis configured".
+func isNilRedisClient(c redis.UniversalClient) bool {
+	if c == nil {
+		return true
+	}
+	v := reflect.ValueOf(c)
+	return v.Kind() == reflect.Ptr && v.IsNil()
 }
 
 type ipRateLimiter struct {
