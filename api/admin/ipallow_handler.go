@@ -116,8 +116,12 @@ func (h *Handler) AddIPAllowRule(w http.ResponseWriter, r *http.Request) {
 			middleware.RespondError(w, http.StatusBadRequest, middleware.ErrCodeInvalidCIDR, "cidr is not a valid network")
 		case errors.Is(err, workspace.ErrPrivateCIDR):
 			middleware.RespondError(w, http.StatusBadRequest, middleware.ErrCodePrivateCIDR, "cidr must be a public range")
+		case errors.Is(err, workspace.ErrLabelTooLong):
+			middleware.RespondError(w, http.StatusBadRequest, middleware.ErrCodeLabelTooLong, "label is too long")
 		case errors.Is(err, workspace.ErrTooManyRules):
 			middleware.RespondError(w, http.StatusConflict, middleware.ErrCodeRuleCapExceeded, "ip allowlist rule cap reached")
+		case errors.Is(err, workspace.ErrDuplicateCIDR):
+			middleware.RespondError(w, http.StatusConflict, middleware.ErrCodeDuplicateCIDR, "cidr is already allowlisted")
 		default:
 			middleware.RespondInternalError(w, r, "add ip allowlist rule", err)
 		}
@@ -158,6 +162,10 @@ func (h *Handler) RemoveIPAllowRule(w http.ResponseWriter, r *http.Request) {
 	if err := h.ipAllow.RemoveRule(r.Context(), workspaceID, ruleID); err != nil {
 		if errors.Is(err, workspace.ErrNotFound) {
 			middleware.RespondError(w, http.StatusNotFound, middleware.ErrCodeNotFound, "rule not found")
+			return
+		}
+		if errors.Is(err, workspace.ErrCannotRemoveLastRule) {
+			middleware.RespondError(w, http.StatusConflict, middleware.ErrCodeAllowlistLastRule, "disable the ip allowlist before removing its last rule")
 			return
 		}
 		middleware.RespondInternalError(w, r, "remove ip allowlist rule", err)
@@ -212,6 +220,10 @@ func (h *Handler) UpdateIPAllowPolicy(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		if errors.Is(err, workspace.ErrNotFound) {
 			middleware.RespondError(w, http.StatusNotFound, middleware.ErrCodeNotFound, "workspace not found")
+			return
+		}
+		if errors.Is(err, workspace.ErrNoRulesToEnable) {
+			middleware.RespondError(w, http.StatusConflict, middleware.ErrCodeAllowlistNoRules, "add at least one rule before enabling the ip allowlist")
 			return
 		}
 		middleware.RespondInternalError(w, r, "update ip allowlist policy", err)

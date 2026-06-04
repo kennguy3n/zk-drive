@@ -49,6 +49,21 @@ func TestIPAllowlist_NilCheckerPassesThrough(t *testing.T) {
 	}
 }
 
+// TestIPAllowlist_TypedNilCheckerPassesThrough guards the typed-nil
+// case: a nil *workspace.IPAllowService passed through the interface
+// is not == nil, so without the unwrap it would panic in CheckAccess.
+// It must instead disable enforcement, like an untyped nil.
+func TestIPAllowlist_TypedNilCheckerPassesThrough(t *testing.T) {
+	var svc *workspace.IPAllowService // typed nil
+	var called bool
+	h := IPAllowlist(svc, 1)(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { called = true }))
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, newAuthedRequest(uuid.New(), "70.0.0.1:1234", ""))
+	if !called {
+		t.Fatalf("typed-nil checker should be a pass-through")
+	}
+}
+
 func TestIPAllowlist_AllowedCallsNext(t *testing.T) {
 	ws := uuid.New()
 	checker := &fakeIPChecker{err: nil}
@@ -189,6 +204,31 @@ func TestClientIPFromRequest_TrustedProxyDepth(t *testing.T) {
 				t.Fatalf("got %v, want %v", got, want)
 			}
 		})
+	}
+}
+
+// TestClientIPFromRequest_MultipleXFFHeaders proves the resolver reads
+// every X-Forwarded-For header line, not just the first. A client can
+// send its own X-Forwarded-For; a proxy that appends a *separate*
+// header line (instead of merging into one comma-separated value)
+// would otherwise leave Header.Get seeing only the client's spoofed
+// line, making the right-anchored "trusted" entry attacker-controlled.
+func TestClientIPFromRequest_MultipleXFFHeaders(t *testing.T) {
+	// First line is attacker-supplied; second is appended by the one
+	// trusted proxy. With depth=1 the resolver must pick the proxy's
+	// entry (203.0.113.9), never the spoofed 1.2.3.4.
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.RemoteAddr = "10.0.0.5:5555"
+	req.Header.Add("X-Forwarded-For", "1.2.3.4")
+	req.Header.Add("X-Forwarded-For", "203.0.113.9")
+
+	if got := ClientIPFromRequest(req, 1); !got.Equal(net.ParseIP("203.0.113.9")) {
+		t.Fatalf("depth=1 multi-header: got %v, want 203.0.113.9 (trusted-appended entry)", got)
+	}
+	// depth=2 reaches across the header boundary to the client-origin
+	// entry, exactly as if both hops were in one merged header.
+	if got := ClientIPFromRequest(req, 2); !got.Equal(net.ParseIP("1.2.3.4")) {
+		t.Fatalf("depth=2 multi-header: got %v, want 1.2.3.4", got)
 	}
 }
 

@@ -100,7 +100,8 @@ type Config struct {
 	// real client address is taken TrustedProxyDepth entries from
 	// the right of the header (entries further left are
 	// client-supplied and spoofable). Sourced from
-	// TRUSTED_PROXY_DEPTH; defaults to 1 (single load balancer).
+	// TRUSTED_PROXY_DEPTH; defaults to defaultTrustedProxyDepth
+	// (single load balancer).
 	TrustedProxyDepth int
 
 	// Preview pipeline scaling + per-tenant fairness. The budget is a
@@ -490,7 +491,7 @@ func buildConfigFromEnv() *Config {
 		MicrosoftRedirectURL:          os.Getenv("MICROSOFT_REDIRECT_URL"),
 		RateLimitPerUser:              parseIntDefault(os.Getenv("RATE_LIMIT_PER_USER"), 0),
 		RateLimitPerWorkspace:         parseIntDefault(os.Getenv("RATE_LIMIT_PER_WORKSPACE"), 0),
-		TrustedProxyDepth:             parseNonNegativeIntDefault(os.Getenv("TRUSTED_PROXY_DEPTH"), 1),
+		TrustedProxyDepth:             parseNonNegativeIntDefault(os.Getenv("TRUSTED_PROXY_DEPTH"), defaultTrustedProxyDepth),
 		PreviewBudgetPerWorkspaceHour: parseIntDefault(os.Getenv("PREVIEW_BUDGET_PER_WORKSPACE_HOUR"), 100),
 		PreviewPriorityWorkers:        parseIntDefault(os.Getenv("PREVIEW_PRIORITY_WORKERS"), 6),
 		PreviewStandardWorkers:        parseIntDefault(os.Getenv("PREVIEW_STANDARD_WORKERS"), 2),
@@ -1037,6 +1038,13 @@ func parseIntDefault(s string, def int) int {
 	}
 	return v
 }
+
+// defaultTrustedProxyDepth is the assumed number of trusted reverse
+// proxies in front of the server when TRUSTED_PROXY_DEPTH is unset.
+// One matches the common single-load-balancer deployment. The
+// IP-allowlist middleware consumes the resolved value; this package
+// owns the default because it owns env-var resolution.
+const defaultTrustedProxyDepth = 1
 
 // parseNonNegativeIntDefault is like parseIntDefault but treats an
 // explicit 0 as a valid value rather than falling back to def. Only an

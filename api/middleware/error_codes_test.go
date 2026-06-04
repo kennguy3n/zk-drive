@@ -99,6 +99,7 @@ func TestErrorCodes_DistinctValues(t *testing.T) {
 		ErrCodeMFAEnrollNeeded,
 		ErrCodeForbidden,
 		ErrCodeAdminOnly,
+		ErrCodePlatformAdminOnly,
 		ErrCodeReadOnly,
 		ErrCodeWrongTenant,
 		ErrCodeNoWorkspace,
@@ -130,6 +131,10 @@ func TestErrorCodes_DistinctValues(t *testing.T) {
 		ErrCodeInvalidCIDR,
 		ErrCodePrivateCIDR,
 		ErrCodeRuleCapExceeded,
+		ErrCodeDuplicateCIDR,
+		ErrCodeLabelTooLong,
+		ErrCodeAllowlistNoRules,
+		ErrCodeAllowlistLastRule,
 	}
 	seen := make(map[ErrorCode]int, len(codes))
 	for i, c := range codes {

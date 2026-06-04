@@ -47,17 +47,17 @@ const (
 	//    session. See frontend/src/api/client.ts
 	//    NON_SESSION_401_CODES for the codes the interceptor treats
 	//    as soft 401s.
-	ErrCodeAuthMissingToken        ErrorCode = "AUTH_MISSING_TOKEN"
-	ErrCodeAuthInvalidToken        ErrorCode = "AUTH_INVALID_TOKEN"
-	ErrCodeAuthRevokedToken        ErrorCode = "AUTH_REVOKED_TOKEN"
-	ErrCodeAuthBadPurpose          ErrorCode = "AUTH_BAD_PURPOSE"
-	ErrCodeAuthMissingIat          ErrorCode = "AUTH_MISSING_IAT"
-	ErrCodeRevocationCheck         ErrorCode = "AUTH_REVOCATION_CHECK_FAILED"
-	ErrCodeAuthInvalidCredentials  ErrorCode = "AUTH_INVALID_CREDENTIALS"
-	ErrCodeAuthPasswordReverify    ErrorCode = "AUTH_PASSWORD_REVERIFY_FAILED"
-	ErrCodeMFARequired             ErrorCode = "AUTH_MFA_REQUIRED"
-	ErrCodeMFAInvalid              ErrorCode = "AUTH_MFA_INVALID"
-	ErrCodeMFAEnrollNeeded         ErrorCode = "MFA_ENROLL_REQUIRED"
+	ErrCodeAuthMissingToken       ErrorCode = "AUTH_MISSING_TOKEN"
+	ErrCodeAuthInvalidToken       ErrorCode = "AUTH_INVALID_TOKEN"
+	ErrCodeAuthRevokedToken       ErrorCode = "AUTH_REVOKED_TOKEN"
+	ErrCodeAuthBadPurpose         ErrorCode = "AUTH_BAD_PURPOSE"
+	ErrCodeAuthMissingIat         ErrorCode = "AUTH_MISSING_IAT"
+	ErrCodeRevocationCheck        ErrorCode = "AUTH_REVOCATION_CHECK_FAILED"
+	ErrCodeAuthInvalidCredentials ErrorCode = "AUTH_INVALID_CREDENTIALS"
+	ErrCodeAuthPasswordReverify   ErrorCode = "AUTH_PASSWORD_REVERIFY_FAILED"
+	ErrCodeMFARequired            ErrorCode = "AUTH_MFA_REQUIRED"
+	ErrCodeMFAInvalid             ErrorCode = "AUTH_MFA_INVALID"
+	ErrCodeMFAEnrollNeeded        ErrorCode = "MFA_ENROLL_REQUIRED"
 
 	// Authorization failures (403 Forbidden).
 	ErrCodeForbidden   ErrorCode = "FORBIDDEN"
@@ -116,10 +116,26 @@ const (
 	// IP allowlist rule validation (400). Distinct codes so the
 	// admin UI can render targeted hints: a malformed CIDR vs. a
 	// well-formed but private/reserved range vs. hitting the
-	// per-workspace rule cap.
+	// per-workspace rule cap vs. re-adding a range that is already
+	// allowlisted (409 — the last two are conflicts, not 400s).
 	ErrCodeInvalidCIDR     ErrorCode = "INVALID_CIDR"
 	ErrCodePrivateCIDR     ErrorCode = "PRIVATE_CIDR_NOT_ALLOWED"
 	ErrCodeRuleCapExceeded ErrorCode = "IP_RULE_CAP_EXCEEDED"
+	ErrCodeDuplicateCIDR   ErrorCode = "DUPLICATE_CIDR"
+	// ErrCodeLabelTooLong (400) — the rule's free-text label exceeds
+	// the server-side length cap (workspace.MaxIPRuleLabelLen). The
+	// label is admin-supplied and persisted as TEXT, so the cap is a
+	// defense-in-depth bound on stored and cached entry size.
+	ErrCodeLabelTooLong ErrorCode = "IP_ALLOWLIST_LABEL_TOO_LONG"
+	// ErrCodeAllowlistNoRules (409) — enabling the allowlist was
+	// refused because the workspace has no rules; enabling would fail
+	// closed and block all data-plane traffic. Add a rule first.
+	ErrCodeAllowlistNoRules ErrorCode = "IP_ALLOWLIST_NO_RULES"
+	// ErrCodeAllowlistLastRule (409) — removing the rule was refused
+	// because it is the last one while the allowlist is enabled;
+	// deleting it would fail closed and block all data-plane traffic.
+	// Disable the allowlist first, then remove the rule.
+	ErrCodeAllowlistLastRule ErrorCode = "IP_ALLOWLIST_LAST_RULE"
 
 	// Resource state (404 / 409 / 410).
 	ErrCodeNotFound      ErrorCode = "NOT_FOUND"

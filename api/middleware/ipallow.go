@@ -18,11 +18,6 @@ import (
 // 403 without parsing the JSON body.
 const IPBlockedHeader = "X-ZkDrive-IP-Blocked"
 
-// DefaultTrustedProxyDepth is the assumed number of trusted reverse
-// proxies in front of the server when TRUSTED_PROXY_DEPTH is unset.
-// One matches the common single-load-balancer deployment.
-const DefaultTrustedProxyDepth = 1
-
 // IPAllowChecker is the subset of workspace.IPAllowService the
 // middleware needs. Declared as an interface so the middleware is
 // unit-testable with a fake and so a nil service cleanly disables
@@ -35,9 +30,11 @@ type IPAllowChecker interface {
 // allowlist. It MUST be composed AFTER the auth/tenant middleware so
 // the workspace id is already bound in the request context.
 //
-// When checker is nil the middleware is a pass-through, so the
-// server boots without an IPAllowService wired (mirroring the
-// nil-service-disables-feature convention used elsewhere).
+// When checker is nil — including a typed-nil concrete
+// *workspace.IPAllowService passed through the interface — the
+// middleware is a pass-through, so the server boots without an
+// IPAllowService wired (mirroring the nil-service-disables-feature
+// convention used elsewhere, e.g. admin.Handler.WithWebhooks).
 //
 // The client IP is resolved from X-Forwarded-For honouring
 // trustedProxyDepth (the number of trusted proxies appended to the
@@ -48,6 +45,12 @@ type IPAllowChecker interface {
 func IPAllowlist(checker IPAllowChecker, trustedProxyDepth int) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		if checker == nil {
+			return next
+		}
+		// A typed-nil *IPAllowService satisfies the interface but is
+		// not == nil; unwrap it so it disables enforcement instead of
+		// panicking on a nil receiver inside CheckAccess.
+		if svc, ok := checker.(*workspace.IPAllowService); ok && svc == nil {
 			return next
 		}
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -88,10 +91,20 @@ func IPAllowlist(checker IPAllowChecker, trustedProxyDepth int) func(http.Handle
 // misconfiguration), it falls back to the TCP peer in RemoteAddr,
 // which cannot be spoofed. Returns nil only when no usable address
 // can be parsed.
+//
+// All X-Forwarded-For header lines are joined before splitting, not
+// just the first. Standard proxies merge XFF into one comma-separated
+// value, but a client can send its own X-Forwarded-For and a proxy
+// that appends a *separate* header line (rather than merging) would
+// otherwise leave http.Header.Get reading only the client's spoofed
+// line — so the right-anchored "trusted" entry would actually be
+// attacker-controlled. Joining Values preserves hop order (each
+// proxy's appended entry stays to the right of earlier ones), so the
+// depth-from-right index still selects the closest trusted proxy.
 func ClientIPFromRequest(r *http.Request, trustedProxyDepth int) net.IP {
 	if trustedProxyDepth > 0 {
-		if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
-			parts := strings.Split(xff, ",")
+		if values := r.Header.Values("X-Forwarded-For"); len(values) > 0 {
+			parts := strings.Split(strings.Join(values, ","), ",")
 			idx := len(parts) - trustedProxyDepth
 			if idx >= 0 && idx < len(parts) {
 				if ip := net.ParseIP(strings.TrimSpace(parts[idx])); ip != nil {
