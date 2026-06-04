@@ -120,7 +120,11 @@ func run() error {
 		}
 	}()
 
-	pool, err := database.Connect(ctx, cfg.DatabaseURL)
+	pool, err := database.ConnectWithPool(ctx, cfg.DatabaseURL, database.PoolConfig{
+		MaxConns:        cfg.DBMaxConns,
+		MinConns:        cfg.DBMinConns,
+		MaxConnIdleTime: cfg.DBMaxConnIdleTime,
+	})
 	if err != nil {
 		cancel()
 		return fmt.Errorf("connect postgres: %w", err)
@@ -277,6 +281,43 @@ func run() error {
 		return fmt.Errorf("credential codec: %w", err)
 	}
 	slog.Info("crypto credential encryption mode", "mode", credentialCodec.Mode())
+
+	// Session-token signing. The KeyManager signs/verifies with ES256
+	// when an active asymmetric key exists in jwt_signing_keys
+	// (migration 034), and otherwise falls back to HS256 using
+	// cfg.JWTSecret. Verification always accepts both, so rotating to
+	// ES256 (POST /api/admin/jwt/rotate) never invalidates sessions
+	// issued before the cutover. JWT_ALGORITHM forces a mode; the
+	// default ("auto") picks ES256-when-available.
+	jwtKeyManager, err := cryptopkg.NewKeyManager(
+		ctx,
+		cryptopkg.NewPostgresSigningKeyStore(pool),
+		credentialCodec,
+		cfg.JWTSecret,
+		cfg.JWTAlgorithm,
+	)
+	if err != nil {
+		cancel()
+		return fmt.Errorf("jwt key manager: %w", err)
+	}
+	slog.Info("jwt signing", "algorithm", jwtKeyManager.Algorithm())
+
+	// Cross-replica key-rotation propagation. RotateKey only reloads
+	// the replica that served POST /api/admin/jwt/rotate; every other
+	// replica must re-read jwt_signing_keys to learn the new key's
+	// public half, or it would 401 tokens signed by it. This loop
+	// polls the table every cfg.JWTKeyRefreshInterval (default 60s)
+	// and exits on ctx cancellation via the shared bgGoroutines
+	// WaitGroup, so shutdown drains it deterministically. A
+	// non-positive interval disables it (single-replica deployments).
+	if cfg.JWTKeyRefreshInterval > 0 {
+		bgGoroutines.Add(1)
+		go func() {
+			defer bgGoroutines.Done()
+			jwtKeyManager.RefreshLoop(ctx, cfg.JWTKeyRefreshInterval)
+		}()
+		slog.Info("jwt signing-key auto-refresh enabled", "interval", cfg.JWTKeyRefreshInterval)
+	}
 
 	storageFactory := storage.NewClientFactory(pool, storageClient, credentialCodec)
 
@@ -578,6 +619,7 @@ func run() error {
 
 	authHandler := auth.NewHandler(pool, userSvc, wsSvc, cfg.JWTSecret).
 		WithAudit(auditSvc).
+		WithSigner(jwtKeyManager).
 		WithTOTP(totpSvc).
 		WithPostSignupHook(func(ctx context.Context, workspaceID uuid.UUID, workspaceName string) {
 			// Best-effort: provision a fabric tenant for the new
@@ -650,7 +692,8 @@ func run() error {
 		WithStripe(stripeService).
 		WithFabric(fabricClient, provisioner, storageFactory).
 		WithWorkspaces(wsSvc).
-		WithWebhooks(webhookPublisher)
+		WithWebhooks(webhookPublisher).
+		WithJWTRotator(jwtKeyManager)
 
 	// Outbound-webhook subscription admin handler. Mounted
 	// under /api/admin/webhooks so it inherits the admin-only +
@@ -916,7 +959,7 @@ func run() error {
 			})
 
 			r.Group(func(r chi.Router) {
-				r.Use(middleware.AuthMiddleware(cfg.JWTSecret, sessionChecker))
+				r.Use(middleware.AuthMiddlewareWithKeys(jwtKeyManager, sessionChecker))
 				r.Post("/logout", authHandler.Logout)
 				r.Post("/refresh", authHandler.Refresh)
 			})
@@ -941,7 +984,7 @@ func run() error {
 					// a session JWT and is managing 2FA from
 					// account settings.
 					r.Group(func(r chi.Router) {
-						r.Use(middleware.AuthMiddleware(cfg.JWTSecret, sessionChecker))
+						r.Use(middleware.AuthMiddlewareWithKeys(jwtKeyManager, sessionChecker))
 						r.Post("/enroll/begin", totpHandler.EnrollBegin)
 						r.Post("/enroll/finalize", totpHandler.EnrollFinalize)
 						r.Post("/disable", totpHandler.Disable)
@@ -953,14 +996,14 @@ func run() error {
 					// The enroll token authorises ONLY the
 					// enrollment endpoints — no data plane.
 					r.Group(func(r chi.Router) {
-						r.Use(middleware.PurposeMiddleware(cfg.JWTSecret, middleware.PurposeMFAEnroll))
+						r.Use(middleware.PurposeMiddlewareWithKeys(jwtKeyManager, middleware.PurposeMFAEnroll))
 						r.Post("/enroll/begin/required", totpHandler.EnrollBegin)
 						r.Post("/enroll/finalize/required", totpHandler.EnrollFinalize)
 					})
 					// Challenge-token path: complete the second
 					// factor and exchange for a real session JWT.
 					r.Group(func(r chi.Router) {
-						r.Use(middleware.PurposeMiddleware(cfg.JWTSecret, middleware.PurposeMFAChallenge))
+						r.Use(middleware.PurposeMiddlewareWithKeys(jwtKeyManager, middleware.PurposeMFAChallenge))
 						r.Post("/verify", totpHandler.Verify)
 					})
 				})
@@ -974,7 +1017,7 @@ func run() error {
 		// frame, and TenantGuard's HTTP-method assumptions trip on
 		// the upgrade handshake.
 		r.Group(func(r chi.Router) {
-			r.Use(middleware.AuthMiddleware(cfg.JWTSecret, sessionChecker))
+			r.Use(middleware.AuthMiddlewareWithKeys(jwtKeyManager, sessionChecker))
 			r.Get("/ws", wsHandler.ServeWS)
 			// Collab WS endpoint: per-document Yjs relay. Mounted
 			// next to /ws because both are long-lived upgrade
@@ -988,7 +1031,7 @@ func run() error {
 		})
 
 		r.Group(func(r chi.Router) {
-			r.Use(middleware.AuthMiddleware(cfg.JWTSecret, sessionChecker))
+			r.Use(middleware.AuthMiddlewareWithKeys(jwtKeyManager, sessionChecker))
 			r.Use(middleware.TenantGuard())
 			r.Use(rateLimiter())
 
@@ -1069,7 +1112,7 @@ func run() error {
 		})
 
 		r.Route("/admin", func(r chi.Router) {
-			r.Use(middleware.AuthMiddleware(cfg.JWTSecret, sessionChecker))
+			r.Use(middleware.AuthMiddlewareWithKeys(jwtKeyManager, sessionChecker))
 			r.Use(middleware.TenantGuard())
 			r.Use(middleware.AdminOnly())
 			r.Use(rateLimiter())
@@ -1084,7 +1127,7 @@ func run() error {
 		})
 
 		r.Route("/kchat", func(r chi.Router) {
-			r.Use(middleware.AuthMiddleware(cfg.JWTSecret, sessionChecker))
+			r.Use(middleware.AuthMiddlewareWithKeys(jwtKeyManager, sessionChecker))
 			r.Use(middleware.TenantGuard())
 			r.Use(rateLimiter())
 			kchatHandler.RegisterRoutes(r)
