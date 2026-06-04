@@ -35,6 +35,16 @@ var ErrInvalidSubscription = errors.New("webpush: invalid subscription")
 // CHECK constraint in migration 038 as defence in depth.
 const maxPushEndpointLen = 2048
 
+// maxPushKeyLen bounds the p256dh and auth key material a client may
+// register. Real values are tiny — p256dh is a 65-byte uncompressed EC
+// point (~88 base64url chars) and auth a 16-byte secret (~24 chars) — so
+// a 256-byte ceiling is generous headroom while stopping an
+// authenticated client from persisting arbitrarily large blobs (storage
+// abuse, amplified once the at-rest cipher expands them). Bounded here
+// for a clean 400 before encryption; the stored column also carries a
+// generous CHECK in migration 038 sized for the resulting ciphertext.
+const maxPushKeyLen = 256
+
 // defaultVAPIDSubscriber is the `sub` claim embedded in the VAPID JWT
 // when the operator does not configure one explicitly. Push services
 // require a mailto: or https: subscriber so they can contact the
@@ -217,6 +227,12 @@ func (s *WebPushService) Subscribe(ctx context.Context, workspaceID, userID uuid
 	}
 	if sub.Endpoint == "" || sub.P256dh == "" || sub.Auth == "" {
 		return fmt.Errorf("%w: endpoint, p256dh and auth are required", ErrInvalidSubscription)
+	}
+	if len(sub.P256dh) > maxPushKeyLen {
+		return fmt.Errorf("%w: p256dh exceeds %d bytes", ErrInvalidSubscription, maxPushKeyLen)
+	}
+	if len(sub.Auth) > maxPushKeyLen {
+		return fmt.Errorf("%w: auth exceeds %d bytes", ErrInvalidSubscription, maxPushKeyLen)
 	}
 	if err := s.validateEndpoint(ctx, sub.Endpoint); err != nil {
 		return err

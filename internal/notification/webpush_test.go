@@ -241,6 +241,31 @@ func TestWebPushService_RejectsOverLongEndpoint(t *testing.T) {
 	}
 }
 
+func TestWebPushService_RejectsOverLongKeys(t *testing.T) {
+	repo := newFakeWebPushRepo()
+	svc, _ := newTestService(t, repo, http.StatusCreated)
+	ctx := context.Background()
+	ws, user := uuid.New(), uuid.New()
+
+	oversize := strings.Repeat("A", maxPushKeyLen+1)
+
+	longP256dh := testSubscription(t, "https://push.example.com/abc")
+	longP256dh.P256dh = oversize
+	if err := svc.Subscribe(ctx, ws, user, longP256dh); !errors.Is(err, ErrInvalidSubscription) {
+		t.Errorf("expected ErrInvalidSubscription for over-long p256dh, got %v", err)
+	}
+
+	longAuth := testSubscription(t, "https://push.example.com/abc")
+	longAuth.Auth = oversize
+	if err := svc.Subscribe(ctx, ws, user, longAuth); !errors.Is(err, ErrInvalidSubscription) {
+		t.Errorf("expected ErrInvalidSubscription for over-long auth, got %v", err)
+	}
+
+	if repo.count() != 0 {
+		t.Errorf("over-long keys should not be stored, got %d", repo.count())
+	}
+}
+
 // TestWebPushService_DeliverFallbackValidationWithoutValidator proves
 // that when no EndpointValidator is injected, delivery still runs the
 // literal-IP fallback check (validatePushEndpoint) before POSTing —

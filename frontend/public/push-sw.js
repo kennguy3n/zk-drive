@@ -53,10 +53,18 @@ self.addEventListener("push", (event) => {
   );
 });
 
-// EDITOR_PATH_PREFIX marks routes (the TipTap/Yjs document editor) where
-// blindly navigating an open tab could discard unsaved edits. The click
-// handler avoids redirecting such tabs.
-const EDITOR_PATH_PREFIX = "/drive/document/";
+// isEditorPath reports whether a pathname renders the TipTap/Yjs document
+// editor, where blindly navigating an open tab could discard unsaved
+// edits. App.tsx mounts DocumentEditorPage on TWO routes, so both must be
+// recognised: the canonical "/drive/document/:id" and the "/documents/:id/edit"
+// alias used by the file-list Edit button. Missing either lets the click
+// handler reuse (and navigate away from) an active editor tab.
+function isEditorPath(pathname) {
+  return (
+    pathname.startsWith("/drive/document/") ||
+    (pathname.startsWith("/documents/") && pathname.endsWith("/edit"))
+  );
+}
 
 function pathnameOf(url) {
   try {
@@ -81,7 +89,7 @@ self.addEventListener("notificationclick", (event) => {
 
       // 2) Reuse a tab that ISN'T mid-edit so we don't blow away unsaved
       // document changes by navigating away from the editor.
-      const reusable = focusable.find((c) => !pathnameOf(c.url).startsWith(EDITOR_PATH_PREFIX));
+      const reusable = focusable.find((c) => !isEditorPath(pathnameOf(c.url)));
       if (reusable) {
         return Promise.resolve(reusable.navigate(targetUrl)).then(() => reusable.focus());
       }

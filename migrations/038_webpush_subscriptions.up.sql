@@ -34,8 +34,14 @@ CREATE TABLE webpush_subscriptions (
     -- WebPushService (which rejects over-long endpoints with a 400
     -- before they reach here).
     endpoint     TEXT NOT NULL CHECK (length(endpoint) <= 2048),
-    p256dh       TEXT NOT NULL,
-    auth         TEXT NOT NULL,
+    -- p256dh / auth are tiny RFC 8291 key material (~88 and ~24 base64url
+    -- chars). The app rejects raw values over maxPushKeyLen (256 B) with a
+    -- 400 before storage; this CHECK is defence in depth on the stored
+    -- value, sized at 1 KiB so it also accommodates the at-rest AES-GCM
+    -- ciphertext ("aesgcm:" + base64(nonce||ct||tag)), which expands a
+    -- 256 B input to under ~400 B.
+    p256dh       TEXT NOT NULL CHECK (length(p256dh) <= 1024),
+    auth         TEXT NOT NULL CHECK (length(auth) <= 1024),
     created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
     UNIQUE(workspace_id, user_id, endpoint)
 );
