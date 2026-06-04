@@ -11,6 +11,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"strconv"
 	"strings"
@@ -155,14 +156,13 @@ func (h *Handler) SuspendWorkspace(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req suspendRequest
-	// Body is optional: a reason-less suspension is valid. Use > 0 (not
-	// != 0) because net/http reports ContentLength as -1 for requests
-	// without a Content-Length header (e.g. HTTP/1.1 chunked), which
-	// would otherwise force a decode of an empty body and 400.
-	if r.ContentLength > 0 {
-		if !decode(w, r, &req) {
-			return
-		}
+	// Body is optional: a reason-less suspension is valid. decodeOptional
+	// treats a genuinely empty body as "no reason" while still rejecting
+	// malformed JSON. It must not gate on r.ContentLength, which net/http
+	// reports as -1 ("unknown") for HTTP/2 or chunked requests that omit
+	// Content-Length even when they carry a real {"reason":"..."} body.
+	if !decodeOptional(w, r, &req) {
+		return
 	}
 	if err := h.svc.SuspendWorkspace(r.Context(), id, req.Reason); err != nil {
 		h.respondErr(w, r, "suspend workspace", err)
@@ -337,6 +337,22 @@ func decode(w http.ResponseWriter, r *http.Request, dst any) bool {
 		return false
 	}
 	return true
+}
+
+// decodeOptional reads a JSON body into dst when one is present. A
+// genuinely empty body (io.EOF before any token) is treated as "no
+// body" and leaves dst at its zero value — for endpoints whose body is
+// optional. Unlike an r.ContentLength check, this does not silently
+// drop a real body on HTTP/2 or chunked requests that omit
+// Content-Length (where ContentLength is -1, i.e. "unknown"). A
+// non-empty but malformed body still writes a 400 and returns false.
+func decodeOptional(w http.ResponseWriter, r *http.Request, dst any) bool {
+	err := json.NewDecoder(r.Body).Decode(dst)
+	if err == nil || errors.Is(err, io.EOF) {
+		return true
+	}
+	middleware.RespondError(w, http.StatusBadRequest, middleware.ErrCodeMalformedJSON, "malformed JSON body")
+	return false
 }
 
 // parseID parses the {id} path param as a UUID, writing a 400 and
