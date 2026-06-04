@@ -721,6 +721,15 @@ func subscribeAll(ctx context.Context, wg *sync.WaitGroup, js nats.JetStreamCont
 // per-call mutable state; the AckWait window plus QueueMaxDeliver
 // bound any redelivery of a message that was in flight when the
 // worker shut down.
+//
+// Both selects are deliberately tolerant of stop and ch being ready
+// at once (Go picks a ready case at random): a worker that processes
+// one more message after stop fires still acks it (and poolWG.Wait
+// accounts for it before drain returns), and a handler send that
+// wins the race after stop closes is fine too — the message is
+// processed rather than dropped. Do NOT add a stop-priority pre-check
+// to "tighten" these selects; it would turn that benign race into a
+// silently dropped (redelivered-after-AckWait) message.
 func startJobPool(ctx context.Context, wg *sync.WaitGroup, workers int, h nats.MsgHandler) (nats.MsgHandler, func()) {
 	if workers < 1 {
 		workers = 1

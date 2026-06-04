@@ -102,7 +102,7 @@ scaling") for the runbook.
 
 | Variable                            | Default | Purpose                                                                                                                                                              |
 | ----------------------------------- | ------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `PREVIEW_BUDGET_PER_WORKSPACE_HOUR` | `100`   | Max previews rendered per workspace per rolling hour. Over budget, the job is `NakWithDelay`-deferred (exponential backoff up to 5m) rather than dropped. Needs `REDIS_URL`; with no Redis the budget is unenforced (all admitted). |
+| `PREVIEW_BUDGET_PER_WORKSPACE_HOUR` | `100`   | Max previews rendered per workspace per rolling hour. Over budget, the job is `NakWithDelay`-deferred (exponential backoff up to 5m) rather than dropped. Needs `REDIS_URL`; with no Redis the budget is unenforced (all admitted). A value `<= 0` falls back to the default (`100`), so to keep Redis but effectively disable the budget, set this very high (e.g. `1000000`). |
 | `PREVIEW_PRIORITY_WORKERS`          | `6`     | Goroutine pool size for the priority preview subject (`drive.preview.generate.priority`, Business/Secure-Business tiers). Values `<= 0` fall back to the default; the pool is clamped to a minimum of 1. |
 | `PREVIEW_STANDARD_WORKERS`          | `2`     | Goroutine pool size for the standard preview subject (`drive.preview.generate.standard`, Free/Starter tiers). Same `<= 0` / minimum-1 semantics as the priority pool. |
 
