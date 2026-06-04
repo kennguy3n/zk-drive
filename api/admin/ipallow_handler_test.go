@@ -101,10 +101,18 @@ func (m *memIPAllowStore) LoadSnapshot(_ context.Context, ws uuid.UUID) (bool, [
 	return m.enabled[ws], cidrs, nil
 }
 
+// SetEnabled mirrors PostgresIPAllowStore.SetEnabled's authoritative
+// guard: enabling a workspace with zero rules is refused with
+// ErrNoRulesToEnable. The service layer also fast-paths this case, but
+// keeping the fake faithful means the handler test still exercises the
+// real invariant if that non-authoritative fast-path is ever removed.
 func (m *memIPAllowStore) SetEnabled(_ context.Context, ws uuid.UUID, enabled bool) (bool, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	prev := m.enabled[ws]
+	if enabled && len(m.rules[ws]) == 0 {
+		return prev, workspace.ErrNoRulesToEnable
+	}
 	m.enabled[ws] = enabled
 	return prev, nil
 }
