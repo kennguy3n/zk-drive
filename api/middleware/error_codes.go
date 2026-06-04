@@ -64,6 +64,13 @@ const (
 	ErrCodeAdminOnly   ErrorCode = "ADMIN_ACCESS_REQUIRED"
 	ErrCodeReadOnly    ErrorCode = "READ_ONLY_ROLE"
 	ErrCodeWrongTenant ErrorCode = "WRONG_TENANT"
+	// ErrCodePlatformAdminOnly is returned when a request passes the
+	// workspace AdminOnly gate but the caller is not in the operator
+	// configured platform-admin allowlist (PLATFORM_ADMIN_USER_IDS).
+	// It guards platform-wide operations (currently JWT signing-key
+	// rotation) that affect every workspace, distinct from the
+	// per-workspace ADMIN_ACCESS_REQUIRED.
+	ErrCodePlatformAdminOnly ErrorCode = "PLATFORM_ADMIN_ACCESS_REQUIRED"
 
 	// Workspace-routing failure (401 Unauthorized). Distinct from the
 	// AUTH_* codes above because the user IS authenticated — we just
