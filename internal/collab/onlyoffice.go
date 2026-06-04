@@ -198,6 +198,14 @@ func (s *OnlyOfficeService) ValidateDocumentURL(raw string) error {
 	if !strings.EqualFold(u.Hostname(), srv.Hostname()) {
 		return ErrCallbackURLNotAllowed
 	}
+	// Enforce the scheme too. Without this, http://office.example.com:443
+	// would pass against an https Document Server (identical effective
+	// port), letting a callback downgrade the fetch to cleartext or steer
+	// it at a co-located plaintext service. The doc comment's same-origin
+	// contract is host + scheme + port.
+	if !strings.EqualFold(u.Scheme, srv.Scheme) {
+		return ErrCallbackURLNotAllowed
+	}
 	// Match the port too, not just the host: a same-hostname URL on a
 	// different port (e.g. office.example.com:9200 Elasticsearch,
 	// :6379 Redis) would otherwise pass and let the callback reach a

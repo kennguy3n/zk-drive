@@ -74,8 +74,12 @@ func (s *Service) NotifyShareLinkCreated(ctx context.Context, workspaceID, owner
 		Type:         TypeShareLinkCreated,
 		Title:        "Share link created",
 		Body:         fmt.Sprintf("A new share link was created for a %s.", resourceType),
-		ResourceType: stringPtr("share_link"),
-		ResourceID:   &linkID,
+		// Deep-link the owner to the shared resource itself. The event
+		// kind is already captured by Type; ResourceType/ResourceID name
+		// the navigable target ("file"/"folder") so push clicks open it.
+		// linkID is not a navigable route, so it is not stored here.
+		ResourceType: stringPtr(resourceType),
+		ResourceID:   &resourceID,
 	})
 }
 
@@ -89,8 +93,9 @@ func (s *Service) NotifyGuestInviteSent(ctx context.Context, workspaceID, invite
 		Type:         TypeGuestInviteSent,
 		Title:        "You were invited to a folder",
 		Body:         fmt.Sprintf("%s was invited as a guest.", email),
-		ResourceType: stringPtr("guest_invite"),
-		ResourceID:   &inviteID,
+		// Deep-link the invitee to the folder they can now access.
+		ResourceType: stringPtr("folder"),
+		ResourceID:   &folderID,
 	})
 }
 
@@ -124,14 +129,16 @@ func (s *Service) NotifyQuarantine(ctx context.Context, workspaceID, fileID, ver
 			Type:         TypeScanQuarantined,
 			Title:        title,
 			Body:         body,
-			ResourceType: stringPtr("file_version"),
-			ResourceID:   &versionID,
+			// Deep-link admins to the affected file so they can review or
+			// purge it. fileID (not versionID) is what the file route resolves.
+			ResourceType: stringPtr("file"),
+			ResourceID:   &fileID,
 		}
 		if err := s.create(ctx, n); err != nil {
 			return err
 		}
 	}
-	_ = fileID // reserved for future per-file deep links
+	_ = versionID // the file route resolves by fileID; versionID is not navigable
 	return nil
 }
 

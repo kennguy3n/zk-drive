@@ -215,7 +215,28 @@ func pushPayloadFromEvent(event Event) (NotificationPayload, bool) {
 		Title: n.Title,
 		Body:  n.Body,
 		Type:  n.Type,
+		URL:   composeNotificationURL(n.ResourceType, n.ResourceID),
 	}, true
+}
+
+// composeNotificationURL maps a notification's navigable resource to
+// the frontend route the push service worker should open when the user
+// clicks the notification. Only resource types backed by a real route
+// produce a URL; anything else returns "" so the service worker falls
+// back to /drive. Keep these paths in sync with the router in
+// frontend/src/App.tsx.
+func composeNotificationURL(resourceType *string, resourceID *uuid.UUID) string {
+	if resourceType == nil || resourceID == nil {
+		return ""
+	}
+	switch *resourceType {
+	case "file":
+		return "/drive/document/" + resourceID.String()
+	case "folder":
+		return "/drive/folder/" + resourceID.String()
+	default:
+		return ""
+	}
 }
 
 func parseChannel(channel string) (uuid.UUID, uuid.UUID, error) {
