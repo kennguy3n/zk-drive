@@ -248,3 +248,126 @@ func TestIPAllowlist_EnableRemoveLastRuleInvariant(t *testing.T) {
 		}
 	}
 }
+
+// TestIPAllowlist_LoadSnapshotConsistent proves the cache loader's
+// snapshot read can never observe a torn {enabled, no rules} view —
+// the fail-closed state that would 403 every data-plane request for
+// the workspace until the cache TTL expires.
+//
+// Two properties combine to guarantee this:
+//   - LoadSnapshot reads the flag and the CIDRs in a SINGLE statement,
+//     so under READ COMMITTED it sees one consistent database snapshot
+//     (never enabled=true paired with a rule set a *later* delete
+//     emptied).
+//   - RemoveRule refuses to delete the last rule while enabled, so the
+//     only way to empty the rule set is to disable first. A snapshot
+//     that observes zero rules therefore also observes enabled=false
+//     (the disable happened-before the delete it can see).
+//
+// The race below hammers LoadSnapshot while an admin disables+clears,
+// asserting the loaded snapshot is never enabled-with-zero-CIDRs.
+func TestIPAllowlist_LoadSnapshotConsistent(t *testing.T) {
+	env := setupEnv(t)
+	tok := env.signupAndLogin("AllowSnap", "snap@ipallow.test", "Snappy", "password-snap")
+	wsID := uuid.MustParse(tok.WorkspaceID)
+	userID := uuid.MustParse(tok.UserID)
+	ctx := context.Background()
+
+	store := workspace.NewPostgresIPAllowStore(env.pool)
+	svc := workspace.NewIPAllowService(store, nil)
+
+	// Correctness: enabled snapshot returns rules in created_at order.
+	if _, err := svc.AddRule(ctx, wsID, "203.0.113.0/24", "a", userID); err != nil {
+		t.Fatalf("AddRule a: %v", err)
+	}
+	if _, err := svc.AddRule(ctx, wsID, "198.51.100.0/24", "b", userID); err != nil {
+		t.Fatalf("AddRule b: %v", err)
+	}
+	if _, err := svc.SetEnabled(ctx, wsID, true); err != nil {
+		t.Fatalf("enable: %v", err)
+	}
+	enabled, cidrs, err := store.LoadSnapshot(ctx, wsID)
+	if err != nil {
+		t.Fatalf("LoadSnapshot enabled: %v", err)
+	}
+	if !enabled || len(cidrs) != 2 || cidrs[0] != "203.0.113.0/24" || cidrs[1] != "198.51.100.0/24" {
+		t.Fatalf("LoadSnapshot enabled = %v, cidrs = %v; want true + [203.0.113.0/24 198.51.100.0/24]", enabled, cidrs)
+	}
+
+	// Disabled snapshot yields the empty (non-nil) array, never NULL.
+	if _, err := svc.SetEnabled(ctx, wsID, false); err != nil {
+		t.Fatalf("disable: %v", err)
+	}
+	if _, err := env.pool.Exec(ctx, "DELETE FROM workspace_ip_allowlist WHERE workspace_id = $1", wsID); err != nil {
+		t.Fatalf("clear rules: %v", err)
+	}
+	enabled, cidrs, err = store.LoadSnapshot(ctx, wsID)
+	if err != nil {
+		t.Fatalf("LoadSnapshot disabled: %v", err)
+	}
+	if enabled || len(cidrs) != 0 {
+		t.Fatalf("LoadSnapshot disabled = %v, cidrs = %v; want false + []", enabled, cidrs)
+	}
+
+	// Missing workspace -> ErrNotFound.
+	if _, _, err := store.LoadSnapshot(ctx, uuid.New()); !errors.Is(err, workspace.ErrNotFound) {
+		t.Fatalf("LoadSnapshot missing workspace: got %v want ErrNotFound", err)
+	}
+
+	// Race: repeatedly seed (enabled, 1 rule), then concurrently spin
+	// LoadSnapshot while an admin disables + removes the rule. No
+	// observed snapshot may be enabled with zero CIDRs.
+	const rounds = 40
+	for i := 0; i < rounds; i++ {
+		r, err := svc.AddRule(ctx, wsID, fmt.Sprintf("203.0.113.%d/32", i), "", userID)
+		if err != nil {
+			t.Fatalf("round %d seed AddRule: %v", i, err)
+		}
+		if _, err := svc.SetEnabled(ctx, wsID, true); err != nil {
+			t.Fatalf("round %d enable: %v", i, err)
+		}
+
+		var wg sync.WaitGroup
+		var readErr error
+		var sawTorn bool
+		stop := make(chan struct{})
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for {
+				select {
+				case <-stop:
+					return
+				default:
+				}
+				en, cs, err := store.LoadSnapshot(ctx, wsID)
+				if err != nil {
+					readErr = err
+					return
+				}
+				if en && len(cs) == 0 {
+					sawTorn = true
+					return
+				}
+			}
+		}()
+
+		// Admin disable-then-remove (the only legal order: RemoveRule
+		// refuses the last rule while enabled).
+		if _, err := svc.SetEnabled(ctx, wsID, false); err != nil {
+			t.Fatalf("round %d disable: %v", i, err)
+		}
+		if err := svc.RemoveRule(ctx, wsID, r.ID); err != nil {
+			t.Fatalf("round %d remove: %v", i, err)
+		}
+		close(stop)
+		wg.Wait()
+
+		if readErr != nil {
+			t.Fatalf("round %d: LoadSnapshot error: %v", i, readErr)
+		}
+		if sawTorn {
+			t.Fatalf("round %d: observed torn snapshot — enabled with zero CIDRs", i)
+		}
+	}
+}

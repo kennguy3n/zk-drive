@@ -117,6 +117,14 @@ type IPAllowStore interface {
 	RemoveRule(ctx context.Context, workspaceID, ruleID uuid.UUID) error
 	// IsEnabled reports the workspaces.ip_allowlist_enabled flag.
 	IsEnabled(ctx context.Context, workspaceID uuid.UUID) (bool, error)
+	// LoadSnapshot reads the enabled flag and the workspace's rule
+	// CIDRs in a single consistent read, so the cache loader never
+	// observes a torn view — e.g. a stale enabled=true paired with a
+	// rule set a concurrent disable+clear has already emptied, which
+	// would cache a fail-closed {enabled, no rules} snapshot and 403
+	// every data-plane request for the workspace until the TTL expires.
+	// Returns ErrNotFound when the workspace does not exist.
+	LoadSnapshot(ctx context.Context, workspaceID uuid.UUID) (enabled bool, cidrs []string, err error)
 	// SetEnabled flips the flag and returns the previous value so the
 	// caller can audit the transition. Enabling is refused with
 	// ErrNoRulesToEnable when the workspace has zero rules, checked
@@ -230,24 +238,20 @@ func (s *IPAllowService) snapshot(ctx context.Context, workspaceID uuid.UUID) (i
 }
 
 func (s *IPAllowService) loadFromStore(ctx context.Context, workspaceID uuid.UUID) (ipAllowSnapshot, error) {
-	enabled, err := s.store.IsEnabled(ctx, workspaceID)
+	// One consistent read of the flag and the rule set. Reading them
+	// separately (IsEnabled then ListRules) could interleave with a
+	// concurrent disable+clear and cache a torn {enabled, no rules}
+	// snapshot that fails closed and blocks the whole workspace; a
+	// single statement observes one database snapshot and can't tear.
+	enabled, cidrs, err := s.store.LoadSnapshot(ctx, workspaceID)
 	if err != nil {
-		return ipAllowSnapshot{}, fmt.Errorf("read ip_allowlist_enabled: %w", err)
+		return ipAllowSnapshot{}, fmt.Errorf("load ip allowlist snapshot: %w", err)
 	}
 	snap := ipAllowSnapshot{Enabled: enabled}
-	// Skip the rule fetch entirely when disabled — the common case
-	// for the vast majority of workspaces, and CheckAccess never
-	// looks at CIDRs when disabled anyway.
-	if !enabled {
-		return snap, nil
-	}
-	rules, err := s.store.ListRules(ctx, workspaceID)
-	if err != nil {
-		return ipAllowSnapshot{}, fmt.Errorf("list ip rules: %w", err)
-	}
-	snap.CIDRs = make([]string, 0, len(rules))
-	for _, r := range rules {
-		snap.CIDRs = append(snap.CIDRs, r.CIDR)
+	// CheckAccess only consults CIDRs when enabled, so drop them from a
+	// disabled snapshot to keep the cached entry minimal.
+	if enabled {
+		snap.CIDRs = cidrs
 	}
 	return snap, nil
 }
@@ -369,11 +373,20 @@ func (s *IPAllowService) IsEnabled(ctx context.Context, workspaceID uuid.UUID) (
 }
 
 // ValidatePublicCIDR parses cidr and confirms it is a well-formed,
-// public network. Returns the canonical text form (host bits
+// fully public network. Returns the canonical text form (host bits
 // zeroed, e.g. "203.0.113.5/24" -> "203.0.113.0/24"). Returns
 // ErrInvalidCIDR for malformed input and ErrPrivateCIDR for
 // non-public ranges (RFC1918, loopback, link-local, unspecified,
-// multicast). Exported so handlers and tests share one definition.
+// multicast, RFC6598 CGNAT). Exported so handlers and tests share one
+// definition.
+//
+// Both endpoints matter: checking only the network (base) address
+// would accept an over-broad mask whose base happens to be public yet
+// whose range swallows reserved space — e.g. 192.0.0.0/4 and
+// 128.0.0.0/1 both have a public base address but cover 192.168.0.0/16
+// and 172.16.0.0/12. So in addition to the base-address check we reject
+// any range that overlaps a reserved block, honouring the "no private
+// ranges on a public SaaS" contract for every address the rule admits.
 func ValidatePublicCIDR(cidr string) (string, error) {
 	_, network, err := net.ParseCIDR(cidr)
 	if err != nil {
@@ -382,7 +395,50 @@ func ValidatePublicCIDR(cidr string) (string, error) {
 	if !isPublicIP(network.IP) {
 		return "", ErrPrivateCIDR
 	}
+	for _, reserved := range reservedNets {
+		if cidrsOverlap(network, reserved) {
+			return "", ErrPrivateCIDR
+		}
+	}
 	return network.String(), nil
+}
+
+// reservedNets are the address blocks that must never fall inside an
+// allowlisted range. They mirror the single-address rejections in
+// isPublicIP, but are checked for range *overlap* so a broad mask
+// whose base address is public can't smuggle in the RFC1918 / loopback
+// / link-local / CGNAT / multicast space it partly or wholly covers.
+var reservedNets = func() []*net.IPNet {
+	cidrs := []string{
+		"10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", // RFC1918
+		"127.0.0.0/8",    // loopback
+		"169.254.0.0/16", // link-local
+		"100.64.0.0/10",  // RFC6598 CGNAT
+		"224.0.0.0/4",    // multicast
+		"::1/128",        // IPv6 loopback
+		"fe80::/10",      // IPv6 link-local
+		"fc00::/7",       // IPv6 ULA (private)
+		"ff00::/8",       // IPv6 multicast
+	}
+	nets := make([]*net.IPNet, 0, len(cidrs))
+	for _, c := range cidrs {
+		_, n, err := net.ParseCIDR(c)
+		if err != nil {
+			panic("workspace: bad reserved CIDR literal " + c + ": " + err.Error())
+		}
+		nets = append(nets, n)
+	}
+	return nets
+}()
+
+// cidrsOverlap reports whether two CIDR-aligned blocks intersect.
+// Every net.IPNet is a power-of-two-aligned block, so two blocks are
+// either disjoint or one contains the other — an overlap therefore
+// exists iff either block contains the other's base address. Mismatched
+// address families never overlap (Contains returns false), so v4
+// candidates are unaffected by the v6 reserved blocks and vice versa.
+func cidrsOverlap(a, b *net.IPNet) bool {
+	return a.Contains(b.IP) || b.Contains(a.IP)
 }
 
 // rfc6598CGNAT is the RFC 6598 Shared Address Space (100.64.0.0/10)
@@ -593,6 +649,38 @@ func (r *PostgresIPAllowStore) IsEnabled(ctx context.Context, workspaceID uuid.U
 		return false, fmt.Errorf("read ip_allowlist_enabled: %w", err)
 	}
 	return enabled, nil
+}
+
+// LoadSnapshot reads the enabled flag and every rule CIDR in one
+// statement. Under READ COMMITTED a single statement observes one
+// consistent database snapshot, so it can never pair a stale
+// enabled=true with a rule set a concurrent disable+clear has already
+// emptied — the torn read that would otherwise cache a fail-closed
+// {enabled, no rules} snapshot and 403 the whole workspace until the
+// cache TTL expires. cidr is cast to text so it scans cleanly into a
+// Go []string; the LEFT JOIN + COALESCE yields an empty array (not
+// NULL) for a workspace with no rules, and no row at all for a
+// workspace that does not exist (-> ErrNotFound).
+func (r *PostgresIPAllowStore) LoadSnapshot(ctx context.Context, workspaceID uuid.UUID) (bool, []string, error) {
+	const q = `
+SELECT w.ip_allowlist_enabled,
+       COALESCE(
+         array_agg(a.cidr::text ORDER BY a.created_at) FILTER (WHERE a.id IS NOT NULL),
+         '{}'::text[]
+       )
+FROM workspaces w
+LEFT JOIN workspace_ip_allowlist a ON a.workspace_id = w.id
+WHERE w.id = $1
+GROUP BY w.id`
+	var enabled bool
+	var cidrs []string
+	if err := r.pool.QueryRow(ctx, q, workspaceID).Scan(&enabled, &cidrs); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return false, nil, ErrNotFound
+		}
+		return false, nil, fmt.Errorf("load ip allowlist snapshot: %w", err)
+	}
+	return enabled, cidrs, nil
 }
 
 // SetEnabled flips the flag under a SELECT ... FOR UPDATE / UPDATE

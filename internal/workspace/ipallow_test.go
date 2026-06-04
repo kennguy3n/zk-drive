@@ -24,11 +24,13 @@ type fakeIPAllowStore struct {
 
 	listCalls      int
 	isEnabledCalls int
+	loadCalls      int
 
 	// behaviour knobs
 	addErr       error
 	listErr      error
 	isEnabledErr error
+	loadErr      error
 }
 
 func newFakeIPAllowStore() *fakeIPAllowStore {
@@ -106,6 +108,25 @@ func (f *fakeIPAllowStore) IsEnabled(_ context.Context, workspaceID uuid.UUID) (
 		return false, f.isEnabledErr
 	}
 	return f.enabled[workspaceID], nil
+}
+
+// LoadSnapshot mirrors PostgresIPAllowStore.LoadSnapshot: it returns
+// the enabled flag and the rule CIDRs read atomically under a single
+// lock acquisition, so the service's cache loader can never observe a
+// torn enabled/rules view.
+func (f *fakeIPAllowStore) LoadSnapshot(_ context.Context, workspaceID uuid.UUID) (bool, []string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.loadCalls++
+	if f.loadErr != nil {
+		return false, nil, f.loadErr
+	}
+	rules := f.rules[workspaceID]
+	cidrs := make([]string, 0, len(rules))
+	for _, r := range rules {
+		cidrs = append(cidrs, r.CIDR)
+	}
+	return f.enabled[workspaceID], cidrs, nil
 }
 
 // SetEnabled mirrors PostgresIPAllowStore.SetEnabled's authoritative
@@ -413,7 +434,7 @@ func TestSetEnabled_NoRulesRejected(t *testing.T) {
 
 // TestCheckAccess_CacheHitSkipsStore proves the Redis snapshot
 // short-circuits the store: after the first CheckAccess populates the
-// cache, a second call must not re-read IsEnabled / ListRules.
+// cache, a second call must not re-read the store snapshot.
 func TestCheckAccess_CacheHitSkipsStore(t *testing.T) {
 	store := newFakeIPAllowStore()
 	ws := uuid.New()
@@ -426,20 +447,19 @@ func TestCheckAccess_CacheHitSkipsStore(t *testing.T) {
 		t.Fatalf("first check: %v", err)
 	}
 	store.mu.Lock()
-	enabledAfterFirst := store.isEnabledCalls
-	listAfterFirst := store.listCalls
+	loadAfterFirst := store.loadCalls
 	store.mu.Unlock()
+	if loadAfterFirst == 0 {
+		t.Fatalf("first check (cache miss) must read the store snapshot once")
+	}
 
 	if err := svc.CheckAccess(context.Background(), ws, net.ParseIP("203.0.113.7")); err != nil {
 		t.Fatalf("second check: %v", err)
 	}
 	store.mu.Lock()
 	defer store.mu.Unlock()
-	if store.isEnabledCalls != enabledAfterFirst {
-		t.Fatalf("cache HIT should not re-read IsEnabled: before=%d after=%d", enabledAfterFirst, store.isEnabledCalls)
-	}
-	if store.listCalls != listAfterFirst {
-		t.Fatalf("cache HIT should not re-read ListRules: before=%d after=%d", listAfterFirst, store.listCalls)
+	if store.loadCalls != loadAfterFirst {
+		t.Fatalf("cache HIT should not re-read the store snapshot: before=%d after=%d", loadAfterFirst, store.loadCalls)
 	}
 }
 
@@ -464,6 +484,51 @@ func TestMutationBustsCache(t *testing.T) {
 	}
 }
 
+// snapshotProbeStore is an IPAllowStore whose IsEnabled and ListRules
+// panic. It proves the CheckAccess/snapshot path loads allowlist state
+// exclusively via the single consistent LoadSnapshot read — never the
+// separate IsEnabled+ListRules pair, whose interleaving with a
+// concurrent disable+clear could cache a torn {enabled, no rules}
+// snapshot that fails closed and blocks the whole workspace.
+type snapshotProbeStore struct {
+	enabled bool
+	cidrs   []string
+}
+
+func (snapshotProbeStore) ListRules(context.Context, uuid.UUID) ([]IPRule, error) {
+	panic("snapshot path must not call ListRules; use LoadSnapshot")
+}
+func (snapshotProbeStore) AddRule(context.Context, IPRule) (IPRule, error) {
+	panic("unused")
+}
+func (snapshotProbeStore) RemoveRule(context.Context, uuid.UUID, uuid.UUID) error {
+	panic("unused")
+}
+func (snapshotProbeStore) IsEnabled(context.Context, uuid.UUID) (bool, error) {
+	panic("snapshot path must not call IsEnabled; use LoadSnapshot")
+}
+func (snapshotProbeStore) SetEnabled(context.Context, uuid.UUID, bool) (bool, error) {
+	panic("unused")
+}
+func (s snapshotProbeStore) LoadSnapshot(context.Context, uuid.UUID) (bool, []string, error) {
+	return s.enabled, s.cidrs, nil
+}
+
+// TestCheckAccess_LoadsViaConsistentSnapshot proves the snapshot path
+// reads enabled+CIDRs through LoadSnapshot only (the probe store panics
+// if IsEnabled or ListRules is touched), guarding against a regression
+// to the racy two-call load that could cache an enabled/empty snapshot.
+func TestCheckAccess_LoadsViaConsistentSnapshot(t *testing.T) {
+	ws := uuid.New()
+	svc := NewIPAllowService(snapshotProbeStore{enabled: true, cidrs: []string{"203.0.113.0/24"}}, nil)
+	if err := svc.CheckAccess(context.Background(), ws, net.ParseIP("203.0.113.7")); err != nil {
+		t.Fatalf("expected allow for in-range IP, got %v", err)
+	}
+	if err := svc.CheckAccess(context.Background(), ws, net.ParseIP("198.51.100.7")); !errors.Is(err, ErrIPBlocked) {
+		t.Fatalf("expected block for out-of-range IP, got %v", err)
+	}
+}
+
 func TestValidatePublicCIDR(t *testing.T) {
 	got, err := ValidatePublicCIDR("198.51.100.128/25")
 	if err != nil {
@@ -471,5 +536,52 @@ func TestValidatePublicCIDR(t *testing.T) {
 	}
 	if got != "198.51.100.128/25" {
 		t.Fatalf("canonical: got %q", got)
+	}
+}
+
+// TestValidatePublicCIDR_RejectsReservedOverlap proves a range is
+// rejected when ANY address it admits is reserved — not just when its
+// base address is private. A base-only check accepts over-broad masks
+// (192.0.0.0/4, 128.0.0.0/1) whose public base address hides the
+// RFC1918 / CGNAT / multicast space they actually cover.
+func TestValidatePublicCIDR_RejectsReservedOverlap(t *testing.T) {
+	accept := []struct{ in, want string }{
+		{"203.0.113.5/24", "203.0.113.0/24"},
+		{"198.51.100.0/24", "198.51.100.0/24"},
+		{"8.8.8.0/24", "8.8.8.0/24"},
+		{"2001:db8::/48", "2001:db8::/48"},
+		// 2000::/3 (2000::–3fff:…) is global-unicast space that does not
+		// overlap any v6 reserved block (fc00::/7, fe80::/10, ff00::/8),
+		// so a broad-but-clean v6 mask is still accepted.
+		{"2000::/3", "2000::/3"},
+	}
+	for _, tc := range accept {
+		got, err := ValidatePublicCIDR(tc.in)
+		if err != nil {
+			t.Fatalf("ValidatePublicCIDR(%q): unexpected err %v", tc.in, err)
+		}
+		if got != tc.want {
+			t.Fatalf("ValidatePublicCIDR(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+
+	reject := []string{
+		"192.0.0.0/4",    // public base 192.0.0.0 but covers 192.168.0.0/16
+		"128.0.0.0/1",    // public base but covers 172.16.0.0/12 + 192.168.0.0/16
+		"96.0.0.0/3",     // covers 100.64.0.0/10 CGNAT and 127.0.0.0/8 loopback
+		"224.0.0.0/4",    // multicast
+		"10.0.0.0/8",     // RFC1918 (base also private)
+		"192.168.1.0/24", // RFC1918
+		"100.64.0.0/10",  // CGNAT
+		"fc00::/7",       // IPv6 ULA
+	}
+	for _, c := range reject {
+		if _, err := ValidatePublicCIDR(c); !errors.Is(err, ErrPrivateCIDR) {
+			t.Fatalf("ValidatePublicCIDR(%q) = %v, want ErrPrivateCIDR", c, err)
+		}
+	}
+
+	if _, err := ValidatePublicCIDR("not-a-cidr"); !errors.Is(err, ErrInvalidCIDR) {
+		t.Fatalf("malformed CIDR: got %v want ErrInvalidCIDR", err)
 	}
 }

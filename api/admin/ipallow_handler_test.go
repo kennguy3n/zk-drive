@@ -88,6 +88,19 @@ func (m *memIPAllowStore) IsEnabled(_ context.Context, ws uuid.UUID) (bool, erro
 	return m.enabled[ws], nil
 }
 
+// LoadSnapshot mirrors PostgresIPAllowStore.LoadSnapshot: enabled flag
+// and CIDRs read atomically under one lock acquisition.
+func (m *memIPAllowStore) LoadSnapshot(_ context.Context, ws uuid.UUID) (bool, []string, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	rules := m.rules[ws]
+	cidrs := make([]string, 0, len(rules))
+	for _, r := range rules {
+		cidrs = append(cidrs, r.CIDR)
+	}
+	return m.enabled[ws], cidrs, nil
+}
+
 func (m *memIPAllowStore) SetEnabled(_ context.Context, ws uuid.UUID, enabled bool) (bool, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
