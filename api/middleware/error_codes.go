@@ -47,17 +47,17 @@ const (
 	//    session. See frontend/src/api/client.ts
 	//    NON_SESSION_401_CODES for the codes the interceptor treats
 	//    as soft 401s.
-	ErrCodeAuthMissingToken        ErrorCode = "AUTH_MISSING_TOKEN"
-	ErrCodeAuthInvalidToken        ErrorCode = "AUTH_INVALID_TOKEN"
-	ErrCodeAuthRevokedToken        ErrorCode = "AUTH_REVOKED_TOKEN"
-	ErrCodeAuthBadPurpose          ErrorCode = "AUTH_BAD_PURPOSE"
-	ErrCodeAuthMissingIat          ErrorCode = "AUTH_MISSING_IAT"
-	ErrCodeRevocationCheck         ErrorCode = "AUTH_REVOCATION_CHECK_FAILED"
-	ErrCodeAuthInvalidCredentials  ErrorCode = "AUTH_INVALID_CREDENTIALS"
-	ErrCodeAuthPasswordReverify    ErrorCode = "AUTH_PASSWORD_REVERIFY_FAILED"
-	ErrCodeMFARequired             ErrorCode = "AUTH_MFA_REQUIRED"
-	ErrCodeMFAInvalid              ErrorCode = "AUTH_MFA_INVALID"
-	ErrCodeMFAEnrollNeeded         ErrorCode = "MFA_ENROLL_REQUIRED"
+	ErrCodeAuthMissingToken       ErrorCode = "AUTH_MISSING_TOKEN"
+	ErrCodeAuthInvalidToken       ErrorCode = "AUTH_INVALID_TOKEN"
+	ErrCodeAuthRevokedToken       ErrorCode = "AUTH_REVOKED_TOKEN"
+	ErrCodeAuthBadPurpose         ErrorCode = "AUTH_BAD_PURPOSE"
+	ErrCodeAuthMissingIat         ErrorCode = "AUTH_MISSING_IAT"
+	ErrCodeRevocationCheck        ErrorCode = "AUTH_REVOCATION_CHECK_FAILED"
+	ErrCodeAuthInvalidCredentials ErrorCode = "AUTH_INVALID_CREDENTIALS"
+	ErrCodeAuthPasswordReverify   ErrorCode = "AUTH_PASSWORD_REVERIFY_FAILED"
+	ErrCodeMFARequired            ErrorCode = "AUTH_MFA_REQUIRED"
+	ErrCodeMFAInvalid             ErrorCode = "AUTH_MFA_INVALID"
+	ErrCodeMFAEnrollNeeded        ErrorCode = "MFA_ENROLL_REQUIRED"
 
 	// Authorization failures (403 Forbidden).
 	ErrCodeForbidden   ErrorCode = "FORBIDDEN"
@@ -69,6 +69,13 @@ const (
 	// configured rule. Returned by the IPAllowlist middleware
 	// alongside the X-ZkDrive-IP-Blocked: true response header.
 	ErrCodeIPBlocked ErrorCode = "IP_NOT_ALLOWED"
+	// ErrCodePlatformAdminOnly is returned when a request passes the
+	// workspace AdminOnly gate but the caller is not in the operator
+	// configured platform-admin allowlist (PLATFORM_ADMIN_USER_IDS).
+	// It guards platform-wide operations (currently JWT signing-key
+	// rotation) that affect every workspace, distinct from the
+	// per-workspace ADMIN_ACCESS_REQUIRED.
+	ErrCodePlatformAdminOnly ErrorCode = "PLATFORM_ADMIN_ACCESS_REQUIRED"
 
 	// Workspace-routing failure (401 Unauthorized). Distinct from the
 	// AUTH_* codes above because the user IS authenticated — we just

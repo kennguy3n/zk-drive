@@ -6,6 +6,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
+
 	"github.com/kennguy3n/zk-drive/internal/audit"
 )
 
@@ -80,6 +82,26 @@ func requireEnv(t *testing.T, envs map[string]string) {
 		// and tests asserting on the default-on / clamped-TTL
 		// behaviour MUST see the production "unset" state.
 		"PERFORMANCE_CACHE_ENABLED", "PERFORMANCE_CACHE_TTL",
+		// Platform-admin allowlist (JWT key-rotation gate). Same
+		// convention as the blocks above: buildConfigFromEnv reads
+		// PLATFORM_ADMIN_USER_IDS via platformAdminUserIDsFromEnv, so
+		// it must be baseline-cleared here or a CI runner that has it
+		// exported would bleed UUIDs into PlatformAdminUserIDs for any
+		// test exercising the "unset → deny-by-default" state.
+		"PLATFORM_ADMIN_USER_IDS",
+		// DB connection-pool sizing + JWT signing/refresh env vars.
+		// Same convention as the blocks above: buildConfigFromEnv reads
+		// each of these (dbMaxConnsFromEnv / dbMinConnsFromEnv /
+		// parseDurationDefault(DB_MAX_CONN_IDLE_TIME) /
+		// normaliseJWTAlgorithm / jwtKeyRefreshIntervalFromEnv), and all
+		// of them treat an empty value identically to unset (fall back to
+		// the clamped default), so a CI runner that exports e.g.
+		// DB_MAX_CONNS=2 or JWT_ALGORITHM=ES256 would otherwise bleed into
+		// tests exercising those default paths. Tests that assert on
+		// non-default values (e.g. TestJWTKeyRefreshInterval) t.Setenv the
+		// specific var themselves after requireEnv runs.
+		"DB_MAX_CONNS", "DB_MIN_CONNS", "DB_MAX_CONN_IDLE_TIME",
+		"JWT_ALGORITHM", "JWT_KEY_REFRESH_INTERVAL",
 	}
 	// WORKER_METRICS_ADDR is intentionally NOT included in the keys
 	// list above. t.Setenv(k, "") makes os.LookupEnv return
@@ -410,9 +432,9 @@ func TestGetEnvDefault(t *testing.T) {
 // the Load contract too.
 func TestLoadParsesRateLimits(t *testing.T) {
 	requireEnv(t, map[string]string{
-		"DATABASE_URL":           "postgres://x/y",
-		"JWT_SECRET":             "secret",
-		"RATE_LIMIT_PER_USER":    "120",
+		"DATABASE_URL":             "postgres://x/y",
+		"JWT_SECRET":               "secret",
+		"RATE_LIMIT_PER_USER":      "120",
 		"RATE_LIMIT_PER_WORKSPACE": "  500 ",
 	})
 	cfg, err := Load()
@@ -475,10 +497,10 @@ func TestLoadWorkerMetricsAddrExplicitEmpty(t *testing.T) {
 // escape hatch — this test guards against a regression to that.
 func TestWorkerMetricsAddrFromEnv(t *testing.T) {
 	tests := []struct {
-		name   string
-		set    bool
-		value  string
-		want   string
+		name  string
+		set   bool
+		value string
+		want  string
 	}{
 		{name: "unset_falls_back_to_default", set: false, want: ":9091"},
 		{name: "explicit_empty_is_passed_through", set: true, value: "", want: ""},
@@ -534,6 +556,71 @@ func TestJWTKeyRefreshIntervalFromEnv(t *testing.T) {
 			}
 			if got := jwtKeyRefreshIntervalFromEnv(); got != tc.want {
 				t.Errorf("jwtKeyRefreshIntervalFromEnv() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestPlatformAdminUserIDsFromEnv(t *testing.T) {
+	id1 := uuid.New()
+	id2 := uuid.New()
+
+	tests := []struct {
+		name        string
+		set         bool
+		value       string
+		want        []uuid.UUID
+		wantInvalid []string
+	}{
+		{name: "unset_is_empty", set: false, want: nil, wantInvalid: nil},
+		{name: "blank_is_empty", set: true, value: "   ", want: nil, wantInvalid: nil},
+		{name: "single_id", set: true, value: id1.String(), want: []uuid.UUID{id1}, wantInvalid: nil},
+		{
+			name:  "multiple_ids_trimmed",
+			set:   true,
+			value: "  " + id1.String() + " , " + id2.String() + "  ",
+			want:  []uuid.UUID{id1, id2},
+		},
+		{
+			name:        "invalid_entries_dropped_and_reported",
+			set:         true,
+			value:       "not-a-uuid," + id1.String() + ",,also-bad",
+			want:        []uuid.UUID{id1},
+			wantInvalid: []string{"not-a-uuid", "also-bad"},
+		},
+		{
+			name:        "all_invalid_is_empty_but_reported",
+			set:         true,
+			value:       "nope,still-nope",
+			want:        nil,
+			wantInvalid: []string{"nope", "still-nope"},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.set {
+				t.Setenv("PLATFORM_ADMIN_USER_IDS", tc.value)
+			} else {
+				if err := os.Unsetenv("PLATFORM_ADMIN_USER_IDS"); err != nil {
+					t.Fatalf("Unsetenv: %v", err)
+				}
+			}
+			got, invalid := platformAdminUserIDsFromEnv()
+			if len(got) != len(tc.want) {
+				t.Fatalf("platformAdminUserIDsFromEnv() ids = %v, want %v", got, tc.want)
+			}
+			for i := range tc.want {
+				if got[i] != tc.want[i] {
+					t.Errorf("id index %d = %v, want %v", i, got[i], tc.want[i])
+				}
+			}
+			if len(invalid) != len(tc.wantInvalid) {
+				t.Fatalf("invalid = %v, want %v", invalid, tc.wantInvalid)
+			}
+			for i := range tc.wantInvalid {
+				if invalid[i] != tc.wantInvalid[i] {
+					t.Errorf("invalid index %d = %q, want %q", i, invalid[i], tc.wantInvalid[i])
+				}
 			}
 		})
 	}

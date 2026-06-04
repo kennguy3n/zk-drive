@@ -71,6 +71,7 @@ type Handler struct {
 	billing        *billing.Service
 	webhooks       WebhookEventPublisher
 	collab         *collab.DocumentHub
+	onlyOffice     *collab.OnlyOfficeService
 	tagSuggest     TagSuggester
 	queryExpand    QueryExpander
 }
