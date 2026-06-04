@@ -159,15 +159,25 @@ func (s *PlatformService) dispatchFiring(ctx context.Context, rule AlertRule, fi
 	if s.dispatcher == nil {
 		return
 	}
+	// Hand every channel an identical, ordering-independent snapshot of
+	// the alert: a copy with the cross-channel "fired" meta-flags zeroed.
+	// Otherwise the email payload would observe WebhookFired=true (set by
+	// the webhook branch above it) while the webhook payload never can,
+	// so a channel's report of the *other* channel's status would depend
+	// on dispatch order. The real per-channel results are recorded on
+	// *firing for the returned AlertFiring.
+	payload := *firing
+	payload.WebhookFired = false
+	payload.EmailFired = false
 	if url := strings.TrimSpace(rule.WebhookURL); url != "" {
-		if err := s.dispatcher.DispatchWebhook(ctx, url, *firing); err != nil {
+		if err := s.dispatcher.DispatchWebhook(ctx, url, payload); err != nil {
 			s.log().Warn("platform: alert webhook dispatch failed", "rule_id", rule.ID, "err", err)
 		} else {
 			firing.WebhookFired = true
 		}
 	}
 	if email := strings.TrimSpace(rule.Email); email != "" {
-		if err := s.dispatcher.DispatchEmail(ctx, email, *firing); err != nil {
+		if err := s.dispatcher.DispatchEmail(ctx, email, payload); err != nil {
 			s.log().Warn("platform: alert email dispatch failed", "rule_id", rule.ID, "err", err)
 		} else {
 			firing.EmailFired = true

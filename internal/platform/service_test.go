@@ -209,3 +209,81 @@ func TestReconcileOneWithInspector(t *testing.T) {
 		t.Errorf("inspector error should surface as a mismatch, got mismatch=%v reason=%q", mismatch, entry.Reason)
 	}
 }
+
+// --- dispatchFiring (no DB; uses a capturing dispatcher) ------------
+
+// captureDispatcher records the AlertFiring snapshot handed to each
+// channel so a test can assert what the dispatchers actually observed.
+type captureDispatcher struct {
+	webhook  AlertFiring
+	email    AlertFiring
+	whErr    error
+	emErr    error
+	gotWH    bool
+	gotEmail bool
+}
+
+func (d *captureDispatcher) DispatchWebhook(_ context.Context, _ string, f AlertFiring) error {
+	d.webhook, d.gotWH = f, true
+	return d.whErr
+}
+
+func (d *captureDispatcher) DispatchEmail(_ context.Context, _ string, f AlertFiring) error {
+	d.email, d.gotEmail = f, true
+	return d.emErr
+}
+
+func TestDispatchFiringConsistentSnapshot(t *testing.T) {
+	d := &captureDispatcher{}
+	s := NewService(nil, nil, nil, nil).WithAlertDispatcher(d)
+	rule := AlertRule{
+		ID:         uuid.New(),
+		WebhookURL: "https://example.com/hook",
+		Email:      "ops@example.com",
+	}
+	firing := AlertFiring{RuleID: rule.ID, Metric: MetricStoragePercent, Value: 95}
+
+	s.dispatchFiring(context.Background(), rule, &firing)
+
+	if !d.gotWH || !d.gotEmail {
+		t.Fatalf("expected both channels dispatched, got webhook=%v email=%v", d.gotWH, d.gotEmail)
+	}
+	// Both channels must see an identical, ordering-independent snapshot
+	// with the cross-channel meta-flags zeroed (the email payload must
+	// not observe WebhookFired=true just because the webhook ran first).
+	if d.webhook.WebhookFired || d.webhook.EmailFired {
+		t.Errorf("webhook payload leaked cross-channel flags: %+v", d.webhook)
+	}
+	if d.email.WebhookFired || d.email.EmailFired {
+		t.Errorf("email payload leaked cross-channel flags: %+v", d.email)
+	}
+	// Alert content must still be carried on both snapshots.
+	if d.webhook.Value != 95 || d.email.Value != 95 || d.webhook.RuleID != rule.ID {
+		t.Errorf("dispatch payloads lost alert content: webhook=%+v email=%+v", d.webhook, d.email)
+	}
+	// The returned firing records the true per-channel results.
+	if !firing.WebhookFired || !firing.EmailFired {
+		t.Errorf("firing should record both channels fired, got %+v", firing)
+	}
+}
+
+func TestDispatchFiringRecordsPerChannelFailure(t *testing.T) {
+	d := &captureDispatcher{whErr: errors.New("webhook down")}
+	s := NewService(nil, nil, nil, nil).WithAlertDispatcher(d)
+	rule := AlertRule{ID: uuid.New(), WebhookURL: "https://x/y", Email: "ops@example.com"}
+	firing := AlertFiring{RuleID: rule.ID, Value: 12}
+
+	s.dispatchFiring(context.Background(), rule, &firing)
+
+	// A failed webhook must not mark WebhookFired, but the email still
+	// fires and gets a clean snapshot.
+	if firing.WebhookFired {
+		t.Errorf("failed webhook must not set WebhookFired")
+	}
+	if !firing.EmailFired {
+		t.Errorf("email should still fire when only the webhook failed")
+	}
+	if d.email.WebhookFired {
+		t.Errorf("email payload must not report the (failed) webhook as fired: %+v", d.email)
+	}
+}
