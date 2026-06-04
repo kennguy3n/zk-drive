@@ -762,7 +762,15 @@ func run() error {
 	// JWT signing-key rotation is a fleet-wide operation (the platform
 	// signing key has workspace_id IS NULL), so it lives on the platform
 	// control plane behind the keys:manage capability rather than the
-	// per-workspace admin API.
+	// per-workspace admin API. The PLATFORM_ADMIN_USER_IDS allowlist that
+	// origin/main's #100 added to gate the (now-removed) admin-API
+	// rotation is therefore redundant here: the platform key's
+	// keys:manage capability already restricts rotation to fleet
+	// operators, so we surface a startup hint if the legacy env var is
+	// still set rather than silently ignoring it.
+	if len(cfg.PlatformAdminUserIDs) > 0 || len(cfg.PlatformAdminUserIDsInvalid) > 0 {
+		slog.Warn("PLATFORM_ADMIN_USER_IDS is set but no longer used: JWT key rotation moved to the platform control plane (POST /api/platform/jwt/rotate), gated by the keys:manage platform-API-key capability")
+	}
 	platformHandler := apiplatform.NewHandler(platformSvc, platformKeyStore).
 		WithJWTRotator(jwtKeyManager)
 

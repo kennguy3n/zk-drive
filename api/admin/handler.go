@@ -1,7 +1,10 @@
 // Package admin serves the admin-only HTTP endpoints: audit log,
 // retention policy CRUD, user management, and workspace storage
 // stats. All routes require the admin role — enforced by the
-// middleware.AdminOnly wrapper in cmd/server/main.go.
+// middleware.AdminOnly wrapper in cmd/server/main.go. POST /jwt/rotate
+// additionally requires the caller to be a configured platform admin
+// (PLATFORM_ADMIN_USER_IDS) because it rotates the platform-wide
+// signing key shared by every workspace.
 package admin
 
 import (
