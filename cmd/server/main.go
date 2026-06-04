@@ -713,7 +713,6 @@ func run() error {
 		WithFabric(fabricClient, provisioner, storageFactory).
 		WithWorkspaces(wsSvc).
 		WithWebhooks(webhookPublisher).
-		WithJWTRotator(jwtKeyManager).
 		WithIPAllow(ipAllowSvc)
 
 	// Platform control plane (Session 9): fleet-wide tenant management
@@ -727,7 +726,12 @@ func run() error {
 	if sessionStore != nil {
 		platformSvc = platformSvc.WithSessions(sessionStore)
 	}
-	platformHandler := apiplatform.NewHandler(platformSvc, platformKeyStore)
+	// JWT signing-key rotation is a fleet-wide operation (the platform
+	// signing key has workspace_id IS NULL), so it lives on the platform
+	// control plane behind the keys:manage capability rather than the
+	// per-workspace admin API.
+	platformHandler := apiplatform.NewHandler(platformSvc, platformKeyStore).
+		WithJWTRotator(jwtKeyManager)
 
 	// Outbound-webhook subscription admin handler. Mounted
 	// under /api/admin/webhooks so it inherits the admin-only +

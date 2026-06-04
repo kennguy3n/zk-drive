@@ -322,8 +322,10 @@ func TestValidateDocumentURL(t *testing.T) {
 		wantErr error
 	}{
 		{"same origin https", "https://office.example.com/cache/files/output.docx?md5=abc", nil},
-		{"same host different scheme allowed", "http://office.example.com/cache/x", nil},
-		{"same host explicit port", "https://office.example.com:443/cache/x", nil},
+		{"same host explicit default port", "https://office.example.com:443/cache/x", nil},
+		{"same host different scheme/port rejected", "http://office.example.com/cache/x", ErrCallbackURLNotAllowed},
+		{"same host elasticsearch port rejected", "https://office.example.com:9200/", ErrCallbackURLNotAllowed},
+		{"same host redis port rejected", "https://office.example.com:6379/", ErrCallbackURLNotAllowed},
 		{"foreign host rejected", "https://evil.example.com/x", ErrCallbackURLNotAllowed},
 		{"internal metadata host rejected", "http://169.254.169.254/latest/meta-data/", ErrCallbackURLNotAllowed},
 		{"non-http scheme rejected", "file:///etc/passwd", ErrCallbackURLNotAllowed},

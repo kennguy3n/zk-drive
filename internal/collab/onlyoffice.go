@@ -198,7 +198,32 @@ func (s *OnlyOfficeService) ValidateDocumentURL(raw string) error {
 	if !strings.EqualFold(u.Hostname(), srv.Hostname()) {
 		return ErrCallbackURLNotAllowed
 	}
+	// Match the port too, not just the host: a same-hostname URL on a
+	// different port (e.g. office.example.com:9200 Elasticsearch,
+	// :6379 Redis) would otherwise pass and let the callback reach a
+	// co-located service. Compare effective ports so an explicit
+	// default (":443"/":80") still matches an omitted one.
+	if effectivePort(u) != effectivePort(srv) {
+		return ErrCallbackURLNotAllowed
+	}
 	return nil
+}
+
+// effectivePort returns the URL's port, defaulting to the well-known
+// port for its scheme when none is explicit so that
+// "https://h" and "https://h:443" compare equal.
+func effectivePort(u *url.URL) string {
+	if p := u.Port(); p != "" {
+		return p
+	}
+	switch u.Scheme {
+	case "https":
+		return "443"
+	case "http":
+		return "80"
+	default:
+		return ""
+	}
 }
 
 // EditorConfig is the payload returned to the browser. DocumentServerURL
