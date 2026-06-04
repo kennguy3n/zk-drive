@@ -29,8 +29,9 @@ resource "random_bytes" "credential_encryption_key" {
 
 # JWT secret.
 resource "aws_secretsmanager_secret" "jwt" {
-  name        = "${local.name}/JWT_SECRET"
-  description = "ZK Drive JWT signing secret"
+  name                    = "${local.name}/JWT_SECRET"
+  description             = "ZK Drive JWT signing secret"
+  recovery_window_in_days = var.secret_recovery_window_days
 }
 
 resource "aws_secretsmanager_secret_version" "jwt" {
@@ -40,8 +41,9 @@ resource "aws_secretsmanager_secret_version" "jwt" {
 
 # Credential encryption key (AES-256-GCM, base64-encoded).
 resource "aws_secretsmanager_secret" "credential_encryption_key" {
-  name        = "${local.name}/CREDENTIAL_ENCRYPTION_KEY"
-  description = "ZK Drive AES-256-GCM credential encryption key (base64)"
+  name                    = "${local.name}/CREDENTIAL_ENCRYPTION_KEY"
+  description             = "ZK Drive AES-256-GCM credential encryption key (base64)"
+  recovery_window_in_days = var.secret_recovery_window_days
 }
 
 resource "aws_secretsmanager_secret_version" "credential_encryption_key" {
@@ -51,8 +53,9 @@ resource "aws_secretsmanager_secret_version" "credential_encryption_key" {
 
 # DB master password (also fed to RDS in rds.tf).
 resource "aws_secretsmanager_secret" "db_password" {
-  name        = "${local.name}/DB_PASSWORD"
-  description = "RDS Postgres master password"
+  name                    = "${local.name}/DB_PASSWORD"
+  description             = "RDS Postgres master password"
+  recovery_window_in_days = var.secret_recovery_window_days
 }
 
 resource "aws_secretsmanager_secret_version" "db_password" {
@@ -64,8 +67,9 @@ resource "aws_secretsmanager_secret_version" "db_password" {
 # which in turn pools connections to the RDS primary. Containers read
 # DATABASE_URL directly; the sidecar owns the RDS credentials.
 resource "aws_secretsmanager_secret" "database_url" {
-  name        = "${local.name}/DATABASE_URL"
-  description = "ZK Drive DATABASE_URL (via PgBouncer sidecar)"
+  name                    = "${local.name}/DATABASE_URL"
+  description             = "ZK Drive DATABASE_URL (via PgBouncer sidecar)"
+  recovery_window_in_days = var.secret_recovery_window_days
 }
 
 resource "aws_secretsmanager_secret_version" "database_url" {
@@ -77,8 +81,9 @@ resource "aws_secretsmanager_secret_version" "database_url" {
 # the short-lived cron tasks (reconciler / orphan-gc / audit-archiver),
 # which would otherwise be held open by an essential sidecar.
 resource "aws_secretsmanager_secret" "database_url_direct" {
-  name        = "${local.name}/DATABASE_URL_DIRECT"
-  description = "ZK Drive DATABASE_URL straight to the RDS primary (cron tasks)"
+  name                    = "${local.name}/DATABASE_URL_DIRECT"
+  description             = "ZK Drive DATABASE_URL straight to the RDS primary (cron tasks)"
+  recovery_window_in_days = var.secret_recovery_window_days
 }
 
 resource "aws_secretsmanager_secret_version" "database_url_direct" {
@@ -97,9 +102,10 @@ resource "aws_secretsmanager_secret_version" "database_url_direct" {
 # env var is simply absent when billing is off, so the app's own
 # configured-detection reports disabled correctly.
 resource "aws_secretsmanager_secret" "stripe_secret_key" {
-  count       = var.stripe_secret_key != "" ? 1 : 0
-  name        = "${local.name}/STRIPE_SECRET_KEY"
-  description = "Stripe secret key"
+  count                   = var.stripe_secret_key != "" ? 1 : 0
+  name                    = "${local.name}/STRIPE_SECRET_KEY"
+  description             = "Stripe secret key"
+  recovery_window_in_days = var.secret_recovery_window_days
 }
 
 resource "aws_secretsmanager_secret_version" "stripe_secret_key" {
@@ -109,9 +115,10 @@ resource "aws_secretsmanager_secret_version" "stripe_secret_key" {
 }
 
 resource "aws_secretsmanager_secret" "stripe_webhook_secret" {
-  count       = var.stripe_webhook_secret != "" ? 1 : 0
-  name        = "${local.name}/STRIPE_WEBHOOK_SECRET"
-  description = "Stripe webhook signing secret"
+  count                   = var.stripe_webhook_secret != "" ? 1 : 0
+  name                    = "${local.name}/STRIPE_WEBHOOK_SECRET"
+  description             = "Stripe webhook signing secret"
+  recovery_window_in_days = var.secret_recovery_window_days
 }
 
 resource "aws_secretsmanager_secret_version" "stripe_webhook_secret" {
@@ -127,8 +134,9 @@ resource "aws_secretsmanager_secret_version" "stripe_webhook_secret" {
 # space still trips validateS3Group's TrimSpace check, surfacing the
 # misconfiguration at boot rather than silently passing.
 resource "aws_secretsmanager_secret" "s3_access_key" {
-  name        = "${local.name}/S3_ACCESS_KEY"
-  description = "zk-object-fabric access key"
+  name                    = "${local.name}/S3_ACCESS_KEY"
+  description             = "zk-object-fabric access key"
+  recovery_window_in_days = var.secret_recovery_window_days
 }
 
 resource "aws_secretsmanager_secret_version" "s3_access_key" {
@@ -137,8 +145,9 @@ resource "aws_secretsmanager_secret_version" "s3_access_key" {
 }
 
 resource "aws_secretsmanager_secret" "s3_secret_key" {
-  name        = "${local.name}/S3_SECRET_KEY"
-  description = "zk-object-fabric secret key"
+  name                    = "${local.name}/S3_SECRET_KEY"
+  description             = "zk-object-fabric secret key"
+  recovery_window_in_days = var.secret_recovery_window_days
 }
 
 resource "aws_secretsmanager_secret_version" "s3_secret_key" {

@@ -144,6 +144,26 @@ variable "redis_transit_encryption" {
   default     = false
 }
 
+variable "secret_recovery_window_days" {
+  description = <<-EOT
+    Recovery window (in days) for the AWS Secrets Manager secrets this module
+    creates. AWS retains a deleted secret for this window before permanently
+    removing it, during which the secret NAME stays reserved — so a
+    `terraform destroy` followed by `terraform apply` within the window fails
+    with "already scheduled for deletion". Defaults to 7 (AWS's own default is
+    30) to balance accidental-deletion protection against iteration speed. Set
+    to 0 for ephemeral/dev stacks so a destroy frees the names immediately and
+    re-apply works right away. Valid values: 0 (immediate) or 7-30.
+  EOT
+  type        = number
+  default     = 7
+
+  validation {
+    condition     = var.secret_recovery_window_days == 0 || (var.secret_recovery_window_days >= 7 && var.secret_recovery_window_days <= 30)
+    error_message = "secret_recovery_window_days must be 0 (immediate deletion) or between 7 and 30."
+  }
+}
+
 # ----------------------------------------------------------------------------
 # ECS service sizing. CPU is in vCPU-units (1024 = 1 vCPU), memory in MiB.
 # CPU tiers mirror deploy/docker-compose.prod.yml (server/worker 1 vCPU, NATS

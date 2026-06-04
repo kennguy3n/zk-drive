@@ -66,7 +66,8 @@ resource "aws_ecs_task_definition" "clamav" {
   network_mode             = "awsvpc"
   cpu                      = var.clamav_cpu
   memory                   = var.clamav_memory
-  execution_role_arn       = aws_iam_role.task_execution.arn
+  # Lean execution role (image pull + logs only); ClamAV injects no secrets.
+  execution_role_arn = aws_iam_role.task_execution_infra.arn
 
   volume {
     name = "signatures"

@@ -156,6 +156,22 @@ resource "aws_iam_role_policy" "task_execution_secrets" {
   policy = data.aws_iam_policy_document.secrets_read.json
 }
 
+# Lean execution role for infrastructure tasks (NATS, ClamAV) that inject no
+# application secrets. It carries only the managed ECR-pull + CloudWatch-logs
+# permissions and deliberately omits the secrets-read inline policy above, so a
+# compromised NATS/ClamAV container can't call secretsmanager:GetSecretValue on
+# JWT_SECRET, DATABASE_URL, CREDENTIAL_ENCRYPTION_KEY, etc. (least privilege —
+# those tasks never reference any secret).
+resource "aws_iam_role" "task_execution_infra" {
+  name               = "${local.name}-task-execution-infra"
+  assume_role_policy = data.aws_iam_policy_document.ecs_assume.json
+}
+
+resource "aws_iam_role_policy_attachment" "task_execution_infra_managed" {
+  role       = aws_iam_role.task_execution_infra.name
+  policy_arn = "arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy"
+}
+
 # Task role: the application's own AWS identity. Minimal today (CloudWatch
 # metric publishing for the worker's NATS-pending gauge); extend as the app
 # integrates more AWS services.

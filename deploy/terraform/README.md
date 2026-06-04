@@ -146,6 +146,15 @@ done
 | `server_min_count` / `server_max_count` | `2` / `10` |
 | `worker_min_count` / `worker_max_count` | `1` / `6` |
 | `audit_log_archive_enabled` | `false` (set `true` to enable the daily audit-archiver task — see Scheduled jobs) |
+| `secret_recovery_window_days` | `7` (Secrets Manager deletion recovery window; set `0` for ephemeral/dev stacks — see Tearing down) |
+
+> **Tearing down & re-applying (AWS).** AWS Secrets Manager keeps a deleted
+> secret's *name* reserved for a recovery window after `terraform destroy`, so
+> re-applying the same stack within that window fails with "already scheduled
+> for deletion". This module defaults `secret_recovery_window_days` to `7`
+> (AWS's own default is 30) to protect against accidental deletion. For
+> short-lived dev/test stacks you iterate on, set `secret_recovery_window_days
+> = 0` so a destroy frees the names immediately and re-apply works right away.
 
 ### GCP-specific
 
