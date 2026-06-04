@@ -83,8 +83,8 @@ spec:
   policyTypes:
     - Egress
   egress:
-    {{- include "zk-drive.backendEgress" (dict "enabled" .Values.postgres.enabled "app" "postgres" "port" .Values.networkPolicy.postgresPort) | nindent 4 }}
-    {{- include "zk-drive.backendEgress" (dict "enabled" .Values.nats.enabled "app" "nats" "port" .Values.networkPolicy.natsPort) | nindent 4 }}
+    {{- include "zk-drive.backendEgress" (dict "enabled" .Values.postgres.enabled "app" "postgres" "clusterPort" 5432 "managedPort" .Values.networkPolicy.postgresPort) | nindent 4 }}
+    {{- include "zk-drive.backendEgress" (dict "enabled" .Values.nats.enabled "app" "nats" "clusterPort" 4222 "managedPort" .Values.networkPolicy.natsPort) | nindent 4 }}
     - ports:
         - protocol: TCP
           port: {{ .Values.networkPolicy.redisPort }}
@@ -132,9 +132,9 @@ spec:
   policyTypes:
     - Egress
   egress:
-    {{- include "zk-drive.backendEgress" (dict "enabled" .Values.postgres.enabled "app" "postgres" "port" .Values.networkPolicy.postgresPort) | nindent 4 }}
-    {{- include "zk-drive.backendEgress" (dict "enabled" .Values.nats.enabled "app" "nats" "port" .Values.networkPolicy.natsPort) | nindent 4 }}
-    {{- include "zk-drive.backendEgress" (dict "enabled" .Values.clamav.enabled "app" "clamav" "port" .Values.networkPolicy.clamavPort) | nindent 4 }}
+    {{- include "zk-drive.backendEgress" (dict "enabled" .Values.postgres.enabled "app" "postgres" "clusterPort" 5432 "managedPort" .Values.networkPolicy.postgresPort) | nindent 4 }}
+    {{- include "zk-drive.backendEgress" (dict "enabled" .Values.nats.enabled "app" "nats" "clusterPort" 4222 "managedPort" .Values.networkPolicy.natsPort) | nindent 4 }}
+    {{- include "zk-drive.backendEgress" (dict "enabled" .Values.clamav.enabled "app" "clamav" "clusterPort" 3310 "managedPort" .Values.networkPolicy.clamavPort) | nindent 4 }}
     - ports:
         - protocol: TCP
           port: {{ .Values.networkPolicy.redisPort }}
@@ -160,9 +160,9 @@ spec:
   policyTypes:
     - Egress
   egress:
-    {{- include "zk-drive.backendEgress" (dict "enabled" .Values.postgres.enabled "app" "postgres" "port" .Values.networkPolicy.postgresPort) | nindent 4 }}
-    {{- include "zk-drive.backendEgress" (dict "enabled" .Values.nats.enabled "app" "nats" "port" .Values.networkPolicy.natsPort) | nindent 4 }}
-    {{- include "zk-drive.backendEgress" (dict "enabled" .Values.clamav.enabled "app" "clamav" "port" .Values.networkPolicy.clamavPort) | nindent 4 }}
+    {{- include "zk-drive.backendEgress" (dict "enabled" .Values.postgres.enabled "app" "postgres" "clusterPort" 5432 "managedPort" .Values.networkPolicy.postgresPort) | nindent 4 }}
+    {{- include "zk-drive.backendEgress" (dict "enabled" .Values.nats.enabled "app" "nats" "clusterPort" 4222 "managedPort" .Values.networkPolicy.natsPort) | nindent 4 }}
+    {{- include "zk-drive.backendEgress" (dict "enabled" .Values.clamav.enabled "app" "clamav" "clusterPort" 3310 "managedPort" .Values.networkPolicy.clamavPort) | nindent 4 }}
     - ports:
         - protocol: TCP
           port: {{ .Values.networkPolicy.redisPort }}

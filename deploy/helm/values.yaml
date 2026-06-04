@@ -263,14 +263,15 @@ networkPolicy:
   ingressNamespace: ingress-nginx
   monitoringNamespace: monitoring
   dnsNamespace: kube-system
-  # Backend egress ports for Postgres / NATS / ClamAV. When the matching
-  # in-cluster dependency (postgres/nats/clamav.enabled) is on, egress is
-  # scoped to that pod via podSelector; when it's off — a managed/external
-  # endpoint (RDS, Cloud SQL, NGS, managed ClamAV) with no in-cluster pod —
-  # the chart renders a port-only egress on these ports so traffic reaches
-  # the managed endpoint under default-deny (same approach as redisPort /
-  # s3Port). Override if your managed endpoint listens on a non-standard
-  # port (e.g. a PgBouncer/RDS Proxy pooler on 6432).
+  # Egress ports used ONLY when the matching backend is a managed/external
+  # endpoint (postgres/nats/clamav.enabled=false — RDS, Cloud SQL, NGS,
+  # managed ClamAV). In that case the chart renders a port-only egress on
+  # these ports so traffic reaches the managed endpoint under default-deny
+  # (same approach as redisPort / s3Port). Override if your managed endpoint
+  # listens on a non-standard port (e.g. a PgBouncer/RDS Proxy pooler on
+  # 6432). When the dependency runs in-cluster (enabled=true) these knobs
+  # are intentionally ignored: egress is scoped to the backend pod on its
+  # fixed listen port (5432/4222/3310), matching that pod's ingress allow.
   postgresPort: 5432
   natsPort: 4222
   clamavPort: 3310
