@@ -108,6 +108,15 @@ func TestGenerateAndHashAPIKey(t *testing.T) {
 	if !strings.HasPrefix(key, APIKeyPrefix) {
 		t.Fatalf("key %q missing prefix %q", key, APIKeyPrefix)
 	}
+	// The constant-expression length used by the compile-time bcrypt
+	// ceiling guard must match the real encoder, and the key must stay
+	// within bcrypt's 72-byte input window so no entropy is truncated.
+	if len(key) != apiKeyPlaintextLen {
+		t.Fatalf("key length %d != apiKeyPlaintextLen %d", len(key), apiKeyPlaintextLen)
+	}
+	if apiKeyPlaintextLen > bcryptMaxInputBytes {
+		t.Fatalf("key plaintext %d exceeds bcrypt ceiling %d", apiKeyPlaintextLen, bcryptMaxInputBytes)
+	}
 	// The lookup id is the fixed-width selector embedded right after
 	// the prefix and must be recoverable from the plaintext alone.
 	gotLookup, ok := parseAPIKeyLookup(key)

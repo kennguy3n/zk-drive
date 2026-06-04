@@ -44,6 +44,26 @@ const (
 // from the encoding so it tracks apiKeyLookupBytes.
 var apiKeyLookupLen = base64.RawURLEncoding.EncodedLen(apiKeyLookupBytes)
 
+// bcryptMaxInputBytes is the input length beyond which bcrypt silently
+// truncates. The full key plaintext must stay at or below it so every
+// byte of the secret contributes to the stored hash.
+const bcryptMaxInputBytes = 72
+
+// apiKeyPlaintextLen is the byte length of a generated key plaintext:
+// APIKeyPrefix + base64url(lookup) + base64url(secret). RawURLEncoding
+// adds no padding, so it encodes n bytes as ceil(n*8/6) = (n*8+5)/6
+// chars; this mirrors base64.RawURLEncoding.EncodedLen in a form usable
+// in a constant expression.
+const apiKeyPlaintextLen = len(APIKeyPrefix) +
+	(apiKeyLookupBytes*8+5)/6 +
+	(apiKeySecretBytes*8+5)/6
+
+// Compile-time guard: growing apiKeyLookupBytes/apiKeySecretBytes past
+// bcrypt's input ceiling would silently truncate the key and discard
+// entropy. Keeping this as a build failure prevents a latent security
+// regression. (uint(negative constant) does not compile.)
+const _ = uint(bcryptMaxInputBytes - apiKeyPlaintextLen)
+
 // dummyAPIKeyHash is bcrypt-compared when no candidate row is found so
 // a missing lookup id costs the same wall-clock time as a wrong secret
 // (a present lookup id is not itself a secret, but equalizing keeps the
