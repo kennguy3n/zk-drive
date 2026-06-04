@@ -397,6 +397,14 @@ func (h *Handler) saveEditedVersion(ctx context.Context, workspaceID, fileID uui
 		return errors.New("drive: storage not configured")
 	}
 
+	// SSRF guard at the write boundary: the edited bytes are served
+	// from the Document Server's own cache, so the callback url must
+	// share the configured Document Server origin. This matters most in
+	// the insecure no-secret mode, where cb.URL arrives unsigned.
+	if err := h.onlyOffice.ValidateDocumentURL(cb.URL); err != nil {
+		return err
+	}
+
 	data, err := fetchEditedDocument(ctx, cb.URL)
 	if err != nil {
 		return err
@@ -457,7 +465,24 @@ func fetchEditedDocument(ctx context.Context, url string) ([]byte, error) {
 	}
 	// Cap the read so a hostile / runaway Document Server response cannot
 	// exhaust memory; office documents are far below this bound.
-	return io.ReadAll(io.LimitReader(resp.Body, onlyOfficeMaxDocumentBytes))
+	return readLimited(resp.Body, onlyOfficeMaxDocumentBytes)
+}
+
+// readLimited reads up to max bytes from r and errors (rather than
+// silently truncating) when the source is larger. It reads max+1 bytes
+// so an over-read is detectable: truncating at exactly max would persist
+// a corrupt, partial document version with no error surfaced to the
+// Document Server or the user, so we fail the save instead and let the
+// Document Server retain the bytes for retry.
+func readLimited(r io.Reader, max int64) ([]byte, error) {
+	data, err := io.ReadAll(io.LimitReader(r, max+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(data)) > max {
+		return nil, errors.New("onlyoffice: edited document exceeds the maximum allowed size")
+	}
+	return data, nil
 }
 
 // callbackAuthor picks the user id to attribute the new version to:

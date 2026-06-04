@@ -27,6 +27,7 @@ package collab
 import (
 	"context"
 	"errors"
+	"net/url"
 	"path/filepath"
 	"strings"
 	"time"
@@ -77,6 +78,12 @@ var (
 	// ErrUnsupportedDocumentType is returned when the file's name /
 	// extension does not map to an ONLYOFFICE document type.
 	ErrUnsupportedDocumentType = errors.New("collab: unsupported document type for onlyoffice")
+	// ErrCallbackURLNotAllowed is returned when a save callback's
+	// edited-document URL does not share the configured Document
+	// Server origin. The callback path fetches this URL server-side,
+	// so an attacker-controlled value (possible in the unsigned
+	// insecure mode) would otherwise be an SSRF vector.
+	ErrCallbackURLNotAllowed = errors.New("collab: callback document url not allowed")
 )
 
 // EditorFile is the minimal projection of a file the OnlyOffice
@@ -159,6 +166,39 @@ func (s *OnlyOfficeService) JWTSecret() string {
 		return ""
 	}
 	return s.jwtSecret
+}
+
+// ValidateDocumentURL guards the save-callback fetch against SSRF. The
+// edited bytes are always served from the Document Server's own cache,
+// so the callback's url must share the configured Document Server's
+// scheme and host. This matters most in the insecure no-secret mode,
+// where the callback body (and therefore the url) is unsigned and an
+// attacker could otherwise steer the server into fetching an arbitrary
+// internal/external address. Same-origin is enforced rather than a
+// private-range block because the Document Server is routinely
+// co-located on a private network, where a blanket private-IP rejection
+// would break legitimate deployments.
+func (s *OnlyOfficeService) ValidateDocumentURL(raw string) error {
+	if !s.Enabled() {
+		return ErrOnlyOfficeNotConfigured
+	}
+	srv, err := url.Parse(s.serverURL)
+	if err != nil || srv.Hostname() == "" {
+		// A misconfigured server URL means we cannot establish the
+		// trusted origin, so fail closed rather than fetch blindly.
+		return ErrCallbackURLNotAllowed
+	}
+	u, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil {
+		return ErrCallbackURLNotAllowed
+	}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return ErrCallbackURLNotAllowed
+	}
+	if !strings.EqualFold(u.Hostname(), srv.Hostname()) {
+		return ErrCallbackURLNotAllowed
+	}
+	return nil
 }
 
 // EditorConfig is the payload returned to the browser. DocumentServerURL

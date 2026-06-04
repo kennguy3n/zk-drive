@@ -313,3 +313,34 @@ func TestDocumentKey_SanitisesAndBounds(t *testing.T) {
 		t.Errorf("key not bounded to 128: len=%d", len(got))
 	}
 }
+
+func TestValidateDocumentURL(t *testing.T) {
+	svc := NewOnlyOfficeService("https://office.example.com", "secret", "https://drive.example.com", newTestData())
+	cases := []struct {
+		name    string
+		raw     string
+		wantErr error
+	}{
+		{"same origin https", "https://office.example.com/cache/files/output.docx?md5=abc", nil},
+		{"same host different scheme allowed", "http://office.example.com/cache/x", nil},
+		{"same host explicit port", "https://office.example.com:443/cache/x", nil},
+		{"foreign host rejected", "https://evil.example.com/x", ErrCallbackURLNotAllowed},
+		{"internal metadata host rejected", "http://169.254.169.254/latest/meta-data/", ErrCallbackURLNotAllowed},
+		{"non-http scheme rejected", "file:///etc/passwd", ErrCallbackURLNotAllowed},
+		{"garbage rejected", "://not a url", ErrCallbackURLNotAllowed},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := svc.ValidateDocumentURL(tc.raw); !errors.Is(err, tc.wantErr) {
+				t.Fatalf("ValidateDocumentURL(%q) = %v, want %v", tc.raw, err, tc.wantErr)
+			}
+		})
+	}
+}
+
+func TestValidateDocumentURL_DisabledService(t *testing.T) {
+	svc := NewOnlyOfficeService("", "secret", "https://drive.example.com", newTestData())
+	if err := svc.ValidateDocumentURL("https://office.example.com/x"); !errors.Is(err, ErrOnlyOfficeNotConfigured) {
+		t.Fatalf("got %v, want ErrOnlyOfficeNotConfigured", err)
+	}
+}

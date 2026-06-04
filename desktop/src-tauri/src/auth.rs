@@ -358,10 +358,16 @@ fn parse_request_target(request_line: &str) -> Option<Url> {
 }
 
 async fn write_response(stream: &mut tokio::net::TcpStream, body: &str) {
+    // Render the HTML body first and derive Content-Length from its
+    // actual byte length. A previous magic-constant offset under-counted
+    // the wrapper, so the header advertised more bytes than were sent and
+    // a strict HTTP client could hang waiting for the missing tail.
+    let html = format!(
+        "<!doctype html><html><body style=\"font-family:system-ui;padding:3rem;text-align:center\"><h2>{body}</h2></body></html>"
+    );
     let payload = format!(
-        "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n<!doctype html><html><body style=\"font-family:system-ui;padding:3rem;text-align:center\"><h2>{}</h2></body></html>",
-        body.len() + 120,
-        body
+        "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{html}",
+        html.len()
     );
     let _ = stream.write_all(payload.as_bytes()).await;
     let _ = stream.flush().await;
