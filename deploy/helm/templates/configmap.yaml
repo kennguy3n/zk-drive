@@ -1,3 +1,8 @@
+{{- if and .Values.config.databaseUrlInSecret .Values.secrets.create (not .Values.secrets.existingSecret) }}
+{{- if not .Values.secrets.data.DATABASE_URL }}
+{{- fail "config.databaseUrlInSecret=true omits DATABASE_URL from the ConfigMap, but the chart-managed Secret has no secrets.data.DATABASE_URL — so DATABASE_URL would be absent from both and every workload + the migrate Job would fail at startup. Set secrets.data.DATABASE_URL to the real connection string, or use secrets.existingSecret pointing to a Secret that carries a DATABASE_URL key." }}
+{{- end }}
+{{- end }}
 apiVersion: v1
 kind: ConfigMap
 metadata:
