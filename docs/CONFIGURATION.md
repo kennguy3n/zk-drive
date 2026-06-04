@@ -162,6 +162,21 @@ re-encryption runbook.
 | `RATE_LIMIT_PER_USER`     | `0`     | Requests per user per minute. `0` disables. When `REDIS_URL` is set the limiter is Redis-backed and survives restarts.  |
 | `RATE_LIMIT_PER_WORKSPACE`| `0`     | Requests per workspace per minute. Same semantics as the per-user limiter, just a different scope.                      |
 
+## Preview pipeline
+
+Read by the `worker` binary. These tune the per-tenant preview
+(thumbnail) budget and the tier-based priority worker pools. The
+budget is **fail-open**: with no `REDIS_URL` the enforcer is nil and
+every preview is admitted, so Redis is a fairness guard, never a
+correctness dependency. See `docs/OPERATIONS.md` ("Preview pipeline
+scaling") for the runbook.
+
+| Variable                            | Default | Purpose                                                                                                                                                              |
+| ----------------------------------- | ------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `PREVIEW_BUDGET_PER_WORKSPACE_HOUR` | `100`   | Max previews rendered per workspace per rolling hour. Over budget, the job is `NakWithDelay`-deferred (exponential backoff up to 5m) rather than dropped. Needs `REDIS_URL`; with no Redis the budget is unenforced (all admitted). A value `<= 0` falls back to the default (`100`), so to keep Redis but effectively disable the budget, set this very high (e.g. `1000000`). |
+| `PREVIEW_PRIORITY_WORKERS`          | `6`     | Goroutine pool size for the priority preview subject (`drive.preview.generate.priority`, Business/Secure-Business tiers). Values `<= 0` fall back to the default; the pool is clamped to a minimum of 1. |
+| `PREVIEW_STANDARD_WORKERS`          | `2`     | Goroutine pool size for the standard preview subject (`drive.preview.generate.standard`, Free/Starter tiers). Same `<= 0` / minimum-1 semantics as the priority pool. |
+
 ## OAuth2 single sign-on (Google / Microsoft)
 
 All six are optional. SSO is enabled per provider when the three

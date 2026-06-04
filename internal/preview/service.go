@@ -142,18 +142,23 @@ func (s *Service) Generate(ctx context.Context, fileID, versionID uuid.UUID) (*P
 		return nil, err
 	}
 
-	// Per-tenant budget gate. Checked here — after the cheap version
-	// lookup but before the (expensive) source download / decode — so
-	// a workspace that has exhausted its window costs only one Redis
-	// round trip per rejected job, not a full render. A nil budget
-	// (Redis not configured) admits unconditionally.
-	if err := s.checkBudget(ctx, meta.workspaceID); err != nil {
-		return nil, err
-	}
-
+	// Resolve the renderer first. lookup is a pure in-memory registry
+	// read with no I/O, and an unsupported MIME is Ack'd as a skip (it
+	// will never render), so resolving it before the budget gate keeps
+	// non-previewable files from consuming a workspace's budget slot.
 	r := lookup(meta.mimeType)
 	if r == nil {
 		return nil, fmt.Errorf("%w: %q", ErrUnsupportedMime, meta.mimeType)
+	}
+
+	// Per-tenant budget gate. Checked here — after the cheap version
+	// lookup + renderer resolution but before the (expensive) source
+	// download / decode — so a workspace that has exhausted its window
+	// costs only one Redis round trip per rejected job, not a full
+	// render. A nil budget (Redis not configured) admits
+	// unconditionally.
+	if err := s.checkBudget(ctx, meta.workspaceID); err != nil {
+		return nil, err
 	}
 
 	srcBytes, err := s.downloadObject(ctx, meta.objectKey)

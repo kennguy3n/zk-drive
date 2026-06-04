@@ -129,25 +129,32 @@ func run() error {
 	//   1. unsubscribeAll    — stops NATS delivering new messages
 	//                          to the worker (registered later, runs
 	//                          first in LIFO).
-	//   2. nc.Drain          — flushes in-flight message callbacks
+	//   2. pool drains       — for pooled subjects (priority/standard
+	//                          previews) block until in-flight h(msg)
+	//                          calls finish + ack while NATS is still
+	//                          connected. Registered just before
+	//                          unsubscribeAll so it runs right after.
+	//   3. nc.Drain          — flushes in-flight message callbacks
 	//                          (which may still hold pool conns and
 	//                          emit reconciler / job metrics).
-	//   3. shutdownMetrics   — graceful 5s drain of /metrics +
+	//   4. shutdownMetrics   — graceful 5s drain of /metrics +
 	//                          /healthz scrape requests, then
 	//                          srv.Shutdown causes the metrics
 	//                          server goroutine to exit and call
 	//                          wg.Done on bgGoroutines.
-	//   4. cancel()          — signals the remaining long-running
+	//   5. cancel()          — signals the remaining long-running
 	//                          goroutines to stop
 	//                          (runGuestExpirySweep,
 	//                          runStorageReconciler).
-	//   5. bgGoroutines.Wait — blocks until ALL tracked goroutines
+	//   6. bgGoroutines.Wait — blocks until ALL tracked goroutines
 	//                          (metrics server, reconciler, guest
-	//                          sweep) have returned, so no caller
-	//                          is mid-Acquire on the pool.
-	//   6. pool.Close()      — closes the pool against a quiescent
+	//                          sweep, pool workers) have returned, so
+	//                          no caller is mid-Acquire on the pool.
+	//   7. pool.Close()      — closes the pool against a quiescent
 	//                          set of consumers; no "use of closed
 	//                          connection" log noise.
+	//   8. redisClient.Close — last: every budget/tier-cache caller
+	//                          has stopped by now (see decl below).
 	//
 	// We register them in the reverse of that target order. The
 	// NATS-related (unsubscribeAll, nc.Drain) and metrics-related
@@ -160,6 +167,24 @@ func run() error {
 	// worker_jobs_total deltas before the metrics server itself
 	// shuts down.
 	var bgGoroutines sync.WaitGroup
+	// redisClient backs the preview budget enforcer and tier cache,
+	// both of which are exercised from inside NATS message handlers
+	// (the pooled preview goroutines). Its Close is registered here,
+	// alongside the other teardown defers, rather than inline at the
+	// connect site so LIFO runs it AFTER nc.Drain + the pool drains +
+	// cancel + bgGoroutines.Wait — i.e. only once every handler that
+	// could touch Redis has stopped. Closing it inline (LIFO-first)
+	// would tear Redis down while pool goroutines were still calling
+	// Allow()/tier lookups, producing spurious "redis: client is
+	// closed" shutdown noise and uncounted admissions. nil-guarded
+	// because redisClient stays nil when REDIS_URL is unset or the
+	// ping fails (fail-open).
+	var redisClient *redis.Client
+	defer func() {
+		if redisClient != nil {
+			_ = redisClient.Close()
+		}
+	}()
 	defer pool.Close()
 	defer bgGoroutines.Wait()
 	defer cancel()
@@ -213,7 +238,9 @@ func run() error {
 	// single-replica / local deploys behave exactly as before. The
 	// budget is the cross-replica fairness guard that stops one
 	// tenant's bulk import from starving the shared worker fleet.
-	var redisClient *redis.Client
+	// redisClient is declared up top so its Close defer can be
+	// ordered with the other teardown defers (see there); here we
+	// only assign it on a successful connect.
 	if cfg.RedisURL != "" {
 		opts, perr := redis.ParseURL(cfg.RedisURL)
 		if perr != nil {
@@ -225,7 +252,6 @@ func run() error {
 			_ = rc.Close()
 		} else {
 			redisClient = rc
-			defer func() { _ = redisClient.Close() }()
 			slog.Info("worker redis connected; preview budget + tier cache enabled", "url", cfg.RedisURL)
 		}
 	}
@@ -350,10 +376,25 @@ func run() error {
 		return fmt.Errorf("ensure stream: %w", err)
 	}
 
-	subs, err := subscribeAll(ctx, &bgGoroutines, js, pool, metricsSurface, previewSvc, scanSvc, archiveSvc, indexSvc, classifySvc, cfg.PreviewPriorityWorkers, cfg.PreviewStandardWorkers)
+	if err := reconcilePreviewConsumers(js); err != nil {
+		return fmt.Errorf("reconcile preview consumers: %w", err)
+	}
+
+	subs, poolDrains, err := subscribeAll(ctx, &bgGoroutines, js, pool, metricsSurface, previewSvc, scanSvc, archiveSvc, indexSvc, classifySvc, cfg.PreviewPriorityWorkers, cfg.PreviewStandardWorkers)
 	if err != nil {
 		return fmt.Errorf("subscribe: %w", err)
 	}
+	// Registered before unsubscribeAll so LIFO runs them in the
+	// order: unsubscribeAll (stop new deliveries) → pool drains
+	// (finish + ack in-flight renders) → nc.Drain (close conn,
+	// registered earliest, runs last). Draining before the
+	// connection closes is what keeps a job that was mid-render at
+	// shutdown from being redelivered.
+	defer func() {
+		for _, drain := range poolDrains {
+			drain()
+		}
+	}()
 	defer unsubscribeAll(subs)
 
 	slog.Info("zk-drive worker listening", "nats_url", natsURL, "stream", streamName)
@@ -492,12 +533,47 @@ func ensureStream(js nats.JetStreamContext) error {
 	return nil
 }
 
+// reconcilePreviewConsumers brings the persisted MaxDeliver of the
+// preview durables up to preview.QueueMaxDeliver. js.Subscribe binds
+// to an existing durable without rewriting its server-side config, so
+// the legacy drive-preview consumer — created by an earlier deploy
+// when it still used preview.MaxDeliver (5) — would otherwise keep
+// that stale cap. Because previewHandler now NakWithDelay's
+// budget-deferred jobs on every preview subject and the API still
+// publishes all previews to the legacy subject, a 5-delivery cap
+// would terminate an over-budget workspace's previews after only a
+// few minutes instead of deferring them until its window drains. We
+// mirror ensureStream's reconcile-on-startup approach (ConsumerInfo →
+// UpdateConsumer) so the cap self-heals across deploys without manual
+// operator intervention. Consumers that don't exist yet are skipped:
+// Subscribe creates them fresh with the correct cap.
+func reconcilePreviewConsumers(js nats.JetStreamContext) error {
+	for _, durable := range []string{"drive-preview", "drive-preview-priority", "drive-preview-standard"} {
+		ci, err := js.ConsumerInfo(streamName, durable)
+		if err != nil {
+			if errors.Is(err, nats.ErrConsumerNotFound) {
+				continue
+			}
+			return fmt.Errorf("consumer info %s: %w", durable, err)
+		}
+		if ci.Config.MaxDeliver == preview.QueueMaxDeliver {
+			continue
+		}
+		cfg := ci.Config
+		cfg.MaxDeliver = preview.QueueMaxDeliver
+		if _, err := js.UpdateConsumer(streamName, &cfg); err != nil {
+			return fmt.Errorf("update consumer %s: %w", durable, err)
+		}
+	}
+	return nil
+}
+
 // subscribeAll wires a durable consumer for each subject. Durable
 // names let the worker restart without losing checkpoint state.
 // Each metrics.JobHandler is wrapped via InstrumentJob so the
 // (subject, result) labels land on zkdrive_worker_jobs_total and
 // the duration histogram captures wall time per subject.
-func subscribeAll(ctx context.Context, wg *sync.WaitGroup, js nats.JetStreamContext, pool *pgxpool.Pool, m *metrics.Metrics, previewSvc *preview.Service, scanSvc *scan.Service, archiveSvc *retention.ArchiveService, indexSvc *index.Service, classifySvc *classify.Service, previewPriorityWorkers, previewStandardWorkers int) ([]*nats.Subscription, error) {
+func subscribeAll(ctx context.Context, wg *sync.WaitGroup, js nats.JetStreamContext, pool *pgxpool.Pool, m *metrics.Metrics, previewSvc *preview.Service, scanSvc *scan.Service, archiveSvc *retention.ArchiveService, indexSvc *index.Service, classifySvc *classify.Service, previewPriorityWorkers, previewStandardWorkers int) ([]*nats.Subscription, []func(), error) {
 	// Webhook delivery worker. Constructed once and shared
 	// across all webhook.events deliveries; the DeliveryClient
 	// holds an http.Client + URLValidator that are both safe for
@@ -509,7 +585,7 @@ func subscribeAll(ctx context.Context, wg *sync.WaitGroup, js nats.JetStreamCont
 	webhookDeliveryClient := webhooks.NewDeliveryClient(webhooks.NewURLValidator(), 0)
 	webhookWorker, werr := webhooks.NewDeliveryWorker(webhookRepo, webhookDeliveryClient, m)
 	if werr != nil {
-		return nil, fmt.Errorf("build webhook delivery worker: %w", werr)
+		return nil, nil, fmt.Errorf("build webhook delivery worker: %w", werr)
 	}
 
 	subjects := []struct {
@@ -575,6 +651,10 @@ func subscribeAll(ctx context.Context, wg *sync.WaitGroup, js nats.JetStreamCont
 		{webhooks.SubjectEvents, "webhook-deliveries", m.InstrumentJob(ctx, webhooks.SubjectEvents, traceJob(webhooks.SubjectEvents, webhookDeliveryHandler(webhookWorker))), []nats.SubOpt{nats.MaxDeliver(webhooks.MaxAttempts)}, 0},
 	}
 	var subs []*nats.Subscription
+	// drains holds one pool-drain hook per pooled subject. run()
+	// invokes them after unsubscribeAll but before nc.Drain() so
+	// in-flight handlers ack while the connection is still open.
+	var drains []func()
 	for _, s := range subjects {
 		opts := []nats.SubOpt{
 			nats.Durable(s.durable),
@@ -585,48 +665,89 @@ func subscribeAll(ctx context.Context, wg *sync.WaitGroup, js nats.JetStreamCont
 		opts = append(opts, s.extraOpts...)
 		handler := s.handler
 		if s.workers > 0 {
-			handler = startJobPool(ctx, wg, s.workers, handler)
+			var drain func()
+			handler, drain = startJobPool(ctx, wg, s.workers, handler)
+			drains = append(drains, drain)
 		}
 		sub, err := js.Subscribe(s.subject, handler, opts...)
 		if err != nil {
+			// Symmetric cleanup: tear down what this call created
+			// before returning. unsubscribeAll stops delivery on the
+			// already-bound subjects, then the pool drains (including
+			// this subject's, appended just above) stop their
+			// goroutines and wait out any handler that slipped in
+			// during the brief window. Same unsubscribe→drain order
+			// run() uses on shutdown; without it the earlier pools
+			// would linger until run()'s deferred cancel reaps them.
 			unsubscribeAll(subs)
-			return nil, fmt.Errorf("subscribe %s: %w", s.subject, err)
+			for _, drain := range drains {
+				drain()
+			}
+			return nil, nil, fmt.Errorf("subscribe %s: %w", s.subject, err)
 		}
 		subs = append(subs, sub)
 	}
-	return subs, nil
+	return subs, drains, nil
 }
 
 // startJobPool fans a single subject's deliveries across a fixed pool
 // of `workers` goroutines so a busy subject (e.g. the priority preview
 // queue) processes up to `workers` jobs concurrently rather than one
-// at a time on the NATS delivery goroutine. The returned
-// nats.MsgHandler is the subscription callback: it hands each message
-// to the pool over an unbuffered channel, which blocks (back-pressure)
-// while all workers are busy so JetStream's in-flight ceiling is
-// respected. Pool goroutines are tracked on wg and exit when ctx is
-// cancelled, so the worker's existing bgGoroutines.Wait() shutdown
-// barrier drains them.
+// at a time on the NATS delivery goroutine. It returns two values:
+//
+//   - handler: the subscription callback. It hands each message to the
+//     pool over an unbuffered channel, which blocks (back-pressure)
+//     while all workers are busy so JetStream's in-flight ceiling is
+//     respected.
+//   - drain: a shutdown hook that stops the pool from accepting new
+//     messages and BLOCKS until every worker has finished the h(msg)
+//     call it is currently running. Calling drain before nc.Drain()
+//     guarantees in-flight handlers complete their msg.Ack/Nak/Term
+//     while the NATS connection is still open, so a job that was mid
+//     render at shutdown is acked rather than silently redelivered.
+//
+// Pool goroutines are also tracked on wg and select on ctx.Done(), so
+// even if drain is never called the worker's bgGoroutines.Wait() /
+// cancel() shutdown barrier still reaps them — drain is the graceful
+// path, ctx cancellation the backstop.
+//
+// drain closes a private `stop` channel (never the message channel) so
+// a NATS callback blocked on the unbuffered send unblocks via stop
+// instead of panicking on a send to a closed channel. drain is
+// idempotent.
 //
 // Concurrent processing is safe because each job calls msg.Ack /
 // Nak / Term itself (ManualAck) and the preview service holds no
-// per-call mutable state. A message that cannot be handed to a worker
-// because the pool is shutting down (ctx cancelled) is explicitly
-// Nak'd rather than dropped, so JetStream redelivers it promptly to a
-// surviving replica / after restart instead of stalling for the full
-// AckWait window. QueueMaxDeliver still bounds total redelivery.
-func startJobPool(ctx context.Context, wg *sync.WaitGroup, workers int, h nats.MsgHandler) nats.MsgHandler {
+// per-call mutable state; the AckWait window plus QueueMaxDeliver
+// bound any redelivery of a message that was in flight when the
+// worker shut down.
+//
+// Both selects are deliberately tolerant of stop and ch being ready
+// at once (Go picks a ready case at random): a worker that processes
+// one more message after stop fires still acks it (and poolWG.Wait
+// accounts for it before drain returns), and a handler send that
+// wins the race after stop closes is fine too — the message is
+// processed rather than dropped. Do NOT add a stop-priority pre-check
+// to "tighten" these selects; it would turn that benign race into a
+// silently dropped (redelivered-after-AckWait) message.
+func startJobPool(ctx context.Context, wg *sync.WaitGroup, workers int, h nats.MsgHandler) (nats.MsgHandler, func()) {
 	if workers < 1 {
 		workers = 1
 	}
 	ch := make(chan *nats.Msg)
+	stop := make(chan struct{})
+	var poolWG sync.WaitGroup
+	poolWG.Add(workers)
 	for i := 0; i < workers; i++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
+			defer poolWG.Done()
 			for {
 				select {
 				case <-ctx.Done():
+					return
+				case <-stop:
 					return
 				case msg := <-ch:
 					h(msg)
@@ -634,16 +755,19 @@ func startJobPool(ctx context.Context, wg *sync.WaitGroup, workers int, h nats.M
 			}
 		}()
 	}
-	return func(msg *nats.Msg) {
+	handler := func(msg *nats.Msg) {
 		select {
-		case ch <- msg:
 		case <-ctx.Done():
-			// Pool is draining: hand the delivery back to JetStream
-			// immediately so it is re-queued for prompt redelivery
-			// rather than waiting out the AckWait timeout.
-			_ = msg.Nak()
+		case <-stop:
+		case ch <- msg:
 		}
 	}
+	var stopOnce sync.Once
+	drain := func() {
+		stopOnce.Do(func() { close(stop) })
+		poolWG.Wait()
+	}
+	return handler, drain
 }
 
 func unsubscribeAll(subs []*nats.Subscription) {
