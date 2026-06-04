@@ -215,18 +215,21 @@ impl KeychainTokenProvider {
         // overflow, so guard with `try_seconds` + `checked_add_signed`
         // and surface it as a 401 rather than crashing the task — same
         // discipline as the SDK's `HttpRefresher` (auth/src/token.rs).
-        let lifetime = ChronoDuration::try_seconds(parsed.expires_in).ok_or_else(|| {
-            ApiError::Status {
+        let lifetime =
+            ChronoDuration::try_seconds(parsed.expires_in).ok_or_else(|| ApiError::Status {
                 status: 401,
                 body: format!("non-representable expires_in: {}", parsed.expires_in),
-            }
-        })?;
-        let expires_at = Utc::now()
-            .checked_add_signed(lifetime)
-            .ok_or_else(|| ApiError::Status {
-                status: 401,
-                body: format!("expires_in would overflow expires_at: {}", parsed.expires_in),
             })?;
+        let expires_at =
+            Utc::now()
+                .checked_add_signed(lifetime)
+                .ok_or_else(|| ApiError::Status {
+                    status: 401,
+                    body: format!(
+                        "expires_in would overflow expires_at: {}",
+                        parsed.expires_in
+                    ),
+                })?;
         let new = TokenSet {
             access_token: parsed.access_token,
             // A refresh response may omit (or null out) a new refresh
@@ -514,9 +517,7 @@ mod tests {
     fn header_value<'a>(headers: &'a str, name: &str) -> Option<&'a str> {
         headers.lines().find_map(|line| {
             let (k, v) = line.split_once(':')?;
-            k.trim()
-                .eq_ignore_ascii_case(name)
-                .then(|| v.trim())
+            k.trim().eq_ignore_ascii_case(name).then(|| v.trim())
         })
     }
 
@@ -524,7 +525,11 @@ mod tests {
     fn callback_response_content_length_matches_body_bytes() {
         // The Content-Length must equal the exact byte count of the
         // body — regression for the off-by-9 hardcoded wrapper size.
-        for message in ["Login complete — you can close this window.", "Invalid request", ""] {
+        for message in [
+            "Login complete — you can close this window.",
+            "Invalid request",
+            "",
+        ] {
             let raw = render_callback_response(message);
             let (headers, body) = split_response(&raw);
             let declared: usize = header_value(headers, "Content-Length")
@@ -638,7 +643,10 @@ mod tests {
             let addr = listener.local_addr().expect("addr");
             let writer = tokio::spawn(async move {
                 let mut client = tokio::net::TcpStream::connect(addr).await.expect("connect");
-                client.write_all(b"GET /callback?code=ab").await.expect("w1");
+                client
+                    .write_all(b"GET /callback?code=ab")
+                    .await
+                    .expect("w1");
                 client.flush().await.expect("f1");
                 tokio::time::sleep(Duration::from_millis(20)).await;
                 client
