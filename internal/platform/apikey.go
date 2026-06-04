@@ -67,8 +67,10 @@ const _ = uint(bcryptMaxInputBytes - apiKeyPlaintextLen)
 // dummyAPIKeyHash is bcrypt-compared when no candidate row is found so
 // a missing lookup id costs the same wall-clock time as a wrong secret
 // (a present lookup id is not itself a secret, but equalizing keeps the
-// auth path free of an obvious timing oracle).
-var dummyAPIKeyHash, _ = bcrypt.GenerateFromPassword([]byte("platform-api-key-timing-equalizer"), bcrypt.DefaultCost)
+// auth path free of an obvious timing oracle). The placeholder input is
+// sized to apiKeyPlaintextLen so the miss path hashes exactly as many
+// bytes as a real key, making the equalization exact rather than close.
+var dummyAPIKeyHash, _ = bcrypt.GenerateFromPassword([]byte(strings.Repeat("k", apiKeyPlaintextLen)), bcrypt.DefaultCost)
 
 // Coarse capability strings stored in platform_api_keys.permissions
 // and checked by the platform-auth middleware. Kept as plain strings
@@ -115,6 +117,19 @@ func (k *APIKey) HasPermission(permission string) bool {
 		if p == permission {
 			return true
 		}
+	}
+	return false
+}
+
+// validPermission reports whether p is one of the recognised platform
+// capability strings. Create rejects unknown permissions so an operator
+// typo ("tenant:readd") fails loudly at creation instead of silently
+// minting a key that authenticates but is inert against every guard.
+func validPermission(p string) bool {
+	switch p {
+	case PermTenantRead, PermTenantWrite, PermTenantSuspend,
+		PermBillingReconcile, PermAlertsRead, PermAlertsWrite, PermKeysManage:
+		return true
 	}
 	return false
 }
@@ -177,8 +192,9 @@ func NewAPIKeyStore(pool *pgxpool.Pool) *APIKeyStore {
 // Create mints a new key, stores its bcrypt hash, and returns both the
 // row metadata and the one-time plaintext. The plaintext is the ONLY
 // time the caller can read the usable key — it is never recoverable
-// afterwards. Permissions are stored verbatim; an empty slice yields a
-// key that authenticates but carries no capabilities (useful as a
+// afterwards. Permissions are validated against the known capability
+// constants (an unknown one is rejected); an empty slice yields a key
+// that authenticates but carries no capabilities (useful as a
 // placeholder before an operator grants scopes).
 func (s *APIKeyStore) Create(ctx context.Context, label string, permissions []string) (*APIKey, string, error) {
 	label = strings.TrimSpace(label)
@@ -187,6 +203,11 @@ func (s *APIKeyStore) Create(ctx context.Context, label string, permissions []st
 	}
 	if permissions == nil {
 		permissions = []string{}
+	}
+	for _, p := range permissions {
+		if !validPermission(p) {
+			return nil, "", fmt.Errorf("%w: unknown permission %q", ErrInvalidArgument, p)
+		}
 	}
 	plaintext, lookup, err := generateAPIKey()
 	if err != nil {

@@ -3,6 +3,7 @@ package platform
 import (
 	"context"
 	"errors"
+	"net/url"
 	"strings"
 	"testing"
 
@@ -273,6 +274,61 @@ func TestDispatchFiringConsistentSnapshot(t *testing.T) {
 	// The returned firing records the true per-channel results.
 	if !firing.WebhookFired || !firing.EmailFired {
 		t.Errorf("firing should record both channels fired, got %+v", firing)
+	}
+}
+
+// fakeURLValidator stubs the SSRF validator: it rejects every URL when
+// blockErr is set, otherwise parses it like the real validator.
+type fakeURLValidator struct{ blockErr error }
+
+func (f fakeURLValidator) Validate(_ context.Context, raw string) (*url.URL, error) {
+	if f.blockErr != nil {
+		return nil, f.blockErr
+	}
+	return url.Parse(raw)
+}
+
+func TestCreateAlertRuleRejectsBlockedWebhookURL(t *testing.T) {
+	// A wired validator that blocks the URL must surface as a 400-class
+	// ErrInvalidArgument before any DB work, so the nil pool is never
+	// touched. This is the SSRF guard at rule-creation time.
+	s := NewService(nil, nil, nil, nil).
+		WithURLValidator(fakeURLValidator{blockErr: errors.New("blocked")})
+	wsID := uuid.New()
+	_, err := s.CreateAlertRule(context.Background(), AlertRule{
+		WorkspaceID: &wsID,
+		Metric:      MetricStoragePercent,
+		Operator:    OperatorGTE,
+		Threshold:   90,
+		WebhookURL:  "http://169.254.169.254/latest/meta-data/",
+	})
+	if !errors.Is(err, ErrInvalidArgument) {
+		t.Fatalf("blocked webhook_url: want ErrInvalidArgument, got %v", err)
+	}
+}
+
+func TestValidPermission(t *testing.T) {
+	for _, p := range []string{
+		PermTenantRead, PermTenantWrite, PermTenantSuspend,
+		PermBillingReconcile, PermAlertsRead, PermAlertsWrite, PermKeysManage,
+	} {
+		if !validPermission(p) {
+			t.Errorf("known permission %q rejected", p)
+		}
+	}
+	if validPermission("tenant:readd") || validPermission("") {
+		t.Errorf("unknown permission accepted")
+	}
+}
+
+func TestCreateAPIKeyRejectsUnknownPermission(t *testing.T) {
+	// An unknown permission string is rejected up front (before any DB
+	// work) so an operator typo fails loudly instead of minting a key
+	// that authenticates but is inert against every guard.
+	store := NewAPIKeyStore(nil)
+	_, _, err := store.Create(context.Background(), "ci-bot", []string{PermTenantRead, "tenant:readd"})
+	if !errors.Is(err, ErrInvalidArgument) {
+		t.Fatalf("unknown permission: want ErrInvalidArgument, got %v", err)
 	}
 }
 

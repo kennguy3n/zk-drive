@@ -65,6 +65,15 @@ func (s *PlatformService) CreateAlertRule(ctx context.Context, rule AlertRule) (
 	if strings.TrimSpace(rule.WebhookURL) == "" && strings.TrimSpace(rule.Email) == "" {
 		return nil, fmt.Errorf("%w: at least one of webhook_url or email is required", ErrInvalidArgument)
 	}
+	// SSRF pre-check: a platform key must not be usable to point the
+	// alert dispatcher at an internal address (loopback / link-local /
+	// RFC1918 / cloud-metadata). Validated at create time when a
+	// validator is wired; a blocked or malformed URL is a 400, not a 500.
+	if wh := strings.TrimSpace(rule.WebhookURL); wh != "" && s.urlValidator != nil {
+		if _, err := s.urlValidator.Validate(ctx, wh); err != nil {
+			return nil, fmt.Errorf("%w: webhook_url: %v", ErrInvalidArgument, err)
+		}
+	}
 
 	out, err := scanAlertRule(s.pool.QueryRow(ctx,
 		`INSERT INTO usage_alert_rules (workspace_id, metric, threshold, operator, webhook_url, email)

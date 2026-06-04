@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/url"
 	"strings"
 	"time"
 
@@ -68,6 +69,17 @@ type AlertDispatcher interface {
 	DispatchEmail(ctx context.Context, email string, firing AlertFiring) error
 }
 
+// WebhookURLValidator screens an outbound webhook URL against SSRF
+// policy (rejecting loopback / link-local / RFC1918 / cloud-metadata
+// targets) before a usage-alert rule pointing at it is persisted, so a
+// platform key cannot be used to make the alert dispatcher probe
+// internal services. *webhooks.URLValidator satisfies it. Optional:
+// when unwired, CreateAlertRule stores webhook URLs without the
+// pre-check (matching the service's degrade-gracefully pattern).
+type WebhookURLValidator interface {
+	Validate(ctx context.Context, raw string) (*url.URL, error)
+}
+
 // SubscriptionInspector resolves the upstream (Stripe) subscription
 // state for a customer so BulkReconcileBilling can compare it against
 // the locally-stored plan tier. Optional: when unwired, reconciliation
@@ -97,6 +109,7 @@ type PlatformService struct {
 	mailer        WelcomeMailer
 	dispatcher    AlertDispatcher
 	subscriptions SubscriptionInspector
+	urlValidator  WebhookURLValidator
 
 	clock  func() time.Time
 	logger *slog.Logger
@@ -156,6 +169,14 @@ func (s *PlatformService) WithAlertDispatcher(d AlertDispatcher) *PlatformServic
 // used by BulkReconcileBilling.
 func (s *PlatformService) WithSubscriptionInspector(i SubscriptionInspector) *PlatformService {
 	s.subscriptions = i
+	return s
+}
+
+// WithURLValidator wires the SSRF validator CreateAlertRule applies to
+// a rule's webhook_url before storing it. When unwired, webhook URLs
+// are stored without an SSRF pre-check.
+func (s *PlatformService) WithURLValidator(v WebhookURLValidator) *PlatformService {
+	s.urlValidator = v
 	return s
 }
 

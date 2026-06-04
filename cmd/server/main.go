@@ -661,7 +661,8 @@ func run() error {
 	// below.
 	platformKeyStore := platform.NewAPIKeyStore(pool)
 	platformSvc := platform.NewService(pool, wsSvc, userSvc, billingSvc).
-		WithProvisioner(provisioner)
+		WithProvisioner(provisioner).
+		WithURLValidator(webhooks.NewURLValidator())
 	if sessionStore != nil {
 		platformSvc = platformSvc.WithSessions(sessionStore)
 	}
