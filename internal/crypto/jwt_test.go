@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -253,6 +254,170 @@ func TestKeyManager_ForceHS256StillVerifiesES256(t *testing.T) {
 	}
 }
 
+func TestKeyManager_ForceES256ErrorsWithoutActiveKey(t *testing.T) {
+	ctx := context.Background()
+	// JWT_ALGORITHM=ES256 is a compliance requirement: with no active
+	// asymmetric key yet, Sign must refuse rather than silently mint an
+	// HS256 token, even though an HS256 secret is configured.
+	km, err := NewKeyManager(ctx, &memKeyStore{}, testCodec(t), "hs-secret", AlgES256)
+	if err != nil {
+		t.Fatalf("new key manager: %v", err)
+	}
+	if _, err := km.Sign(makeClaims(time.Hour)); err == nil {
+		t.Fatal("expected Sign to error under AlgES256 with no active key, got nil")
+	}
+
+	// After a key is rotated in, ES256 signing succeeds.
+	if _, err := km.RotateKey(ctx); err != nil {
+		t.Fatalf("rotate: %v", err)
+	}
+	signed, err := km.Sign(makeClaims(time.Hour))
+	if err != nil {
+		t.Fatalf("sign after rotate: %v", err)
+	}
+	tok, err := km.Parse(signed, &jwt.RegisteredClaims{})
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if tok.Method.Alg() != "ES256" {
+		t.Fatalf("alg = %q, want ES256", tok.Method.Alg())
+	}
+}
+
+func TestKeyManager_AutoFallsBackToHS256WithoutActiveKey(t *testing.T) {
+	ctx := context.Background()
+	// AlgAuto (the default) must keep the backward-compatible HS256
+	// fallback when no asymmetric key exists — the enforcement only
+	// applies to AlgES256.
+	km, err := NewKeyManager(ctx, &memKeyStore{}, testCodec(t), "hs-secret", AlgAuto)
+	if err != nil {
+		t.Fatalf("new key manager: %v", err)
+	}
+	signed, err := km.Sign(makeClaims(time.Hour))
+	if err != nil {
+		t.Fatalf("auto sign should fall back to HS256, got error: %v", err)
+	}
+	tok, err := km.Parse(signed, &jwt.RegisteredClaims{})
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if tok.Method.Alg() != "HS256" {
+		t.Fatalf("alg = %q, want HS256", tok.Method.Alg())
+	}
+}
+
+func TestKeyManager_ReloadPropagatesRotationAcrossReplicas(t *testing.T) {
+	ctx := context.Background()
+	store := &memKeyStore{}
+	// Two managers over the same store model two replicas behind a load
+	// balancer. replicaA serves the rotate; replicaB only learns the
+	// new key after a reload (the cross-replica propagation path).
+	replicaA, err := NewKeyManager(ctx, store, testCodec(t), "hs-secret", AlgAuto)
+	if err != nil {
+		t.Fatalf("replicaA: %v", err)
+	}
+	replicaB, err := NewKeyManager(ctx, store, testCodec(t), "hs-secret", AlgAuto)
+	if err != nil {
+		t.Fatalf("replicaB: %v", err)
+	}
+
+	rec, err := replicaA.RotateKey(ctx)
+	if err != nil {
+		t.Fatalf("rotate on A: %v", err)
+	}
+	tokenFromA, err := replicaA.Sign(makeClaims(time.Hour))
+	if err != nil {
+		t.Fatalf("sign on A: %v", err)
+	}
+
+	// Before B reloads, it has never seen the new kid → verification
+	// fails (this is exactly the 401 the review flagged).
+	if _, err := replicaB.Parse(tokenFromA, &jwt.RegisteredClaims{}); err == nil {
+		t.Fatal("expected replicaB to reject token from new key before reload")
+	}
+
+	// After B reloads (what RefreshLoop does on a timer), it accepts it.
+	if err := replicaB.Reload(ctx); err != nil {
+		t.Fatalf("reload on B: %v", err)
+	}
+	tok, err := replicaB.Parse(tokenFromA, &jwt.RegisteredClaims{})
+	if err != nil {
+		t.Fatalf("replicaB still rejects token after reload: %v", err)
+	}
+	if tok.Header["kid"] != rec.ID.String() {
+		t.Fatalf("kid = %v, want %v", tok.Header["kid"], rec.ID.String())
+	}
+}
+
+func TestKeyManager_RefreshLoopPicksUpRotation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	store := &memKeyStore{}
+	replicaA, err := NewKeyManager(ctx, store, testCodec(t), "hs-secret", AlgAuto)
+	if err != nil {
+		t.Fatalf("replicaA: %v", err)
+	}
+	replicaB, err := NewKeyManager(ctx, store, testCodec(t), "hs-secret", AlgAuto)
+	if err != nil {
+		t.Fatalf("replicaB: %v", err)
+	}
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		replicaB.RefreshLoop(ctx, 5*time.Millisecond)
+	}()
+
+	if _, err := replicaA.RotateKey(ctx); err != nil {
+		t.Fatalf("rotate on A: %v", err)
+	}
+	tokenFromA, err := replicaA.Sign(makeClaims(time.Hour))
+	if err != nil {
+		t.Fatalf("sign on A: %v", err)
+	}
+
+	// The background loop should converge B onto the new key set well
+	// within this deadline without any manual reload.
+	deadline := time.After(2 * time.Second)
+	for {
+		if _, err := replicaB.Parse(tokenFromA, &jwt.RegisteredClaims{}); err == nil {
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatal("RefreshLoop did not propagate rotation within deadline")
+		case <-time.After(5 * time.Millisecond):
+		}
+	}
+
+	// Cancelling the context must terminate the loop (graceful shutdown).
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("RefreshLoop did not exit after context cancellation")
+	}
+}
+
+func TestKeyManager_RefreshLoopDisabledReturnsImmediately(t *testing.T) {
+	km, err := NewKeyManager(context.Background(), &memKeyStore{}, testCodec(t), "hs-secret", AlgAuto)
+	if err != nil {
+		t.Fatalf("new key manager: %v", err)
+	}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		// A non-positive interval disables the loop: it must return at
+		// once even though the context is never cancelled.
+		km.RefreshLoop(context.Background(), 0)
+	}()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("RefreshLoop(interval=0) should return immediately")
+	}
+}
+
 func TestKeyManager_RotateWithoutStoreFails(t *testing.T) {
 	ctx := context.Background()
 	km, err := NewKeyManager(ctx, nil, testCodec(t), "hs-secret", AlgAuto)
@@ -261,6 +426,129 @@ func TestKeyManager_RotateWithoutStoreFails(t *testing.T) {
 	}
 	if _, err := km.RotateKey(ctx); err == nil {
 		t.Fatal("expected error rotating without a store")
+	}
+}
+
+// gatedStore wraps a SigningKeyStore and pauses exactly one ListKeys
+// call (the first after Arm) inside the store read: it signals via
+// reading once the snapshot has been taken, then blocks until release
+// is closed. This lets a test pin one reload in mid-flight to observe
+// the serialization invariant that reloadMu enforces.
+type gatedStore struct {
+	inner   SigningKeyStore
+	armed   atomic.Bool
+	reading chan struct{}
+	release chan struct{}
+}
+
+func (g *gatedStore) ListKeys(ctx context.Context) ([]SigningKeyRecord, error) {
+	if g.armed.CompareAndSwap(true, false) {
+		recs, err := g.inner.ListKeys(ctx)
+		close(g.reading)
+		<-g.release
+		return recs, err
+	}
+	return g.inner.ListKeys(ctx)
+}
+
+func (g *gatedStore) Rotate(ctx context.Context, rec SigningKeyRecord) error {
+	return g.inner.Rotate(ctx, rec)
+}
+
+// TestKeyManager_ReloadIsSerialized is a regression test for the
+// concurrent-reload race: reload reads the store and rebuilds its maps,
+// and before the fix only the final assignment was guarded — so a slow
+// reload holding a stale snapshot could swap in last and clobber a
+// fresher concurrent reload. The fix serializes the entire reload under
+// reloadMu. This test pins reload A inside its store read (holding
+// reloadMu) and asserts reload B cannot complete until A releases —
+// i.e. reloads are mutually exclusive across the whole read→swap. Without
+// the fix, B sails through its (un-gated) read and completes immediately,
+// failing the test.
+func TestKeyManager_ReloadIsSerialized(t *testing.T) {
+	ctx := context.Background()
+	g := &gatedStore{
+		inner:   &memKeyStore{},
+		reading: make(chan struct{}),
+		release: make(chan struct{}),
+	}
+	// Construction reload runs before arming, so it isn't gated.
+	km, err := NewKeyManager(ctx, g, testCodec(t), "hs-secret", AlgAuto)
+	if err != nil {
+		t.Fatalf("new key manager: %v", err)
+	}
+
+	g.armed.Store(true)
+	aDone := make(chan struct{})
+	go func() {
+		defer close(aDone)
+		_ = km.Reload(ctx)
+	}()
+	<-g.reading // A has read the store and is parked, holding reloadMu.
+
+	bDone := make(chan struct{})
+	go func() {
+		defer close(bDone)
+		_ = km.Reload(ctx)
+	}()
+
+	select {
+	case <-bDone:
+		t.Fatal("second reload completed while the first was mid-flight; reloads are not serialized (reloadMu missing)")
+	case <-time.After(200 * time.Millisecond):
+		// Expected: B is blocked on reloadMu held by A.
+	}
+
+	close(g.release) // Let A finish and drop reloadMu.
+	select {
+	case <-bDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("second reload did not complete after the first released reloadMu")
+	}
+	<-aDone
+}
+
+// TestKeyManager_ConcurrentReloadAndRotate exercises RotateKey racing
+// many Reload calls under -race, and asserts the manager converges on a
+// loaded ES256 signing key with a kid present in the verify map (i.e. no
+// reload left a torn or stale set installed). Pair with `go test -race`.
+func TestKeyManager_ConcurrentReloadAndRotate(t *testing.T) {
+	ctx := context.Background()
+	km, err := NewKeyManager(ctx, &memKeyStore{}, testCodec(t), "hs-secret", AlgAuto)
+	if err != nil {
+		t.Fatalf("new key manager: %v", err)
+	}
+
+	var wg sync.WaitGroup
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < 25; j++ {
+				_ = km.Reload(ctx)
+			}
+		}()
+	}
+	for i := 0; i < 5; i++ {
+		if _, err := km.RotateKey(ctx); err != nil {
+			t.Errorf("rotate: %v", err)
+		}
+	}
+	wg.Wait()
+
+	// One last reload to settle on the final persisted state, then verify
+	// the active signing key is consistent with the verify map.
+	if err := km.Reload(ctx); err != nil {
+		t.Fatalf("final reload: %v", err)
+	}
+	if got := km.Algorithm(); got != AlgES256 {
+		t.Fatalf("algorithm = %q, want ES256 after rotations", got)
+	}
+	km.mu.RLock()
+	_, ok := km.verifyKeys[km.signingKID]
+	km.mu.RUnlock()
+	if !ok {
+		t.Fatal("active signing kid not present in verify map after concurrent reload/rotate")
 	}
 }
 

@@ -36,6 +36,14 @@ type Config struct {
 	// "auto".
 	JWTAlgorithm string
 
+	// JWTKeyRefreshInterval is how often each replica re-reads the
+	// jwt_signing_keys table so that a key rotation performed on one
+	// replica (POST /api/admin/jwt/rotate) propagates to all others
+	// without a restart. Sourced from JWT_KEY_REFRESH_INTERVAL and
+	// clamped to [10s, 1h]; a non-positive value disables the
+	// background refresh (single-replica deployments). Default 60s.
+	JWTKeyRefreshInterval time.Duration
+
 	ListenAddr    string
 	S3Endpoint    string
 	S3Bucket      string
@@ -429,13 +437,17 @@ func Load() (*Config, error) {
 // function so adding a new field doesn't require touching multiple
 // constructors.
 func buildConfigFromEnv() *Config {
+	// Read DB_MAX_CONNS once: DBMinConns is clamped against the same
+	// resolved maximum, so re-reading the env var would be redundant.
+	dbMaxConns := dbMaxConnsFromEnv()
 	return &Config{
 		DatabaseURL:                   os.Getenv("DATABASE_URL"),
 		JWTSecret:                     os.Getenv("JWT_SECRET"),
-		DBMaxConns:                    dbMaxConnsFromEnv(),
-		DBMinConns:                    dbMinConnsFromEnv(dbMaxConnsFromEnv()),
+		DBMaxConns:                    dbMaxConns,
+		DBMinConns:                    dbMinConnsFromEnv(dbMaxConns),
 		DBMaxConnIdleTime:             parseDurationDefault(os.Getenv("DB_MAX_CONN_IDLE_TIME"), defaultDBMaxConnIdleTime),
 		JWTAlgorithm:                  normaliseJWTAlgorithm(os.Getenv("JWT_ALGORITHM")),
+		JWTKeyRefreshInterval:         jwtKeyRefreshIntervalFromEnv(),
 		ListenAddr:                    getEnvDefault("LISTEN_ADDR", ":8080"),
 		S3Endpoint:                    os.Getenv("S3_ENDPOINT"),
 		S3Bucket:                      os.Getenv("S3_BUCKET"),
@@ -829,14 +841,15 @@ func dbMaxConnsFromEnv() int32 {
 // down to maxConns so MinConns can never exceed MaxConns (pgxpool
 // rejects that configuration at NewWithConfig time).
 func dbMinConnsFromEnv(maxConns int32) int32 {
+	// n stays non-negative by construction: it starts at the default and
+	// is only reassigned from an explicitly-parsed value when v >= 0, so a
+	// negative DB_MIN_CONNS is ignored (default retained) rather than
+	// clamped — no separate floor check is needed.
 	n := defaultDBMinConns
 	if s := strings.TrimSpace(os.Getenv("DB_MIN_CONNS")); s != "" {
 		if v, err := strconv.Atoi(s); err == nil && v >= 0 {
 			n = v
 		}
-	}
-	if n < 0 {
-		n = 0
 	}
 	if int32(n) > maxConns {
 		return maxConns
@@ -857,6 +870,43 @@ func normaliseJWTAlgorithm(s string) string {
 	default:
 		return "auto"
 	}
+}
+
+// JWT signing-key background-refresh defaults and bounds. Mirrors the
+// documented values in docs/CONFIGURATION.md.
+const (
+	defaultJWTKeyRefreshInterval = 60 * time.Second
+	minJWTKeyRefreshInterval     = 10 * time.Second
+	maxJWTKeyRefreshInterval     = time.Hour
+)
+
+// jwtKeyRefreshIntervalFromEnv parses JWT_KEY_REFRESH_INTERVAL. An
+// unset or malformed value falls back to defaultJWTKeyRefreshInterval.
+// An explicit non-positive value (e.g. "0") disables the background
+// refresh and is returned as 0 — appropriate for single-replica
+// deployments where rotation already reloads locally. Any positive
+// value is clamped to [minJWTKeyRefreshInterval, maxJWTKeyRefreshInterval]
+// so an over-eager "1s" cannot hammer the database and a "24h" typo
+// cannot effectively defeat cross-replica propagation.
+func jwtKeyRefreshIntervalFromEnv() time.Duration {
+	s := strings.TrimSpace(os.Getenv("JWT_KEY_REFRESH_INTERVAL"))
+	if s == "" {
+		return defaultJWTKeyRefreshInterval
+	}
+	d, err := time.ParseDuration(s)
+	if err != nil {
+		return defaultJWTKeyRefreshInterval
+	}
+	if d <= 0 {
+		return 0
+	}
+	if d < minJWTKeyRefreshInterval {
+		return minJWTKeyRefreshInterval
+	}
+	if d > maxJWTKeyRefreshInterval {
+		return maxJWTKeyRefreshInterval
+	}
+	return d
 }
 
 // normaliseArchivePrefix ensures the prefix ends with exactly one

@@ -304,6 +304,23 @@ func run() error {
 	}
 	slog.Info("jwt signing", "algorithm", jwtKeyManager.Algorithm())
 
+	// Cross-replica key-rotation propagation. RotateKey only reloads
+	// the replica that served POST /api/admin/jwt/rotate; every other
+	// replica must re-read jwt_signing_keys to learn the new key's
+	// public half, or it would 401 tokens signed by it. This loop
+	// polls the table every cfg.JWTKeyRefreshInterval (default 60s)
+	// and exits on ctx cancellation via the shared bgGoroutines
+	// WaitGroup, so shutdown drains it deterministically. A
+	// non-positive interval disables it (single-replica deployments).
+	if cfg.JWTKeyRefreshInterval > 0 {
+		bgGoroutines.Add(1)
+		go func() {
+			defer bgGoroutines.Done()
+			jwtKeyManager.RefreshLoop(ctx, cfg.JWTKeyRefreshInterval)
+		}()
+		slog.Info("jwt signing-key auto-refresh enabled", "interval", cfg.JWTKeyRefreshInterval)
+	}
+
 	storageFactory := storage.NewClientFactory(pool, storageClient, credentialCodec)
 
 	provisioner := fabric.NewProvisioner(pool, fabric.Config{

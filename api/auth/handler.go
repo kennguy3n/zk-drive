@@ -17,6 +17,7 @@ import (
 
 	"github.com/kennguy3n/zk-drive/api/middleware"
 	"github.com/kennguy3n/zk-drive/internal/audit"
+	cryptopkg "github.com/kennguy3n/zk-drive/internal/crypto"
 	"github.com/kennguy3n/zk-drive/internal/totp"
 	"github.com/kennguy3n/zk-drive/internal/user"
 	"github.com/kennguy3n/zk-drive/internal/workspace"
@@ -79,9 +80,17 @@ func NewHandler(pool *pgxpool.Pool, users *user.Service, workspaces *workspace.S
 // *crypto.KeyManager). When unset, the handler signs with HS256 using
 // jwtSecret. Returns the handler for chaining.
 func (h *Handler) WithSigner(s middleware.Signer) *Handler {
-	if s != nil {
-		h.signer = s
+	if s == nil {
+		return h
 	}
+	// Guard against a typed-nil *crypto.KeyManager wrapped in the
+	// Signer interface (compares != nil but NPEs on use): keep the
+	// HS256 default rather than installing it. Mirrors the typed-nil
+	// guards on WithWebhooks / WithJWTRotator.
+	if km, ok := s.(*cryptopkg.KeyManager); ok && km == nil {
+		return h
+	}
+	h.signer = s
 	return h
 }
 
