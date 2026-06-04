@@ -241,6 +241,36 @@ func TestWebPushService_RejectsOverLongEndpoint(t *testing.T) {
 	}
 }
 
+// TestWebPushService_DeliverFallbackValidationWithoutValidator proves
+// that when no EndpointValidator is injected, delivery still runs the
+// literal-IP fallback check (validatePushEndpoint) before POSTing —
+// matching subscribe-time behaviour rather than skipping pre-send
+// validation entirely. We seed the repo directly (bypassing Subscribe's
+// own validation) with a loopback endpoint to simulate a row that
+// should never be delivered to, then assert Send makes no HTTP call and
+// leaves the row intact (a validation failure is not a 410, so we don't
+// prune it).
+func TestWebPushService_DeliverFallbackValidationWithoutValidator(t *testing.T) {
+	repo := newFakeWebPushRepo()
+	svc, stub := newTestService(t, repo, http.StatusCreated) // no validator injected
+	ctx := context.Background()
+	ws, user := uuid.New(), uuid.New()
+
+	// Seed straight through the repo so Subscribe's validation is bypassed.
+	if err := repo.SaveSubscription(ctx, ws, user, testSubscription(t, "https://127.0.0.1/x")); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	if err := svc.Send(ctx, ws, user, NotificationPayload{Title: "T", Body: "B"}); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	if stub.calls != 0 {
+		t.Errorf("disallowed endpoint must not be POSTed to, got %d HTTP calls", stub.calls)
+	}
+	if repo.count() != 1 {
+		t.Errorf("validation failure (not a 410) must not prune the row, got count %d", repo.count())
+	}
+}
+
 // TestWebPushService_InjectedValidatorGatesSubscribeAndDeliver proves
 // the injected DNS-resolving validator runs both at subscribe time and
 // again before each delivery — the latter being the DNS-rebinding

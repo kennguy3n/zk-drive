@@ -319,14 +319,20 @@ func (s *WebPushService) Send(ctx context.Context, workspaceID, userID uuid.UUID
 // service's HTTP status code. The response body is always drained and
 // closed so the underlying connection can be reused.
 func (s *WebPushService) deliver(ctx context.Context, message []byte, sub PushSubscription) (int, error) {
-	// Re-validate (re-resolving DNS) immediately before sending so a
-	// subscription whose hostname was repointed at an internal address
-	// after it was stored is never POSTed to. Subscriptions are stored
-	// pre-validated, so this only trips on a deliberate DNS rebind.
+	// Re-validate immediately before sending so a subscription whose
+	// hostname was repointed at an internal address after it was stored
+	// is never POSTed to. Subscriptions are stored pre-validated, so
+	// this only trips on a deliberate DNS rebind. When an injected
+	// validator is present it re-resolves DNS (the actual rebinding
+	// defence); otherwise fall back to the same literal-IP checks used
+	// at subscribe time so the no-validator path still has a pre-send
+	// guard rather than skipping validation entirely.
 	if s.validator != nil {
 		if _, err := s.validator.Validate(ctx, sub.Endpoint); err != nil {
 			return 0, fmt.Errorf("webpush: endpoint failed pre-send revalidation: %w", err)
 		}
+	} else if err := validatePushEndpoint(sub.Endpoint); err != nil {
+		return 0, fmt.Errorf("webpush: endpoint failed pre-send validation: %w", err)
 	}
 	opts := &webpush.Options{
 		Subscriber:      s.subscriber,
