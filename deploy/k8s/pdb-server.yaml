@@ -1,0 +1,15 @@
+# PodDisruptionBudget for the API server. minAvailable: 1 guarantees
+# at least one server pod stays Ready during voluntary disruptions
+# (node drains, cluster upgrades), so a rolling node maintenance never
+# takes the API fully offline. Paired with the HPA minReplicas: 2 this
+# leaves headroom for one pod to be evicted at a time.
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: zk-drive-server
+  namespace: zk-drive
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: zk-drive-server

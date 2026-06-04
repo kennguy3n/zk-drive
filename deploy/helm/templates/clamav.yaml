@@ -1,0 +1,45 @@
+{{- if .Values.clamav.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: clamav
+  namespace: {{ include "zk-drive.namespace" . }}
+  labels:
+    {{- include "zk-drive.labels" . | nindent 4 }}
+spec:
+  selector:
+    app: clamav
+  ports:
+    - port: 3310
+      targetPort: 3310
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: clamav
+  namespace: {{ include "zk-drive.namespace" . }}
+  labels:
+    {{- include "zk-drive.labels" . | nindent 4 }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: clamav
+  template:
+    metadata:
+      labels:
+        app: clamav
+    spec:
+      containers:
+        - name: clamav
+          image: {{ .Values.clamav.image }}
+          ports:
+            - containerPort: 3310
+          readinessProbe:
+            tcpSocket:
+              port: 3310
+            initialDelaySeconds: 30
+            periodSeconds: 15
+          resources:
+            {{- toYaml .Values.clamav.resources | nindent 12 }}
+{{- end }}

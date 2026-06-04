@@ -1,0 +1,19 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "Capabilities for the main ZK Drive window: shell open (OAuth browser handoff), native folder picker, filesystem, notifications and auto-update.",
+  "windows": ["main"],
+  "permissions": [
+    "core:default",
+    "core:window:allow-show",
+    "core:window:allow-hide",
+    "core:window:allow-unminimize",
+    "core:window:allow-set-focus",
+    "dialog:default",
+    "dialog:allow-open",
+    "shell:allow-open",
+    "fs:default",
+    "notification:default",
+    "updater:default"
+  ]
+}

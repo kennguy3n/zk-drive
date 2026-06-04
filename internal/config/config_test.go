@@ -503,6 +503,42 @@ func TestWorkerMetricsAddrFromEnv(t *testing.T) {
 	}
 }
 
+// TestJWTKeyRefreshIntervalFromEnv pins the documented contract for
+// JWT_KEY_REFRESH_INTERVAL: unset/malformed → 60s default; an explicit
+// non-positive value disables the loop (0); positive values clamp to
+// [10s, 1h] so a "1s" can't hammer the DB and a "24h" typo can't defeat
+// cross-replica propagation.
+func TestJWTKeyRefreshIntervalFromEnv(t *testing.T) {
+	tests := []struct {
+		name  string
+		set   bool
+		value string
+		want  time.Duration
+	}{
+		{name: "unset_falls_back_to_default", set: false, want: 60 * time.Second},
+		{name: "malformed_falls_back_to_default", set: true, value: "not-a-duration", want: 60 * time.Second},
+		{name: "explicit_zero_disables", set: true, value: "0", want: 0},
+		{name: "negative_disables", set: true, value: "-5s", want: 0},
+		{name: "below_floor_clamps_up", set: true, value: "1s", want: 10 * time.Second},
+		{name: "in_range_passes_through", set: true, value: "90s", want: 90 * time.Second},
+		{name: "above_ceiling_clamps_down", set: true, value: "24h", want: time.Hour},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.set {
+				t.Setenv("JWT_KEY_REFRESH_INTERVAL", tc.value)
+			} else {
+				if err := os.Unsetenv("JWT_KEY_REFRESH_INTERVAL"); err != nil {
+					t.Fatalf("Unsetenv: %v", err)
+				}
+			}
+			if got := jwtKeyRefreshIntervalFromEnv(); got != tc.want {
+				t.Errorf("jwtKeyRefreshIntervalFromEnv() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
 // TestClampAuditRetentionDays exercises every branch of the
 // retention-day clamp so a future refactor that drops one of the
 // safety floors (negative input, zero input, sub-service-floor input,

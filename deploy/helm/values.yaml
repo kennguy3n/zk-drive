@@ -1,0 +1,284 @@
+# Default values for the zk-drive chart.
+# This is a YAML-formatted file. Override with `-f my-values.yaml` or
+# `--set key=value` at install/upgrade time.
+
+# -- Namespace the chart deploys into. Left empty so resources follow the
+# release namespace (`helm install -n <ns>`), the conventional Helm
+# behavior — `--set namespace.name=<ns>` only when you need to pin
+# resources to a namespace different from the release's. The chart does
+# NOT create the namespace by default (set namespace.create=true to manage
+# it here); `helm install -n zk-drive --create-namespace` is the common path.
+namespace:
+  name: ""
+  create: false
+
+# Image used by server, worker, migrate Job, and all CronJobs — every
+# entrypoint ships in one tag (Dockerfile builds /app/server,
+# /app/worker, /app/migrate, /app/reconciler, /app/orphan-gc,
+# /app/audit-archiver).
+image:
+  repository: ghcr.io/kennguy3n/zk-drive
+  tag: "0.1.0"
+  pullPolicy: IfNotPresent
+# Optional imagePullSecrets (names of existing docker-registry secrets).
+imagePullSecrets: []
+
+# Non-secret configuration → rendered into the ConfigMap and mounted
+# via envFrom on every workload.
+config:
+  DATABASE_URL: postgres://zkdrive:zkdrive@postgres.zk-drive.svc.cluster.local:5432/zkdrive?sslmode=disable
+  # Set true for production so DATABASE_URL is NOT rendered into the
+  # ConfigMap (which is unencrypted at rest and broadly RBAC-readable).
+  # When true, supply the real connection string — which embeds the DB
+  # password — via the Secret instead: either secrets.data.DATABASE_URL
+  # (with secrets.create=true) or an existingSecret carrying a
+  # DATABASE_URL key. Both flow through the same envFrom, so the value
+  # reaches every workload + the migrate Job. Default false keeps the
+  # in-cluster dev connection string above for local/staging use.
+  databaseUrlInSecret: false
+  NATS_URL: nats://nats.zk-drive.svc.cluster.local:4222
+  LISTEN_ADDR: ":8080"
+  RATE_LIMIT_PER_USER: "100"
+  RATE_LIMIT_PER_WORKSPACE: "500"
+  # Extra free-form key/value pairs merged into the ConfigMap.
+  extra: {}
+
+# Secret values → rendered into the Secret (stringData) when
+# secrets.create=true. For production, prefer secrets.create=false and
+# reference a pre-provisioned Secret via secrets.existingSecret
+# (e.g. created by External Secrets / Sealed Secrets / cloud SM).
+secrets:
+  create: true
+  existingSecret: ""
+  data:
+    JWT_SECRET: REPLACE_ME_32B_MINIMUM_SECRET_xxxxxxx
+    S3_ACCESS_KEY: REPLACE_ME
+    S3_SECRET_KEY: REPLACE_ME
+    S3_BUCKET: REPLACE_ME
+    S3_ENDPOINT: REPLACE_ME
+    GOOGLE_CLIENT_ID: ""
+    GOOGLE_CLIENT_SECRET: ""
+    MICROSOFT_CLIENT_ID: ""
+    MICROSOFT_CLIENT_SECRET: ""
+
+server:
+  replicas: 2
+  port: 8080
+  resources:
+    requests:
+      cpu: 250m
+      memory: 256Mi
+    limits:
+      cpu: 1000m
+      memory: 512Mi
+  # podAntiAffinity (spread across nodes) + topology spread (multi-AZ).
+  spread:
+    enabled: true
+    topologyKey: kubernetes.io/hostname
+    zoneKey: topology.kubernetes.io/zone
+  readinessProbe:
+    # Deep readiness check: /readyz pings Postgres/Redis/S3/NATS (checks
+    # run concurrently under a 900ms per-check budget) so a pod that has
+    # lost a dependency is pulled from the Service endpoints instead of
+    # serving failing traffic. This is what cmd/server/main.go documents
+    # for the readiness probe; /healthz is the shallow liveness check
+    # below (a failing liveness probe restarts the pod, which is the
+    # wrong response to a transient dependency outage).
+    path: /readyz
+    initialDelaySeconds: 5
+    periodSeconds: 10
+    timeoutSeconds: 3
+    failureThreshold: 3
+  livenessProbe:
+    path: /healthz
+    initialDelaySeconds: 15
+    periodSeconds: 15
+    timeoutSeconds: 3
+    failureThreshold: 3
+  hpa:
+    enabled: true
+    minReplicas: 2
+    maxReplicas: 20
+    targetCPUUtilizationPercentage: 70
+  pdb:
+    enabled: true
+    minAvailable: 1
+
+worker:
+  replicas: 2
+  # Dedicated /metrics + /healthz port. Set to "" / "off" via
+  # config.extra.WORKER_METRICS_ADDR to disable; then also set
+  # worker.metricsEnabled=false so probes/ports/HPA are dropped.
+  metricsPort: 9091
+  metricsEnabled: true
+  resources:
+    requests:
+      cpu: 500m
+      memory: 384Mi
+    limits:
+      cpu: 1000m
+      memory: 512Mi
+  spread:
+    enabled: true
+    topologyKey: kubernetes.io/hostname
+    zoneKey: topology.kubernetes.io/zone
+  readinessProbe:
+    path: /healthz
+    initialDelaySeconds: 5
+    periodSeconds: 10
+    timeoutSeconds: 3
+    failureThreshold: 3
+  livenessProbe:
+    path: /healthz
+    initialDelaySeconds: 15
+    periodSeconds: 15
+    timeoutSeconds: 3
+    failureThreshold: 3
+  hpa:
+    enabled: true
+    minReplicas: 2
+    maxReplicas: 10
+    # "cpu" (default, dependency-free) or "custom" to scale on the
+    # zkdrive_worker_jobs_total-derived Pods metric (needs the
+    # Prometheus Adapter to serve custom.metrics.k8s.io).
+    metric: cpu
+    targetCPUUtilizationPercentage: 70
+    custom:
+      metricName: zkdrive_worker_jobs_per_second
+      targetAverageValue: "10"
+  pdb:
+    enabled: true
+    minAvailable: 1
+
+# Database migration Job (runs as a Helm pre-install/pre-upgrade hook
+# so the schema is current before server/worker roll).
+migrate:
+  enabled: true
+  backoffLimit: 2
+  activeDeadlineSeconds: 600
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      cpu: 500m
+      memory: 256Mi
+
+# Background CronJobs. Set RECONCILE_INTERVAL_MINUTES / GC_INTERVAL_MINUTES
+# to 0 on the worker (config.extra) when enabling these to avoid the
+# in-process loop racing the CronJob on the same rows.
+cronjobs:
+  reconciler:
+    enabled: true
+    schedule: "17 * * * *"
+    activeDeadlineSeconds: 1800
+  orphanGc:
+    enabled: true
+    schedule: "37 */6 * * *"
+    activeDeadlineSeconds: 14400
+  auditArchiver:
+    enabled: true
+    schedule: "47 3 * * *"
+    activeDeadlineSeconds: 14400
+    # Opt-in gate; archiver no-ops until true.
+    enabledFlag: "true"
+    # The archiver is bound by S3 PUT latency and gzip CPU on the batch
+    # encoder; its memory limit is intentionally double the other
+    # CronJobs' (512Mi vs 256Mi) to hold the encoder working set +
+    # JSONL.gz scratch buffer — matching deploy/k8s/audit-archiver-cronjob.yaml.
+    # Each CronJob falls back to the shared cronjobs.resources below when
+    # its own .resources is unset, so only the archiver overrides it here.
+    resources:
+      requests:
+        cpu: 100m
+        memory: 128Mi
+      limits:
+        cpu: 500m
+        memory: 512Mi
+  # Shared default for any CronJob without its own .resources block
+  # (reconciler + orphan-gc; both are Postgres/S3-latency bound, not
+  # CPU/memory bound, so 256Mi is ample — see the raw manifests).
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      cpu: 500m
+      memory: 256Mi
+
+# In-cluster dependencies. For production set these to false and point
+# config.DATABASE_URL / NATS_URL / CLAMAV_ADDRESS at managed services.
+postgres:
+  enabled: true
+  image: postgres:16
+  user: zkdrive
+  password: zkdrive
+  database: zkdrive
+  storage: 20Gi
+  # "" → use the cluster default StorageClass.
+  storageClass: ""
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      cpu: 1000m
+      memory: 1Gi
+
+nats:
+  enabled: true
+  image: nats:2.10-alpine
+  resources:
+    requests:
+      cpu: 50m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+
+clamav:
+  enabled: true
+  image: clamav/clamav:stable
+  resources:
+    requests:
+      cpu: 200m
+      memory: 1Gi
+    limits:
+      cpu: 1000m
+      memory: 2Gi
+
+ingress:
+  enabled: true
+  className: nginx
+  host: zk-drive.example.com
+  tlsSecret: zk-drive-tls
+  annotations:
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/proxy-body-size: "50m"
+
+networkPolicy:
+  enabled: true
+  # Namespaces allowed to reach the workloads. Adjust to match your
+  # cluster's ingress-controller and monitoring namespaces.
+  ingressNamespace: ingress-nginx
+  monitoringNamespace: monitoring
+  dnsNamespace: kube-system
+  # Egress ports used ONLY when the matching backend is a managed/external
+  # endpoint (postgres/nats/clamav.enabled=false — RDS, Cloud SQL, NGS,
+  # managed ClamAV). In that case the chart renders a port-only egress on
+  # these ports so traffic reaches the managed endpoint under default-deny
+  # (same approach as redisPort / s3Port). Override if your managed endpoint
+  # listens on a non-standard port (e.g. a PgBouncer/RDS Proxy pooler on
+  # 6432). When the dependency runs in-cluster (enabled=true) these knobs
+  # are intentionally ignored: egress is scoped to the backend pod on its
+  # fixed listen port (5432/4222/3310), matching that pod's ingress allow.
+  postgresPort: 5432
+  natsPort: 4222
+  clamavPort: 3310
+  # Allow egress to Redis on this port (managed/external friendly).
+  redisPort: 6379
+  # Allow egress to the S3 / zk-object-fabric endpoint on this port
+  # (port-only, so managed/external S3 works). Server uses it for the
+  # /readyz HeadBucket check; worker for previews, scanning, orphan-gc,
+  # and audit archiving.
+  s3Port: 443

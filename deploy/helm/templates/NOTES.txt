@@ -1,0 +1,29 @@
+ZK Drive {{ .Chart.AppVersion }} installed as release "{{ .Release.Name }}" in namespace "{{ include "zk-drive.namespace" . }}".
+
+Image: {{ include "zk-drive.image" . }}
+
+Next steps:
+{{- if and .Values.secrets.create (not .Values.secrets.existingSecret) }}
+  1. The chart created the Secret "zk-drive-secrets" with PLACEHOLDER values.
+     Replace JWT_SECRET (>= 32 bytes) and S3 credentials before serving traffic:
+       helm upgrade {{ .Release.Name }} deploy/helm -n {{ include "zk-drive.namespace" . }} \
+         --set secrets.data.JWT_SECRET=... --set secrets.data.S3_BUCKET=...
+     Or set secrets.create=false and reference an existing Secret via
+     secrets.existingSecret.
+{{- else }}
+  1. Workloads reference the existing Secret "{{ include "zk-drive.secretName" . }}".
+     Ensure it exists and carries JWT_SECRET + S3 credentials.
+{{- end }}
+{{- if .Values.ingress.enabled }}
+  2. Create the TLS secret "{{ .Values.ingress.tlsSecret }}" (cert-manager or manually)
+     so the Ingress for {{ .Values.ingress.host }} can terminate TLS.
+{{- end }}
+{{- if .Values.postgres.enabled }}
+  3. The in-cluster Postgres StatefulSet is single-replica and for dev/staging
+     only. For production set postgres.enabled=false and point
+     config.DATABASE_URL at managed Postgres (RDS / Cloud SQL).
+{{- end }}
+
+Check rollout:
+  kubectl -n {{ include "zk-drive.namespace" . }} rollout status deploy/zk-drive-server
+  kubectl -n {{ include "zk-drive.namespace" . }} get hpa,pdb,networkpolicy

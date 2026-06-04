@@ -14,6 +14,36 @@ import (
 type Config struct {
 	DatabaseURL   string
 	JWTSecret     string
+
+	// DB connection-pool sizing. These tune the pgxpool created by
+	// internal/database.ConnectWithPool. Sourced from DB_MAX_CONNS,
+	// DB_MIN_CONNS, and DB_MAX_CONN_IDLE_TIME. DBMaxConns is clamped
+	// to [2, 200] and DBMinConns to [0, DBMaxConns] at load time so a
+	// fat-fingered env var cannot starve the pool (max < min) or
+	// exhaust Postgres' max_connections.
+	DBMaxConns        int32
+	DBMinConns        int32
+	DBMaxConnIdleTime time.Duration
+
+	// JWTAlgorithm selects the session-token signing algorithm:
+	//   - "auto" (default): sign with ES256 when an active asymmetric
+	//     signing key exists in jwt_signing_keys, otherwise fall back
+	//     to HS256 using JWTSecret. Verification always accepts both.
+	//   - "ES256": force ES256 signing (still verifies HS256 tokens
+	//     issued before the cutover so existing sessions survive).
+	//   - "HS256": force HS256 signing (legacy behaviour).
+	// Parsed case-insensitively; unrecognised values fall back to
+	// "auto".
+	JWTAlgorithm string
+
+	// JWTKeyRefreshInterval is how often each replica re-reads the
+	// jwt_signing_keys table so that a key rotation performed on one
+	// replica (POST /api/admin/jwt/rotate) propagates to all others
+	// without a restart. Sourced from JWT_KEY_REFRESH_INTERVAL and
+	// clamped to [10s, 1h]; a non-positive value disables the
+	// background refresh (single-replica deployments). Default 60s.
+	JWTKeyRefreshInterval time.Duration
+
 	ListenAddr    string
 	S3Endpoint    string
 	S3Bucket      string
@@ -350,9 +380,17 @@ func Load() (*Config, error) {
 // function so adding a new field doesn't require touching multiple
 // constructors.
 func buildConfigFromEnv() *Config {
+	// Read DB_MAX_CONNS once: DBMinConns is clamped against the same
+	// resolved maximum, so re-reading the env var would be redundant.
+	dbMaxConns := dbMaxConnsFromEnv()
 	return &Config{
 		DatabaseURL:           os.Getenv("DATABASE_URL"),
 		JWTSecret:             os.Getenv("JWT_SECRET"),
+		DBMaxConns:            dbMaxConns,
+		DBMinConns:            dbMinConnsFromEnv(dbMaxConns),
+		DBMaxConnIdleTime:     parseDurationDefault(os.Getenv("DB_MAX_CONN_IDLE_TIME"), defaultDBMaxConnIdleTime),
+		JWTAlgorithm:          normaliseJWTAlgorithm(os.Getenv("JWT_ALGORITHM")),
+		JWTKeyRefreshInterval: jwtKeyRefreshIntervalFromEnv(),
 		ListenAddr:            getEnvDefault("LISTEN_ADDR", ":8080"),
 		S3Endpoint:            os.Getenv("S3_ENDPOINT"),
 		S3Bucket:              os.Getenv("S3_BUCKET"),
@@ -678,6 +716,110 @@ func parseDurationDefault(s string, def time.Duration) time.Duration {
 	d, err := time.ParseDuration(s)
 	if err != nil {
 		return def
+	}
+	return d
+}
+
+// DB connection-pool defaults and bounds. The pool is created by
+// internal/database.ConnectWithPool; these mirror the documented
+// defaults in docs/CONFIGURATION.md.
+const (
+	defaultDBMaxConns = 20
+	minDBMaxConns     = 2
+	maxDBMaxConns     = 200
+	defaultDBMinConns = 2
+
+	defaultDBMaxConnIdleTime = 30 * time.Minute
+)
+
+// dbMaxConnsFromEnv parses DB_MAX_CONNS and clamps the result to
+// [minDBMaxConns, maxDBMaxConns]. An unset / non-positive / malformed
+// value falls back to defaultDBMaxConns (operators most likely forgot
+// to set it), and an out-of-range value clamps to the nearest bound
+// so a typo can neither starve the pool nor exhaust Postgres'
+// max_connections.
+func dbMaxConnsFromEnv() int32 {
+	n := parseIntDefault(os.Getenv("DB_MAX_CONNS"), defaultDBMaxConns)
+	if n < minDBMaxConns {
+		n = minDBMaxConns
+	}
+	if n > maxDBMaxConns {
+		n = maxDBMaxConns
+	}
+	return int32(n)
+}
+
+// dbMinConnsFromEnv parses DB_MIN_CONNS and clamps it to
+// [0, maxConns]. Unlike parseIntDefault it honours an explicit 0
+// (a zero floor is legal — the pool simply opens connections lazily),
+// so the parse is done directly here. A value above maxConns clamps
+// down to maxConns so MinConns can never exceed MaxConns (pgxpool
+// rejects that configuration at NewWithConfig time).
+func dbMinConnsFromEnv(maxConns int32) int32 {
+	// n stays non-negative by construction: it starts at the default and
+	// is only reassigned from an explicitly-parsed value when v >= 0, so a
+	// negative DB_MIN_CONNS is ignored (default retained) rather than
+	// clamped — no separate floor check is needed.
+	n := defaultDBMinConns
+	if s := strings.TrimSpace(os.Getenv("DB_MIN_CONNS")); s != "" {
+		if v, err := strconv.Atoi(s); err == nil && v >= 0 {
+			n = v
+		}
+	}
+	if int32(n) > maxConns {
+		return maxConns
+	}
+	return int32(n)
+}
+
+// normaliseJWTAlgorithm canonicalises the JWT_ALGORITHM env var to
+// one of "auto", "ES256", or "HS256". Parsing is case-insensitive and
+// whitespace-tolerant; an empty or unrecognised value falls back to
+// "auto" so a typo can't silently disable asymmetric signing.
+func normaliseJWTAlgorithm(s string) string {
+	switch strings.ToUpper(strings.TrimSpace(s)) {
+	case "ES256":
+		return "ES256"
+	case "HS256":
+		return "HS256"
+	default:
+		return "auto"
+	}
+}
+
+// JWT signing-key background-refresh defaults and bounds. Mirrors the
+// documented values in docs/CONFIGURATION.md.
+const (
+	defaultJWTKeyRefreshInterval = 60 * time.Second
+	minJWTKeyRefreshInterval     = 10 * time.Second
+	maxJWTKeyRefreshInterval     = time.Hour
+)
+
+// jwtKeyRefreshIntervalFromEnv parses JWT_KEY_REFRESH_INTERVAL. An
+// unset or malformed value falls back to defaultJWTKeyRefreshInterval.
+// An explicit non-positive value (e.g. "0") disables the background
+// refresh and is returned as 0 — appropriate for single-replica
+// deployments where rotation already reloads locally. Any positive
+// value is clamped to [minJWTKeyRefreshInterval, maxJWTKeyRefreshInterval]
+// so an over-eager "1s" cannot hammer the database and a "24h" typo
+// cannot effectively defeat cross-replica propagation.
+func jwtKeyRefreshIntervalFromEnv() time.Duration {
+	s := strings.TrimSpace(os.Getenv("JWT_KEY_REFRESH_INTERVAL"))
+	if s == "" {
+		return defaultJWTKeyRefreshInterval
+	}
+	d, err := time.ParseDuration(s)
+	if err != nil {
+		return defaultJWTKeyRefreshInterval
+	}
+	if d <= 0 {
+		return 0
+	}
+	if d < minJWTKeyRefreshInterval {
+		return minJWTKeyRefreshInterval
+	}
+	if d > maxJWTKeyRefreshInterval {
+		return maxJWTKeyRefreshInterval
 	}
 	return d
 }
