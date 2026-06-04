@@ -1,6 +1,8 @@
-# S3 bucket holding the built frontend (frontend/dist) and preview
-# thumbnails fronted by CloudFront. This is NOT the object-storage bucket
-# for user files — that lives on the zk-object-fabric gateway (S3_BUCKET).
+# S3 bucket holding ONLY the built frontend (frontend/dist) — public web
+# artifacts (JS/CSS/HTML) — fronted by CloudFront. This is NOT the
+# object-storage bucket for user files, and it does NOT hold preview
+# thumbnails: both live on the zk-object-fabric gateway (S3_BUCKET), served
+# through the app behind auth (internal/preview/preview.go).
 #
 # The bucket is fully private; CloudFront reaches it through an Origin
 # Access Control (see cloudfront.tf), and the bucket policy only grants

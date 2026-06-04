@@ -88,7 +88,41 @@ resource "google_secret_manager_secret_version" "database_url" {
   secret_data = "postgres://${var.db_username}:${random_password.db.result}@127.0.0.1:5432/${var.db_name}?sslmode=disable"
 }
 
+# Direct DATABASE_URL for the short-lived audit-archiver Cloud Run Job, which
+# does not run a Cloud SQL Proxy sidecar (a non-exiting proxy container would
+# keep a one-shot job task from completing — the same rationale the AWS module
+# uses for database_url_direct on its cron tasks). The job reaches the instance
+# at its private IP over the VPC connector; the instance is private-IP only
+# (cloudsql.tf ipv4_enabled=false) and does not require SSL, so traffic stays on
+# the VPC. The long-lived server/worker keep the proxy-terminated 127.0.0.1 URL.
+resource "google_secret_manager_secret" "database_url_direct" {
+  secret_id = "${local.name}-DATABASE_URL_DIRECT"
+
+  labels = local.common_labels
+
+  replication {
+    auto {}
+  }
+
+  depends_on = [google_project_service.this]
+}
+
+resource "google_secret_manager_secret_version" "database_url_direct" {
+  secret      = google_secret_manager_secret.database_url_direct.id
+  secret_data = "postgres://${var.db_username}:${random_password.db.result}@${google_sql_database_instance.this.private_ip_address}:5432/${var.db_name}?sslmode=disable"
+}
+
+# Stripe keys are created (and injected into Cloud Run) ONLY when billing is
+# configured. Previously they were always created and seeded with a single
+# space when unset (Secret Manager rejects empty payloads). config.go reads
+# STRIPE_SECRET_KEY without trimming, so a " " placeholder reads as non-empty
+# and the server logs billing "enabled" while admin billing routes fail with
+# a Stripe auth error. Conditional creation leaves the env var absent when
+# billing is off, so the app reports disabled cleanly. (S3 creds keep the
+# space-seed because validateS3Group TrimSpace-checks them, turning a space
+# into a clear boot error instead.)
 resource "google_secret_manager_secret" "stripe_secret_key" {
+  count     = var.stripe_secret_key != "" ? 1 : 0
   secret_id = "${local.name}-STRIPE_SECRET_KEY"
 
   labels = local.common_labels
@@ -101,13 +135,13 @@ resource "google_secret_manager_secret" "stripe_secret_key" {
 }
 
 resource "google_secret_manager_secret_version" "stripe_secret_key" {
-  secret = google_secret_manager_secret.stripe_secret_key.id
-  # Secret Manager rejects empty payloads; seed a single space when no key
-  # is configured so the version (and the Cloud Run secret ref) is valid.
-  secret_data = var.stripe_secret_key != "" ? var.stripe_secret_key : " "
+  count       = var.stripe_secret_key != "" ? 1 : 0
+  secret      = google_secret_manager_secret.stripe_secret_key[0].id
+  secret_data = var.stripe_secret_key
 }
 
 resource "google_secret_manager_secret" "stripe_webhook_secret" {
+  count     = var.stripe_webhook_secret != "" ? 1 : 0
   secret_id = "${local.name}-STRIPE_WEBHOOK_SECRET"
 
   labels = local.common_labels
@@ -120,8 +154,9 @@ resource "google_secret_manager_secret" "stripe_webhook_secret" {
 }
 
 resource "google_secret_manager_secret_version" "stripe_webhook_secret" {
-  secret      = google_secret_manager_secret.stripe_webhook_secret.id
-  secret_data = var.stripe_webhook_secret != "" ? var.stripe_webhook_secret : " "
+  count       = var.stripe_webhook_secret != "" ? 1 : 0
+  secret      = google_secret_manager_secret.stripe_webhook_secret[0].id
+  secret_data = var.stripe_webhook_secret
 }
 
 # zk-object-fabric storage credentials. config.go's validateS3Group requires
@@ -143,6 +178,19 @@ resource "google_secret_manager_secret" "s3_access_key" {
 resource "google_secret_manager_secret_version" "s3_access_key" {
   secret      = google_secret_manager_secret.s3_access_key.id
   secret_data = var.fabric_access_key != "" ? var.fabric_access_key : " "
+
+  # Fail fast at plan time on the half-configured state (fabric_endpoint set
+  # but the credentials left blank) instead of letting the app boot, hit
+  # validateS3Group's TrimSpace check on the " " placeholder, and crash-loop.
+  # A precondition is used rather than a variable `validation` block because
+  # the condition spans multiple variables (cross-variable validation needs
+  # Terraform >= 1.9, but this module supports >= 1.5).
+  lifecycle {
+    precondition {
+      condition     = var.fabric_endpoint == "" || var.fabric_access_key != ""
+      error_message = "fabric_access_key must be set when fabric_endpoint is configured: the app's validateS3Group requires S3_ACCESS_KEY whenever S3_ENDPOINT is non-empty."
+    }
+  }
 }
 
 resource "google_secret_manager_secret" "s3_secret_key" {
@@ -160,19 +208,33 @@ resource "google_secret_manager_secret" "s3_secret_key" {
 resource "google_secret_manager_secret_version" "s3_secret_key" {
   secret      = google_secret_manager_secret.s3_secret_key.id
   secret_data = var.fabric_secret_key != "" ? var.fabric_secret_key : " "
+
+  lifecycle {
+    precondition {
+      condition     = var.fabric_endpoint == "" || var.fabric_secret_key != ""
+      error_message = "fabric_secret_key must be set when fabric_endpoint is configured: the app's validateS3Group requires S3_SECRET_KEY whenever S3_ENDPOINT is non-empty."
+    }
+  }
 }
 
 # Grant the application service account read access to each secret.
 locals {
-  app_secret_ids = {
+  # Stripe secret ids, present only when billing is configured (the resources
+  # are count-gated above). A for over the resource list yields a 0- or
+  # 1-entry map with no index errors.
+  stripe_secret_ids = merge(
+    { for s in google_secret_manager_secret.stripe_secret_key : "stripe_secret_key" => s.secret_id },
+    { for s in google_secret_manager_secret.stripe_webhook_secret : "stripe_webhook_secret" => s.secret_id },
+  )
+
+  app_secret_ids = merge({
     jwt                       = google_secret_manager_secret.jwt.secret_id
     credential_encryption_key = google_secret_manager_secret.credential_encryption_key.secret_id
     database_url              = google_secret_manager_secret.database_url.secret_id
-    stripe_secret_key         = google_secret_manager_secret.stripe_secret_key.secret_id
-    stripe_webhook_secret     = google_secret_manager_secret.stripe_webhook_secret.secret_id
+    database_url_direct       = google_secret_manager_secret.database_url_direct.secret_id
     s3_access_key             = google_secret_manager_secret.s3_access_key.secret_id
     s3_secret_key             = google_secret_manager_secret.s3_secret_key.secret_id
-  }
+  }, local.stripe_secret_ids)
 }
 
 resource "google_secret_manager_secret_iam_member" "app" {

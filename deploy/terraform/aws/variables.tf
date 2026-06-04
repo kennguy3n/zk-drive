@@ -44,6 +44,13 @@ variable "az_count" {
   description = "Number of availability zones to spread subnets across. Multi-AZ RDS and the ALB both require at least two."
   type        = number
   default     = 2
+
+  # Fail fast at plan time rather than letting the ALB / Multi-AZ RDS creation
+  # error out mid-apply (parity with the GCP module's plan-time validations).
+  validation {
+    condition     = var.az_count >= 2
+    error_message = "az_count must be at least 2: the ALB requires subnets in two AZs and RDS Multi-AZ needs a standby in a second AZ."
+  }
 }
 
 # ----------------------------------------------------------------------------
@@ -76,6 +83,12 @@ variable "rds_replica_instance_class" {
   description = "Instance class for the RDS read replica."
   type        = string
   default     = "db.t4g.medium"
+}
+
+variable "rds_max_connections" {
+  description = "Postgres max_connections for the primary instance, used to derive the 80% DatabaseConnections alarm threshold. Default ~410 matches db.t4g.medium's memory-derived default; set it to match the chosen rds_instance_class."
+  type        = number
+  default     = 410
 }
 
 variable "rds_allocated_storage" {
@@ -124,9 +137,68 @@ variable "redis_engine_version" {
   default     = "7.1"
 }
 
+variable "redis_transit_encryption" {
+  description = <<-EOT
+    Enable in-transit (TLS) encryption for ElastiCache Redis. Defaults to false:
+    the cluster lives on private subnets reachable only by the app tasks, and
+    disabling TLS avoids the per-op handshake/latency cost. Set to true for
+    compliance regimes (SOC2/HIPAA) that mandate encryption in transit even
+    inside the VPC; the app then connects over `rediss://` (ElastiCache presents
+    an Amazon-CA-signed cert that the standard go-redis client trusts via the
+    system root store, so no app change is required).
+  EOT
+  type        = bool
+  default     = false
+}
+
+variable "redis_auth_token_enabled" {
+  description = <<-EOT
+    Enable Redis AUTH (a password) on the ElastiCache replication group.
+    Defaults to false: the cluster is on private subnets reachable only by the
+    app security group, so network isolation is the primary control. Set to true
+    for compliance regimes (SOC2/HIPAA) that require authentication on every data
+    store. When enabled, Terraform generates the token, sets it on the cluster,
+    and injects the full credentialed connection string as the REDIS_URL *secret*
+    (Secrets Manager) instead of a plaintext task-definition env var, so the token
+    never appears in the ECS API/console. AWS requires in-transit encryption for
+    AUTH, so this implies redis_transit_encryption=true (enforced by a
+    precondition). go-redis parses the rediss://:<token>@host form natively, so no
+    app change is required.
+  EOT
+  type        = bool
+  default     = false
+}
+
+variable "secret_recovery_window_days" {
+  description = <<-EOT
+    Recovery window (in days) for the AWS Secrets Manager secrets this module
+    creates. AWS retains a deleted secret for this window before permanently
+    removing it, during which the secret NAME stays reserved — so a
+    `terraform destroy` followed by `terraform apply` within the window fails
+    with "already scheduled for deletion". Defaults to 7 (AWS's own default is
+    30) to balance accidental-deletion protection against iteration speed. Set
+    to 0 for ephemeral/dev stacks so a destroy frees the names immediately and
+    re-apply works right away. Valid values: 0 (immediate) or 7-30.
+  EOT
+  type        = number
+  default     = 7
+
+  validation {
+    condition     = var.secret_recovery_window_days == 0 || (var.secret_recovery_window_days >= 7 && var.secret_recovery_window_days <= 30)
+    error_message = "secret_recovery_window_days must be 0 (immediate deletion) or between 7 and 30."
+  }
+}
+
 # ----------------------------------------------------------------------------
 # ECS service sizing. CPU is in vCPU-units (1024 = 1 vCPU), memory in MiB.
-# Limits mirror deploy/docker-compose.prod.yml.
+# CPU tiers mirror deploy/docker-compose.prod.yml (server/worker 1 vCPU, NATS
+# 0.5 vCPU). Memory is set to the Fargate-valid *minimum* for each CPU tier
+# rather than the compose memory limit: Fargate only accepts a fixed set of
+# CPU/memory pairings (1 vCPU -> 2048-8192 MiB, 0.5 vCPU -> 1024-4096 MiB),
+# so compose's 512 MiB limit is not a legal Fargate task size and would make
+# `terraform apply` fail at RegisterTaskDefinition. The app's actual working
+# set is well under these minimums; the extra headroom is unavoidable, not a
+# deliberate reservation.
 # ----------------------------------------------------------------------------
 
 variable "server_cpu" {
@@ -136,9 +208,9 @@ variable "server_cpu" {
 }
 
 variable "server_memory" {
-  description = "Fargate memory (MiB) for the server task."
+  description = "Fargate memory (MiB) for the server task. Minimum valid value for a 1 vCPU (1024) task is 2048."
   type        = number
-  default     = 512
+  default     = 2048
 }
 
 variable "server_desired_count" {
@@ -165,6 +237,12 @@ variable "server_target_requests_per_instance" {
   default     = 12000
 }
 
+variable "alb_idle_timeout" {
+  description = "ALB connection idle timeout (seconds). The app's WebSocket endpoints (/api/ws, /api/documents/{id}/ws) ping every ~54s (pingPeriod = pongWait*9/10, pongWait=60s), so the AWS default of 60s leaves only a ~6s margin: a delayed ping (GC pause, slow write, network jitter) could trip the idle timeout and drop a live collab session. Default 300s gives comfortable headroom over the ping period while still reaping genuinely idle connections. (This is an idle timeout, reset by the keepalive ping — unlike GCP's backend_timeout_sec, which is a max connection lifetime.)"
+  type        = number
+  default     = 300
+}
+
 variable "worker_cpu" {
   description = "Fargate CPU units for the worker task (1024 = 1 vCPU)."
   type        = number
@@ -172,9 +250,9 @@ variable "worker_cpu" {
 }
 
 variable "worker_memory" {
-  description = "Fargate memory (MiB) for the worker task."
+  description = "Fargate memory (MiB) for the worker task. Minimum valid value for a 1 vCPU (1024) task is 2048."
   type        = number
-  default     = 512
+  default     = 2048
 }
 
 variable "worker_desired_count" {
@@ -220,9 +298,9 @@ variable "nats_cpu" {
 }
 
 variable "nats_memory" {
-  description = "Fargate memory (MiB) for the NATS task."
+  description = "Fargate memory (MiB) for the NATS task. Minimum valid value for a 0.5 vCPU (512) task is 1024."
   type        = number
-  default     = 512
+  default     = 1024
 }
 
 variable "nats_storage_gib" {
@@ -284,6 +362,12 @@ variable "log_retention_days" {
   description = "Retention period (days) for CloudWatch log groups."
   type        = number
   default     = 30
+}
+
+variable "audit_log_archive_enabled" {
+  description = "Sets AUDIT_LOG_ARCHIVE_ENABLED on the daily audit-archiver cron task. The audit-archiver binary is opt-in (defaults to false) and exits as a no-op until this is true, so the scheduled task does nothing until enabled. Leave false until zk-object-fabric storage (fabric_endpoint/bucket) is configured and the archive prefix is confirmed writable; the K8s deployment hardcodes this true (deploy/k8s/audit-archiver-cronjob.yaml)."
+  type        = bool
+  default     = false
 }
 
 # ----------------------------------------------------------------------------

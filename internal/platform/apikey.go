@@ -3,7 +3,6 @@ package platform
 import (
 	"context"
 	"crypto/rand"
-	"crypto/sha256"
 	"encoding/base64"
 	"errors"
 	"fmt"
@@ -23,10 +22,55 @@ import (
 // grep logs / secret stores for the prefix.
 const APIKeyPrefix = "pk_"
 
-// apiKeyRandomBytes is the entropy of the random portion of a key.
-// 32 bytes (256 bits) base64url-encodes to 43 characters; with the
-// prefix the whole token stays well under bcrypt's 72-byte input cap.
-const apiKeyRandomBytes = 32
+// A platform key is "pk_<lookup><secret>": a fixed-width, non-secret
+// lookup id followed by the secret. The lookup id is stored verbatim
+// (indexed, UNIQUE) so Authenticate selects the single candidate row
+// in O(1) instead of scanning and bcrypt-comparing every active key;
+// only the matched row's hash is then bcrypt-verified. The secret
+// carries the security — the lookup id is just a selector.
+//
+//   apiKeyLookupBytes  12 bytes (96 bits)  -> 16 base64url chars
+//   apiKeySecretBytes  24 bytes (192 bits) -> 32 base64url chars
+//
+// Both base64url-encode without padding, so the lookup is always the
+// first apiKeyLookupLen characters after the prefix and parsing needs
+// no delimiter (base64url's alphabet itself contains '_').
+const (
+	apiKeyLookupBytes = 12
+	apiKeySecretBytes = 24
+)
+
+// apiKeyLookupLen is the encoded width of the lookup id (16). Computed
+// from the encoding so it tracks apiKeyLookupBytes.
+var apiKeyLookupLen = base64.RawURLEncoding.EncodedLen(apiKeyLookupBytes)
+
+// bcryptMaxInputBytes is the input length beyond which bcrypt silently
+// truncates. The full key plaintext must stay at or below it so every
+// byte of the secret contributes to the stored hash.
+const bcryptMaxInputBytes = 72
+
+// apiKeyPlaintextLen is the byte length of a generated key plaintext:
+// APIKeyPrefix + base64url(lookup) + base64url(secret). RawURLEncoding
+// adds no padding, so it encodes n bytes as ceil(n*8/6) = (n*8+5)/6
+// chars; this mirrors base64.RawURLEncoding.EncodedLen in a form usable
+// in a constant expression.
+const apiKeyPlaintextLen = len(APIKeyPrefix) +
+	(apiKeyLookupBytes*8+5)/6 +
+	(apiKeySecretBytes*8+5)/6
+
+// Compile-time guard: growing apiKeyLookupBytes/apiKeySecretBytes past
+// bcrypt's input ceiling would silently truncate the key and discard
+// entropy. Keeping this as a build failure prevents a latent security
+// regression. (uint(negative constant) does not compile.)
+const _ = uint(bcryptMaxInputBytes - apiKeyPlaintextLen)
+
+// dummyAPIKeyHash is bcrypt-compared when no candidate row is found so
+// a missing lookup id costs the same wall-clock time as a wrong secret
+// (a present lookup id is not itself a secret, but equalizing keeps the
+// auth path free of an obvious timing oracle). The placeholder input is
+// sized to apiKeyPlaintextLen so the miss path hashes exactly as many
+// bytes as a real key, making the equalization exact rather than close.
+var dummyAPIKeyHash, _ = bcrypt.GenerateFromPassword([]byte(strings.Repeat("k", apiKeyPlaintextLen)), bcrypt.DefaultCost)
 
 // Coarse capability strings stored in platform_api_keys.permissions
 // and checked by the platform-auth middleware. Kept as plain strings
@@ -77,16 +121,50 @@ func (k *APIKey) HasPermission(permission string) bool {
 	return false
 }
 
-// generateAPIKey returns a fresh plaintext key in the form
-// "pk_<base64url-no-padding>". Only the caller (APIKeyStore.Create)
-// ever sees the plaintext; the store immediately bcrypt-hashes it for
-// persistence.
-func generateAPIKey() (string, error) {
-	buf := make([]byte, apiKeyRandomBytes)
-	if _, err := rand.Read(buf); err != nil {
-		return "", fmt.Errorf("platform: read random: %w", err)
+// validPermission reports whether p is one of the recognised platform
+// capability strings. Create rejects unknown permissions so an operator
+// typo ("tenant:readd") fails loudly at creation instead of silently
+// minting a key that authenticates but is inert against every guard.
+func validPermission(p string) bool {
+	switch p {
+	case PermTenantRead, PermTenantWrite, PermTenantSuspend,
+		PermBillingReconcile, PermAlertsRead, PermAlertsWrite, PermKeysManage:
+		return true
 	}
-	return APIKeyPrefix + base64.RawURLEncoding.EncodeToString(buf), nil
+	return false
+}
+
+// generateAPIKey returns a fresh plaintext key "pk_<lookup><secret>"
+// plus the lookup id to persist alongside the hash. Only the caller
+// (APIKeyStore.Create) ever sees the plaintext; the store immediately
+// bcrypt-hashes it for persistence.
+func generateAPIKey() (plaintext, lookup string, err error) {
+	lookupBuf := make([]byte, apiKeyLookupBytes)
+	if _, err := rand.Read(lookupBuf); err != nil {
+		return "", "", fmt.Errorf("platform: read random: %w", err)
+	}
+	secretBuf := make([]byte, apiKeySecretBytes)
+	if _, err := rand.Read(secretBuf); err != nil {
+		return "", "", fmt.Errorf("platform: read random: %w", err)
+	}
+	lookup = base64.RawURLEncoding.EncodeToString(lookupBuf)
+	secret := base64.RawURLEncoding.EncodeToString(secretBuf)
+	return APIKeyPrefix + lookup + secret, lookup, nil
+}
+
+// parseAPIKeyLookup extracts the non-secret lookup id from a presented
+// token. It returns false for anything that is not a well-formed
+// "pk_<lookup><secret>" (wrong prefix, or too short to carry both the
+// lookup id and at least one secret character).
+func parseAPIKeyLookup(presented string) (string, bool) {
+	if !strings.HasPrefix(presented, APIKeyPrefix) {
+		return "", false
+	}
+	rest := presented[len(APIKeyPrefix):]
+	if len(rest) <= apiKeyLookupLen {
+		return "", false
+	}
+	return rest[:apiKeyLookupLen], true
 }
 
 // hashAPIKey bcrypt-hashes a plaintext key. bcrypt salts internally so
@@ -98,19 +176,6 @@ func hashAPIKey(plaintext string) ([]byte, error) {
 		return nil, fmt.Errorf("platform: hash api key: %w", err)
 	}
 	return h, nil
-}
-
-// lookupDigest derives the deterministic SHA-256 digest stored in
-// platform_api_keys.key_lookup. Unlike the bcrypt hash (salted, so it
-// cannot be looked up), the digest is a stable function of the
-// plaintext, so Authenticate can fetch the single matching row by
-// digest instead of scanning every key. This is safe to index and
-// equality-match on because the plaintext carries 256 bits of entropy,
-// making the digest effectively unguessable; the bcrypt hash remains
-// the actual verifier.
-func lookupDigest(plaintext string) []byte {
-	sum := sha256.Sum256([]byte(plaintext))
-	return sum[:]
 }
 
 // APIKeyStore persists and authenticates platform API keys against
@@ -127,18 +192,24 @@ func NewAPIKeyStore(pool *pgxpool.Pool) *APIKeyStore {
 // Create mints a new key, stores its bcrypt hash, and returns both the
 // row metadata and the one-time plaintext. The plaintext is the ONLY
 // time the caller can read the usable key — it is never recoverable
-// afterwards. Permissions are stored verbatim; an empty slice yields a
-// key that authenticates but carries no capabilities (useful as a
+// afterwards. Permissions are validated against the known capability
+// constants (an unknown one is rejected); an empty slice yields a key
+// that authenticates but carries no capabilities (useful as a
 // placeholder before an operator grants scopes).
 func (s *APIKeyStore) Create(ctx context.Context, label string, permissions []string) (*APIKey, string, error) {
 	label = strings.TrimSpace(label)
 	if label == "" {
-		return nil, "", errors.New("platform: api key label is required")
+		return nil, "", fmt.Errorf("%w: api key label is required", ErrInvalidArgument)
 	}
 	if permissions == nil {
 		permissions = []string{}
 	}
-	plaintext, err := generateAPIKey()
+	for _, p := range permissions {
+		if !validPermission(p) {
+			return nil, "", fmt.Errorf("%w: unknown permission %q", ErrInvalidArgument, p)
+		}
+	}
+	plaintext, lookup, err := generateAPIKey()
 	if err != nil {
 		return nil, "", err
 	}
@@ -146,9 +217,8 @@ func (s *APIKeyStore) Create(ctx context.Context, label string, permissions []st
 	if err != nil {
 		return nil, "", err
 	}
-	lookup := lookupDigest(plaintext)
 	const q = `
-INSERT INTO platform_api_keys (key_hash, key_lookup, label, permissions)
+INSERT INTO platform_api_keys (key_hash, lookup_id, label, permissions)
 VALUES ($1, $2, $3, $4)
 RETURNING id, label, permissions, created_at, last_used_at, revoked_at`
 	key := &APIKey{}
@@ -209,34 +279,35 @@ WHERE id = $1`
 // any non-match (bad prefix, unknown, revoked). On success it
 // best-effort refreshes last_used_at.
 //
-// The presented token's deterministic SHA-256 digest selects at most
-// ONE candidate row through the unique key_lookup index, so the cost is
-// a single indexed fetch plus a single bcrypt comparison regardless of
-// how many keys exist. This bounds the work an unauthenticated caller
-// can force per request (the previous linear scan let a bogus token
-// trigger one bcrypt hash per stored key). The bcrypt compare on the
-// matched row is retained as defense-in-depth: the digest only selects
-// the candidate, the salted bcrypt hash is still the verifier.
+// The non-secret lookup id embedded in the token selects the single
+// candidate row via the UNIQUE index, so authentication is O(1) in the
+// number of keys (no full scan) and only that row's bcrypt hash is
+// verified. When no row matches the lookup id a dummy bcrypt compare is
+// still performed so the "unknown key" path costs roughly the same as
+// the "wrong secret" path.
 func (s *APIKeyStore) Authenticate(ctx context.Context, presented string) (*APIKey, error) {
 	presented = strings.TrimSpace(presented)
-	if !strings.HasPrefix(presented, APIKeyPrefix) {
+	lookup, ok := parseAPIKeyLookup(presented)
+	if !ok {
 		return nil, ErrAPIKeyInvalid
 	}
 	const q = `
 SELECT id, key_hash, label, permissions, created_at, last_used_at, revoked_at
 FROM platform_api_keys
-WHERE key_lookup = $1 AND revoked_at IS NULL`
+WHERE lookup_id = $1 AND revoked_at IS NULL`
 	var (
 		k    APIKey
 		hash []byte
 	)
-	err := s.pool.QueryRow(ctx, q, lookupDigest(presented)).Scan(
+	err := s.pool.QueryRow(ctx, q, lookup).Scan(
 		&k.ID, &hash, &k.Label, &k.Permissions, &k.CreatedAt, &k.LastUsedAt, &k.RevokedAt,
 	)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return nil, ErrAPIKeyInvalid
-	}
 	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			// Equalize timing with the matched path.
+			_ = bcrypt.CompareHashAndPassword(dummyAPIKeyHash, []byte(presented))
+			return nil, ErrAPIKeyInvalid
+		}
 		return nil, fmt.Errorf("platform: load api key: %w", err)
 	}
 	if bcrypt.CompareHashAndPassword(hash, []byte(presented)) != nil {

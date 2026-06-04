@@ -34,7 +34,11 @@ locals {
     var.labels,
   )
 
-  has_domain = var.domain_name != ""
+  # Note: unlike the AWS module there is no `has_domain` toggle here. On GCP a
+  # domain is mandatory (var.domain_name has a non-empty validation), because
+  # the external HTTPS LB's Google-managed cert and Cloud Run's internal-only
+  # ingress leave no domain-less serving path. So var.domain_name is used
+  # directly rather than behind an always-true conditional.
 
   # APIs the module needs enabled on the project.
   services = [
@@ -46,6 +50,8 @@ locals {
     "servicenetworking.googleapis.com",
     "vpcaccess.googleapis.com",
     "monitoring.googleapis.com",
+    # Cloud Scheduler triggers the audit-archiver Cloud Run Job (cronjobs.tf).
+    "cloudscheduler.googleapis.com",
   ]
 }
 
@@ -123,10 +129,16 @@ resource "google_compute_firewall" "health_checks" {
 # Private Service Access for Cloud SQL private IP
 # ----------------------------------------------------------------------------
 
+# PSA range for Cloud SQL/Memorystore private IPs. The start address is pinned
+# (var.private_service_access_address) so the allocation is deterministic and
+# can't drift onto a range that a future subnet expansion might want — rather
+# than letting GCP auto-pick from the VPC's free space. Default 10.40.0.0/16 is
+# well clear of the subnet (10.30.0.0/20) and connector (10.30.16.0/28).
 resource "google_compute_global_address" "private_service_range" {
   name          = "${local.name}-psa"
   purpose       = "VPC_PEERING"
   address_type  = "INTERNAL"
+  address       = var.private_service_access_address
   prefix_length = 16
   network       = google_compute_network.this.id
 }
@@ -143,6 +155,10 @@ resource "google_service_networking_connection" "private_vpc" {
 # Serverless VPC Access connector (Cloud Run -> VPC)
 # ----------------------------------------------------------------------------
 
+# Serverless VPC Access connector names are capped at 25 characters by the
+# API. "${local.name}-conn" is "<name_prefix>-<environment>-conn" (24 chars at
+# the defaults), so a longer name_prefix/environment would otherwise fail with
+# an opaque error at apply. The precondition surfaces it at plan time instead.
 resource "google_vpc_access_connector" "this" {
   name          = "${local.name}-conn"
   region        = var.region
@@ -153,4 +169,11 @@ resource "google_vpc_access_connector" "this" {
   max_instances = 3
 
   depends_on = [google_project_service.this]
+
+  lifecycle {
+    precondition {
+      condition     = length("${local.name}-conn") <= 25
+      error_message = "VPC Access connector name \"${local.name}-conn\" is ${length("${local.name}-conn")} chars; the limit is 25. Shorten var.name_prefix or var.environment."
+    }
+  }
 }

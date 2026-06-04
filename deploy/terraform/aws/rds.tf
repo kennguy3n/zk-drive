@@ -27,6 +27,17 @@ resource "aws_db_parameter_group" "this" {
     value = "1000"
   }
 
+  # Pin password hashing to SCRAM-SHA-256. The PgBouncer sidecar authenticates
+  # with PGBOUNCER_AUTH_TYPE=scram-sha-256 (ecs.tf), which requires the server
+  # to store SCRAM verifiers. Postgres 16 already defaults to scram-sha-256, so
+  # this changes nothing on a stock instance — it just makes the dependency
+  # explicit so a custom/overridden parameter group can't silently drop the
+  # cluster back to md5 and break PgBouncer auth.
+  parameter {
+    name  = "password_encryption"
+    value = "scram-sha-256"
+  }
+
   lifecycle {
     create_before_destroy = true
   }

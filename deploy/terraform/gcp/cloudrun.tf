@@ -26,7 +26,7 @@ resource "google_project_iam_member" "app_metric_writer" {
 locals {
   redis_url = "redis://${google_redis_instance.this.host}:${google_redis_instance.this.port}"
 
-  public_url = local.has_domain ? "https://${var.domain_name}" : ""
+  public_url = "https://${var.domain_name}"
 
   cloud_sql_proxy_image = "gcr.io/cloud-sql-connectors/cloud-sql-proxy:2.11.4"
 
@@ -43,18 +43,26 @@ locals {
     S3_BUCKET                = var.fabric_bucket
     FABRIC_CONSOLE_URL       = var.fabric_console_url
     PUBLIC_URL               = local.public_url
+    # Pin the credential-encryption mode explicitly rather than relying on
+    # internal/crypto.LoadFromEnv auto-selecting "aesgcm" from the presence of
+    # CREDENTIAL_ENCRYPTION_KEY (mirrors the AWS module).
+    CREDENTIAL_ENCRYPTION = "aesgcm"
   }
 
-  # Secret env vars: env var name -> Secret Manager secret id.
-  app_secret_env = {
+  # Secret env vars: env var name -> Secret Manager secret id. Stripe entries
+  # are added only when billing is configured (count-gated in secrets.tf), so
+  # the env vars are simply absent otherwise and the app reports billing
+  # disabled cleanly instead of reading a " " placeholder as enabled.
+  app_secret_env = merge({
     DATABASE_URL              = google_secret_manager_secret.database_url.secret_id
     JWT_SECRET                = google_secret_manager_secret.jwt.secret_id
     CREDENTIAL_ENCRYPTION_KEY = google_secret_manager_secret.credential_encryption_key.secret_id
-    STRIPE_SECRET_KEY         = google_secret_manager_secret.stripe_secret_key.secret_id
-    STRIPE_WEBHOOK_SECRET     = google_secret_manager_secret.stripe_webhook_secret.secret_id
     S3_ACCESS_KEY             = google_secret_manager_secret.s3_access_key.secret_id
     S3_SECRET_KEY             = google_secret_manager_secret.s3_secret_key.secret_id
-  }
+    },
+    { for s in google_secret_manager_secret.stripe_secret_key : "STRIPE_SECRET_KEY" => s.secret_id },
+    { for s in google_secret_manager_secret.stripe_webhook_secret : "STRIPE_WEBHOOK_SECRET" => s.secret_id },
+  )
 }
 
 # ----------------------------------------------------------------------------
@@ -87,6 +95,13 @@ resource "google_cloud_run_v2_service" "server" {
       name    = "server"
       image   = "${var.app_image}:${var.app_version}"
       command = ["/app/server"]
+
+      # Gate the app on the Cloud SQL Proxy sidecar being ready before it
+      # starts (parity with the AWS task's dependsOn on the PgBouncer
+      # sidecar). Combined with the proxy's startup_probe below, this removes
+      # the brief window where the app could dial 127.0.0.1:5432 before the
+      # proxy is listening and see connection refused.
+      depends_on = ["cloud-sql-proxy"]
 
       ports {
         container_port = 8080
@@ -154,8 +169,23 @@ resource "google_cloud_run_v2_service" "server" {
         "--private-ip",
         "--port=5432",
         "--address=127.0.0.1",
+        # Serve the proxy's HTTP health endpoints (/startup, /readiness) so the
+        # app container's depends_on can wait until the proxy is actually
+        # listening rather than just process-started.
+        "--health-check",
+        "--http-address=0.0.0.0",
+        "--http-port=9090",
         google_sql_database_instance.this.connection_name,
       ]
+
+      startup_probe {
+        http_get {
+          path = "/startup"
+          port = 9090
+        }
+        period_seconds    = 2
+        failure_threshold = 30
+      }
 
       resources {
         limits = {
@@ -167,7 +197,27 @@ resource "google_cloud_run_v2_service" "server" {
     }
   }
 
-  depends_on = [google_project_service.this]
+  # Cloud Run resolves secret_key_ref version="latest" at deploy time, so the
+  # service must not be created before the secret *versions* exist AND the
+  # service account holds secretAccessor on them. The template only references
+  # the secret shells (secret_id), which makes the versions and the IAM
+  # bindings siblings (not ancestors) of this service in the graph; without
+  # this, Terraform can create the service first and the apply fails with a
+  # secret-resolution / permission error. Depend on every version the app
+  # actually consumes plus the secretAccessor grant (stripe entries are
+  # count-gated and resolve to an empty set when billing is off, which
+  # depends_on tolerates).
+  depends_on = [
+    google_project_service.this,
+    google_secret_manager_secret_version.database_url,
+    google_secret_manager_secret_version.jwt,
+    google_secret_manager_secret_version.credential_encryption_key,
+    google_secret_manager_secret_version.s3_access_key,
+    google_secret_manager_secret_version.s3_secret_key,
+    google_secret_manager_secret_version.stripe_secret_key,
+    google_secret_manager_secret_version.stripe_webhook_secret,
+    google_secret_manager_secret_iam_member.app,
+  ]
 }
 
 # ----------------------------------------------------------------------------
@@ -198,6 +248,10 @@ resource "google_cloud_run_v2_service" "worker" {
       name    = "worker"
       image   = "${var.app_image}:${var.app_version}"
       command = ["/app/worker"]
+
+      # Gate the worker on the Cloud SQL Proxy sidecar being ready (see the
+      # server container for rationale; parity with the AWS PgBouncer dependsOn).
+      depends_on = ["cloud-sql-proxy"]
 
       # The worker brings up a /metrics + /healthz surface on :9091
       # (WORKER_METRICS_ADDR). Cloud Run probes it as the service port.
@@ -250,6 +304,17 @@ resource "google_cloud_run_v2_service" "worker" {
         period_seconds        = 5
         failure_threshold     = 12
       }
+
+      # Restart the worker if its /healthz surface stops responding after
+      # startup (e.g. a wedged NATS consumer). Mirrors the server's probe so
+      # both services self-heal rather than silently going idle.
+      liveness_probe {
+        http_get {
+          path = "/healthz"
+          port = 9091
+        }
+        period_seconds = 30
+      }
     }
 
     containers {
@@ -259,20 +324,53 @@ resource "google_cloud_run_v2_service" "worker" {
         "--private-ip",
         "--port=5432",
         "--address=127.0.0.1",
+        # Serve the proxy's HTTP health endpoints (/startup, /readiness) so the
+        # worker container's depends_on can wait until the proxy is actually
+        # listening rather than just process-started.
+        "--health-check",
+        "--http-address=0.0.0.0",
+        "--http-port=9090",
         google_sql_database_instance.this.connection_name,
       ]
+
+      startup_probe {
+        http_get {
+          path = "/startup"
+          port = 9090
+        }
+        period_seconds    = 2
+        failure_threshold = 30
+      }
 
       resources {
         limits = {
           cpu    = "1"
           memory = "256Mi"
         }
-        cpu_idle = true
+        # The worker (ingress container) sets cpu_idle = false, which forces the
+        # whole instance always-on, so the proxy gets CPU regardless. Set it
+        # false here too so the config states the effective behavior rather than
+        # implying the proxy could be throttled while background NATS consumers
+        # still need DB access.
+        cpu_idle = false
       }
     }
   }
 
-  depends_on = [google_project_service.this]
+  # Same secret-version + secretAccessor race as the server (see the note
+  # there): the worker also reads secret_key_ref version="latest" and must wait
+  # for the versions and the IAM grant before it can resolve them.
+  depends_on = [
+    google_project_service.this,
+    google_secret_manager_secret_version.database_url,
+    google_secret_manager_secret_version.jwt,
+    google_secret_manager_secret_version.credential_encryption_key,
+    google_secret_manager_secret_version.s3_access_key,
+    google_secret_manager_secret_version.s3_secret_key,
+    google_secret_manager_secret_version.stripe_secret_key,
+    google_secret_manager_secret_version.stripe_webhook_secret,
+    google_secret_manager_secret_iam_member.app,
+  ]
 }
 
 # The external HTTPS load balancer (lb.tf) invokes the server as any

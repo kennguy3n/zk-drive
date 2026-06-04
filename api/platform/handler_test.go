@@ -17,6 +17,59 @@ import (
 	platformsvc "github.com/kennguy3n/zk-drive/internal/platform"
 )
 
+// TestDecodeOptional covers the optional-body decode used by
+// SuspendWorkspace. A real body must always be decoded (even when the
+// transport reports ContentLength == -1, as HTTP/2 and chunked requests
+// do), an empty body must be tolerated as "no body", and a non-empty
+// malformed body must still produce a 400.
+func TestDecodeOptional(t *testing.T) {
+	type body struct {
+		Reason string `json:"reason"`
+	}
+
+	t.Run("valid body with unknown ContentLength is decoded", func(t *testing.T) {
+		r := httptest.NewRequest(http.MethodPost, "/x", strings.NewReader(`{"reason":"abuse"}`))
+		// Simulate HTTP/2 / chunked: length unknown despite a real body.
+		r.ContentLength = -1
+		w := httptest.NewRecorder()
+
+		var dst body
+		if !decodeOptional(w, r, &dst) {
+			t.Fatalf("expected decodeOptional to succeed, got status %d", w.Code)
+		}
+		if dst.Reason != "abuse" {
+			t.Fatalf("body not decoded: %+v", dst)
+		}
+	})
+
+	t.Run("empty body is tolerated", func(t *testing.T) {
+		r := httptest.NewRequest(http.MethodPost, "/x", strings.NewReader(""))
+		r.ContentLength = -1
+		w := httptest.NewRecorder()
+
+		var dst body
+		if !decodeOptional(w, r, &dst) {
+			t.Fatalf("expected empty body to be tolerated, got status %d", w.Code)
+		}
+		if dst.Reason != "" {
+			t.Fatalf("expected zero-value body, got %+v", dst)
+		}
+	})
+
+	t.Run("malformed body is rejected with 400", func(t *testing.T) {
+		r := httptest.NewRequest(http.MethodPost, "/x", strings.NewReader(`{"reason":`))
+		w := httptest.NewRecorder()
+
+		var dst body
+		if decodeOptional(w, r, &dst) {
+			t.Fatalf("expected malformed body to be rejected")
+		}
+		if w.Code != http.StatusBadRequest {
+			t.Fatalf("expected 400 for malformed body, got %d", w.Code)
+		}
+	})
+}
+
 // fakeRotator is an in-memory JWTRotator that records calls and returns
 // a canned platform-wide signing-key record.
 type fakeRotator struct {
@@ -71,11 +124,9 @@ func postRotate(t *testing.T, srv http.Handler) *httptest.ResponseRecorder {
 	return rec
 }
 
-// TestRotateJWTKey_RequiresKeysManage is the core regression test for
-// the privilege-escalation fix: JWT signing-key rotation is fleet-wide
-// and must be gated on the platform keys:manage capability, never the
-// per-workspace admin API. A principal lacking keys:manage must be
-// rejected before the key is ever rotated.
+// TestRotateJWTKey_RequiresKeysManage is the core regression: fleet-wide
+// JWT rotation must be gated on the keys:manage capability and must not
+// rotate when the caller lacks it or the rotator is unwired.
 func TestRotateJWTKey_RequiresKeysManage(t *testing.T) {
 	rec := cryptopkg.SigningKeyRecord{
 		ID:        uuid.New(),
@@ -130,63 +181,6 @@ func TestRotateJWTKey_RequiresKeysManage(t *testing.T) {
 		resp := postRotate(t, mountRotate(km, platformsvc.PermKeysManage))
 		if resp.Code != http.StatusNotImplemented {
 			t.Fatalf("status = %d, want 501; body=%s", resp.Code, resp.Body.String())
-		}
-	})
-}
-
-// TestDecodeOptional covers the optional-body decode used by endpoints
-// like SuspendWorkspace. The bug it guards against: a bodyless POST with
-// no Content-Length header arrives with http.Request.ContentLength == -1,
-// which the old `if r.ContentLength != 0` guard treated as "has a body",
-// then failed to JSON-decode the empty body and returned a spurious 400.
-func TestDecodeOptional(t *testing.T) {
-	type body struct {
-		Reason string `json:"reason"`
-	}
-
-	t.Run("empty body with absent Content-Length (-1) succeeds", func(t *testing.T) {
-		req := httptest.NewRequest(http.MethodPost, "/x", http.NoBody)
-		req.ContentLength = -1 // simulate a missing Content-Length header
-		rec := httptest.NewRecorder()
-		var dst body
-		if !decodeOptional(rec, req, &dst) {
-			t.Fatalf("decodeOptional = false for empty body; code=%d body=%s", rec.Code, rec.Body.String())
-		}
-		if dst.Reason != "" {
-			t.Errorf("reason = %q, want empty", dst.Reason)
-		}
-	})
-
-	t.Run("empty body with Content-Length 0 succeeds", func(t *testing.T) {
-		req := httptest.NewRequest(http.MethodPost, "/x", strings.NewReader(""))
-		rec := httptest.NewRecorder()
-		var dst body
-		if !decodeOptional(rec, req, &dst) {
-			t.Fatalf("decodeOptional = false for empty body; code=%d", rec.Code)
-		}
-	})
-
-	t.Run("valid JSON body decodes", func(t *testing.T) {
-		req := httptest.NewRequest(http.MethodPost, "/x", strings.NewReader(`{"reason":"abuse"}`))
-		rec := httptest.NewRecorder()
-		var dst body
-		if !decodeOptional(rec, req, &dst) {
-			t.Fatalf("decodeOptional = false for valid body; code=%d", rec.Code)
-		}
-		if dst.Reason != "abuse" {
-			t.Errorf("reason = %q, want abuse", dst.Reason)
-		}
-	})
-
-	t.Run("malformed non-empty body is rejected with 400", func(t *testing.T) {
-		req := httptest.NewRequest(http.MethodPost, "/x", strings.NewReader(`{not json`))
-		rec := httptest.NewRecorder()
-		var dst body
-		if decodeOptional(rec, req, &dst) {
-			t.Fatal("decodeOptional = true for malformed body, want false")
-		}
-		if rec.Code != http.StatusBadRequest {
-			t.Errorf("status = %d, want 400", rec.Code)
 		}
 	})
 }

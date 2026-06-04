@@ -66,7 +66,8 @@ resource "aws_ecs_task_definition" "clamav" {
   network_mode             = "awsvpc"
   cpu                      = var.clamav_cpu
   memory                   = var.clamav_memory
-  execution_role_arn       = aws_iam_role.task_execution.arn
+  # Lean execution role (image pull + logs only); ClamAV injects no secrets.
+  execution_role_arn = aws_iam_role.task_execution_infra.arn
 
   volume {
     name = "signatures"
@@ -93,8 +94,13 @@ resource "aws_ecs_task_definition" "clamav" {
       mountPoints = [
         { sourceVolume = "signatures", containerPath = "/var/lib/clamav", readOnly = false },
       ]
+      # clamdcheck.sh is the image's own health helper: it sends PING to clamd
+      # on TCP 3310 and requires a PONG, so it actually proves the daemon is
+      # accepting scan requests. (The earlier `clamdscan --version` only printed
+      # the client version and never contacted clamd, so a crashed daemon would
+      # still report healthy and the worker's scans would silently fail.)
       healthCheck = {
-        command     = ["CMD-SHELL", "echo PING | clamdscan --version >/dev/null 2>&1 || exit 1"]
+        command     = ["CMD-SHELL", "clamdcheck.sh || exit 1"]
         interval    = 30
         timeout     = 10
         retries     = 3
@@ -104,7 +110,7 @@ resource "aws_ecs_task_definition" "clamav" {
         logDriver = "awslogs"
         options = {
           "awslogs-group"         = aws_cloudwatch_log_group.clamav.name
-          "awslogs-region"        = data.aws_region.current.region
+          "awslogs-region"        = var.region
           "awslogs-stream-prefix" = "clamav"
         }
       }

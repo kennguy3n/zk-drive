@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -13,6 +14,12 @@ import (
 )
 
 const gibibyte = 1024 * 1024 * 1024
+
+// defaultAlertCooldown is the minimum interval between successive
+// firings of the same usage-alert rule. It bounds alert storms when
+// EvaluateUsageAlerts is driven on a schedule while a threshold stays
+// crossed. Override per-service with WithAlertCooldown (0 disables).
+const defaultAlertCooldown = time.Hour
 
 // ListAlertRules returns every usage-alert rule, newest first.
 func (s *PlatformService) ListAlertRules(ctx context.Context) ([]AlertRule, error) {
@@ -57,6 +64,15 @@ func (s *PlatformService) CreateAlertRule(ctx context.Context, rule AlertRule) (
 	}
 	if strings.TrimSpace(rule.WebhookURL) == "" && strings.TrimSpace(rule.Email) == "" {
 		return nil, fmt.Errorf("%w: at least one of webhook_url or email is required", ErrInvalidArgument)
+	}
+	// SSRF pre-check: a platform key must not be usable to point the
+	// alert dispatcher at an internal address (loopback / link-local /
+	// RFC1918 / cloud-metadata). Validated at create time when a
+	// validator is wired; a blocked or malformed URL is a 400, not a 500.
+	if wh := strings.TrimSpace(rule.WebhookURL); wh != "" && s.urlValidator != nil {
+		if _, err := s.urlValidator.Validate(ctx, wh); err != nil {
+			return nil, fmt.Errorf("%w: webhook_url: %v", ErrInvalidArgument, err)
+		}
 	}
 
 	out, err := scanAlertRule(s.pool.QueryRow(ctx,
@@ -113,6 +129,16 @@ func (s *PlatformService) EvaluateUsageAlerts(ctx context.Context) ([]AlertFirin
 		if !thresholdCrossed(rule.Operator, value, rule.Threshold) {
 			continue
 		}
+		// De-dup: suppress re-firing a rule whose previous firing is
+		// still within the cooldown window. This enforces the contract
+		// documented on usage_alert_rules.last_triggered_at and stops a
+		// cron-driven evaluation loop from storming the configured
+		// channels on every tick while a threshold stays crossed.
+		now := s.now()
+		if rule.LastTriggeredAt != nil && s.alertCooldown > 0 &&
+			now.Sub(*rule.LastTriggeredAt) < s.alertCooldown {
+			continue
+		}
 		firing := AlertFiring{
 			RuleID:      rule.ID,
 			WorkspaceID: *rule.WorkspaceID,
@@ -120,11 +146,14 @@ func (s *PlatformService) EvaluateUsageAlerts(ctx context.Context) ([]AlertFirin
 			Operator:    rule.Operator,
 			Threshold:   rule.Threshold,
 			Value:       value,
-			FiredAt:     s.now(),
+			FiredAt:     now,
 		}
 		s.dispatchFiring(ctx, rule, &firing)
+		// Stamp last_triggered_at with the service clock (not the DB
+		// clock) so the cooldown above is evaluated on a single,
+		// test-controllable timeline.
 		if _, uerr := s.pool.Exec(ctx,
-			`UPDATE usage_alert_rules SET last_triggered_at = now() WHERE id = $1`, rule.ID,
+			`UPDATE usage_alert_rules SET last_triggered_at = $2 WHERE id = $1`, rule.ID, now,
 		); uerr != nil {
 			s.log().Warn("platform: update last_triggered_at failed", "rule_id", rule.ID, "err", uerr)
 		}
@@ -139,15 +168,25 @@ func (s *PlatformService) dispatchFiring(ctx context.Context, rule AlertRule, fi
 	if s.dispatcher == nil {
 		return
 	}
+	// Hand every channel an identical, ordering-independent snapshot of
+	// the alert: a copy with the cross-channel "fired" meta-flags zeroed.
+	// Otherwise the email payload would observe WebhookFired=true (set by
+	// the webhook branch above it) while the webhook payload never can,
+	// so a channel's report of the *other* channel's status would depend
+	// on dispatch order. The real per-channel results are recorded on
+	// *firing for the returned AlertFiring.
+	payload := *firing
+	payload.WebhookFired = false
+	payload.EmailFired = false
 	if url := strings.TrimSpace(rule.WebhookURL); url != "" {
-		if err := s.dispatcher.DispatchWebhook(ctx, url, *firing); err != nil {
+		if err := s.dispatcher.DispatchWebhook(ctx, url, payload); err != nil {
 			s.log().Warn("platform: alert webhook dispatch failed", "rule_id", rule.ID, "err", err)
 		} else {
 			firing.WebhookFired = true
 		}
 	}
 	if email := strings.TrimSpace(rule.Email); email != "" {
-		if err := s.dispatcher.DispatchEmail(ctx, email, *firing); err != nil {
+		if err := s.dispatcher.DispatchEmail(ctx, email, payload); err != nil {
 			s.log().Warn("platform: alert email dispatch failed", "rule_id", rule.ID, "err", err)
 		} else {
 			firing.EmailFired = true

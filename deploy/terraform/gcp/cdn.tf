@@ -1,8 +1,9 @@
-# Cloud CDN for the frontend static assets (and preview thumbnails),
-# backed by a GCS bucket attached to the external HTTPS load balancer
-# (lb.tf). This bucket holds the built frontend (frontend/dist) — it is
-# NOT the object-storage bucket for user files (that lives on the
-# zk-object-fabric gateway, S3_BUCKET).
+# Cloud CDN for the frontend static assets, backed by a GCS bucket attached
+# to the external HTTPS load balancer (lb.tf). This bucket holds ONLY the
+# built frontend (frontend/dist) — public web artifacts (JS/CSS/HTML). It is
+# NOT the object-storage bucket for user files, and it does NOT hold preview
+# thumbnails: both live on the zk-object-fabric gateway (S3_BUCKET), served
+# through the app behind auth (internal/preview/preview.go).
 
 resource "google_storage_bucket" "frontend" {
   name                        = "${local.name}-frontend-${var.project_id}"
@@ -23,7 +24,16 @@ resource "google_storage_bucket" "frontend" {
   }
 }
 
-# Serve objects to the public CDN edge (the LB), not directly.
+# Grant public read on the bucket objects. This is the standard pattern for a
+# GCS bucket fronted by Cloud CDN (a backend bucket requires either public
+# objects or signed URLs/cookies). It is safe here because the bucket holds
+# only the public frontend build (JS/CSS/HTML) — the same bytes any visitor
+# downloads to run the SPA. No user data or preview thumbnails are ever stored
+# here (those are in zk-object-fabric and served through the authenticated
+# app), so there is nothing sensitive to expose. This differs from the AWS
+# module's CloudFront-OAC + private-bucket setup only because GCS+Cloud CDN
+# has no OAC equivalent; the effective exposure (public static assets) is the
+# same on both clouds.
 resource "google_storage_bucket_iam_member" "public_read" {
   bucket = google_storage_bucket.frontend.name
   role   = "roles/storage.objectViewer"

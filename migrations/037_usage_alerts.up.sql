@@ -14,9 +14,12 @@
 --
 -- operator is 'gte' (fire when value >= threshold, the default) or 'lte'.
 -- threshold is NUMERIC so percentage / fractional thresholds round-trip
--- exactly. last_triggered_at records the most recent firing so the evaluator
--- (and the UI) can avoid alert storms; it is informational here and the
--- de-dup window is enforced in application code.
+-- exactly. last_triggered_at records the most recent firing. The evaluator
+-- (PlatformService.EvaluateUsageAlerts) reads it to suppress re-firing a rule
+-- within a cooldown window (WithAlertCooldown; default 1h), so repeated
+-- evaluations don't storm the configured channels while a threshold stays
+-- crossed. The de-dup window is therefore enforced in application code, not by
+-- a database constraint.
 --
 -- workspace_id ON DELETE CASCADE drops a workspace's rules with it. The table
 -- is intentionally outside the tenant_isolation RLS set (migration 024): the

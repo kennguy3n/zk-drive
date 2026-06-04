@@ -129,7 +129,7 @@ func (h *Handler) RegisterRoutes(r chi.Router) {
 }
 
 // jwtRotateResponse returns the public metadata of the freshly
-// activated signing key. Private key material is never serialised.
+// activated signing key (never any private key material).
 type jwtRotateResponse struct {
 	KeyID     string    `json:"key_id"`
 	Algorithm string    `json:"algorithm"`
@@ -181,7 +181,7 @@ func (h *Handler) ProvisionWorkspace(w http.ResponseWriter, r *http.Request) {
 	}
 	ws, err := h.svc.ProvisionWorkspace(r.Context(), req.Name, req.OwnerEmail, req.Tier, req.PlacementRef)
 	if err != nil {
-		h.respondErr(w, err)
+		h.respondErr(w, r, "provision workspace", err)
 		return
 	}
 	middleware.WriteJSON(w, http.StatusCreated, ws)
@@ -203,7 +203,7 @@ func (h *Handler) ListWorkspaces(w http.ResponseWriter, r *http.Request) {
 	}
 	summaries, total, err := h.svc.ListWorkspaces(r.Context(), filters)
 	if err != nil {
-		h.respondErr(w, err)
+		h.respondErr(w, r, "list workspaces", err)
 		return
 	}
 	middleware.WriteJSON(w, http.StatusOK, listWorkspacesResponse{
@@ -222,7 +222,7 @@ func (h *Handler) GetWorkspace(w http.ResponseWriter, r *http.Request) {
 	}
 	summary, err := h.svc.GetWorkspace(r.Context(), id)
 	if err != nil {
-		h.respondErr(w, err)
+		h.respondErr(w, r, "get workspace", err)
 		return
 	}
 	middleware.WriteJSON(w, http.StatusOK, summary)
@@ -240,15 +240,15 @@ func (h *Handler) SuspendWorkspace(w http.ResponseWriter, r *http.Request) {
 	}
 	var req suspendRequest
 	// Body is optional: a reason-less suspension is valid. decodeOptional
-	// tolerates an empty body regardless of how the client framed it
-	// (Content-Length: 0, an absent header where ContentLength == -1, or
-	// chunked transfer encoding) and only rejects a genuinely malformed
-	// non-empty body.
+	// treats a genuinely empty body as "no reason" while still rejecting
+	// malformed JSON. It must not gate on r.ContentLength, which net/http
+	// reports as -1 ("unknown") for HTTP/2 or chunked requests that omit
+	// Content-Length even when they carry a real {"reason":"..."} body.
 	if !decodeOptional(w, r, &req) {
 		return
 	}
 	if err := h.svc.SuspendWorkspace(r.Context(), id, req.Reason); err != nil {
-		h.respondErr(w, err)
+		h.respondErr(w, r, "suspend workspace", err)
 		return
 	}
 	middleware.WriteJSON(w, http.StatusOK, map[string]any{"id": id, "suspended": true})
@@ -261,7 +261,7 @@ func (h *Handler) ResumeWorkspace(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := h.svc.ResumeWorkspace(r.Context(), id); err != nil {
-		h.respondErr(w, err)
+		h.respondErr(w, r, "resume workspace", err)
 		return
 	}
 	middleware.WriteJSON(w, http.StatusOK, map[string]any{"id": id, "suspended": false})
@@ -275,7 +275,7 @@ func (h *Handler) GetWorkspaceUsage(w http.ResponseWriter, r *http.Request) {
 	}
 	report, err := h.svc.GetWorkspaceUsage(r.Context(), id)
 	if err != nil {
-		h.respondErr(w, err)
+		h.respondErr(w, r, "get workspace usage", err)
 		return
 	}
 	middleware.WriteJSON(w, http.StatusOK, report)
@@ -287,7 +287,7 @@ func (h *Handler) GetWorkspaceUsage(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) ReconcileBilling(w http.ResponseWriter, r *http.Request) {
 	report, err := h.svc.BulkReconcileBilling(r.Context())
 	if err != nil {
-		h.respondErr(w, err)
+		h.respondErr(w, r, "reconcile billing", err)
 		return
 	}
 	middleware.WriteJSON(w, http.StatusOK, report)
@@ -299,7 +299,7 @@ func (h *Handler) ReconcileBilling(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) EvaluateAlerts(w http.ResponseWriter, r *http.Request) {
 	firings, err := h.svc.EvaluateUsageAlerts(r.Context())
 	if err != nil {
-		h.respondErr(w, err)
+		h.respondErr(w, r, "evaluate alerts", err)
 		return
 	}
 	middleware.WriteJSON(w, http.StatusOK, map[string]any{"firings": firings, "count": len(firings)})
@@ -309,7 +309,7 @@ func (h *Handler) EvaluateAlerts(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) ListAlertRules(w http.ResponseWriter, r *http.Request) {
 	rules, err := h.svc.ListAlertRules(r.Context())
 	if err != nil {
-		h.respondErr(w, err)
+		h.respondErr(w, r, "list alert rules", err)
 		return
 	}
 	middleware.WriteJSON(w, http.StatusOK, map[string]any{"rules": rules})
@@ -339,7 +339,7 @@ func (h *Handler) CreateAlertRule(w http.ResponseWriter, r *http.Request) {
 		Email:       req.Email,
 	})
 	if err != nil {
-		h.respondErr(w, err)
+		h.respondErr(w, r, "create alert rule", err)
 		return
 	}
 	middleware.WriteJSON(w, http.StatusCreated, rule)
@@ -352,7 +352,7 @@ func (h *Handler) DeleteAlertRule(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := h.svc.DeleteAlertRule(r.Context(), id); err != nil {
-		h.respondErr(w, err)
+		h.respondErr(w, r, "delete alert rule", err)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
@@ -380,11 +380,7 @@ func (h *Handler) CreateAPIKey(w http.ResponseWriter, r *http.Request) {
 	}
 	key, plaintext, err := h.keys.Create(r.Context(), req.Label, req.Permissions)
 	if err != nil {
-		if strings.Contains(err.Error(), "label is required") {
-			middleware.RespondError(w, http.StatusBadRequest, middleware.ErrCodeValidation, "label is required")
-			return
-		}
-		h.respondErr(w, err)
+		h.respondErr(w, r, "create api key", err)
 		return
 	}
 	middleware.WriteJSON(w, http.StatusCreated, createAPIKeyResponse{Key: plaintext, APIKey: key})
@@ -395,7 +391,7 @@ func (h *Handler) CreateAPIKey(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) ListAPIKeys(w http.ResponseWriter, r *http.Request) {
 	keys, err := h.keys.List(r.Context())
 	if err != nil {
-		h.respondErr(w, err)
+		h.respondErr(w, r, "list api keys", err)
 		return
 	}
 	middleware.WriteJSON(w, http.StatusOK, map[string]any{"api_keys": keys})
@@ -408,7 +404,7 @@ func (h *Handler) RevokeAPIKey(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := h.keys.Revoke(r.Context(), id); err != nil {
-		h.respondErr(w, err)
+		h.respondErr(w, r, "revoke api key", err)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
@@ -426,23 +422,20 @@ func decode(w http.ResponseWriter, r *http.Request, dst any) bool {
 	return true
 }
 
-// decodeOptional is like decode but for endpoints whose request body is
-// optional. A completely empty body (io.EOF before any JSON token) is
-// treated as success, leaving dst at its zero value. This is correct
-// regardless of how the client signalled the empty body — including a
-// missing Content-Length header, where http.Request.ContentLength is -1
-// (the old `if r.ContentLength != 0` guard treated -1 as "has body" and
-// produced a spurious 400 on a bodyless POST). A non-empty but malformed
-// body still yields a 400.
+// decodeOptional reads a JSON body into dst when one is present. A
+// genuinely empty body (io.EOF before any token) is treated as "no
+// body" and leaves dst at its zero value — for endpoints whose body is
+// optional. Unlike an r.ContentLength check, this does not silently
+// drop a real body on HTTP/2 or chunked requests that omit
+// Content-Length (where ContentLength is -1, i.e. "unknown"). A
+// non-empty but malformed body still writes a 400 and returns false.
 func decodeOptional(w http.ResponseWriter, r *http.Request, dst any) bool {
-	if err := json.NewDecoder(r.Body).Decode(dst); err != nil {
-		if errors.Is(err, io.EOF) {
-			return true
-		}
-		middleware.RespondError(w, http.StatusBadRequest, middleware.ErrCodeMalformedJSON, "malformed JSON body")
-		return false
+	err := json.NewDecoder(r.Body).Decode(dst)
+	if err == nil || errors.Is(err, io.EOF) {
+		return true
 	}
-	return true
+	middleware.RespondError(w, http.StatusBadRequest, middleware.ErrCodeMalformedJSON, "malformed JSON body")
+	return false
 }
 
 // parseID parses the {id} path param as a UUID, writing a 400 and
@@ -526,22 +519,17 @@ func parseListFilters(r *http.Request) (platformsvc.ListFilters, error) {
 }
 
 // respondErr maps a service error to the appropriate HTTP status and
-// stable error code.
-func (h *Handler) respondErr(w http.ResponseWriter, err error) {
+// stable error code. op is a short operation label (e.g. "provision
+// workspace") used by RespondInternalError to log unexpected 500s with
+// request context (request_id, path, method) while keeping err out of
+// the client-facing body.
+func (h *Handler) respondErr(w http.ResponseWriter, r *http.Request, op string, err error) {
 	switch {
 	case errors.Is(err, platformsvc.ErrNotFound):
 		middleware.RespondError(w, http.StatusNotFound, middleware.ErrCodeNotFound, "not found")
 	case errors.Is(err, platformsvc.ErrInvalidArgument):
-		// Surface the caller-actionable detail but strip the internal
-		// sentinel prefix ("platform: invalid argument: ") so the response
-		// doesn't leak the package-qualified error text. If the error is
-		// the bare sentinel with no detail, fall back to a generic message.
-		msg := strings.TrimPrefix(err.Error(), platformsvc.ErrInvalidArgument.Error()+": ")
-		if msg == err.Error() {
-			msg = "invalid argument"
-		}
-		middleware.RespondError(w, http.StatusBadRequest, middleware.ErrCodeValidation, msg)
+		middleware.RespondError(w, http.StatusBadRequest, middleware.ErrCodeValidation, err.Error())
 	default:
-		middleware.RespondError(w, http.StatusInternalServerError, middleware.ErrCodeInternal, "internal error")
+		middleware.RespondInternalError(w, r, op, err)
 	}
 }

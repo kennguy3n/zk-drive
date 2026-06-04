@@ -72,9 +72,9 @@ resource "aws_cloudwatch_metric_alarm" "worker_cpu_high" {
 }
 
 # --- RDS connections > 80% of max -------------------------------------------
-# db.t4g.medium (4 GiB) has a default max_connections of ~410 derived from
-# memory. 80% of that is ~328; expose as a variable-free constant tied to
-# the instance class default.
+# Threshold is derived from var.rds_max_connections (default ~410 for
+# db.t4g.medium) so it tracks the instance class instead of being a magic
+# constant. Mirrors the GCP module's var.cloudsql_max_connections approach.
 
 resource "aws_cloudwatch_metric_alarm" "rds_connections_high" {
   alarm_name          = "${local.name}-rds-connections-high"
@@ -84,7 +84,7 @@ resource "aws_cloudwatch_metric_alarm" "rds_connections_high" {
   statistic           = "Average"
   period              = 60
   evaluation_periods  = 5
-  threshold           = 328
+  threshold           = floor(var.rds_max_connections * 0.8)
   comparison_operator = "GreaterThanThreshold"
   treat_missing_data  = "notBreaching"
 

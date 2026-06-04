@@ -13,15 +13,25 @@ locals {
     reconciler = {
       entrypoint = "/app/reconciler"
       # EventBridge Scheduler cron is cron(min hour day-of-month month day-of-week year).
-      schedule = "cron(17 * * * ? *)"
+      schedule  = "cron(17 * * * ? *)"
+      extra_env = []
     }
     orphan-gc = {
       entrypoint = "/app/orphan-gc"
       schedule   = "cron(37 0/6 * * ? *)"
+      extra_env  = []
     }
     audit-archiver = {
       entrypoint = "/app/audit-archiver"
       schedule   = "cron(47 3 * * ? *)"
+      # The audit-archiver binary is opt-in: it exits as a no-op unless
+      # AUDIT_LOG_ARCHIVE_ENABLED is truthy (cmd/audit-archiver/main.go).
+      # The shared app_environment doesn't carry it, so without this the
+      # daily scheduled task would always no-op. Mirrors the K8s CronJob,
+      # which sets it explicitly (deploy/k8s/audit-archiver-cronjob.yaml).
+      extra_env = [
+        { name = "AUDIT_LOG_ARCHIVE_ENABLED", value = tostring(var.audit_log_archive_enabled) },
+      ]
     }
   }
 }
@@ -34,7 +44,7 @@ resource "aws_ecs_task_definition" "cron" {
   network_mode             = "awsvpc"
   cpu                      = 512
   memory                   = 1024
-  execution_role_arn       = aws_iam_role.task_execution.arn
+  execution_role_arn       = aws_iam_role.cron_execution.arn
   task_role_arn            = aws_iam_role.task.arn
 
   container_definitions = jsonencode([
@@ -43,13 +53,13 @@ resource "aws_ecs_task_definition" "cron" {
       image       = "${var.app_image}:${var.app_version}"
       essential   = true
       entryPoint  = [each.value.entrypoint]
-      environment = local.app_environment
+      environment = concat(local.app_environment, each.value.extra_env)
       secrets     = local.cron_secrets
       logConfiguration = {
         logDriver = "awslogs"
         options = {
           "awslogs-group"         = aws_cloudwatch_log_group.cron.name
-          "awslogs-region"        = data.aws_region.current.region
+          "awslogs-region"        = var.region
           "awslogs-stream-prefix" = each.key
         }
       }
@@ -91,9 +101,14 @@ data "aws_iam_policy_document" "scheduler" {
   }
 
   statement {
-    sid       = "PassTaskRoles"
-    actions   = ["iam:PassRole"]
-    resources = [aws_iam_role.task_execution.arn, aws_iam_role.task.arn]
+    sid     = "PassTaskRoles"
+    actions = ["iam:PassRole"]
+    # The cron task definitions use cron_execution (not the server/worker
+    # task_execution role), so the scheduler must be allowed to pass exactly
+    # that role plus the shared task role — passing task_execution here would
+    # AccessDenied since RunTask requires PassRole on the task def's actual
+    # execution_role_arn.
+    resources = [aws_iam_role.cron_execution.arn, aws_iam_role.task.arn]
   }
 }
 

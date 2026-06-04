@@ -761,12 +761,7 @@ func run() error {
 	platformKeyStore := platform.NewAPIKeyStore(pool)
 	platformSvc := platform.NewService(pool, wsSvc, userSvc, billingSvc).
 		WithProvisioner(provisioner).
-		// Cache suspension state on the hot SuspensionGuard path
-		// (mounted on every authenticated tenant request below) so it
-		// is one Redis read per workspace per TTL instead of a DB round
-		// trip per request. Shares the same client as the IP allowlist
-		// cache; nil when Redis is unconfigured (caching disabled).
-		WithSuspensionCache(ipAllowRedis)
+		WithURLValidator(webhooks.NewURLValidator())
 	if sessionStore != nil {
 		platformSvc = platformSvc.WithSessions(sessionStore)
 	}
@@ -1149,6 +1144,7 @@ func run() error {
 		r.Group(func(r chi.Router) {
 			r.Use(middleware.AuthMiddlewareWithKeys(jwtKeyManager, sessionChecker))
 			r.Use(middleware.TenantGuard())
+			r.Use(middleware.SuspensionGuard(platformSvc))
 			// IP allowlist enforcement runs after the tenant guard
 			// has resolved the workspace. It is a no-op for any
 			// workspace that has not enabled the feature. Mounted on
@@ -1157,7 +1153,6 @@ func run() error {
 			// reach the management endpoints to fix it and cannot
 			// lock themselves out of their own workspace.
 			r.Use(middleware.IPAllowlist(ipAllowSvc, cfg.TrustedProxyDepth))
-			r.Use(middleware.SuspensionGuard(platformSvc))
 			r.Use(rateLimiter())
 
 			r.Get("/workspaces", driveHandler.ListWorkspaces)
@@ -1263,11 +1258,11 @@ func run() error {
 		r.Route("/kchat", func(r chi.Router) {
 			r.Use(middleware.AuthMiddlewareWithKeys(jwtKeyManager, sessionChecker))
 			r.Use(middleware.TenantGuard())
+			r.Use(middleware.SuspensionGuard(platformSvc))
 			// kchat is a data-plane feature (attachment uploads, room
 			// creation, member sync), so it must honour the workspace IP
 			// allowlist exactly like the main data-plane group above.
 			r.Use(middleware.IPAllowlist(ipAllowSvc, cfg.TrustedProxyDepth))
-			r.Use(middleware.SuspensionGuard(platformSvc))
 			r.Use(rateLimiter())
 			kchatHandler.RegisterRoutes(r)
 		})

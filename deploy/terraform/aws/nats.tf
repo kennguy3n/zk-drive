@@ -45,7 +45,8 @@ resource "aws_ecs_task_definition" "nats" {
   network_mode             = "awsvpc"
   cpu                      = var.nats_cpu
   memory                   = var.nats_memory
-  execution_role_arn       = aws_iam_role.task_execution.arn
+  # Lean execution role (image pull + logs only); NATS injects no secrets.
+  execution_role_arn = aws_iam_role.task_execution_infra.arn
 
   volume {
     name                = "jetstream"
@@ -76,7 +77,7 @@ resource "aws_ecs_task_definition" "nats" {
         logDriver = "awslogs"
         options = {
           "awslogs-group"         = aws_cloudwatch_log_group.nats.name
-          "awslogs-region"        = data.aws_region.current.region
+          "awslogs-region"        = var.region
           "awslogs-stream-prefix" = "nats"
         }
       }

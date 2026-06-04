@@ -3,86 +3,28 @@ package platform
 import (
 	"context"
 	"errors"
+	"net/url"
 	"strings"
 	"testing"
 
-	"github.com/alicebob/miniredis/v2"
 	"github.com/google/uuid"
-	"github.com/redis/go-redis/v9"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"golang.org/x/crypto/bcrypt"
 
 	"github.com/kennguy3n/zk-drive/internal/billing"
+	"github.com/kennguy3n/zk-drive/internal/user"
+	"github.com/kennguy3n/zk-drive/internal/workspace"
 )
 
-// newTestRedis spins up a miniredis-backed client for the suspension
-// cache tests and registers cleanup.
-func newTestRedis(t *testing.T) *redis.Client {
-	t.Helper()
-	mr, err := miniredis.Run()
-	if err != nil {
-		t.Fatalf("miniredis: %v", err)
-	}
-	c := redis.NewClient(&redis.Options{Addr: mr.Addr()})
-	t.Cleanup(func() {
-		_ = c.Close()
-		mr.Close()
-	})
-	return c
-}
-
-// TestSuspensionCache covers the Redis-backed snapshot on the
-// SuspensionGuard hot path: a write is read back, a bust forces a
-// miss, and a service with no Redis client never reports a hit (so
-// WorkspaceSuspension always reads through to the store).
-func TestSuspensionCache(t *testing.T) {
-	ctx := context.Background()
-	ws := uuid.New()
-
-	// No Redis wired: every lookup is a miss so the caller reads
-	// through to Postgres, and writes/busts are silent no-ops.
-	noCache := &PlatformService{}
-	if _, ok := noCache.cachedSuspension(ctx, ws); ok {
-		t.Fatal("expected miss when Redis is unconfigured")
-	}
-	noCache.cacheSuspension(ctx, ws, suspensionSnapshot{Suspended: true})
-	noCache.bustSuspension(ctx, ws)
-	if _, ok := noCache.cachedSuspension(ctx, ws); ok {
-		t.Fatal("expected miss after write with Redis unconfigured")
-	}
-
-	svc := &PlatformService{rdb: newTestRedis(t)}
-
-	// Cold cache: miss.
-	if _, ok := svc.cachedSuspension(ctx, ws); ok {
-		t.Fatal("expected miss on cold cache")
-	}
-
-	// Write a suspended snapshot, read it back.
-	svc.cacheSuspension(ctx, ws, suspensionSnapshot{Suspended: true, Reason: "nonpayment"})
-	snap, ok := svc.cachedSuspension(ctx, ws)
-	if !ok {
-		t.Fatal("expected hit after write")
-	}
-	if !snap.Suspended || snap.Reason != "nonpayment" {
-		t.Fatalf("unexpected snapshot: %+v", snap)
-	}
-
-	// A bust forces the next read to miss (so it reloads from store).
-	svc.bustSuspension(ctx, ws)
-	if _, ok := svc.cachedSuspension(ctx, ws); ok {
-		t.Fatal("expected miss after bust")
-	}
-
-	// A cached negative is a hit too (collapses the unknown-workspace
-	// flood into one read per TTL).
-	svc.cacheSuspension(ctx, ws, suspensionSnapshot{})
-	snap, ok = svc.cachedSuspension(ctx, ws)
-	if !ok {
-		t.Fatal("expected hit for cached negative")
-	}
-	if snap.Suspended {
-		t.Fatalf("expected not-suspended snapshot, got %+v", snap)
-	}
+// newLogicService builds a PlatformService for the pure-logic unit
+// tests below, which never reach the database. The four required deps
+// are non-nil but inert: NewService only nil-checks them, and the
+// exercised paths (reconcileOne, dispatchFiring, CreateAlertRule's SSRF
+// pre-check) never dereference them. Using inert pointers instead of
+// nil keeps these tests valid now that NewService fails fast on a nil
+// required dependency.
+func newLogicService() *PlatformService {
+	return NewService(&pgxpool.Pool{}, &workspace.Service{}, &user.Service{}, &billing.Service{})
 }
 
 // --- pure-logic unit tests (no database) -----------------------------
@@ -174,17 +116,35 @@ func TestNullIfEmpty(t *testing.T) {
 // --- API key generation / verification ------------------------------
 
 func TestGenerateAndHashAPIKey(t *testing.T) {
-	key, err := generateAPIKey()
+	key, lookup, err := generateAPIKey()
 	if err != nil {
 		t.Fatalf("generateAPIKey: %v", err)
 	}
 	if !strings.HasPrefix(key, APIKeyPrefix) {
 		t.Fatalf("key %q missing prefix %q", key, APIKeyPrefix)
 	}
-	// Two generations must differ.
-	key2, _ := generateAPIKey()
+	// The constant-expression length used by the compile-time bcrypt
+	// ceiling guard must match the real encoder, and the key must stay
+	// within bcrypt's 72-byte input window so no entropy is truncated.
+	if len(key) != apiKeyPlaintextLen {
+		t.Fatalf("key length %d != apiKeyPlaintextLen %d", len(key), apiKeyPlaintextLen)
+	}
+	if apiKeyPlaintextLen > bcryptMaxInputBytes {
+		t.Fatalf("key plaintext %d exceeds bcrypt ceiling %d", apiKeyPlaintextLen, bcryptMaxInputBytes)
+	}
+	// The lookup id is the fixed-width selector embedded right after
+	// the prefix and must be recoverable from the plaintext alone.
+	gotLookup, ok := parseAPIKeyLookup(key)
+	if !ok || gotLookup != lookup {
+		t.Fatalf("parseAPIKeyLookup(%q) = %q, %v; want %q, true", key, gotLookup, ok, lookup)
+	}
+	// Two generations must differ in both the full key and the lookup.
+	key2, lookup2, _ := generateAPIKey()
 	if key == key2 {
 		t.Fatalf("expected distinct keys, got identical")
+	}
+	if lookup == lookup2 {
+		t.Fatalf("expected distinct lookup ids, got identical")
 	}
 
 	hash, err := hashAPIKey(key)
@@ -228,8 +188,35 @@ func (f fakeInspector) SubscriptionStatus(_ context.Context, _ string) (string, 
 
 func strptr(s string) *string { return &s }
 
+func TestNewServiceRequiresDeps(t *testing.T) {
+	pool, ws, us, bl := &pgxpool.Pool{}, &workspace.Service{}, &user.Service{}, &billing.Service{}
+	// Each required dep is dereferenced on the request path, so a nil
+	// must fail loudly at construction rather than as a deferred
+	// nil-panic deep in a handler.
+	cases := map[string]func(){
+		"nil pool":       func() { NewService(nil, ws, us, bl) },
+		"nil workspaces": func() { NewService(pool, nil, us, bl) },
+		"nil users":      func() { NewService(pool, ws, nil, bl) },
+		"nil billing":    func() { NewService(pool, ws, us, nil) },
+	}
+	for name, fn := range cases {
+		t.Run(name, func(t *testing.T) {
+			defer func() {
+				if recover() == nil {
+					t.Fatalf("NewService(%s) should have panicked", name)
+				}
+			}()
+			fn()
+		})
+	}
+	// A fully-wired construction must not panic.
+	if newLogicService() == nil {
+		t.Fatal("newLogicService returned nil")
+	}
+}
+
 func TestReconcileOneWithoutInspector(t *testing.T) {
-	s := NewService(nil, nil, nil, nil)
+	s := newLogicService()
 	id := uuid.New()
 
 	// Free tier without a customer is consistent.
@@ -250,26 +237,159 @@ func TestReconcileOneWithInspector(t *testing.T) {
 	id := uuid.New()
 
 	// Matching tier and active subscription -> no mismatch.
-	s := NewService(nil, nil, nil, nil).WithSubscriptionInspector(fakeInspector{status: "active", tier: billing.TierBusiness})
+	s := newLogicService().WithSubscriptionInspector(fakeInspector{status: "active", tier: billing.TierBusiness})
 	if entry, mismatch := s.reconcileOne(context.Background(), id, billing.TierBusiness, strptr("cus_ok")); mismatch {
 		t.Errorf("matching tier should reconcile cleanly, got reason %q", entry.Reason)
 	}
 
 	// Tier drift -> mismatch.
-	s = NewService(nil, nil, nil, nil).WithSubscriptionInspector(fakeInspector{status: "active", tier: billing.TierStarter})
+	s = newLogicService().WithSubscriptionInspector(fakeInspector{status: "active", tier: billing.TierStarter})
 	if _, mismatch := s.reconcileOne(context.Background(), id, billing.TierBusiness, strptr("cus_drift")); !mismatch {
 		t.Errorf("tier drift should be a mismatch")
 	}
 
 	// No subscription found for a linked customer -> mismatch.
-	s = NewService(nil, nil, nil, nil).WithSubscriptionInspector(fakeInspector{status: ""})
+	s = newLogicService().WithSubscriptionInspector(fakeInspector{status: ""})
 	if _, mismatch := s.reconcileOne(context.Background(), id, billing.TierBusiness, strptr("cus_none")); !mismatch {
 		t.Errorf("missing subscription should be a mismatch")
 	}
 
 	// Inspector error -> mismatch with reason.
-	s = NewService(nil, nil, nil, nil).WithSubscriptionInspector(fakeInspector{err: errors.New("boom")})
+	s = newLogicService().WithSubscriptionInspector(fakeInspector{err: errors.New("boom")})
 	if entry, mismatch := s.reconcileOne(context.Background(), id, billing.TierFree, strptr("cus_err")); !mismatch || !strings.Contains(entry.Reason, "boom") {
 		t.Errorf("inspector error should surface as a mismatch, got mismatch=%v reason=%q", mismatch, entry.Reason)
+	}
+}
+
+// --- dispatchFiring (no DB; uses a capturing dispatcher) ------------
+
+// captureDispatcher records the AlertFiring snapshot handed to each
+// channel so a test can assert what the dispatchers actually observed.
+type captureDispatcher struct {
+	webhook  AlertFiring
+	email    AlertFiring
+	whErr    error
+	emErr    error
+	gotWH    bool
+	gotEmail bool
+}
+
+func (d *captureDispatcher) DispatchWebhook(_ context.Context, _ string, f AlertFiring) error {
+	d.webhook, d.gotWH = f, true
+	return d.whErr
+}
+
+func (d *captureDispatcher) DispatchEmail(_ context.Context, _ string, f AlertFiring) error {
+	d.email, d.gotEmail = f, true
+	return d.emErr
+}
+
+func TestDispatchFiringConsistentSnapshot(t *testing.T) {
+	d := &captureDispatcher{}
+	s := newLogicService().WithAlertDispatcher(d)
+	rule := AlertRule{
+		ID:         uuid.New(),
+		WebhookURL: "https://example.com/hook",
+		Email:      "ops@example.com",
+	}
+	firing := AlertFiring{RuleID: rule.ID, Metric: MetricStoragePercent, Value: 95}
+
+	s.dispatchFiring(context.Background(), rule, &firing)
+
+	if !d.gotWH || !d.gotEmail {
+		t.Fatalf("expected both channels dispatched, got webhook=%v email=%v", d.gotWH, d.gotEmail)
+	}
+	// Both channels must see an identical, ordering-independent snapshot
+	// with the cross-channel meta-flags zeroed (the email payload must
+	// not observe WebhookFired=true just because the webhook ran first).
+	if d.webhook.WebhookFired || d.webhook.EmailFired {
+		t.Errorf("webhook payload leaked cross-channel flags: %+v", d.webhook)
+	}
+	if d.email.WebhookFired || d.email.EmailFired {
+		t.Errorf("email payload leaked cross-channel flags: %+v", d.email)
+	}
+	// Alert content must still be carried on both snapshots.
+	if d.webhook.Value != 95 || d.email.Value != 95 || d.webhook.RuleID != rule.ID {
+		t.Errorf("dispatch payloads lost alert content: webhook=%+v email=%+v", d.webhook, d.email)
+	}
+	// The returned firing records the true per-channel results.
+	if !firing.WebhookFired || !firing.EmailFired {
+		t.Errorf("firing should record both channels fired, got %+v", firing)
+	}
+}
+
+// fakeURLValidator stubs the SSRF validator: it rejects every URL when
+// blockErr is set, otherwise parses it like the real validator.
+type fakeURLValidator struct{ blockErr error }
+
+func (f fakeURLValidator) Validate(_ context.Context, raw string) (*url.URL, error) {
+	if f.blockErr != nil {
+		return nil, f.blockErr
+	}
+	return url.Parse(raw)
+}
+
+func TestCreateAlertRuleRejectsBlockedWebhookURL(t *testing.T) {
+	// A wired validator that blocks the URL must surface as a 400-class
+	// ErrInvalidArgument before any DB work, so the nil pool is never
+	// touched. This is the SSRF guard at rule-creation time.
+	s := newLogicService().
+		WithURLValidator(fakeURLValidator{blockErr: errors.New("blocked")})
+	wsID := uuid.New()
+	_, err := s.CreateAlertRule(context.Background(), AlertRule{
+		WorkspaceID: &wsID,
+		Metric:      MetricStoragePercent,
+		Operator:    OperatorGTE,
+		Threshold:   90,
+		WebhookURL:  "http://169.254.169.254/latest/meta-data/",
+	})
+	if !errors.Is(err, ErrInvalidArgument) {
+		t.Fatalf("blocked webhook_url: want ErrInvalidArgument, got %v", err)
+	}
+}
+
+func TestValidPermission(t *testing.T) {
+	for _, p := range []string{
+		PermTenantRead, PermTenantWrite, PermTenantSuspend,
+		PermBillingReconcile, PermAlertsRead, PermAlertsWrite, PermKeysManage,
+	} {
+		if !validPermission(p) {
+			t.Errorf("known permission %q rejected", p)
+		}
+	}
+	if validPermission("tenant:readd") || validPermission("") {
+		t.Errorf("unknown permission accepted")
+	}
+}
+
+func TestCreateAPIKeyRejectsUnknownPermission(t *testing.T) {
+	// An unknown permission string is rejected up front (before any DB
+	// work) so an operator typo fails loudly instead of minting a key
+	// that authenticates but is inert against every guard.
+	store := NewAPIKeyStore(nil)
+	_, _, err := store.Create(context.Background(), "ci-bot", []string{PermTenantRead, "tenant:readd"})
+	if !errors.Is(err, ErrInvalidArgument) {
+		t.Fatalf("unknown permission: want ErrInvalidArgument, got %v", err)
+	}
+}
+
+func TestDispatchFiringRecordsPerChannelFailure(t *testing.T) {
+	d := &captureDispatcher{whErr: errors.New("webhook down")}
+	s := newLogicService().WithAlertDispatcher(d)
+	rule := AlertRule{ID: uuid.New(), WebhookURL: "https://x/y", Email: "ops@example.com"}
+	firing := AlertFiring{RuleID: rule.ID, Value: 12}
+
+	s.dispatchFiring(context.Background(), rule, &firing)
+
+	// A failed webhook must not mark WebhookFired, but the email still
+	// fires and gets a clean snapshot.
+	if firing.WebhookFired {
+		t.Errorf("failed webhook must not set WebhookFired")
+	}
+	if !firing.EmailFired {
+		t.Errorf("email should still fire when only the webhook failed")
+	}
+	if d.email.WebhookFired {
+		t.Errorf("email payload must not report the (failed) webhook as fired: %+v", d.email)
 	}
 }
