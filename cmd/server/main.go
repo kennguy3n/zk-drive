@@ -288,7 +288,7 @@ func run() error {
 	// when an active asymmetric key exists in jwt_signing_keys
 	// (migration 034), and otherwise falls back to HS256 using
 	// cfg.JWTSecret. Verification always accepts both, so rotating to
-	// ES256 (POST /api/admin/jwt/rotate) never invalidates sessions
+	// ES256 (POST /api/platform/jwt/rotate) never invalidates sessions
 	// issued before the cutover. JWT_ALGORITHM forces a mode; the
 	// default ("auto") picks ES256-when-available.
 	jwtKeyManager, err := cryptopkg.NewKeyManager(
@@ -305,7 +305,7 @@ func run() error {
 	slog.Info("jwt signing", "algorithm", jwtKeyManager.Algorithm())
 
 	// Cross-replica key-rotation propagation. RotateKey only reloads
-	// the replica that served POST /api/admin/jwt/rotate; every other
+	// the replica that served POST /api/platform/jwt/rotate; every other
 	// replica must re-read jwt_signing_keys to learn the new key's
 	// public half, or it would 401 tokens signed by it. This loop
 	// polls the table every cfg.JWTKeyRefreshInterval (default 60s)

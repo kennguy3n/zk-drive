@@ -40,23 +40,20 @@ type Config struct {
 
 	// JWTKeyRefreshInterval is how often each replica re-reads the
 	// jwt_signing_keys table so that a key rotation performed on one
-	// replica (POST /api/admin/jwt/rotate) propagates to all others
+	// replica (POST /api/platform/jwt/rotate) propagates to all others
 	// without a restart. Sourced from JWT_KEY_REFRESH_INTERVAL and
 	// clamped to [10s, 1h]; a non-positive value disables the
 	// background refresh (single-replica deployments). Default 60s.
 	JWTKeyRefreshInterval time.Duration
 
-	// PlatformAdminUserIDs lists the user IDs permitted to perform
-	// platform-wide administrative operations that affect every
-	// workspace — currently rotating the platform JWT signing key
-	// (POST /api/admin/jwt/rotate). The data model has a single
-	// "admin" role scoped per workspace, so the AdminOnly gate alone
-	// would let any workspace admin rotate the shared platform key and
-	// thereby affect all tenants. This allowlist narrows the rotate
-	// endpoint to designated platform operators. Sourced from
-	// PLATFORM_ADMIN_USER_IDS (comma-separated UUIDs). Empty by
-	// default, which denies the gated operations until an operator
-	// configures the list (deny-by-default for a cross-tenant action).
+	// PlatformAdminUserIDs is LEGACY and no longer gates anything. It
+	// once narrowed the per-workspace admin JWT-rotation endpoint to
+	// designated platform operators, but rotation has since moved to the
+	// platform control plane (POST /api/platform/jwt/rotate, gated by the
+	// keys:manage platform-API-key capability) and the admin endpoint was
+	// removed. The value is still parsed from PLATFORM_ADMIN_USER_IDS
+	// solely so cmd/server can emit a startup warning when it is set,
+	// nudging operators to drop it from their config.
 	PlatformAdminUserIDs []uuid.UUID
 
 	// PlatformAdminUserIDsInvalid holds the raw PLATFORM_ADMIN_USER_IDS
@@ -984,19 +981,15 @@ func parseBoolDefault(s string, def bool) bool {
 	}
 }
 
-// platformAdminUserIDsFromEnv parses PLATFORM_ADMIN_USER_IDS, a
-// comma-separated list of user UUIDs permitted to perform
-// platform-wide administrative operations that affect every workspace
-// — currently just rotating the platform JWT signing key
-// (POST /api/admin/jwt/rotate). Workspace "admin" role alone is not
-// sufficient for these operations because the data model has a single
-// admin role shared across tenants. Blank and unparseable entries are
-// dropped (rather than aborting startup) so one malformed ID cannot
-// widen access; an empty result means no one may perform the gated
-// operation until the operator configures the list (deny-by-default).
-// The second return value carries any entries that failed to parse so
-// the caller can warn the operator about a typo that silently dropped
-// an intended admin.
+// platformAdminUserIDsFromEnv parses the LEGACY PLATFORM_ADMIN_USER_IDS
+// env var (comma-separated user UUIDs). It once gated the per-workspace
+// admin JWT-rotation endpoint, but rotation moved to the platform
+// control plane (POST /api/platform/jwt/rotate, keys:manage) and the
+// admin endpoint was removed, so these IDs no longer gate anything. The
+// value is still parsed so cmd/server can warn the operator at startup
+// that the var is obsolete and can be dropped. Blank and unparseable
+// entries are still separated out for the same warning path; the second
+// return value carries any entries that failed to parse.
 func platformAdminUserIDsFromEnv() (ids []uuid.UUID, invalid []string) {
 	raw := parseCSVList(os.Getenv("PLATFORM_ADMIN_USER_IDS"))
 	if len(raw) == 0 {

@@ -46,7 +46,7 @@ const (
 	ActionAdminBillingPortal    = "admin.billing_portal_session"
 	// JWT signing-key rotation. Recorded whenever an admin rotates
 	// the platform's ES256 session-signing key (POST
-	// /api/admin/jwt/rotate); the metadata blob carries the new
+	// /api/platform/jwt/rotate); the metadata blob carries the new
 	// key id and algorithm so a rotation can be correlated with the
 	// jwt_signing_keys table without exposing key material.
 	ActionAdminJWTRotate = "admin.jwt_rotate"
