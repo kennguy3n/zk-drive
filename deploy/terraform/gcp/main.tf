@@ -127,10 +127,16 @@ resource "google_compute_firewall" "health_checks" {
 # Private Service Access for Cloud SQL private IP
 # ----------------------------------------------------------------------------
 
+# PSA range for Cloud SQL/Memorystore private IPs. The start address is pinned
+# (var.private_service_access_address) so the allocation is deterministic and
+# can't drift onto a range that a future subnet expansion might want — rather
+# than letting GCP auto-pick from the VPC's free space. Default 10.40.0.0/16 is
+# well clear of the subnet (10.30.0.0/20) and connector (10.30.16.0/28).
 resource "google_compute_global_address" "private_service_range" {
   name          = "${local.name}-psa"
   purpose       = "VPC_PEERING"
   address_type  = "INTERNAL"
+  address       = var.private_service_access_address
   prefix_length = 16
   network       = google_compute_network.this.id
 }

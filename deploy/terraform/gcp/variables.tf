@@ -60,6 +60,12 @@ variable "serverless_connector_cidr" {
   default     = "10.30.16.0/28"
 }
 
+variable "private_service_access_address" {
+  description = "Start address of the /16 block reserved for Private Service Access (Cloud SQL private IP, Memorystore). Set explicitly so the allocation is deterministic rather than auto-selected by GCP. Must not overlap subnet_cidr or serverless_connector_cidr; the default 10.40.0.0/16 is well clear of the default 10.30.0.0/20 subnet and 10.30.16.0/28 connector ranges."
+  type        = string
+  default     = "10.40.0.0"
+}
+
 # ----------------------------------------------------------------------------
 # Container image
 # ----------------------------------------------------------------------------

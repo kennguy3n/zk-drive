@@ -96,6 +96,13 @@ resource "google_cloud_run_v2_service" "server" {
       image   = "${var.app_image}:${var.app_version}"
       command = ["/app/server"]
 
+      # Gate the app on the Cloud SQL Proxy sidecar being ready before it
+      # starts (parity with the AWS task's dependsOn on the PgBouncer
+      # sidecar). Combined with the proxy's startup_probe below, this removes
+      # the brief window where the app could dial 127.0.0.1:5432 before the
+      # proxy is listening and see connection refused.
+      depends_on = ["cloud-sql-proxy"]
+
       ports {
         container_port = 8080
       }
@@ -162,8 +169,23 @@ resource "google_cloud_run_v2_service" "server" {
         "--private-ip",
         "--port=5432",
         "--address=127.0.0.1",
+        # Serve the proxy's HTTP health endpoints (/startup, /readiness) so the
+        # app container's depends_on can wait until the proxy is actually
+        # listening rather than just process-started.
+        "--health-check",
+        "--http-address=0.0.0.0",
+        "--http-port=9090",
         google_sql_database_instance.this.connection_name,
       ]
+
+      startup_probe {
+        http_get {
+          path = "/startup"
+          port = 9090
+        }
+        period_seconds    = 2
+        failure_threshold = 30
+      }
 
       resources {
         limits = {
@@ -206,6 +228,10 @@ resource "google_cloud_run_v2_service" "worker" {
       name    = "worker"
       image   = "${var.app_image}:${var.app_version}"
       command = ["/app/worker"]
+
+      # Gate the worker on the Cloud SQL Proxy sidecar being ready (see the
+      # server container for rationale; parity with the AWS PgBouncer dependsOn).
+      depends_on = ["cloud-sql-proxy"]
 
       # The worker brings up a /metrics + /healthz surface on :9091
       # (WORKER_METRICS_ADDR). Cloud Run probes it as the service port.
@@ -278,8 +304,23 @@ resource "google_cloud_run_v2_service" "worker" {
         "--private-ip",
         "--port=5432",
         "--address=127.0.0.1",
+        # Serve the proxy's HTTP health endpoints (/startup, /readiness) so the
+        # worker container's depends_on can wait until the proxy is actually
+        # listening rather than just process-started.
+        "--health-check",
+        "--http-address=0.0.0.0",
+        "--http-port=9090",
         google_sql_database_instance.this.connection_name,
       ]
+
+      startup_probe {
+        http_get {
+          path = "/startup"
+          port = 9090
+        }
+        period_seconds    = 2
+        failure_threshold = 30
+      }
 
       resources {
         limits = {
