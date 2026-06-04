@@ -13,15 +13,25 @@ locals {
     reconciler = {
       entrypoint = "/app/reconciler"
       # EventBridge Scheduler cron is cron(min hour day-of-month month day-of-week year).
-      schedule = "cron(17 * * * ? *)"
+      schedule  = "cron(17 * * * ? *)"
+      extra_env = []
     }
     orphan-gc = {
       entrypoint = "/app/orphan-gc"
       schedule   = "cron(37 0/6 * * ? *)"
+      extra_env  = []
     }
     audit-archiver = {
       entrypoint = "/app/audit-archiver"
       schedule   = "cron(47 3 * * ? *)"
+      # The audit-archiver binary is opt-in: it exits as a no-op unless
+      # AUDIT_LOG_ARCHIVE_ENABLED is truthy (cmd/audit-archiver/main.go).
+      # The shared app_environment doesn't carry it, so without this the
+      # daily scheduled task would always no-op. Mirrors the K8s CronJob,
+      # which sets it explicitly (deploy/k8s/audit-archiver-cronjob.yaml).
+      extra_env = [
+        { name = "AUDIT_LOG_ARCHIVE_ENABLED", value = tostring(var.audit_log_archive_enabled) },
+      ]
     }
   }
 }
@@ -43,7 +53,7 @@ resource "aws_ecs_task_definition" "cron" {
       image       = "${var.app_image}:${var.app_version}"
       essential   = true
       entryPoint  = [each.value.entrypoint]
-      environment = local.app_environment
+      environment = concat(local.app_environment, each.value.extra_env)
       secrets     = local.cron_secrets
       logConfiguration = {
         logDriver = "awslogs"

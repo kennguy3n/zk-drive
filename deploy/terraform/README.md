@@ -133,7 +133,7 @@ done
 | `environment` | `production` | Name prefix + tag/label. On GCP, `<name_prefix>-<environment>-conn` must stay ≤ 25 chars (Serverless VPC connector name limit); the module fails at `plan` with a clear message otherwise. |
 | `app_image` / `app_version` | `ghcr.io/kennguy3n/zk-drive` / `0.1.0` | Image to deploy. |
 | `fabric_endpoint` / `fabric_bucket` / `fabric_console_url` | `""` | zk-object-fabric storage wiring (`S3_*`, `FABRIC_CONSOLE_URL`). |
-| `stripe_secret_key` / `stripe_webhook_secret` | `""` | Optional billing secrets. |
+| `stripe_secret_key` / `stripe_webhook_secret` | `""` | Optional billing secrets. Each is created and injected only when non-empty — left empty, the env var is absent and the app reports billing disabled (rather than reading a placeholder as enabled). |
 
 ### AWS-specific
 
@@ -145,6 +145,7 @@ done
 | `redis_transit_encryption` | `false` (set `true` for TLS / `rediss://` — see Security & compliance) |
 | `server_min_count` / `server_max_count` | `2` / `10` |
 | `worker_min_count` / `worker_max_count` | `1` / `6` |
+| `audit_log_archive_enabled` | `false` (set `true` to enable the daily audit-archiver task — see Scheduled jobs) |
 
 ### GCP-specific
 
@@ -198,6 +199,14 @@ done
     `RECONCILE_INTERVAL_MINUTES=0` and `GC_INTERVAL_MINUTES=0` on the worker
     task (both default loops then disable themselves). Leave them at their
     defaults if you'd rather keep the safety net.
+  - **Enabling audit-archiver (AWS).** The `audit-archiver` binary is
+    opt-in: it exits as a no-op unless `AUDIT_LOG_ARCHIVE_ENABLED` is set
+    (`cmd/audit-archiver/main.go`). The scheduled task therefore does
+    nothing until you set `audit_log_archive_enabled = true` (default
+    `false`), which injects `AUDIT_LOG_ARCHIVE_ENABLED=true` onto that task
+    only. Turn it on once zk-object-fabric storage (`fabric_endpoint` /
+    `fabric_bucket`) is configured and the archive prefix is writable; the
+    K8s deployment hardcodes it true (`deploy/k8s/audit-archiver-cronjob.yaml`).
 - **Redis in-transit encryption.** Both modules keep the cache on private
   subnets/VPC networks reachable only by the app, and ship with TLS to Redis
   **disabled** to avoid the per-op handshake cost. For compliance regimes

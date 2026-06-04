@@ -49,16 +49,20 @@ locals {
     CREDENTIAL_ENCRYPTION = "aesgcm"
   }
 
-  # Secret env vars: env var name -> Secret Manager secret id.
-  app_secret_env = {
+  # Secret env vars: env var name -> Secret Manager secret id. Stripe entries
+  # are added only when billing is configured (count-gated in secrets.tf), so
+  # the env vars are simply absent otherwise and the app reports billing
+  # disabled cleanly instead of reading a " " placeholder as enabled.
+  app_secret_env = merge({
     DATABASE_URL              = google_secret_manager_secret.database_url.secret_id
     JWT_SECRET                = google_secret_manager_secret.jwt.secret_id
     CREDENTIAL_ENCRYPTION_KEY = google_secret_manager_secret.credential_encryption_key.secret_id
-    STRIPE_SECRET_KEY         = google_secret_manager_secret.stripe_secret_key.secret_id
-    STRIPE_WEBHOOK_SECRET     = google_secret_manager_secret.stripe_webhook_secret.secret_id
     S3_ACCESS_KEY             = google_secret_manager_secret.s3_access_key.secret_id
     S3_SECRET_KEY             = google_secret_manager_secret.s3_secret_key.secret_id
-  }
+    },
+    { for s in google_secret_manager_secret.stripe_secret_key : "STRIPE_SECRET_KEY" => s.secret_id },
+    { for s in google_secret_manager_secret.stripe_webhook_secret : "STRIPE_WEBHOOK_SECRET" => s.secret_id },
+  )
 }
 
 # ----------------------------------------------------------------------------

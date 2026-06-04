@@ -86,28 +86,38 @@ resource "aws_secretsmanager_secret_version" "database_url_direct" {
   secret_string = "postgres://${var.db_username}:${random_password.db.result}@${aws_db_instance.primary.address}:5432/${var.db_name}?sslmode=require"
 }
 
-# Stripe keys. Always created so the task definition can reference a
-# stable ARN; seeded empty when billing is not configured.
+# Stripe keys are created (and injected) ONLY when billing is configured.
+# Previously these were always created and seeded with a single space when
+# unset (Secrets Manager rejects an empty SecretString). But unlike the S3
+# credentials — where validateS3Group TrimSpace-checks the value, so a space
+# surfaces a clear boot error — config.go reads STRIPE_SECRET_KEY without
+# trimming, so a " " placeholder reads as non-empty: the server then logs
+# "billing ... enabled" and admin billing routes fail with a Stripe auth
+# error instead of a clean disabled state. Conditional creation means the
+# env var is simply absent when billing is off, so the app's own
+# configured-detection reports disabled correctly.
 resource "aws_secretsmanager_secret" "stripe_secret_key" {
+  count       = var.stripe_secret_key != "" ? 1 : 0
   name        = "${local.name}/STRIPE_SECRET_KEY"
   description = "Stripe secret key"
 }
 
 resource "aws_secretsmanager_secret_version" "stripe_secret_key" {
-  secret_id = aws_secretsmanager_secret.stripe_secret_key.id
-  # Secrets Manager rejects an empty SecretString (min length 1); seed a
-  # single space when billing is not configured so a clean apply succeeds.
-  secret_string = var.stripe_secret_key != "" ? var.stripe_secret_key : " "
+  count         = var.stripe_secret_key != "" ? 1 : 0
+  secret_id     = aws_secretsmanager_secret.stripe_secret_key[0].id
+  secret_string = var.stripe_secret_key
 }
 
 resource "aws_secretsmanager_secret" "stripe_webhook_secret" {
+  count       = var.stripe_webhook_secret != "" ? 1 : 0
   name        = "${local.name}/STRIPE_WEBHOOK_SECRET"
   description = "Stripe webhook signing secret"
 }
 
 resource "aws_secretsmanager_secret_version" "stripe_webhook_secret" {
-  secret_id     = aws_secretsmanager_secret.stripe_webhook_secret.id
-  secret_string = var.stripe_webhook_secret != "" ? var.stripe_webhook_secret : " "
+  count         = var.stripe_webhook_secret != "" ? 1 : 0
+  secret_id     = aws_secretsmanager_secret.stripe_webhook_secret[0].id
+  secret_string = var.stripe_webhook_secret
 }
 
 # zk-object-fabric storage credentials. config.go's validateS3Group requires
@@ -137,10 +147,22 @@ resource "aws_secretsmanager_secret_version" "s3_secret_key" {
 }
 
 locals {
+  # Stripe secret injections, present only when the corresponding key is
+  # configured (the resources are count-gated above). Using a for over the
+  # resource list yields a 0- or 1-element list with no index errors.
+  stripe_secrets = concat(
+    [for s in aws_secretsmanager_secret.stripe_secret_key : { name = "STRIPE_SECRET_KEY", valueFrom = s.arn }],
+    [for s in aws_secretsmanager_secret.stripe_webhook_secret : { name = "STRIPE_WEBHOOK_SECRET", valueFrom = s.arn }],
+  )
+  stripe_secret_arns = concat(
+    [for s in aws_secretsmanager_secret.stripe_secret_key : s.arn],
+    [for s in aws_secretsmanager_secret.stripe_webhook_secret : s.arn],
+  )
+
   # Secrets injected into every application container, expressed in the
   # `secrets` shape ECS expects ({ name, valueFrom }). Names match the env
   # vars read by internal/config/config.go.
-  app_secrets = [
+  app_secrets = concat([
     {
       name      = "DATABASE_URL"
       valueFrom = aws_secretsmanager_secret.database_url.arn
@@ -154,14 +176,6 @@ locals {
       valueFrom = aws_secretsmanager_secret.credential_encryption_key.arn
     },
     {
-      name      = "STRIPE_SECRET_KEY"
-      valueFrom = aws_secretsmanager_secret.stripe_secret_key.arn
-    },
-    {
-      name      = "STRIPE_WEBHOOK_SECRET"
-      valueFrom = aws_secretsmanager_secret.stripe_webhook_secret.arn
-    },
-    {
       name      = "S3_ACCESS_KEY"
       valueFrom = aws_secretsmanager_secret.s3_access_key.arn
     },
@@ -169,11 +183,11 @@ locals {
       name      = "S3_SECRET_KEY"
       valueFrom = aws_secretsmanager_secret.s3_secret_key.arn
     },
-  ]
+  ], local.stripe_secrets)
 
   # Same set as app_secrets but pointing at the direct DATABASE_URL, for
   # the short-lived cron tasks that don't run a PgBouncer sidecar.
-  cron_secrets = [
+  cron_secrets = concat([
     {
       name      = "DATABASE_URL"
       valueFrom = aws_secretsmanager_secret.database_url_direct.arn
@@ -187,14 +201,6 @@ locals {
       valueFrom = aws_secretsmanager_secret.credential_encryption_key.arn
     },
     {
-      name      = "STRIPE_SECRET_KEY"
-      valueFrom = aws_secretsmanager_secret.stripe_secret_key.arn
-    },
-    {
-      name      = "STRIPE_WEBHOOK_SECRET"
-      valueFrom = aws_secretsmanager_secret.stripe_webhook_secret.arn
-    },
-    {
       name      = "S3_ACCESS_KEY"
       valueFrom = aws_secretsmanager_secret.s3_access_key.arn
     },
@@ -202,18 +208,16 @@ locals {
       name      = "S3_SECRET_KEY"
       valueFrom = aws_secretsmanager_secret.s3_secret_key.arn
     },
-  ]
+  ], local.stripe_secrets)
 
   # ARNs the task execution role must be allowed to read.
-  app_secret_arns = [
+  app_secret_arns = concat([
     aws_secretsmanager_secret.database_url.arn,
     aws_secretsmanager_secret.database_url_direct.arn,
     aws_secretsmanager_secret.jwt.arn,
     aws_secretsmanager_secret.credential_encryption_key.arn,
-    aws_secretsmanager_secret.stripe_secret_key.arn,
-    aws_secretsmanager_secret.stripe_webhook_secret.arn,
     aws_secretsmanager_secret.s3_access_key.arn,
     aws_secretsmanager_secret.s3_secret_key.arn,
     aws_secretsmanager_secret.db_password.arn,
-  ]
+  ], local.stripe_secret_arns)
 }

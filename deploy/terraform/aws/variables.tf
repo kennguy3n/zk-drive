@@ -313,6 +313,12 @@ variable "log_retention_days" {
   default     = 30
 }
 
+variable "audit_log_archive_enabled" {
+  description = "Sets AUDIT_LOG_ARCHIVE_ENABLED on the daily audit-archiver cron task. The audit-archiver binary is opt-in (defaults to false) and exits as a no-op until this is true, so the scheduled task does nothing until enabled. Leave false until zk-object-fabric storage (fabric_endpoint/bucket) is configured and the archive prefix is confirmed writable; the K8s deployment hardcodes this true (deploy/k8s/audit-archiver-cronjob.yaml)."
+  type        = bool
+  default     = false
+}
+
 # ----------------------------------------------------------------------------
 # Secret seed values. Override these (or rotate the generated secrets out of
 # band) for real deployments. STRIPE_* default to empty because billing is
