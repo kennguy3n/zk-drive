@@ -364,7 +364,7 @@ func (h *Handler) AcceptGuestInvite(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	h.notify(r.Context(), func(n *notification.Service) error {
-		return n.NotifyGuestInviteAccepted(r.Context(), workspaceID, inv.CreatedBy, inv.ID, inv.Email)
+		return n.NotifyGuestInviteAccepted(r.Context(), workspaceID, inv.CreatedBy, inv.FolderID, inv.Email)
 	})
 	writeJSON(w, http.StatusOK, inv)
 }

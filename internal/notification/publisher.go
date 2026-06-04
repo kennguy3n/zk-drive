@@ -296,13 +296,24 @@ func pushPayloadFromEvent(event Event) (NotificationPayload, bool) {
 // result is the safe default, never a broken link.
 //
 // Only resource types that map to a real frontend route (App.tsx) and
-// whose ResourceID is the ID that route expects are linked here.
-// Today's notification resource types (share_link, guest_invite,
-// file_version) carry the *event* id (link / invite / version), not a
-// folder or document id, and the SPA has no route to view those by id,
-// so they intentionally fall through to the /drive default. Wiring the
-// URL end-to-end means the moment a notification references a folder or
-// document the click lands on it with no further plumbing.
+// whose ResourceID is the ID that route expects are linked here. Today
+// that is "folder" (-> /drive/folder/:id) and "document"
+// (-> /drive/document/:id). A guest-invite-sent notification carries the
+// target "folder" id, so its push click now deep-links straight to the
+// folder.
+//
+// The other resource types fall through to the /drive default on
+// purpose, because the SPA has no by-id route for them:
+//   - "file" (quarantine alerts, file share-links) — there is no
+//     /drive/file/:id route; files are browsed inside their folder, and
+//     the push payload carries only the file id, not the parent folder
+//     id, so we cannot synthesize a folder link here. Mapping it to
+//     /drive/document/:id would be wrong — that route is the TipTap/Yjs
+//     editor for collaborative documents, not arbitrary files.
+//   - "guest_invite" (invite-accepted) — carries the *invite* event id,
+//     which no route resolves.
+// Returning "" for these lets push-sw.js apply its safe /drive fallback
+// rather than emit a link that would 404 or open the wrong surface.
 //
 // Contract with the service worker: every value returned here MUST be an
 // SPA-relative path (leading "/", no scheme or host). push-sw.js's

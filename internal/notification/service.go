@@ -101,15 +101,20 @@ func (s *Service) NotifyGuestInviteSent(ctx context.Context, workspaceID, invite
 
 // NotifyGuestInviteAccepted informs the invite creator that the
 // invitee accepted.
-func (s *Service) NotifyGuestInviteAccepted(ctx context.Context, workspaceID, creatorID, inviteID uuid.UUID, email string) error {
+func (s *Service) NotifyGuestInviteAccepted(ctx context.Context, workspaceID, creatorID, folderID uuid.UUID, email string) error {
 	return s.create(ctx, &Notification{
-		WorkspaceID:  workspaceID,
-		UserID:       creatorID,
-		Type:         TypeGuestInviteAccepted,
-		Title:        "Guest invite accepted",
-		Body:         fmt.Sprintf("%s accepted your invitation.", email),
-		ResourceType: stringPtr("guest_invite"),
-		ResourceID:   &inviteID,
+		WorkspaceID: workspaceID,
+		UserID:      creatorID,
+		Type:        TypeGuestInviteAccepted,
+		Title:       "Guest invite accepted",
+		Body:        fmt.Sprintf("%s accepted your invitation.", email),
+		// Deep-link the creator to the folder the guest just joined,
+		// mirroring NotifyGuestInviteSent — the "folder" resource type
+		// resolves to /drive/folder/:id in deepLinkFor, whereas the
+		// previous "guest_invite" (an event id with no route) forced the
+		// push click to the generic /drive fallback.
+		ResourceType: stringPtr("folder"),
+		ResourceID:   &folderID,
 	})
 }
 
