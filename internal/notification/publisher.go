@@ -297,6 +297,13 @@ func pushPayloadFromEvent(event Event) (NotificationPayload, bool) {
 // so they intentionally fall through to the /drive default. Wiring the
 // URL end-to-end means the moment a notification references a folder or
 // document the click lands on it with no further plumbing.
+//
+// Contract with the service worker: every value returned here MUST be an
+// SPA-relative path (leading "/", no scheme or host). push-sw.js's
+// notificationclick handler matches an already-open tab by comparing this
+// value to new URL(client.url).pathname, so returning an absolute URL
+// (e.g. "https://host/drive/...") would never match and would force a
+// redundant navigation. Keep new cases returning bare paths only.
 func deepLinkFor(n *Notification) string {
 	if n == nil || n.ResourceType == nil || n.ResourceID == nil {
 		return ""

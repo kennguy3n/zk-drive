@@ -56,6 +56,15 @@ func (r *PostgresRepository) WithSubscriptionCipher(cipher SubscriptionCipher) *
 
 // encryptKeys seals the p256dh / auth key material for storage. A nil
 // cipher passes the plaintext through unchanged.
+//
+// Only p256dh and auth are encrypted; endpoint is stored as plaintext by
+// design. endpoint is part of the UNIQUE(workspace_id, user_id, endpoint)
+// constraint and the WHERE endpoint = $ lookup in DeleteSubscription, and
+// AES-GCM is non-deterministic, so encrypting it would break those exact
+// matches. It is also not sensitive — a push-service URL
+// (e.g. https://fcm.googleapis.com/fcm/send/...) — whereas p256dh (the
+// subscriber ECDH public key) and auth (the 16-byte shared secret) are
+// the credentials worth protecting at rest.
 func (r *PostgresRepository) encryptKeys(ctx context.Context, sub PushSubscription) (p256dh, auth string, err error) {
 	if r.cipher == nil {
 		return sub.P256dh, sub.Auth, nil
