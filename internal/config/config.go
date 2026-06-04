@@ -14,8 +14,8 @@ import (
 // binaries. All values are sourced from environment variables so deployments
 // can inject them uniformly.
 type Config struct {
-	DatabaseURL   string
-	JWTSecret     string
+	DatabaseURL string
+	JWTSecret   string
 
 	// DB connection-pool sizing. These tune the pgxpool created by
 	// internal/database.ConnectWithPool. Sourced from DB_MAX_CONNS,
@@ -58,6 +58,14 @@ type Config struct {
 	// default, which denies the gated operations until an operator
 	// configures the list (deny-by-default for a cross-tenant action).
 	PlatformAdminUserIDs []uuid.UUID
+
+	// PlatformAdminUserIDsInvalid holds the raw PLATFORM_ADMIN_USER_IDS
+	// entries that failed to parse as UUIDs. They are dropped from the
+	// allowlist (a malformed entry can only narrow access, never widen
+	// it) but retained here so cmd/server can warn the operator at
+	// startup — otherwise a typo'd UUID would silently exclude an
+	// intended platform admin with no signal.
+	PlatformAdminUserIDsInvalid []string
 
 	ListenAddr    string
 	S3Endpoint    string
@@ -389,42 +397,44 @@ func buildConfigFromEnv() *Config {
 	// Read DB_MAX_CONNS once: DBMinConns is clamped against the same
 	// resolved maximum, so re-reading the env var would be redundant.
 	dbMaxConns := dbMaxConnsFromEnv()
+	platformAdmins, invalidPlatformAdmins := platformAdminUserIDsFromEnv()
 	return &Config{
-		DatabaseURL:           os.Getenv("DATABASE_URL"),
-		JWTSecret:             os.Getenv("JWT_SECRET"),
-		DBMaxConns:            dbMaxConns,
-		DBMinConns:            dbMinConnsFromEnv(dbMaxConns),
-		DBMaxConnIdleTime:     parseDurationDefault(os.Getenv("DB_MAX_CONN_IDLE_TIME"), defaultDBMaxConnIdleTime),
-		JWTAlgorithm:          normaliseJWTAlgorithm(os.Getenv("JWT_ALGORITHM")),
-		JWTKeyRefreshInterval: jwtKeyRefreshIntervalFromEnv(),
-		PlatformAdminUserIDs:  platformAdminUserIDsFromEnv(),
-		ListenAddr:            getEnvDefault("LISTEN_ADDR", ":8080"),
-		S3Endpoint:            os.Getenv("S3_ENDPOINT"),
-		S3Bucket:              os.Getenv("S3_BUCKET"),
-		S3AccessKey:           os.Getenv("S3_ACCESS_KEY"),
-		S3SecretKey:           os.Getenv("S3_SECRET_KEY"),
-		MigrationsDir:         getEnvDefault("MIGRATIONS_DIR", "migrations"),
-		NATSURL:               os.Getenv("NATS_URL"),
-		ClamAVAddress:         os.Getenv("CLAMAV_ADDRESS"),
-		GoogleClientID:        os.Getenv("GOOGLE_CLIENT_ID"),
-		GoogleClientSecret:    os.Getenv("GOOGLE_CLIENT_SECRET"),
-		GoogleRedirectURL:     os.Getenv("GOOGLE_REDIRECT_URL"),
-		MicrosoftClientID:     os.Getenv("MICROSOFT_CLIENT_ID"),
-		MicrosoftClientSecret: os.Getenv("MICROSOFT_CLIENT_SECRET"),
-		MicrosoftRedirectURL:  os.Getenv("MICROSOFT_REDIRECT_URL"),
-		RateLimitPerUser:        parseIntDefault(os.Getenv("RATE_LIMIT_PER_USER"), 0),
-		RateLimitPerWorkspace:   parseIntDefault(os.Getenv("RATE_LIMIT_PER_WORKSPACE"), 0),
-		RedisURL:                os.Getenv("REDIS_URL"),
-		FabricConsoleURL:        os.Getenv("FABRIC_CONSOLE_URL"),
-		FabricConsoleAdminToken: os.Getenv("FABRIC_CONSOLE_ADMIN_TOKEN"),
-		FabricBucketTemplate:    getEnvDefault("FABRIC_BUCKET_TEMPLATE", "zk-drive-{tenant}"),
-		FabricDefaultPlacementRef: getEnvDefault("FABRIC_DEFAULT_PLACEMENT_REF", "b2c_pooled_default"),
-		StaticDir:                 os.Getenv("STATIC_DIR"),
-		StripeWebhookSecret:       os.Getenv("STRIPE_WEBHOOK_SECRET"),
-		StripeSecretKey:           os.Getenv("STRIPE_SECRET_KEY"),
-		StripePriceTierMap:        parsePriceTierMap(os.Getenv("STRIPE_PRICE_TIER_MAP")),
-		OllamaURL:                 os.Getenv("OLLAMA_URL"),
-		OllamaModel:               os.Getenv("OLLAMA_MODEL"),
+		DatabaseURL:                 os.Getenv("DATABASE_URL"),
+		JWTSecret:                   os.Getenv("JWT_SECRET"),
+		DBMaxConns:                  dbMaxConns,
+		DBMinConns:                  dbMinConnsFromEnv(dbMaxConns),
+		DBMaxConnIdleTime:           parseDurationDefault(os.Getenv("DB_MAX_CONN_IDLE_TIME"), defaultDBMaxConnIdleTime),
+		JWTAlgorithm:                normaliseJWTAlgorithm(os.Getenv("JWT_ALGORITHM")),
+		JWTKeyRefreshInterval:       jwtKeyRefreshIntervalFromEnv(),
+		PlatformAdminUserIDs:        platformAdmins,
+		PlatformAdminUserIDsInvalid: invalidPlatformAdmins,
+		ListenAddr:                  getEnvDefault("LISTEN_ADDR", ":8080"),
+		S3Endpoint:                  os.Getenv("S3_ENDPOINT"),
+		S3Bucket:                    os.Getenv("S3_BUCKET"),
+		S3AccessKey:                 os.Getenv("S3_ACCESS_KEY"),
+		S3SecretKey:                 os.Getenv("S3_SECRET_KEY"),
+		MigrationsDir:               getEnvDefault("MIGRATIONS_DIR", "migrations"),
+		NATSURL:                     os.Getenv("NATS_URL"),
+		ClamAVAddress:               os.Getenv("CLAMAV_ADDRESS"),
+		GoogleClientID:              os.Getenv("GOOGLE_CLIENT_ID"),
+		GoogleClientSecret:          os.Getenv("GOOGLE_CLIENT_SECRET"),
+		GoogleRedirectURL:           os.Getenv("GOOGLE_REDIRECT_URL"),
+		MicrosoftClientID:           os.Getenv("MICROSOFT_CLIENT_ID"),
+		MicrosoftClientSecret:       os.Getenv("MICROSOFT_CLIENT_SECRET"),
+		MicrosoftRedirectURL:        os.Getenv("MICROSOFT_REDIRECT_URL"),
+		RateLimitPerUser:            parseIntDefault(os.Getenv("RATE_LIMIT_PER_USER"), 0),
+		RateLimitPerWorkspace:       parseIntDefault(os.Getenv("RATE_LIMIT_PER_WORKSPACE"), 0),
+		RedisURL:                    os.Getenv("REDIS_URL"),
+		FabricConsoleURL:            os.Getenv("FABRIC_CONSOLE_URL"),
+		FabricConsoleAdminToken:     os.Getenv("FABRIC_CONSOLE_ADMIN_TOKEN"),
+		FabricBucketTemplate:        getEnvDefault("FABRIC_BUCKET_TEMPLATE", "zk-drive-{tenant}"),
+		FabricDefaultPlacementRef:   getEnvDefault("FABRIC_DEFAULT_PLACEMENT_REF", "b2c_pooled_default"),
+		StaticDir:                   os.Getenv("STATIC_DIR"),
+		StripeWebhookSecret:         os.Getenv("STRIPE_WEBHOOK_SECRET"),
+		StripeSecretKey:             os.Getenv("STRIPE_SECRET_KEY"),
+		StripePriceTierMap:          parsePriceTierMap(os.Getenv("STRIPE_PRICE_TIER_MAP")),
+		OllamaURL:                   os.Getenv("OLLAMA_URL"),
+		OllamaModel:                 os.Getenv("OLLAMA_MODEL"),
 
 		SecurityHeadersDisableHSTS:     parseBoolDefault(os.Getenv("SECURITY_HEADERS_DISABLE_HSTS"), false),
 		SecurityHeadersCSPReportOnly:   parseBoolDefault(os.Getenv("SECURITY_HEADERS_CSP_REPORT_ONLY"), false),
@@ -878,23 +888,27 @@ func parseBoolDefault(s string, def bool) bool {
 // dropped (rather than aborting startup) so one malformed ID cannot
 // widen access; an empty result means no one may perform the gated
 // operation until the operator configures the list (deny-by-default).
-func platformAdminUserIDsFromEnv() []uuid.UUID {
+// The second return value carries any entries that failed to parse so
+// the caller can warn the operator about a typo that silently dropped
+// an intended admin.
+func platformAdminUserIDsFromEnv() (ids []uuid.UUID, invalid []string) {
 	raw := parseCSVList(os.Getenv("PLATFORM_ADMIN_USER_IDS"))
 	if len(raw) == 0 {
-		return nil
+		return nil, nil
 	}
 	out := make([]uuid.UUID, 0, len(raw))
 	for _, s := range raw {
 		id, err := uuid.Parse(s)
 		if err != nil {
+			invalid = append(invalid, s)
 			continue
 		}
 		out = append(out, id)
 	}
 	if len(out) == 0 {
-		return nil
+		return nil, invalid
 	}
-	return out
+	return out, invalid
 }
 
 // parseCSVList splits a comma-separated env-var value into a

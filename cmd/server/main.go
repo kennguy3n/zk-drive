@@ -695,6 +695,10 @@ func run() error {
 		WithWebhooks(webhookPublisher).
 		WithJWTRotator(jwtKeyManager).
 		WithPlatformAdmins(cfg.PlatformAdminUserIDs)
+	if len(cfg.PlatformAdminUserIDsInvalid) > 0 {
+		slog.Warn("ignoring malformed PLATFORM_ADMIN_USER_IDS entries (not valid UUIDs); affected admins will be excluded from JWT key rotation",
+			"entries", cfg.PlatformAdminUserIDsInvalid)
+	}
 	if len(cfg.PlatformAdminUserIDs) == 0 {
 		slog.Warn("PLATFORM_ADMIN_USER_IDS not set: POST /api/admin/jwt/rotate will deny all callers until configured")
 	}

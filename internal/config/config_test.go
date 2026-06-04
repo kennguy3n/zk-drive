@@ -390,9 +390,9 @@ func TestGetEnvDefault(t *testing.T) {
 // the Load contract too.
 func TestLoadParsesRateLimits(t *testing.T) {
 	requireEnv(t, map[string]string{
-		"DATABASE_URL":           "postgres://x/y",
-		"JWT_SECRET":             "secret",
-		"RATE_LIMIT_PER_USER":    "120",
+		"DATABASE_URL":             "postgres://x/y",
+		"JWT_SECRET":               "secret",
+		"RATE_LIMIT_PER_USER":      "120",
 		"RATE_LIMIT_PER_WORKSPACE": "  500 ",
 	})
 	cfg, err := Load()
@@ -455,10 +455,10 @@ func TestLoadWorkerMetricsAddrExplicitEmpty(t *testing.T) {
 // escape hatch — this test guards against a regression to that.
 func TestWorkerMetricsAddrFromEnv(t *testing.T) {
 	tests := []struct {
-		name   string
-		set    bool
-		value  string
-		want   string
+		name  string
+		set   bool
+		value string
+		want  string
 	}{
 		{name: "unset_falls_back_to_default", set: false, want: ":9091"},
 		{name: "explicit_empty_is_passed_through", set: true, value: "", want: ""},
@@ -524,14 +524,15 @@ func TestPlatformAdminUserIDsFromEnv(t *testing.T) {
 	id2 := uuid.New()
 
 	tests := []struct {
-		name  string
-		set   bool
-		value string
-		want  []uuid.UUID
+		name        string
+		set         bool
+		value       string
+		want        []uuid.UUID
+		wantInvalid []string
 	}{
-		{name: "unset_is_empty", set: false, want: nil},
-		{name: "blank_is_empty", set: true, value: "   ", want: nil},
-		{name: "single_id", set: true, value: id1.String(), want: []uuid.UUID{id1}},
+		{name: "unset_is_empty", set: false, want: nil, wantInvalid: nil},
+		{name: "blank_is_empty", set: true, value: "   ", want: nil, wantInvalid: nil},
+		{name: "single_id", set: true, value: id1.String(), want: []uuid.UUID{id1}, wantInvalid: nil},
 		{
 			name:  "multiple_ids_trimmed",
 			set:   true,
@@ -539,12 +540,19 @@ func TestPlatformAdminUserIDsFromEnv(t *testing.T) {
 			want:  []uuid.UUID{id1, id2},
 		},
 		{
-			name:  "invalid_entries_dropped",
-			set:   true,
-			value: "not-a-uuid," + id1.String() + ",,also-bad",
-			want:  []uuid.UUID{id1},
+			name:        "invalid_entries_dropped_and_reported",
+			set:         true,
+			value:       "not-a-uuid," + id1.String() + ",,also-bad",
+			want:        []uuid.UUID{id1},
+			wantInvalid: []string{"not-a-uuid", "also-bad"},
 		},
-		{name: "all_invalid_is_empty", set: true, value: "nope,still-nope", want: nil},
+		{
+			name:        "all_invalid_is_empty_but_reported",
+			set:         true,
+			value:       "nope,still-nope",
+			want:        nil,
+			wantInvalid: []string{"nope", "still-nope"},
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -555,13 +563,21 @@ func TestPlatformAdminUserIDsFromEnv(t *testing.T) {
 					t.Fatalf("Unsetenv: %v", err)
 				}
 			}
-			got := platformAdminUserIDsFromEnv()
+			got, invalid := platformAdminUserIDsFromEnv()
 			if len(got) != len(tc.want) {
-				t.Fatalf("platformAdminUserIDsFromEnv() = %v, want %v", got, tc.want)
+				t.Fatalf("platformAdminUserIDsFromEnv() ids = %v, want %v", got, tc.want)
 			}
 			for i := range tc.want {
 				if got[i] != tc.want[i] {
-					t.Errorf("index %d = %v, want %v", i, got[i], tc.want[i])
+					t.Errorf("id index %d = %v, want %v", i, got[i], tc.want[i])
+				}
+			}
+			if len(invalid) != len(tc.wantInvalid) {
+				t.Fatalf("invalid = %v, want %v", invalid, tc.wantInvalid)
+			}
+			for i := range tc.wantInvalid {
+				if invalid[i] != tc.wantInvalid[i] {
+					t.Errorf("invalid index %d = %q, want %q", i, invalid[i], tc.wantInvalid[i])
 				}
 			}
 		})
