@@ -66,9 +66,20 @@ export interface OnlyOfficeEditorProps {
 
 export default function OnlyOfficeEditor({ fileID, mode = "edit", onClose }: OnlyOfficeEditorProps) {
   const { t } = useTranslation();
+  // Keep the latest t in a ref so the editor effect can produce
+  // translated messages without listing t in its dependency array — a
+  // new t identity on language change must not tear down and re-init a
+  // live co-editing session.
+  const tRef = useRef(t);
+  tRef.current = t;
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
-  const containerIdRef = useRef<string>(`onlyoffice-editor-${++editorSeq}`);
+  // Assign the unique container id once per mount; guarding with the ref
+  // keeps ++editorSeq from running (and burning ids) on every render.
+  const containerIdRef = useRef<string>("");
+  if (!containerIdRef.current) {
+    containerIdRef.current = `onlyoffice-editor-${++editorSeq}`;
+  }
   const editorRef = useRef<DocEditorInstance | null>(null);
 
   useEffect(() => {
@@ -85,7 +96,7 @@ export default function OnlyOfficeEditor({ fileID, mode = "edit", onClose }: Onl
       .then(() => {
         if (cancelled || !config) return;
         if (!window.DocsAPI) {
-          setError(t("onlyoffice.unavailable"));
+          setError(tRef.current("onlyoffice.unavailable"));
           setLoading(false);
           return;
         }
@@ -99,14 +110,14 @@ export default function OnlyOfficeEditor({ fileID, mode = "edit", onClose }: Onl
           width: "100%",
           height: "100%",
           events: {
-            onError: () => setError(t("onlyoffice.editorError")),
+            onError: () => setError(tRef.current("onlyoffice.editorError")),
           },
         });
         setLoading(false);
       })
       .catch((e) => {
         if (cancelled) return;
-        setError(translateApiError(e, t));
+        setError(translateApiError(e, tRef.current));
         setLoading(false);
       });
 
@@ -124,7 +135,7 @@ export default function OnlyOfficeEditor({ fileID, mode = "edit", onClose }: Onl
         editorRef.current = null;
       }
     };
-  }, [fileID, mode, t]);
+  }, [fileID, mode]);
 
   if (error) {
     return (

@@ -384,6 +384,13 @@ func (h *Handler) saveEditedVersion(ctx context.Context, workspaceID, fileID uui
 	}
 	fresh, err := h.files.ConfirmVersion(ctx, workspaceID, v)
 	if err != nil {
+		// The object is already in storage but no version row references
+		// it. Unlike the direct-upload path, this server-side save sets
+		// no pending_upload_object_key marker, so the orphan GC would
+		// never reclaim it; best-effort delete it here to avoid leaking.
+		if delErr := store.DeleteObject(ctx, objectKey); delErr != nil {
+			logging.FromContext(ctx).Warn("onlyoffice: failed to delete orphaned object after confirm failure", "object_key", objectKey, "err", delErr)
+		}
 		return err
 	}
 	if fresh {
@@ -417,8 +424,18 @@ func fetchEditedDocument(ctx context.Context, url string) ([]byte, error) {
 		return nil, errors.New("onlyoffice: unexpected status fetching edited document: " + resp.Status)
 	}
 	// Cap the read so a hostile / runaway Document Server response cannot
-	// exhaust memory; office documents are far below this bound.
-	return io.ReadAll(io.LimitReader(resp.Body, onlyOfficeMaxDocumentBytes))
+	// exhaust memory; office documents are far below this bound. Read one
+	// byte past the cap so an over-limit response is detected and rejected
+	// rather than silently truncated and stored as a corrupt version — a
+	// non-zero ack keeps the bytes in the Document Server's cache.
+	data, err := io.ReadAll(io.LimitReader(resp.Body, onlyOfficeMaxDocumentBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(data)) > onlyOfficeMaxDocumentBytes {
+		return nil, errors.New("onlyoffice: edited document exceeds maximum allowed size")
+	}
+	return data, nil
 }
 
 // callbackAuthor picks the user id to attribute the new version to:
