@@ -75,11 +75,19 @@ type PushSubscription struct {
 // worker's `push` event listener. The frontend reads Title / Body to
 // call self.registration.showNotification, and uses URL (when set) to
 // focus / open the relevant page on notificationclick.
+//
+// Tag is the per-notification collapse key the service worker passes as
+// Notification.tag. It is the notification's own id, so the browser only
+// coalesces a genuine re-delivery of the *same* notification (e.g. a
+// duplicate push) — distinct notifications, even of the same Type, each
+// stay visible. Empty Tag lets the service worker fall back to a generic
+// constant.
 type NotificationPayload struct {
 	Title string `json:"title"`
 	Body  string `json:"body"`
 	Type  string `json:"type,omitempty"`
 	URL   string `json:"url,omitempty"`
+	Tag   string `json:"tag,omitempty"`
 }
 
 // WebPushRepository persists browser push subscriptions. The Postgres

@@ -8,6 +8,15 @@ import (
 	"github.com/kennguy3n/zk-drive/internal/notification"
 )
 
+// maxPushBodyBytes bounds the request body the push subscribe /
+// unsubscribe handlers will read. The real payload is tiny (an endpoint
+// URL plus two short base64url keys), so 8 KiB is generous headroom
+// while stopping an authenticated client from forcing the JSON decoder
+// to allocate an arbitrarily large body (memory DoS) before the
+// field-level length checks run. Mirrors the MaxBytesReader guard the
+// Stripe webhook handler already uses (internal/billing/stripe.go).
+const maxPushBodyBytes = 8 << 10
+
 // pushSubscriptionRequest mirrors the JSON produced by the browser's
 // PushSubscription.toJSON(): a push-service endpoint plus the ECDH
 // (p256dh) and auth keys. The frontend POSTs this verbatim after
@@ -52,6 +61,7 @@ func (h *Handler) SubscribePush(w http.ResponseWriter, r *http.Request) {
 	workspaceID, _ := middleware.WorkspaceIDFromContext(r.Context())
 	userID, _ := middleware.UserIDFromContext(r.Context())
 
+	r.Body = http.MaxBytesReader(w, r.Body, maxPushBodyBytes)
 	var req pushSubscriptionRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		middleware.RespondError(w, http.StatusBadRequest, middleware.ErrCodeMalformedJSON, "invalid json body")
@@ -83,6 +93,7 @@ func (h *Handler) UnsubscribePush(w http.ResponseWriter, r *http.Request) {
 	workspaceID, _ := middleware.WorkspaceIDFromContext(r.Context())
 	userID, _ := middleware.UserIDFromContext(r.Context())
 
+	r.Body = http.MaxBytesReader(w, r.Body, maxPushBodyBytes)
 	var req pushUnsubscribeRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		middleware.RespondError(w, http.StatusBadRequest, middleware.ErrCodeMalformedJSON, "invalid json body")

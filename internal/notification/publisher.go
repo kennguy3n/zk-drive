@@ -280,6 +280,10 @@ func pushPayloadFromEvent(event Event) (NotificationPayload, bool) {
 		Body:  n.Body,
 		Type:  n.Type,
 		URL:   deepLinkFor(n),
+		// Per-notification collapse key: the browser coalesces only a
+		// re-delivery of this same notification, so two distinct events
+		// of the same Type both stay visible (see NotificationPayload).
+		Tag: n.ID.String(),
 	}, true
 }
 

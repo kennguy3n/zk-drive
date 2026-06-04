@@ -513,25 +513,25 @@ func TestPushPayloadFromEvent_DeepLink(t *testing.T) {
 	}{
 		{
 			name:    "folder resource deep-links to folder route",
-			event:   Event{Type: "notification", Payload: &Notification{Title: "T", Body: "B", Type: "x", ResourceType: &folderType, ResourceID: &folderID}},
+			event:   Event{Type: "notification", Payload: &Notification{ID: uuid.New(), Title: "T", Body: "B", Type: "x", ResourceType: &folderType, ResourceID: &folderID}},
 			wantOK:  true,
 			wantURL: "/drive/folder/" + folderID.String(),
 		},
 		{
 			name:    "document resource deep-links to document route",
-			event:   Event{Type: "notification", Payload: &Notification{Title: "T", Body: "B", Type: "x", ResourceType: &docType, ResourceID: &docID}},
+			event:   Event{Type: "notification", Payload: &Notification{ID: uuid.New(), Title: "T", Body: "B", Type: "x", ResourceType: &docType, ResourceID: &docID}},
 			wantOK:  true,
 			wantURL: "/drive/document/" + docID.String(),
 		},
 		{
 			name:    "routeless resource type leaves URL empty (SW falls back to /drive)",
-			event:   Event{Type: "notification", Payload: &Notification{Title: "T", Body: "B", Type: "x", ResourceType: &shareType, ResourceID: &otherID}},
+			event:   Event{Type: "notification", Payload: &Notification{ID: uuid.New(), Title: "T", Body: "B", Type: "x", ResourceType: &shareType, ResourceID: &otherID}},
 			wantOK:  true,
 			wantURL: "",
 		},
 		{
 			name:    "missing resource leaves URL empty",
-			event:   Event{Type: "notification", Payload: &Notification{Title: "T", Body: "B", Type: "x"}},
+			event:   Event{Type: "notification", Payload: &Notification{ID: uuid.New(), Title: "T", Body: "B", Type: "x"}},
 			wantOK:  true,
 			wantURL: "",
 		},
@@ -552,6 +552,14 @@ func TestPushPayloadFromEvent_DeepLink(t *testing.T) {
 			}
 			if payload.URL != tc.wantURL {
 				t.Errorf("URL = %q, want %q", payload.URL, tc.wantURL)
+			}
+			// Tag must be the notification's own id so the browser
+			// collapses only a re-delivery of the same notification,
+			// never two distinct notifications of the same type.
+			if n, isNotif := tc.event.Payload.(*Notification); isNotif {
+				if payload.Tag != n.ID.String() {
+					t.Errorf("Tag = %q, want %q", payload.Tag, n.ID.String())
+				}
 			}
 		})
 	}

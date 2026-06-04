@@ -24,9 +24,13 @@ self.addEventListener("push", (event) => {
     body: payload.body || "",
     icon: "/pwa-192x192.png",
     badge: "/pwa-192x192.png",
-    // Collapse repeat notifications of the same type so a burst doesn't
-    // stack; data carries the deep link for the click handler.
-    tag: payload.type || "zk-drive-notification",
+    // Per-notification collapse key: payload.tag is the notification's
+    // own id, so the browser only coalesces a genuine re-delivery of the
+    // *same* notification (e.g. a duplicate push) — two distinct events,
+    // even of the same type, each stay visible. Fall back to a generic
+    // constant only when the server omits a tag. data carries the deep
+    // link for the click handler.
+    tag: payload.tag || payload.type || "zk-drive-notification",
     data: { url: payload.url || "/drive" },
   };
   event.waitUntil(
