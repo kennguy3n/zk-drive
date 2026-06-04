@@ -543,6 +543,7 @@
     "ADMIN_ACCESS_REQUIRED": "This action requires admin privileges.",
     "READ_ONLY_ROLE": "Your account has read-only access.",
     "WRONG_TENANT": "This resource belongs to a different workspace.",
+    "PLATFORM_ADMIN_ACCESS_REQUIRED": "This action requires platform administrator privileges.",
     "MISSING_WORKSPACE_CONTEXT": "No workspace selected.",
     "NOT_FOUND": "Not found.",
     "BAD_REQUEST": "The request is malformed.",
@@ -567,5 +568,12 @@
     "UPSTREAM_FAILED": "An upstream service is unavailable.",
     "STORAGE_FAILURE": "Storage service is currently unavailable.",
     "INTERNAL_ERROR": "Something went wrong on our end. Please try again."
+  },
+  "onlyoffice": {
+    "openInEditor": "Open in editor",
+    "editAria": "Open {{name}} in the office editor",
+    "unavailable": "The office document editor is not available.",
+    "editorError": "The office document editor encountered an error.",
+    "title": "Office editor"
   }
 }

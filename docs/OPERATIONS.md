@@ -172,6 +172,20 @@ either a tenant hammering uploads or an under-provisioned budget; if
 it is a legitimate workload, raise `PREVIEW_BUDGET_PER_WORKSPACE_HOUR`
 and/or add worker replicas.
 
+### Upgrade note: JWT key rotation now requires PLATFORM_ADMIN_USER_IDS
+
+`POST /api/admin/jwt/rotate` rotates the **platform-wide** signing key
+shared by every tenant. It is now gated behind the
+`PLATFORM_ADMIN_USER_IDS` allowlist **in addition to** the existing
+`AdminOnly` check, and is **deny-by-default**: until you set the env var
+to the UUID(s) of your platform operators, every rotate call returns
+`403 PLATFORM_ADMIN_ACCESS_REQUIRED`. Deployments that previously let any
+workspace admin rotate the key must set `PLATFORM_ADMIN_USER_IDS` before
+upgrading, or the endpoint will be unavailable. The server logs a startup
+warning when the var is unset (and another naming any malformed entries
+that were dropped). See [`CONFIGURATION.md`](CONFIGURATION.md) for the
+field definition.
+
 ## Observability
 
 Every long-running binary exposes a Prometheus scrape surface:
