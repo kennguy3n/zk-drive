@@ -28,6 +28,7 @@ import (
 	"github.com/kennguy3n/zk-drive/api/drive"
 	apikchat "github.com/kennguy3n/zk-drive/api/kchat"
 	"github.com/kennguy3n/zk-drive/api/middleware"
+	apiplatform "github.com/kennguy3n/zk-drive/api/platform"
 	apiwebhooks "github.com/kennguy3n/zk-drive/api/webhooks"
 	"github.com/kennguy3n/zk-drive/api/ws"
 	"github.com/kennguy3n/zk-drive/internal/activity"
@@ -51,6 +52,7 @@ import (
 	"github.com/kennguy3n/zk-drive/internal/metrics"
 	"github.com/kennguy3n/zk-drive/internal/notification"
 	"github.com/kennguy3n/zk-drive/internal/permission"
+	"github.com/kennguy3n/zk-drive/internal/platform"
 	"github.com/kennguy3n/zk-drive/internal/preview"
 	"github.com/kennguy3n/zk-drive/internal/retention"
 	"github.com/kennguy3n/zk-drive/internal/search"
@@ -760,6 +762,20 @@ func run() error {
 		slog.Warn("PLATFORM_ADMIN_USER_IDS not set: POST /api/admin/jwt/rotate will deny all callers until configured")
 	}
 
+	// Platform control plane (Session 9): fleet-wide tenant management
+	// authenticated by platform API keys, mounted under /api/platform
+	// SEPARATELY from the workspace JWT chain. The same service backs
+	// the suspended-workspace 503 guard applied to the tenant groups
+	// below.
+	platformKeyStore := platform.NewAPIKeyStore(pool)
+	platformSvc := platform.NewService(pool, wsSvc, userSvc, billingSvc).
+		WithProvisioner(provisioner).
+		WithURLValidator(webhooks.NewURLValidator())
+	if sessionStore != nil {
+		platformSvc = platformSvc.WithSessions(sessionStore)
+	}
+	platformHandler := apiplatform.NewHandler(platformSvc, platformKeyStore)
+
 	// Outbound-webhook subscription admin handler. Mounted
 	// under /api/admin/webhooks so it inherits the admin-only +
 	// tenant-guarded middleware stack. CRUD on subscriptions still
@@ -1098,6 +1114,7 @@ func run() error {
 		r.Group(func(r chi.Router) {
 			r.Use(middleware.AuthMiddlewareWithKeys(jwtKeyManager, sessionChecker))
 			r.Use(middleware.TenantGuard())
+			r.Use(middleware.SuspensionGuard(platformSvc))
 			// IP allowlist enforcement runs after the tenant guard
 			// has resolved the workspace. It is a no-op for any
 			// workspace that has not enabled the feature. Mounted on
@@ -1195,6 +1212,7 @@ func run() error {
 		r.Route("/admin", func(r chi.Router) {
 			r.Use(middleware.AuthMiddlewareWithKeys(jwtKeyManager, sessionChecker))
 			r.Use(middleware.TenantGuard())
+			r.Use(middleware.SuspensionGuard(platformSvc))
 			r.Use(middleware.AdminOnly())
 			r.Use(rateLimiter())
 			adminHandler.RegisterRoutes(r)
@@ -1210,12 +1228,23 @@ func run() error {
 		r.Route("/kchat", func(r chi.Router) {
 			r.Use(middleware.AuthMiddlewareWithKeys(jwtKeyManager, sessionChecker))
 			r.Use(middleware.TenantGuard())
+			r.Use(middleware.SuspensionGuard(platformSvc))
 			// kchat is a data-plane feature (attachment uploads, room
 			// creation, member sync), so it must honour the workspace IP
 			// allowlist exactly like the main data-plane group above.
 			r.Use(middleware.IPAllowlist(ipAllowSvc, cfg.TrustedProxyDepth))
 			r.Use(rateLimiter())
 			kchatHandler.RegisterRoutes(r)
+		})
+
+		// Platform control-plane routes. Authenticated by a platform
+		// API key (Authorization: Bearer pk_...) via PlatformAuth —
+		// deliberately NOT behind the workspace JWT AuthMiddleware /
+		// TenantGuard chain, since these endpoints operate across the
+		// whole fleet rather than within a single workspace.
+		r.Route("/platform", func(r chi.Router) {
+			r.Use(middleware.PlatformAuth(platformHandler))
+			platformHandler.RegisterRoutes(r)
 		})
 
 		// Public share-link resolution — deliberately outside the auth
