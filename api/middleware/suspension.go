@@ -66,6 +66,10 @@ func SuspensionGuard(checker WorkspaceSuspensionChecker) func(http.Handler) http
 
 func writeSuspended(w http.ResponseWriter, reason string) {
 	w.Header().Set("Content-Type", "application/json")
+	// Match the nosniff defense WriteJSON applies to every other JSON
+	// response so this hand-written body (a deliberately distinct
+	// envelope) isn't the lone response a browser could MIME-sniff.
+	w.Header().Set("X-Content-Type-Options", "nosniff")
 	w.Header().Set("Retry-After", "3600")
 	w.WriteHeader(http.StatusServiceUnavailable)
 	_ = json.NewEncoder(w).Encode(suspendedWorkspaceBody{Error: "workspace_suspended", Reason: reason})
