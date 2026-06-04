@@ -540,8 +540,11 @@ func run() error {
 	// notifRepo backs both the notification service and the web-push
 	// service; they read/write the same Postgres tables via the shared
 	// pool, so one repository instance is reused rather than allocating
-	// a second identical wrapper.
-	notifRepo := notification.NewPostgresRepository(pool)
+	// a second identical wrapper. The credential codec encrypts the
+	// web-push p256dh / auth key material at rest (no-op pass-through
+	// when CREDENTIAL_ENCRYPTION is "none").
+	notifRepo := notification.NewPostgresRepository(pool).
+		WithSubscriptionCipher(credentialCodec)
 
 	// Web Push (RFC 8030 + VAPID). Constructed only when both VAPID
 	// keys are configured; otherwise webPushSvc stays nil and the

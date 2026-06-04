@@ -279,7 +279,40 @@ func pushPayloadFromEvent(event Event) (NotificationPayload, bool) {
 		Title: n.Title,
 		Body:  n.Body,
 		Type:  n.Type,
+		URL:   deepLinkFor(n),
 	}, true
+}
+
+// deepLinkFor maps a notification's resource to the SPA path the service
+// worker should open when the user clicks the push. It returns "" when
+// the resource has no dedicated route, in which case the service worker
+// falls back to /drive (see frontend/public/push-sw.js) — so an empty
+// result is the safe default, never a broken link.
+//
+// Only resource types that map to a real frontend route (App.tsx) and
+// whose ResourceID is the ID that route expects are linked here.
+// Today's notification resource types (share_link, guest_invite,
+// file_version) carry the *event* id (link / invite / version), not a
+// folder or document id, and the SPA has no route to view those by id,
+// so they intentionally fall through to the /drive default. Wiring the
+// URL end-to-end means the moment a notification references a folder or
+// document the click lands on it with no further plumbing.
+func deepLinkFor(n *Notification) string {
+	if n == nil || n.ResourceType == nil || n.ResourceID == nil {
+		return ""
+	}
+	id := n.ResourceID.String()
+	switch *n.ResourceType {
+	case "folder":
+		return "/drive/folder/" + id
+	case "document":
+		return "/drive/document/" + id
+	default:
+		// No dedicated route for this resource type — let the service
+		// worker apply its /drive fallback rather than emit a link that
+		// would 404 or land on an unrelated page.
+		return ""
+	}
 }
 
 func parseChannel(channel string) (uuid.UUID, uuid.UUID, error) {

@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/kennguy3n/zk-drive/internal/typednil"
+
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -25,12 +27,67 @@ type Repository interface {
 
 // PostgresRepository implements Repository against Postgres.
 type PostgresRepository struct {
-	pool *pgxpool.Pool
+	pool   *pgxpool.Pool
+	cipher SubscriptionCipher
 }
 
 // NewPostgresRepository returns a PostgresRepository using the supplied pool.
 func NewPostgresRepository(pool *pgxpool.Pool) *PostgresRepository {
 	return &PostgresRepository{pool: pool}
+}
+
+// WithSubscriptionCipher injects the cipher used to encrypt the
+// p256dh / auth key material of web-push subscriptions at rest. When
+// nil (the default), the keys are stored as-is — matching the
+// pass-through behaviour of crypto.Codec in mode "none". cipher is
+// normalised through typednil.IsTypedNil so a typed-nil concrete value
+// wrapped in the interface engages the plaintext path rather than
+// NPE-ing, consistent with the With* setters elsewhere in the codebase.
+// Fluent so it composes with the constructor.
+func (r *PostgresRepository) WithSubscriptionCipher(cipher SubscriptionCipher) *PostgresRepository {
+	if r != nil {
+		if typednil.IsTypedNil(cipher) {
+			cipher = nil
+		}
+		r.cipher = cipher
+	}
+	return r
+}
+
+// encryptKeys seals the p256dh / auth key material for storage. A nil
+// cipher passes the plaintext through unchanged.
+func (r *PostgresRepository) encryptKeys(ctx context.Context, sub PushSubscription) (p256dh, auth string, err error) {
+	if r.cipher == nil {
+		return sub.P256dh, sub.Auth, nil
+	}
+	if p256dh, err = r.cipher.Encrypt(ctx, sub.P256dh); err != nil {
+		return "", "", fmt.Errorf("encrypt p256dh: %w", err)
+	}
+	if auth, err = r.cipher.Encrypt(ctx, sub.Auth); err != nil {
+		return "", "", fmt.Errorf("encrypt auth: %w", err)
+	}
+	return p256dh, auth, nil
+}
+
+// decryptKeys opens key material read back from storage. A nil cipher
+// returns the values unchanged; crypto.Codec additionally returns
+// historical plaintext rows (no ciphertext prefix) verbatim, so a
+// mid-rollout mix of encrypted and plaintext rows both decode.
+func (r *PostgresRepository) decryptKeys(ctx context.Context, sub PushSubscription) (PushSubscription, error) {
+	if r.cipher == nil {
+		return sub, nil
+	}
+	p256dh, err := r.cipher.Decrypt(ctx, sub.P256dh)
+	if err != nil {
+		return PushSubscription{}, fmt.Errorf("decrypt p256dh: %w", err)
+	}
+	auth, err := r.cipher.Decrypt(ctx, sub.Auth)
+	if err != nil {
+		return PushSubscription{}, fmt.Errorf("decrypt auth: %w", err)
+	}
+	sub.P256dh = p256dh
+	sub.Auth = auth
+	return sub, nil
 }
 
 const notificationColumns = "id, workspace_id, user_id, type, title, body, resource_type, resource_id, read_at, created_at"
@@ -159,12 +216,16 @@ func (r *PostgresRepository) ListWorkspaceAdmins(ctx context.Context, workspaceI
 // means re-registering the same endpoint refreshes its keys instead of
 // inserting a duplicate row.
 func (r *PostgresRepository) SaveSubscription(ctx context.Context, workspaceID, userID uuid.UUID, sub PushSubscription) error {
+	p256dh, auth, err := r.encryptKeys(ctx, sub)
+	if err != nil {
+		return fmt.Errorf("save webpush subscription: %w", err)
+	}
 	const q = `
 INSERT INTO webpush_subscriptions (workspace_id, user_id, endpoint, p256dh, auth)
 VALUES ($1, $2, $3, $4, $5)
 ON CONFLICT (workspace_id, user_id, endpoint)
 DO UPDATE SET p256dh = EXCLUDED.p256dh, auth = EXCLUDED.auth`
-	if _, err := r.pool.Exec(ctx, q, workspaceID, userID, sub.Endpoint, sub.P256dh, sub.Auth); err != nil {
+	if _, err := r.pool.Exec(ctx, q, workspaceID, userID, sub.Endpoint, p256dh, auth); err != nil {
 		return fmt.Errorf("save webpush subscription: %w", err)
 	}
 	return nil
@@ -200,7 +261,11 @@ func (r *PostgresRepository) ListSubscriptions(ctx context.Context, workspaceID,
 		if err := rows.Scan(&sub.Endpoint, &sub.P256dh, &sub.Auth); err != nil {
 			return nil, err
 		}
-		out = append(out, sub)
+		decoded, err := r.decryptKeys(ctx, sub)
+		if err != nil {
+			return nil, fmt.Errorf("list webpush subscriptions: %w", err)
+		}
+		out = append(out, decoded)
 	}
 	return out, rows.Err()
 }

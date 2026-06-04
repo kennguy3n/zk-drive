@@ -526,6 +526,13 @@
     "dismissAria": "Dismiss install prompt",
     "notNow": "Not now"
   },
+  "notifications": {
+    "enable": "Enable notifications",
+    "enableTooltip": "Get notified about share links and activity even when this tab is closed",
+    "enabled": "Notifications on",
+    "blocked": "Notifications blocked",
+    "blockedTooltip": "Notifications are blocked in your browser settings for this site"
+  },
   "errors": {
     "AUTH_MISSING_TOKEN": "Authentication required.",
     "AUTH_INVALID_TOKEN": "Your session has expired. Please sign in again.",

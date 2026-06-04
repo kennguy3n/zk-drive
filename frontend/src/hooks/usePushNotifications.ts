@@ -55,19 +55,32 @@ function pushSupported(): boolean {
   );
 }
 
-// ensurePushSubscription requests notification permission (if not yet
-// decided), subscribes through the active service worker registration,
-// and registers the resulting PushSubscription with the server. It is a
-// no-op when the browser lacks push support, the user has denied
-// permission, or the server has web push disabled (VAPID 501).
-async function ensurePushSubscription(): Promise<void> {
+// ensurePushSubscription subscribes through the active service worker
+// registration and registers the resulting PushSubscription with the
+// server. It is a no-op when the browser lacks push support, the user
+// has denied permission, or the server has web push disabled (VAPID
+// 501).
+//
+// promptIfDefault controls whether to call Notification.requestPermission
+// when the user has not yet decided. The automatic on-login path passes
+// false: prompting outside a user gesture is suppressed (Chrome's
+// "quieter" UI) or blocked outright (Safari), which trains users to
+// dismiss the prompt and tanks the grant rate. We instead surface an
+// explicit "Enable notifications" control (enablePushNotifications),
+// which passes true so the prompt fires inside a real click handler.
+// When permission is already "granted" both paths (re)subscribe so a
+// returning user's subscription is kept current (e.g. after VAPID key
+// rotation) without any prompt.
+async function ensurePushSubscription(promptIfDefault: boolean): Promise<void> {
   if (!pushSupported()) {
     return;
   }
-  // Only prompt when the user hasn't already made a decision. A prior
-  // "denied" is respected (re-prompting is blocked by the browser
-  // anyway); "granted" proceeds straight to (re)subscribe.
   if (Notification.permission === "default") {
+    if (!promptIfDefault) {
+      // No decision yet and we're not allowed to prompt here (no user
+      // gesture). Leave it to the explicit Enable-notifications control.
+      return;
+    }
     const permission = await Notification.requestPermission();
     if (permission !== "granted") {
       return;
@@ -114,14 +127,48 @@ async function ensurePushSubscription(): Promise<void> {
 // the user becomes authenticated. Failures are swallowed (logged) so a
 // push-service hiccup never breaks rendering — in-app + WebSocket
 // notifications remain the source of truth.
+//
+// On login we only (re)subscribe when permission is ALREADY granted; we
+// never auto-prompt, because the request would not be tied to a user
+// gesture. First-time opt-in goes through enablePushNotifications, wired
+// to an explicit "Enable notifications" button.
 export function usePushNotifications(token: string | null): void {
   useEffect(() => {
     if (!token) {
       return;
     }
-    ensurePushSubscription().catch((err) => {
+    ensurePushSubscription(false).catch((err) => {
       // eslint-disable-next-line no-console
       console.warn("web push subscription failed", err);
     });
   }, [token]);
+}
+
+// enablePushNotifications is the gesture-triggered opt-in: call it from a
+// click handler (the "Enable notifications" button) so the browser's
+// permission prompt is allowed to appear. Resolves to the resulting
+// Notification.permission so the caller can update its UI; resolves to
+// "denied" when the browser lacks push support. Subscription failures
+// after a granted prompt are swallowed (logged) like the on-login path.
+export async function enablePushNotifications(): Promise<NotificationPermission> {
+  if (!pushSupported()) {
+    return "denied";
+  }
+  try {
+    await ensurePushSubscription(true);
+  } catch (err) {
+    // eslint-disable-next-line no-console
+    console.warn("web push subscription failed", err);
+  }
+  return Notification.permission;
+}
+
+// pushPermissionState reports the current opt-in state for UI gating
+// without triggering any prompt. Returns "unsupported" when the browser
+// can't do web push at all.
+export function pushPermissionState(): NotificationPermission | "unsupported" {
+  if (!pushSupported()) {
+    return "unsupported";
+  }
+  return Notification.permission;
 }

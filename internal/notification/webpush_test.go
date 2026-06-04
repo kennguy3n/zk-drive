@@ -467,6 +467,71 @@ func TestWebPushPublisher_IgnoresNonNotificationEvents(t *testing.T) {
 	}
 }
 
+// TestPushPayloadFromEvent_DeepLink verifies the click-through URL is
+// derived from the notification's resource: folder / document resources
+// map to their SPA route, while resource types without a dedicated route
+// (and non-notification events) leave URL empty so the service worker
+// applies its /drive fallback.
+func TestPushPayloadFromEvent_DeepLink(t *testing.T) {
+	folderID := uuid.New()
+	docID := uuid.New()
+	otherID := uuid.New()
+	folderType := "folder"
+	docType := "document"
+	shareType := "share_link"
+
+	cases := []struct {
+		name    string
+		event   Event
+		wantOK  bool
+		wantURL string
+	}{
+		{
+			name:    "folder resource deep-links to folder route",
+			event:   Event{Type: "notification", Payload: &Notification{Title: "T", Body: "B", Type: "x", ResourceType: &folderType, ResourceID: &folderID}},
+			wantOK:  true,
+			wantURL: "/drive/folder/" + folderID.String(),
+		},
+		{
+			name:    "document resource deep-links to document route",
+			event:   Event{Type: "notification", Payload: &Notification{Title: "T", Body: "B", Type: "x", ResourceType: &docType, ResourceID: &docID}},
+			wantOK:  true,
+			wantURL: "/drive/document/" + docID.String(),
+		},
+		{
+			name:    "routeless resource type leaves URL empty (SW falls back to /drive)",
+			event:   Event{Type: "notification", Payload: &Notification{Title: "T", Body: "B", Type: "x", ResourceType: &shareType, ResourceID: &otherID}},
+			wantOK:  true,
+			wantURL: "",
+		},
+		{
+			name:    "missing resource leaves URL empty",
+			event:   Event{Type: "notification", Payload: &Notification{Title: "T", Body: "B", Type: "x"}},
+			wantOK:  true,
+			wantURL: "",
+		},
+		{
+			name:   "non-notification event is not surfaced",
+			event:  Event{Type: "change", Payload: map[string]string{"k": "v"}},
+			wantOK: false,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			payload, ok := pushPayloadFromEvent(tc.event)
+			if ok != tc.wantOK {
+				t.Fatalf("ok = %v, want %v", ok, tc.wantOK)
+			}
+			if !ok {
+				return
+			}
+			if payload.URL != tc.wantURL {
+				t.Errorf("URL = %q, want %q", payload.URL, tc.wantURL)
+			}
+		})
+	}
+}
+
 // TestWebPushPublisher_TypedNilPushDegradesGracefully proves that a
 // typed-nil *WebPushService passed as the PushSender interface is
 // normalised to a plain-nil field, so Publish short-circuits to the

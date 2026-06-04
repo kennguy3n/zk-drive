@@ -8,6 +8,7 @@ import SearchBar from "../components/SearchBar";
 import ShareDialog from "../components/ShareDialog";
 import OnlyOfficeEditor from "../components/OnlyOfficeEditor";
 import EncryptionBadge, { type EncryptionMode } from "../components/EncryptionBadge";
+import EnableNotificationsButton from "../components/EnableNotificationsButton";
 import { translateApiError } from "../api/errors";
 import {
   bulkCopy,
@@ -141,6 +142,7 @@ export default function FileBrowserPage() {
           <Breadcrumb folder={folder} />
           <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
             <SearchBar />
+            <EnableNotificationsButton style={btn} />
             <button onClick={handleCreateFolder} style={btn}>{t("drive.newFolder")}</button>
             {isAdmin ? (
               <button onClick={() => setTemplateDialogOpen(true)} style={btn}>

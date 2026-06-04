@@ -108,6 +108,27 @@ type EndpointValidator interface {
 	Validate(ctx context.Context, raw string) (*url.URL, error)
 }
 
+// SubscriptionCipher encrypts and decrypts the RFC 8291 key material
+// (p256dh and auth) persisted with each push subscription. It is
+// satisfied by *crypto.Codec, injected into the Postgres repository by
+// the server wiring via WithSubscriptionCipher. Defining the interface
+// here (rather than importing the crypto package) keeps the
+// notification package free of that dependency and lets tests supply a
+// fake cipher.
+//
+// auth is a 16-byte shared secret and p256dh the subscriber's ECDH
+// public key; together with the VAPID private key they are everything
+// needed to forge or decrypt a push message for that subscription, so
+// encrypting them at rest keeps a database-only compromise from
+// yielding usable push credentials. Decrypt must round-trip plaintext
+// it does not recognise as its own ciphertext unchanged, so rows
+// written before encryption was enabled (or while in pass-through mode)
+// stay readable — *crypto.Codec already behaves this way.
+type SubscriptionCipher interface {
+	Encrypt(ctx context.Context, plaintext string) (string, error)
+	Decrypt(ctx context.Context, ciphertext string) (string, error)
+}
+
 // WebPushService delivers RFC 8030 / VAPID web-push messages to a
 // user's registered browser subscriptions. It is constructed only
 // when both VAPID keys are configured; callers treat a nil service as
