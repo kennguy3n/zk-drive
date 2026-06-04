@@ -25,7 +25,7 @@ func TestSuspensionGuardBlocksSuspendedWorkspace(t *testing.T) {
 	next := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		t.Fatal("next handler must not run for a suspended workspace")
 	})
-	guard := SuspensionGuard(fakeSuspensionChecker{suspended: true, reason: "abuse"})
+	guard := SuspensionGuard(fakeSuspensionChecker{suspended: true, reason: "abuse"}, false)
 
 	req := httptest.NewRequest(http.MethodGet, "/api/drive/files", nil).
 		WithContext(WithWorkspaceID(context.Background(), uuid.New()))
@@ -64,10 +64,53 @@ func TestSuspensionGuardFailsOpen(t *testing.T) {
 			req := httptest.NewRequest(http.MethodGet, "/api/drive/files", nil).
 				WithContext(WithWorkspaceID(context.Background(), uuid.New()))
 			rec := httptest.NewRecorder()
-			SuspensionGuard(checker)(next).ServeHTTP(rec, req)
+			SuspensionGuard(checker, false)(next).ServeHTTP(rec, req)
 			if !called || rec.Code != http.StatusOK {
 				t.Fatalf("expected request to pass through (called=%v, code=%d)", called, rec.Code)
 			}
 		})
 	}
+}
+
+func TestSuspensionGuardFailsClosed(t *testing.T) {
+	// With failClosed=true a lookup error rejects the request with a
+	// distinct "suspension_check_unavailable" body (not
+	// "workspace_suspended"), so callers can tell "can't confirm" from a
+	// confirmed suspension. An active workspace still passes through.
+	t.Run("lookup_error_blocks", func(t *testing.T) {
+		next := http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+			t.Fatal("next handler must not run when fail-closed and lookup errors")
+		})
+		req := httptest.NewRequest(http.MethodGet, "/api/drive/files", nil).
+			WithContext(WithWorkspaceID(context.Background(), uuid.New()))
+		rec := httptest.NewRecorder()
+		SuspensionGuard(fakeSuspensionChecker{err: context.DeadlineExceeded}, true)(next).ServeHTTP(rec, req)
+		if rec.Code != http.StatusServiceUnavailable {
+			t.Fatalf("status: got %d, want 503", rec.Code)
+		}
+		if got := rec.Header().Get("X-Content-Type-Options"); got != "nosniff" {
+			t.Errorf("X-Content-Type-Options: got %q, want nosniff", got)
+		}
+		var body suspendedWorkspaceBody
+		if err := json.NewDecoder(rec.Body).Decode(&body); err != nil {
+			t.Fatalf("decode body: %v", err)
+		}
+		if body.Error != "suspension_check_unavailable" {
+			t.Errorf("error: got %q, want suspension_check_unavailable", body.Error)
+		}
+	})
+	t.Run("active_passes", func(t *testing.T) {
+		called := false
+		next := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			called = true
+			w.WriteHeader(http.StatusOK)
+		})
+		req := httptest.NewRequest(http.MethodGet, "/api/drive/files", nil).
+			WithContext(WithWorkspaceID(context.Background(), uuid.New()))
+		rec := httptest.NewRecorder()
+		SuspensionGuard(fakeSuspensionChecker{suspended: false}, true)(next).ServeHTTP(rec, req)
+		if !called || rec.Code != http.StatusOK {
+			t.Fatalf("expected request to pass through (called=%v, code=%d)", called, rec.Code)
+		}
+	})
 }

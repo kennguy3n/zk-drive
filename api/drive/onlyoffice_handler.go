@@ -47,63 +47,48 @@ import (
 // a hung callback pinning a goroutine.
 const onlyOfficeFetchTimeout = 60 * time.Second
 
-// onlyOfficeMaxDocumentBytes caps how many bytes the save callback will
-// buffer in memory from the Document Server's edited-document URL, so a
-// hostile or runaway response cannot exhaust the API container (which
-// deploy/docker-compose.prod.yml limits to 512 MiB). 100 MiB matches the
-// repo's other bounded-in-memory job cap (index.MaxDownloadBytes) and is
-// far above any real office document.
-const onlyOfficeMaxDocumentBytes = 100 << 20 // 100 MiB
+// defaultOnlyOfficeMaxDocumentBytes caps how many bytes the save
+// callback will buffer in memory from the Document Server's
+// edited-document URL, so a hostile or runaway response cannot exhaust
+// the API container (which deploy/docker-compose.prod.yml limits to
+// 512 MiB). 100 MiB matches the repo's other bounded-in-memory job cap
+// (index.MaxDownloadBytes) and is far above any real office document.
+// It is the fallback when the handler is not wired with explicit limits
+// (e.g. metadata-only test wiring); production overrides it from
+// ONLYOFFICE_MAX_DOCUMENT_MB via WithOnlyOfficeSaveLimits.
+const defaultOnlyOfficeMaxDocumentBytes = 100 << 20 // 100 MiB
+
+// defaultOnlyOfficeSaveMemoryBudget is the share of the API container's
+// memory the save path may buffer concurrently — half of the 512 MiB
+// production container, leaving headroom for the Go runtime, caches,
+// and the rest of the request load. The save path must never claim the
+// whole container, or a burst of large saves would OOM everything else.
+// Overridden from ONLYOFFICE_SAVE_MEMORY_BUDGET_MB in production.
+const defaultOnlyOfficeSaveMemoryBudget = 256 << 20 // 256 MiB
+
+// defaultOnlyOfficeMaxConcurrentSaves bounds how many save callbacks may
+// buffer an edited document in memory at once when explicit limits are
+// not wired. The editor-callback route runs outside the per-user/
+// -workspace rate limiter (the Document Server holds no ZK Drive JWT),
+// so without this a burst of callbacks could each buffer up to the
+// per-document cap and exhaust the container. The cap is DERIVED from
+// the memory budget so the worst case (concurrency * max-document)
+// stays within budget by construction; excess callbacks are shed with a
+// retryable error (the bytes stay in the Document Server cache and it
+// retries) rather than blocking a goroutine.
+const defaultOnlyOfficeMaxConcurrentSaves = defaultOnlyOfficeSaveMemoryBudget / defaultOnlyOfficeMaxDocumentBytes // = 2
+
+// Compile-time guards on the DEFAULTS (a negative untyped constant
+// converted to uint is a build error): the derived cap must be positive
+// and the worst-case concurrent buffering must not exceed the budget.
+// The same invariant for operator-supplied values is enforced at
+// startup by config.validateOnlyOfficeGroup.
+const _ = uint(defaultOnlyOfficeMaxConcurrentSaves - 1)                                                                   // cap >= 1
+const _ = uint(defaultOnlyOfficeSaveMemoryBudget - defaultOnlyOfficeMaxConcurrentSaves*defaultOnlyOfficeMaxDocumentBytes) // worst case <= budget
 
 // onlyOfficeHTTPClient pulls edited bytes from the Document Server in
 // the save callback. Shared so connections are reused across callbacks.
 var onlyOfficeHTTPClient = &http.Client{Timeout: onlyOfficeFetchTimeout}
-
-// onlyOfficeAPIContainerMemoryBytes mirrors the API server container's
-// memory limit (zk-drive-server in deploy/docker-compose.prod.yml).
-// Used only to size the save concurrency cap below; keep in sync if the
-// deploy limit changes.
-const onlyOfficeAPIContainerMemoryBytes = 512 << 20 // 512 MiB
-
-// onlyOfficeSaveMemoryBudget is the share of the container's memory the
-// save path may buffer concurrently. Half the container leaves headroom
-// for the Go runtime, caches, and the rest of the request load — the
-// save path must never be allowed to claim the whole container, or a
-// burst of large saves would OOM everything else.
-const onlyOfficeSaveMemoryBudget = onlyOfficeAPIContainerMemoryBytes / 2 // 256 MiB
-
-// onlyOfficeMaxConcurrentSaves bounds how many save callbacks may be
-// buffering an edited document in memory at once. The editor-callback
-// route runs outside the per-user/-workspace rate limiter (the Document
-// Server holds no ZK Drive JWT), so without this a burst of callbacks
-// could each buffer up to onlyOfficeMaxDocumentBytes and exhaust the
-// container.
-//
-// The cap is DERIVED from the memory budget so the worst case
-// (onlyOfficeMaxConcurrentSaves * onlyOfficeMaxDocumentBytes) stays
-// within budget by construction. It was previously a hand-picked 8,
-// which at 100 MiB per doc implied an 800 MiB worst case — overrunning
-// the very 512 MiB container the cap exists to protect. Deriving it
-// keeps the invariant true even if either constant changes later.
-// Excess callbacks are shed with a retryable error (the edited bytes
-// stay in the Document Server's cache and it retries) rather than
-// blocking a goroutine, so a storm degrades gracefully instead of
-// OOMing.
-const onlyOfficeMaxConcurrentSaves = onlyOfficeSaveMemoryBudget / onlyOfficeMaxDocumentBytes // = 2
-
-// Compile-time guards (a negative untyped constant converted to uint is
-// a build error): the derived cap must be positive — a budget below one
-// document would shed every save — and the worst-case concurrent
-// buffering must not exceed the budget. Both hold by construction today;
-// these fail the build if a future edit to the constants above breaks
-// the invariant.
-const _ = uint(onlyOfficeMaxConcurrentSaves - 1)                                                  // cap >= 1
-const _ = uint(onlyOfficeSaveMemoryBudget - onlyOfficeMaxConcurrentSaves*onlyOfficeMaxDocumentBytes) // worst case <= budget
-
-// onlyOfficeSaveSem is the counting semaphore enforcing
-// onlyOfficeMaxConcurrentSaves. A buffered channel slot is held for the
-// duration of the memory-heavy fetch+write in saveEditedVersion.
-var onlyOfficeSaveSem = make(chan struct{}, onlyOfficeMaxConcurrentSaves)
 
 // ONLYOFFICE callback status codes (Document Server → ZK Drive).
 const (
@@ -148,20 +133,63 @@ func (h *Handler) WithSuspensionChecker(c middleware.WorkspaceSuspensionChecker)
 	return h
 }
 
+// WithSuspensionFailClosed sets the suspension-enforcement posture for
+// the ONLYOFFICE save callback to match SuspensionGuard. When true, a
+// suspension-lookup error at the write boundary rejects the save
+// (returning a retryable error so the Document Server keeps the bytes)
+// instead of allowing it. Default (false) preserves the fail-OPEN
+// availability posture. Wired from config.SuspensionFailClosed.
+func (h *Handler) WithSuspensionFailClosed(failClosed bool) *Handler {
+	h.suspensionFailClosed = failClosed
+	return h
+}
+
+// WithOnlyOfficeSaveLimits sizes the save-callback memory guards from
+// operator config: maxDocumentBytes caps a single buffered document and
+// the concurrency cap is DERIVED as memoryBudgetBytes / maxDocumentBytes
+// so the worst case (concurrency * max-document) stays within budget by
+// construction. Non-positive inputs fall back to the package defaults,
+// and the derived cap is floored at 1. config.validateOnlyOfficeGroup
+// already rejects a budget below one document at startup.
+func (h *Handler) WithOnlyOfficeSaveLimits(memoryBudgetBytes, maxDocumentBytes int64) *Handler {
+	if maxDocumentBytes <= 0 {
+		maxDocumentBytes = defaultOnlyOfficeMaxDocumentBytes
+	}
+	if memoryBudgetBytes <= 0 {
+		memoryBudgetBytes = defaultOnlyOfficeSaveMemoryBudget
+	}
+	concurrency := int(memoryBudgetBytes / maxDocumentBytes)
+	if concurrency < 1 {
+		concurrency = 1
+	}
+	h.onlyOfficeMaxDocumentBytes = maxDocumentBytes
+	h.onlyOfficeSaveConcurrency = concurrency
+	h.onlyOfficeSaveSem = make(chan struct{}, concurrency)
+	return h
+}
+
 // ensureNotSuspended returns collab.ErrWorkspaceSuspended when the
 // workspace has been suspended by the platform control plane. It is a
-// no-op when no checker is wired (metadata-only test wiring), and fails
-// OPEN on a lookup error — exactly like SuspensionGuard — because
-// suspension is an availability control rather than a security
-// boundary, so a transient DB blip must not silently drop a user's
-// edited bytes. Used by the ONLYOFFICE save callback, which runs
-// outside the SuspensionGuard middleware group.
+// no-op when no checker is wired (metadata-only test wiring). On a
+// suspension-lookup error it mirrors the SuspensionGuard middleware
+// posture: by default it fails OPEN (suspension is an availability
+// control, not a security boundary, so a transient DB blip must not
+// silently drop a user's edited bytes), but when WithSuspensionFailClosed
+// is set it fails CLOSED — returning a retryable error so the Document
+// Server keeps the bytes and retries once the lookup recovers. Used by
+// the ONLYOFFICE save callback, which runs outside the SuspensionGuard
+// middleware group.
 func (h *Handler) ensureNotSuspended(ctx context.Context, workspaceID uuid.UUID) error {
 	if h.suspension == nil {
 		return nil
 	}
 	suspended, _, err := h.suspension.WorkspaceSuspension(ctx, workspaceID)
 	if err != nil {
+		if h.suspensionFailClosed {
+			logging.FromContext(ctx).Warn("onlyoffice save: suspension lookup failed; rejecting write (fail-closed)",
+				"workspace_id", workspaceID, "err", err)
+			return collab.ErrWorkspaceSuspended
+		}
 		logging.FromContext(ctx).Warn("onlyoffice save: suspension lookup failed; allowing write",
 			"workspace_id", workspaceID, "err", err)
 		return nil
@@ -409,15 +437,15 @@ func (h *Handler) EditorCallback(w http.ResponseWriter, r *http.Request) {
 	ctx := middleware.WithWorkspaceID(r.Context(), workspaceID)
 
 	// Bound concurrent in-memory document buffering (see
-	// onlyOfficeMaxConcurrentSaves). At capacity, shed load with a
+	// onlyOfficeSaveConcurrency). At capacity, shed load with a
 	// retryable ack so the Document Server keeps the bytes and retries,
 	// rather than reading another document into memory now.
 	select {
-	case onlyOfficeSaveSem <- struct{}{}:
-		defer func() { <-onlyOfficeSaveSem }()
+	case h.onlyOfficeSaveSem <- struct{}{}:
+		defer func() { <-h.onlyOfficeSaveSem }()
 	default:
 		logging.FromContext(ctx).Warn("onlyoffice save concurrency limit reached; asking document server to retry",
-			"file_id", fileID, "limit", onlyOfficeMaxConcurrentSaves)
+			"file_id", fileID, "limit", h.onlyOfficeSaveConcurrency)
 		writeOnlyOfficeAck(w, http.StatusServiceUnavailable, 1)
 		return
 	}
@@ -479,7 +507,7 @@ func (h *Handler) saveEditedVersion(ctx context.Context, workspaceID, fileID uui
 		return err
 	}
 
-	data, err := fetchEditedDocument(ctx, cb.URL)
+	data, err := h.fetchEditedDocument(ctx, cb.URL)
 	if err != nil {
 		return err
 	}
@@ -538,7 +566,7 @@ func (h *Handler) saveEditedVersion(ctx context.Context, workspaceID, fileID uui
 
 // fetchEditedDocument GETs the edited file from the Document Server's
 // cache URL.
-func fetchEditedDocument(ctx context.Context, url string) ([]byte, error) {
+func (h *Handler) fetchEditedDocument(ctx context.Context, url string) ([]byte, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return nil, err
@@ -553,7 +581,7 @@ func fetchEditedDocument(ctx context.Context, url string) ([]byte, error) {
 	}
 	// Cap the read so a hostile / runaway Document Server response cannot
 	// exhaust memory; office documents are far below this bound.
-	return readLimited(resp.Body, onlyOfficeMaxDocumentBytes)
+	return readLimited(resp.Body, h.onlyOfficeMaxDocumentBytes)
 }
 
 // readLimited reads up to max bytes from r and errors (rather than

@@ -88,6 +88,15 @@ func requireEnv(t *testing.T, envs map[string]string) {
 		// tests asserting that guard MUST see the production "unset"
 		// state and not a value bled in from the CI runner.
 		"ONLYOFFICE_URL", "ONLYOFFICE_SECRET", "ONLYOFFICE_ALLOW_INSECURE",
+		// ONLYOFFICE save-path memory sizing + suspension posture.
+		// Same convention as the blocks above: buildConfigFromEnv reads
+		// each via onlyOfficeBytesFromEnv / parseBoolDefault (treating
+		// empty identically to unset → safe default), so a CI runner
+		// that exports e.g. ONLYOFFICE_MAX_DOCUMENT_MB or
+		// SUSPENSION_FAIL_CLOSED must not bleed into tests exercising
+		// the default-sizing / fail-open paths.
+		"ONLYOFFICE_MAX_DOCUMENT_MB", "ONLYOFFICE_SAVE_MEMORY_BUDGET_MB",
+		"SUSPENSION_FAIL_CLOSED",
 		// Preview pipeline scaling env vars. Same convention as the
 		// blocks above: buildConfigFromEnv reads each of these via
 		// parseIntDefault, treating an empty value identically to unset
@@ -316,6 +325,103 @@ func TestLoadOnlyOfficeWithSecret(t *testing.T) {
 	if cfg.OnlyOfficeURL != "https://docs.example.com" || cfg.OnlyOfficeSecret != "office-callback-secret" {
 		t.Fatalf("OnlyOffice fields not propagated: %+v", cfg)
 	}
+}
+
+// TestLoadOnlyOfficeSaveLimitsDefaults verifies the save-path memory
+// sizing falls back to the documented defaults (256 MiB budget /
+// 100 MiB per-document → concurrency 2) when unset.
+func TestLoadOnlyOfficeSaveLimitsDefaults(t *testing.T) {
+	requireEnv(t, map[string]string{
+		"DATABASE_URL": "postgres://x/y",
+		"JWT_SECRET":   "secret",
+	})
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load failed: %v", err)
+	}
+	if got := cfg.OnlyOfficeMaxDocumentBytes; got != 100*bytesPerMB {
+		t.Errorf("OnlyOfficeMaxDocumentBytes default: got %d, want %d", got, 100*bytesPerMB)
+	}
+	if got := cfg.OnlyOfficeSaveMemoryBudgetBytes; got != 256*bytesPerMB {
+		t.Errorf("OnlyOfficeSaveMemoryBudgetBytes default: got %d, want %d", got, 256*bytesPerMB)
+	}
+	if got := cfg.OnlyOfficeMaxConcurrentSaves(); got != 2 {
+		t.Errorf("OnlyOfficeMaxConcurrentSaves default: got %d, want 2", got)
+	}
+}
+
+// TestLoadOnlyOfficeSaveLimitsConfigured verifies operator overrides are
+// honoured and the derived concurrency follows budget / per-document.
+func TestLoadOnlyOfficeSaveLimitsConfigured(t *testing.T) {
+	requireEnv(t, map[string]string{
+		"DATABASE_URL":                     "postgres://x/y",
+		"JWT_SECRET":                       "secret",
+		"ONLYOFFICE_MAX_DOCUMENT_MB":       "50",
+		"ONLYOFFICE_SAVE_MEMORY_BUDGET_MB": "512",
+	})
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load failed: %v", err)
+	}
+	if got := cfg.OnlyOfficeMaxDocumentBytes; got != 50*bytesPerMB {
+		t.Errorf("OnlyOfficeMaxDocumentBytes: got %d, want %d", got, 50*bytesPerMB)
+	}
+	if got := cfg.OnlyOfficeMaxConcurrentSaves(); got != 10 { // 512 / 50 = 10
+		t.Errorf("OnlyOfficeMaxConcurrentSaves: got %d, want 10", got)
+	}
+}
+
+// TestLoadOnlyOfficeBudgetBelowDocumentFails verifies the server refuses
+// to start when the memory budget is smaller than a single document
+// (which would floor the derived concurrency to 0 and shed every save).
+func TestLoadOnlyOfficeBudgetBelowDocumentFails(t *testing.T) {
+	requireEnv(t, map[string]string{
+		"DATABASE_URL":                     "postgres://x/y",
+		"JWT_SECRET":                       "secret",
+		"ONLYOFFICE_URL":                   "https://docs.example.com",
+		"ONLYOFFICE_SECRET":                "office-callback-secret",
+		"ONLYOFFICE_MAX_DOCUMENT_MB":       "100",
+		"ONLYOFFICE_SAVE_MEMORY_BUDGET_MB": "50",
+	})
+	_, err := Load()
+	if err == nil {
+		t.Fatal("expected error when ONLYOFFICE_SAVE_MEMORY_BUDGET_MB < ONLYOFFICE_MAX_DOCUMENT_MB")
+	}
+	if !strings.Contains(err.Error(), "ONLYOFFICE_SAVE_MEMORY_BUDGET_MB") {
+		t.Fatalf("expected error to mention the budget var, got %v", err)
+	}
+}
+
+// TestLoadSuspensionFailClosed verifies SUSPENSION_FAIL_CLOSED defaults
+// to the fail-open posture and flips on when explicitly set.
+func TestLoadSuspensionFailClosed(t *testing.T) {
+	t.Run("default_fail_open", func(t *testing.T) {
+		requireEnv(t, map[string]string{
+			"DATABASE_URL": "postgres://x/y",
+			"JWT_SECRET":   "secret",
+		})
+		cfg, err := Load()
+		if err != nil {
+			t.Fatalf("Load failed: %v", err)
+		}
+		if cfg.SuspensionFailClosed {
+			t.Fatal("SuspensionFailClosed should default to false (fail-open)")
+		}
+	})
+	t.Run("opt_in_fail_closed", func(t *testing.T) {
+		requireEnv(t, map[string]string{
+			"DATABASE_URL":           "postgres://x/y",
+			"JWT_SECRET":             "secret",
+			"SUSPENSION_FAIL_CLOSED": "true",
+		})
+		cfg, err := Load()
+		if err != nil {
+			t.Fatalf("Load failed: %v", err)
+		}
+		if !cfg.SuspensionFailClosed {
+			t.Fatal("SuspensionFailClosed should be true when SUSPENSION_FAIL_CLOSED=true")
+		}
+	})
 }
 
 // TestLoadStorageOnly verifies the audit-restore-friendly slim

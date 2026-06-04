@@ -111,6 +111,47 @@ nor exhaust Postgres' `max_connections`. Other binaries (`migrate`,
 | `DB_MIN_CONNS`           | `2`     | Minimum idle connections kept warm. Clamped to `[0, DB_MAX_CONNS]`.                                       |
 | `DB_MAX_CONN_IDLE_TIME`  | `30m`   | How long an idle connection is kept before being closed. Go duration string (e.g. `45s`, `5m`, `1h`).     |
 
+### Sizing the pool across replicas (read this before scaling out)
+
+`DB_MAX_CONNS` is **per process**, not per cluster. Every `server`
+(and `worker`) replica opens its own pool, so the load Postgres
+actually sees is:
+
+```
+peak backends ≈ server_replicas × server.DB_MAX_CONNS
+              + worker_replicas × worker.DB_MAX_CONNS
+              + (migrate / reconciler / orphan-gc / audit-archiver, default sizing)
+```
+
+The default `DB_MAX_CONNS` was raised from `10` to `20`. With the
+server HPA scaling up to **20 pods**, that is `20 × 20 = 400`
+connections from the server tier alone — before the worker tier and
+the one-shot jobs. A stock Postgres ships with `max_connections = 100`,
+so a fully scaled-out fleet will exhaust it and new connections will be
+refused (`FATAL: sorry, too many clients already`).
+
+**Plan for one of these before scaling past a handful of replicas:**
+
+- **Put PgBouncer (transaction pooling) in front of Postgres** and
+  point `DATABASE_URL` at it. This is the intended production topology
+  and is what the Terraform / Helm chart wires up. PgBouncer multiplexes
+  the fleet's many client connections onto a small set of real Postgres
+  backends, so `replicas × DB_MAX_CONNS` becomes the *client* count
+  (cheap) rather than the *backend* count (scarce).
+- **Or** raise Postgres `max_connections` to comfortably exceed the
+  worst-case sum above (and size RAM accordingly — each backend costs
+  several MB).
+- **Or** lower `DB_MAX_CONNS` so `replicas × DB_MAX_CONNS` stays under
+  Postgres `max_connections` with headroom.
+
+> ⚠️ **In-place upgrades:** if you are upgrading an existing deployment
+> that scaled replicas under the old `DB_MAX_CONNS=10` default and you
+> do **not** run PgBouncer, the bump to `20` doubles the backend count
+> and can push you past `max_connections`. Either keep `DB_MAX_CONNS=10`
+> explicitly, raise Postgres `max_connections`, or adopt PgBouncer as
+> part of the upgrade — make it a conscious choice rather than a
+> surprise.
+
 ## JWT signing
 
 | Variable                   | Default | Purpose                                                                                                                                            |
@@ -272,6 +313,31 @@ key and must not see plaintext.
 | ------------------- | ------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `ONLYOFFICE_URL`    | _empty_ | Base URL of the ONLYOFFICE Document Server (e.g. `https://onlyoffice.example.com`). When empty, office editing is disabled: `/api/onlyoffice/status` reports `enabled:false`, the editor-config endpoint returns `503`, and the frontend hides the "Edit" / "Open in editor" affordances. |
 | `ONLYOFFICE_SECRET` | _empty_ | Shared JWT secret matching the Document Server's `JWT_SECRET` (`JWT_ENABLED=true`). ZK Drive signs the editor config with it (HS256) and verifies the inbound save callback against it. When empty, the config is emitted unsigned and the callback skips verification — acceptable only for trusted local development. |
+| `ONLYOFFICE_MAX_DOCUMENT_MB` | `100` | Maximum size (MiB) of a single edited document the save callback will buffer in memory before rejecting it. Generous — real office documents are 1–50 MiB. |
+| `ONLYOFFICE_SAVE_MEMORY_BUDGET_MB` | `256` | Total memory (MiB) the save path may buffer **concurrently**. The save-concurrency cap is **derived** as `budget ÷ per-document`, so the worst case (`concurrency × per-document`) never exceeds the budget. Must be `>=` `ONLYOFFICE_MAX_DOCUMENT_MB` or the server refuses to start. |
+
+**Save concurrency & memory.** The editor-callback route runs outside
+the per-user / per-workspace rate limiter (the Document Server holds no
+ZK Drive JWT), so a burst of save callbacks could each buffer a whole
+document and OOM the API container. ZK Drive bounds this with a counting
+semaphore whose size is **derived** from the two knobs above:
+`max_concurrent_saves = ONLYOFFICE_SAVE_MEMORY_BUDGET_MB ÷ ONLYOFFICE_MAX_DOCUMENT_MB`
+(floored at 1). The defaults (`256 ÷ 100 = 2`) are sized for the 512 MiB
+production API container in
+[`deploy/docker-compose.prod.yml`](../deploy/docker-compose.prod.yml)
+(half the container, leaving headroom for the runtime and other
+requests). Excess callbacks are shed with a retryable `503` — the
+Document Server keeps the edited bytes in its cache and retries, so a
+storm degrades gracefully instead of OOMing.
+
+- **Raising throughput** on a larger container: raise
+  `ONLYOFFICE_SAVE_MEMORY_BUDGET_MB` (e.g. to half a 1 GiB container →
+  `512`, giving concurrency `5` at the default per-document cap). Do
+  **not** simply raise it past what the container can hold — the budget
+  exists to keep `concurrency × per-document` inside the container.
+- **Smaller documents** (lowering `ONLYOFFICE_MAX_DOCUMENT_MB`) raises
+  concurrency at the same budget, but rejects larger legitimate
+  documents — keep it above your largest expected office file.
 
 The callback URL the Document Server posts to is composed from
 [`PUBLIC_URL`](#transactional-email-guest-invite-delivery): `${PUBLIC_URL}/api/files/{id}/editor-callback?workspace_id={ws}`.
@@ -294,6 +360,35 @@ Setup:
 > Server and renders inside an iframe. Add the Document Server origin to
 > the relevant `SECURITY_HEADERS_CSP_*` allowances (script / frame /
 > connect sources) so the browser can load it.
+
+## Workspace suspension enforcement
+
+When the platform control plane suspends a workspace, `SuspensionGuard`
+(REST + WebSocket) and the ONLYOFFICE save-callback write boundary
+return `503` for that workspace. These knobs control what happens when
+the suspension **lookup itself** errors (e.g. a transient database
+blip).
+
+| Variable                 | Default | Purpose                                                                                                                          |
+| ------------------------ | ------- | -------------------------------------------------------------------------------------------------------------------------------- |
+| `SUSPENSION_FAIL_CLOSED`  | `false` | Posture on a suspension-lookup error. `false` (default) **fails open**; `true` **fails closed** (returns `503`). See below.      |
+
+- **`false` — fail open (default).** A lookup error lets the request
+  proceed. Suspension is an **availability control** (e.g. billing /
+  non-payment), not a security boundary, so a transient database
+  outage must not lock the entire fleet out of their own data. This is
+  the right default for the overwhelming majority of deployments.
+- **`true` — fail closed.** A lookup error rejects the request with
+  `503` and a distinct `{"error":"suspension_check_unavailable"}` body
+  (separate from a confirmed `{"error":"workspace_suspended"}`, so
+  tooling can tell "can't confirm" from "confirmed suspended"). Enable
+  this **only** if you use suspension for **compliance / legal holds**,
+  where a held workspace must never transact even during a database
+  outage — accepting that a suspension-lookup outage will block *all*
+  workspaces (including healthy ones) until the lookup recovers. The
+  ONLYOFFICE save callback honours the same posture, returning a
+  retryable error so the Document Server keeps the edited bytes and
+  retries once the lookup recovers (no data loss).
 
 ## Browser security headers
 

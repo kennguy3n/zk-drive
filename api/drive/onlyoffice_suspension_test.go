@@ -57,3 +57,68 @@ func TestEnsureNotSuspended(t *testing.T) {
 		})
 	}
 }
+
+// TestEnsureNotSuspendedFailClosed pins the compliance-hold posture: with
+// WithSuspensionFailClosed(true) a suspension-lookup error rejects the
+// write (returns ErrWorkspaceSuspended) instead of allowing it, so the
+// Document Server keeps the bytes and retries when the lookup recovers.
+// An active workspace still saves.
+func TestEnsureNotSuspendedFailClosed(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		checker *fakeSuspensionChecker
+		wantErr error
+	}{
+		{name: "lookup error fails closed", checker: &fakeSuspensionChecker{err: errors.New("db blip")}, wantErr: collab.ErrWorkspaceSuspended},
+		{name: "workspace active still allowed", checker: &fakeSuspensionChecker{suspended: false}, wantErr: nil},
+		{name: "workspace suspended refused", checker: &fakeSuspensionChecker{suspended: true}, wantErr: collab.ErrWorkspaceSuspended},
+	}
+	for _, tc := range tests {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			h := (&Handler{}).WithSuspensionChecker(tc.checker).WithSuspensionFailClosed(true)
+			err := h.ensureNotSuspended(context.Background(), uuid.New())
+			if !errors.Is(err, tc.wantErr) {
+				t.Fatalf("ensureNotSuspended (fail-closed) err = %v, want %v", err, tc.wantErr)
+			}
+		})
+	}
+}
+
+// TestWithOnlyOfficeSaveLimits pins the derived concurrency: the cap is
+// budget / per-document, floored at 1, and the semaphore is sized to
+// match. Non-positive inputs fall back to the package defaults.
+func TestWithOnlyOfficeSaveLimits(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name            string
+		budget, maxDoc  int64
+		wantConcurrency int
+		wantMaxDoc      int64
+	}{
+		{name: "default-equivalent", budget: 256 << 20, maxDoc: 100 << 20, wantConcurrency: 2, wantMaxDoc: 100 << 20},
+		{name: "higher budget raises cap", budget: 512 << 20, maxDoc: 50 << 20, wantConcurrency: 10, wantMaxDoc: 50 << 20},
+		{name: "budget equals one doc floors to 1", budget: 100 << 20, maxDoc: 100 << 20, wantConcurrency: 1, wantMaxDoc: 100 << 20},
+		{name: "non-positive falls back to defaults", budget: 0, maxDoc: 0, wantConcurrency: defaultOnlyOfficeMaxConcurrentSaves, wantMaxDoc: defaultOnlyOfficeMaxDocumentBytes},
+	}
+	for _, tc := range tests {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			h := (&Handler{}).WithOnlyOfficeSaveLimits(tc.budget, tc.maxDoc)
+			if h.onlyOfficeSaveConcurrency != tc.wantConcurrency {
+				t.Errorf("concurrency: got %d, want %d", h.onlyOfficeSaveConcurrency, tc.wantConcurrency)
+			}
+			if cap(h.onlyOfficeSaveSem) != tc.wantConcurrency {
+				t.Errorf("semaphore cap: got %d, want %d", cap(h.onlyOfficeSaveSem), tc.wantConcurrency)
+			}
+			if h.onlyOfficeMaxDocumentBytes != tc.wantMaxDoc {
+				t.Errorf("maxDocumentBytes: got %d, want %d", h.onlyOfficeMaxDocumentBytes, tc.wantMaxDoc)
+			}
+		})
+	}
+}
