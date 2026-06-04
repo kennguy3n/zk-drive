@@ -119,4 +119,16 @@ func TestRotateJWTKey_RequiresKeysManage(t *testing.T) {
 			t.Fatalf("status = %d, want 501; body=%s", resp.Code, resp.Body.String())
 		}
 	})
+
+	// A typed-nil *crypto.KeyManager wrapped in the JWTRotator interface
+	// is != nil, so mountRotate calls WithJWTRotator with it. The setter
+	// must collapse it back to a real nil; otherwise RotateJWTKey would
+	// pass its nil-guard and NPE on RotateKey. Expect a clean 501.
+	t.Run("typed-nil rotator collapses to 501", func(t *testing.T) {
+		var km *cryptopkg.KeyManager
+		resp := postRotate(t, mountRotate(km, platformsvc.PermKeysManage))
+		if resp.Code != http.StatusNotImplemented {
+			t.Fatalf("status = %d, want 501; body=%s", resp.Code, resp.Body.String())
+		}
+	})
 }

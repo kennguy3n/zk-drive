@@ -62,6 +62,20 @@ func NewHandler(svc *platformsvc.PlatformService, keys *platformsvc.APIKeyStore)
 // Optional: when nil the route responds 501 Not Implemented (e.g.
 // deployments still on HS256-only signing).
 func (h *Handler) WithJWTRotator(r JWTRotator) *Handler {
+	// Collapse a typed-nil *crypto.KeyManager wrapped in the JWTRotator
+	// interface back to a real nil. Otherwise h.jwtKeys would compare
+	// != nil (an interface holding a typed-nil), the h.jwtKeys == nil
+	// guard in RotateJWTKey would pass, and h.jwtKeys.RotateKey() would
+	// NPE. Mirrors the guard on every other With* setter (e.g.
+	// admin.Handler.WithWebhooks, drive.Handler.WithWebhooks).
+	if r == nil {
+		h.jwtKeys = nil
+		return h
+	}
+	if km, ok := r.(*cryptopkg.KeyManager); ok && km == nil {
+		h.jwtKeys = nil
+		return h
+	}
 	h.jwtKeys = r
 	return h
 }
