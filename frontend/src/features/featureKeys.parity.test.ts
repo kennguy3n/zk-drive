@@ -13,7 +13,12 @@ import flagsSrc from "../../../internal/feature/flags.go?raw";
 describe("feature key parity (Go <-> TS)", () => {
   it("Feature values exactly match internal/feature/flags.go", () => {
     // Extract the string literal from each `Feature<Name> = "<value>"` const.
-    const goKeys = [...flagsSrc.matchAll(/Feature\w+\s*=\s*"([a-z_]+)"/g)].map(
+    // Capture the whole literal (any non-quote run) rather than a restricted
+    // [a-z_]+ class: a key that doesn't fit the expected charset (e.g. a digit
+    // like "feature_v2", or an accidental uppercase) must surface as a parity
+    // mismatch, not be silently skipped by the regex — silent omission would
+    // blind the very drift this guard exists to catch.
+    const goKeys = [...flagsSrc.matchAll(/Feature\w+\s*=\s*"([^"]+)"/g)].map(
       (m) => m[1],
     );
 
