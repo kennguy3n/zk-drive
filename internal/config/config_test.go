@@ -130,6 +130,11 @@ func requireEnv(t *testing.T, envs map[string]string) {
 		// bleed an ES256 default into tests exercising the "auto"
 		// fallback path.
 		"ZKDRIVE_PROFILE",
+		// Security-header knobs whose defaults are profile- or
+		// constant-derived. Baseline-clear them so a runner exporting
+		// e.g. SECURITY_HEADERS_EXPECT_CT=true can't bleed into tests
+		// asserting the profile default.
+		"SECURITY_HEADERS_CSP_NONCE", "SECURITY_HEADERS_EXPECT_CT",
 	}
 	// WORKER_METRICS_ADDR is intentionally NOT included in the keys
 	// list above. t.Setenv(k, "") makes os.LookupEnv return
@@ -768,6 +773,65 @@ func TestNormaliseProfile(t *testing.T) {
 			t.Errorf("normaliseProfile(%q) = %q, want %q", tc.in, got, tc.want)
 		}
 	}
+}
+
+// TestSecurityHeaderDefaults pins the 6.5 config contract:
+//   - CSP nonce defaults ON (additive hardening) regardless of profile.
+//   - Expect-CT defaults ON under production, OFF otherwise.
+//   - Explicit env values override the profile default either way.
+func TestSecurityHeaderDefaults(t *testing.T) {
+	t.Run("development defaults", func(t *testing.T) {
+		requireEnv(t, map[string]string{
+			"DATABASE_URL": "postgres://x/y",
+			"JWT_SECRET":   "secret",
+		})
+		cfg, err := Load()
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		if !cfg.SecurityHeadersCSPNonce {
+			t.Errorf("CSP nonce should default on")
+		}
+		if cfg.SecurityHeadersExpectCT {
+			t.Errorf("Expect-CT should default off outside production")
+		}
+	})
+	t.Run("production defaults Expect-CT on", func(t *testing.T) {
+		requireEnv(t, map[string]string{
+			"DATABASE_URL":    "postgres://x/y",
+			"JWT_SECRET":      "secret",
+			"ZKDRIVE_PROFILE": "production",
+		})
+		cfg, err := Load()
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		if !cfg.SecurityHeadersExpectCT {
+			t.Errorf("Expect-CT should default on under production")
+		}
+		if !cfg.SecurityHeadersCSPNonce {
+			t.Errorf("CSP nonce should default on under production")
+		}
+	})
+	t.Run("explicit env overrides profile", func(t *testing.T) {
+		requireEnv(t, map[string]string{
+			"DATABASE_URL":               "postgres://x/y",
+			"JWT_SECRET":                 "secret",
+			"ZKDRIVE_PROFILE":            "production",
+			"SECURITY_HEADERS_EXPECT_CT": "false",
+			"SECURITY_HEADERS_CSP_NONCE": "false",
+		})
+		cfg, err := Load()
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		if cfg.SecurityHeadersExpectCT {
+			t.Errorf("explicit SECURITY_HEADERS_EXPECT_CT=false ignored")
+		}
+		if cfg.SecurityHeadersCSPNonce {
+			t.Errorf("explicit SECURITY_HEADERS_CSP_NONCE=false ignored")
+		}
+	})
 }
 
 // TestJWTAlgorithmFromEnv pins the profile-aware default: an explicit,

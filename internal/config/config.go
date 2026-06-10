@@ -237,6 +237,27 @@ type Config struct {
 	// `'self' data: blob:`). Thumbnails / previews served from
 	// the storage gateway origin go here.
 	SecurityHeadersCSPImgExtra []string
+	// SecurityHeadersCSPNonce enables a per-request CSP nonce
+	// (6.5): a fresh `'nonce-<base64>'` source is added to
+	// `script-src` on every response and surfaced to the SPA via
+	// the `<meta name="csp-nonce">` tag in index.html, so an
+	// inline script the app legitimately needs can be allow-listed
+	// by nonce WITHOUT reopening `'unsafe-inline'`. Defaults to
+	// true (the policy already ships nonce-clean — there are no
+	// inline scripts — so enabling it is purely additive and
+	// future-proofs against a dependency that injects one). Set
+	// SECURITY_HEADERS_CSP_NONCE=false to suppress the per-request
+	// nonce (e.g. when a downstream CDN strips the meta tag).
+	SecurityHeadersCSPNonce bool
+	// SecurityHeadersExpectCT emits the Expect-CT header (6.5).
+	// Defaults to true under the production profile and false
+	// elsewhere; also suppressed when HSTS is disabled (Expect-CT
+	// is only meaningful over HTTPS). Sourced from
+	// SECURITY_HEADERS_EXPECT_CT when set (overrides the profile
+	// default). Expect-CT is superseded by browsers enforcing
+	// Certificate Transparency by default, but it is still honoured
+	// by deployed clients and is an explicit hardening requirement.
+	SecurityHeadersExpectCT bool
 
 	// WorkerMetricsAddr is the listen address for the worker
 	// binary's dedicated /metrics HTTP server. Default ":9091"
@@ -600,6 +621,10 @@ func buildConfigFromEnv() *Config {
 		SecurityHeadersCSPReportURI:    os.Getenv("SECURITY_HEADERS_CSP_REPORT_URI"),
 		SecurityHeadersCSPConnectExtra: parseCSVList(os.Getenv("SECURITY_HEADERS_CSP_CONNECT_EXTRA")),
 		SecurityHeadersCSPImgExtra:     parseCSVList(os.Getenv("SECURITY_HEADERS_CSP_IMG_EXTRA")),
+		SecurityHeadersCSPNonce:        parseBoolDefault(os.Getenv("SECURITY_HEADERS_CSP_NONCE"), true),
+		// Expect-CT defaults on under the production profile, off
+		// otherwise; an explicit env value wins either way.
+		SecurityHeadersExpectCT: parseBoolDefault(os.Getenv("SECURITY_HEADERS_EXPECT_CT"), profile == ProfileProduction),
 
 		// WorkerMetricsAddr uses LookupEnv (not getEnvDefault) so the
 		// documented contract holds: unset → default :9091; explicitly

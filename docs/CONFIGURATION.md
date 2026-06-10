@@ -462,6 +462,29 @@ rollouts.
 | `SECURITY_HEADERS_CSP_REPORT_ONLY`    | `false` | When `true`, the policy emits under `Content-Security-Policy-Report-Only` instead of enforcing — browsers report violations but do not block. Use during the first rollout, then flip to `false`. |
 | `SECURITY_HEADERS_CSP_REPORT_URI`     | _empty_ | When set, appended as `report-uri <value>` to the CSP value. Browsers POST violation reports there.                                                                      |
 | `SECURITY_HEADERS_DISABLE_HSTS`       | `false` | When `true`, skips `Strict-Transport-Security`. Use for local HTTP development only; keep `false` in production.                                                          |
+| `SECURITY_HEADERS_CSP_NONCE`          | `true`  | When `true`, a fresh per-request `'nonce-<base64>'` source is added to CSP `script-src` and the same nonce is injected into the `<meta name="csp-nonce">` tag of the served `index.html`. The policy already ships nonce-clean (no inline scripts), so this is purely additive: a future inline script can be allow-listed by nonce without reopening `'unsafe-inline'`. Read it in the SPA via `document.querySelector('meta[name=csp-nonce]').content`. |
+| `SECURITY_HEADERS_EXPECT_CT`          | _profile_ | Emits `Expect-CT: max-age=86400, enforce`. Defaults to **on** under the `production` profile and **off** otherwise; an explicit value wins. Suppressed automatically when HSTS is disabled (Expect-CT is HTTPS-only). Superseded by browsers enforcing Certificate Transparency by default, but still honoured by deployed clients. |
+
+### CSP nonce & inline scripts (6.5)
+
+`script-src` is nonce-clean: it carries **no** `'unsafe-inline'` and
+**no** `'unsafe-eval'`. Vite emits external, content-hashed bundles
+that load under `'self'`, so the SPA needs neither. When
+`SECURITY_HEADERS_CSP_NONCE` is on, the server stamps a cryptographically
+random 128-bit nonce into both the `script-src` directive and the
+`index.html` meta tag on **every navigation request** (the document is
+served `no-store` precisely so the nonce is never cached / reused). A
+component or dependency that must inject an inline `<script>`/`<style>`
+should copy that nonce onto the element so it satisfies the policy —
+this keeps the door to `'unsafe-inline'` permanently shut.
+
+`style-src` retains `'unsafe-inline'` because React's `style={}` prop
+compiles to inline `style=` attributes (governed by `style-src-attr`,
+which inherits `style-src`); removing it is a separate frontend
+workstream (refactor every inline style to a class). Camera, microphone
+and geolocation are denied outright via `Permissions-Policy`
+(`camera=()`, `microphone=()`, `geolocation=()`) — stricter than the
+"restrict to self" baseline, since the drive app uses none of them.
 
 ## Transactional email (guest-invite delivery)
 

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"os"
@@ -1031,6 +1032,8 @@ func run() error {
 		CSPConnectExtra: cfg.SecurityHeadersCSPConnectExtra,
 		CSPImgExtra:     cfg.SecurityHeadersCSPImgExtra,
 		DisableHSTS:     cfg.SecurityHeadersDisableHSTS,
+		Nonce:           cfg.SecurityHeadersCSPNonce,
+		ExpectCT:        cfg.SecurityHeadersExpectCT,
 	}))
 	// HTTP metrics middleware runs BEFORE Recoverer so the
 	// resulting chain is HTTPMiddleware(Recoverer(handler)).
@@ -1507,6 +1510,32 @@ func run() error {
 // safe when STATIC_DIR is a sibling of sensitive files.
 func spaHandler(dir string) http.HandlerFunc {
 	indexPath := filepath.Join(dir, "index.html")
+	// Pre-read index.html and split it around the nonce placeholder
+	// so each navigation request only pays a two-write concat to
+	// inject its per-request CSP nonce (6.5). The bundle assets are
+	// still streamed verbatim via http.ServeFile; only the HTML
+	// document is templated. If the file is unreadable or carries no
+	// placeholder we fall back to serving it verbatim.
+	idxPrefix, idxSuffix, templated := loadIndexTemplate(indexPath)
+
+	serveIndex := func(w http.ResponseWriter, r *http.Request) {
+		if !templated {
+			http.ServeFile(w, r, indexPath)
+			return
+		}
+		nonce := middleware.CSPNonceFromContext(r.Context())
+		// index.html references content-hashed bundles, so it must
+		// never be cached: a stale copy would point at assets a new
+		// deploy has already replaced. The per-request nonce makes
+		// this doubly true.
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, idxPrefix)
+		_, _ = io.WriteString(w, nonce)
+		_, _ = io.WriteString(w, idxSuffix)
+	}
+
 	return func(w http.ResponseWriter, r *http.Request) {
 		clean := filepath.Clean("/" + strings.TrimPrefix(r.URL.Path, "/"))
 		if strings.Contains(clean, "..") {
@@ -1515,15 +1544,37 @@ func spaHandler(dir string) http.HandlerFunc {
 		}
 		candidate := filepath.Join(dir, clean)
 		if rel, err := filepath.Rel(dir, candidate); err != nil || strings.HasPrefix(rel, "..") {
-			http.ServeFile(w, r, indexPath)
+			serveIndex(w, r)
 			return
 		}
 		if info, err := os.Stat(candidate); err == nil && !info.IsDir() {
 			http.ServeFile(w, r, candidate)
 			return
 		}
-		http.ServeFile(w, r, indexPath)
+		serveIndex(w, r)
 	}
+}
+
+// indexNoncePlaceholder is the literal token the frontend's index.html
+// carries in its `<meta name="csp-nonce">` tag; spaHandler swaps it for
+// the per-request CSP nonce. Kept in sync with frontend/index.html.
+const indexNoncePlaceholder = "__CSP_NONCE__"
+
+// loadIndexTemplate reads index.html once and splits it around the
+// nonce placeholder. Returns templated=false (and empty halves) when
+// the file can't be read or carries no placeholder, in which case the
+// caller serves it verbatim with http.ServeFile.
+func loadIndexTemplate(indexPath string) (prefix, suffix string, templated bool) {
+	raw, err := os.ReadFile(indexPath)
+	if err != nil {
+		return "", "", false
+	}
+	html := string(raw)
+	idx := strings.Index(html, indexNoncePlaceholder)
+	if idx < 0 {
+		return "", "", false
+	}
+	return html[:idx], html[idx+len(indexNoncePlaceholder):], true
 }
 
 // folderCreatorAdapter bridges *folder.Service to

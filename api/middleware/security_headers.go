@@ -1,9 +1,47 @@
 package middleware
 
 import (
+	"context"
+	"crypto/rand"
+	"encoding/base64"
 	"net/http"
 	"strings"
 )
+
+// cspNonceSentinel is a placeholder token planted into the script-src
+// directive at construction time. SecurityHeaders splits the assembled
+// policy on it once, so the per-request hot path is a two-string concat
+// (prefix + nonce + suffix) rather than rebuilding the whole directive
+// list on every request.
+const cspNonceSentinel = "\x00CSP_NONCE\x00"
+
+// nonceContextKey carries the per-request CSP nonce so the SPA handler
+// can echo it into the index.html `<meta name="csp-nonce">` tag.
+type nonceContextKey struct{}
+
+// CSPNonceFromContext returns the per-request CSP nonce set by
+// SecurityHeaders, or "" when nonces are disabled / not on this request.
+func CSPNonceFromContext(ctx context.Context) string {
+	n, _ := ctx.Value(nonceContextKey{}).(string)
+	return n
+}
+
+// withCSPNonce stores the per-request CSP nonce in the context.
+func withCSPNonce(ctx context.Context, nonce string) context.Context {
+	return context.WithValue(ctx, nonceContextKey{}, nonce)
+}
+
+// newCSPNonce returns a 128-bit base64 nonce. crypto/rand failure is
+// treated as fatal-for-the-request by the caller (it falls back to no
+// nonce) rather than panicking — a transient entropy error must not
+// take the server down.
+func newCSPNonce() (string, bool) {
+	var b [16]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return "", false
+	}
+	return base64.StdEncoding.EncodeToString(b[:]), true
+}
 
 // SecurityHeadersOptions controls the values emitted by
 // SecurityHeaders. Every field has a safe production default
@@ -66,6 +104,22 @@ type SecurityHeadersOptions struct {
 	// for a year) and for environments behind a TLS-terminating
 	// proxy that already emits its own HSTS header.
 	DisableHSTS bool
+
+	// Nonce enables a per-request CSP nonce (6.5). When true a
+	// fresh `'nonce-<base64>'` source is added to `script-src` on
+	// every response and the nonce is stored on the request
+	// context (CSPNonceFromContext) so the SPA handler can echo it
+	// into the index.html `<meta name="csp-nonce">` tag. This lets
+	// a legitimately-needed inline script be allow-listed by nonce
+	// without reopening `'unsafe-inline'`.
+	Nonce bool
+
+	// ExpectCT emits the Expect-CT header (6.5). Independently of
+	// the deprecation status in modern browsers, it is still
+	// honoured by deployed clients; gate it on production. It is
+	// additionally suppressed when DisableHSTS is set, since
+	// Expect-CT is only meaningful over HTTPS.
+	ExpectCT bool
 }
 
 // SecurityHeaders returns a middleware that emits the modern
@@ -150,16 +204,54 @@ func SecurityHeaders(opts SecurityHeadersOptions) func(http.Handler) http.Handle
 		cspHeader = "Content-Security-Policy-Report-Only"
 	}
 
+	// Pre-split the policy around the nonce sentinel so the
+	// per-request path is a two-string concat. When nonces are
+	// disabled the sentinel is absent and cspPrefix holds the whole
+	// (static) policy.
+	var cspPrefix, cspSuffix string
+	nonceEnabled := opts.Nonce && strings.Contains(csp, cspNonceSentinel)
+	if nonceEnabled {
+		idx := strings.Index(csp, cspNonceSentinel)
+		cspPrefix = csp[:idx]
+		cspSuffix = csp[idx+len(cspNonceSentinel):]
+	} else {
+		// Drop the sentinel if nonces are disabled but buildCSP
+		// still planted it (defensive: keeps the emitted policy
+		// valid regardless of option combinations).
+		cspPrefix = strings.Replace(csp, "'nonce-"+cspNonceSentinel+"'", "", 1)
+	}
+
+	emitExpectCT := opts.ExpectCT && !opts.DisableHSTS
+
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			h := w.Header()
-			h.Set(cspHeader, csp)
+			if nonceEnabled {
+				if nonce, ok := newCSPNonce(); ok {
+					h.Set(cspHeader, cspPrefix+nonce+cspSuffix)
+					r = r.WithContext(withCSPNonce(r.Context(), nonce))
+				} else {
+					// Entropy failure: emit the policy with an
+					// empty nonce source rather than no policy.
+					// `'nonce-'` matches nothing, so inline
+					// scripts stay blocked — fail closed.
+					h.Set(cspHeader, cspPrefix+cspSuffix)
+				}
+			} else {
+				h.Set(cspHeader, cspPrefix)
+			}
 			if !opts.DisableHSTS {
 				// 31536000 = 365 days. preload signals
 				// inclusion intent for hstspreload.org;
 				// harmless even if not actually
 				// preloaded.
 				h.Set("Strict-Transport-Security", "max-age=31536000; includeSubDomains; preload")
+			}
+			if emitExpectCT {
+				// max-age=86400 (1 day) + enforce: the browser
+				// rejects a certificate not backed by valid SCTs
+				// (Certificate Transparency proof) for a day.
+				h.Set("Expect-CT", "max-age=86400, enforce")
 			}
 			h.Set("X-Content-Type-Options", "nosniff")
 			h.Set("X-Frame-Options", "DENY")
@@ -234,9 +326,18 @@ func buildCSP(opts SecurityHeadersOptions) string {
 	img := []string{"'self'", "data:", "blob:"}
 	img = append(img, sanitiseCSPOrigins(opts.CSPImgExtra)...)
 
+	// script-src stays nonce-clean (no 'unsafe-inline'/'unsafe-eval').
+	// When nonces are enabled we add a `'nonce-<sentinel>'` source
+	// that SecurityHeaders rewrites per request; `'self'` remains so
+	// the external Vite bundles still load.
+	scriptSrc := "script-src 'self'"
+	if opts.Nonce {
+		scriptSrc += " 'nonce-" + cspNonceSentinel + "'"
+	}
+
 	directives := []string{
 		"default-src 'self'",
-		"script-src 'self'",
+		scriptSrc,
 		"style-src 'self' 'unsafe-inline'",
 		"img-src " + strings.Join(img, " "),
 		"font-src 'self' data:",

@@ -368,6 +368,127 @@ func TestSecurityHeadersDoNotOverrideHandlerSetHeaders(t *testing.T) {
 	}
 }
 
+// TestSecurityHeadersNonceAddedToScriptSrcAndContext pins the 6.5
+// nonce contract: when Nonce is enabled the CSP script-src carries a
+// `'nonce-<base64>'` source AND the same nonce is exposed on the
+// request context for the SPA handler to echo into the index.html
+// meta tag. The nonce must be the SAME value in both places, must keep
+// `'self'` (so external bundles still load), and must NOT reintroduce
+// `'unsafe-inline'`.
+func TestSecurityHeadersNonceAddedToScriptSrcAndContext(t *testing.T) {
+	var ctxNonce string
+	capture := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ctxNonce = CSPNonceFromContext(r.Context())
+		w.WriteHeader(http.StatusOK)
+	})
+	wrapped := SecurityHeaders(SecurityHeadersOptions{Nonce: true})(capture)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/x", nil)
+	wrapped.ServeHTTP(rec, req)
+
+	if ctxNonce == "" {
+		t.Fatalf("nonce not propagated to request context")
+	}
+	csp := rec.Header().Get("Content-Security-Policy")
+	wantSrc := "script-src 'self' 'nonce-" + ctxNonce + "'"
+	if !strings.Contains(csp, wantSrc) {
+		t.Errorf("CSP script-src missing nonce; want %q in %s", wantSrc, csp)
+	}
+	if strings.Contains(csp, "'unsafe-inline'") && strings.Contains(csp, "script-src 'self' 'unsafe-inline'") {
+		t.Errorf("nonce mode must not reintroduce script-src 'unsafe-inline': %s", csp)
+	}
+	if strings.Contains(csp, cspNonceSentinel) {
+		t.Errorf("CSP still contains the unrendered nonce sentinel: %s", csp)
+	}
+}
+
+// TestSecurityHeadersNonceIsPerRequest pins that two requests get two
+// distinct nonces — a fixed nonce would be no better than
+// 'unsafe-inline' (an attacker could just reuse it).
+func TestSecurityHeadersNonceIsPerRequest(t *testing.T) {
+	wrapped := SecurityHeaders(SecurityHeadersOptions{Nonce: true})(passthroughHandler())
+
+	nonceOf := func() string {
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodGet, "/x", nil)
+		wrapped.ServeHTTP(rec, req)
+		csp := rec.Header().Get("Content-Security-Policy")
+		const marker = "'nonce-"
+		i := strings.Index(csp, marker)
+		if i < 0 {
+			t.Fatalf("no nonce in CSP: %s", csp)
+		}
+		rest := csp[i+len(marker):]
+		j := strings.Index(rest, "'")
+		if j < 0 {
+			t.Fatalf("unterminated nonce in CSP: %s", csp)
+		}
+		return rest[:j]
+	}
+
+	a, b := nonceOf(), nonceOf()
+	if a == "" || b == "" {
+		t.Fatalf("empty nonce(s): %q %q", a, b)
+	}
+	if a == b {
+		t.Errorf("nonce reused across requests: %q", a)
+	}
+}
+
+// TestSecurityHeadersNonceDisabledByDefault pins that with the
+// zero-value options (Nonce:false) no nonce source appears and no
+// unrendered sentinel leaks into the policy.
+func TestSecurityHeadersNonceDisabledByDefault(t *testing.T) {
+	wrapped := SecurityHeaders(SecurityHeadersOptions{})(passthroughHandler())
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/x", nil)
+	wrapped.ServeHTTP(rec, req)
+
+	csp := rec.Header().Get("Content-Security-Policy")
+	if strings.Contains(csp, "'nonce-") {
+		t.Errorf("nonce source present despite Nonce=false: %s", csp)
+	}
+	if strings.Contains(csp, cspNonceSentinel) {
+		t.Errorf("nonce sentinel leaked into policy: %s", csp)
+	}
+	if CSPNonceFromContext(req.Context()) != "" {
+		t.Errorf("context nonce set despite Nonce=false")
+	}
+}
+
+// TestSecurityHeadersExpectCT pins the 6.5 Expect-CT contract: emitted
+// (with enforce) when ExpectCT is on and HSTS is enabled, suppressed
+// when HSTS is disabled (Expect-CT is HTTPS-only), and absent when the
+// option is off.
+func TestSecurityHeadersExpectCT(t *testing.T) {
+	t.Run("emitted when enabled and HSTS on", func(t *testing.T) {
+		wrapped := SecurityHeaders(SecurityHeadersOptions{ExpectCT: true})(passthroughHandler())
+		rec := httptest.NewRecorder()
+		wrapped.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/x", nil))
+		if got := rec.Header().Get("Expect-CT"); got != "max-age=86400, enforce" {
+			t.Errorf("Expect-CT = %q, want %q", got, "max-age=86400, enforce")
+		}
+	})
+	t.Run("suppressed when HSTS disabled", func(t *testing.T) {
+		wrapped := SecurityHeaders(SecurityHeadersOptions{ExpectCT: true, DisableHSTS: true})(passthroughHandler())
+		rec := httptest.NewRecorder()
+		wrapped.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/x", nil))
+		if got := rec.Header().Get("Expect-CT"); got != "" {
+			t.Errorf("Expect-CT set despite DisableHSTS: %q", got)
+		}
+	})
+	t.Run("absent when disabled", func(t *testing.T) {
+		wrapped := SecurityHeaders(SecurityHeadersOptions{})(passthroughHandler())
+		rec := httptest.NewRecorder()
+		wrapped.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/x", nil))
+		if got := rec.Header().Get("Expect-CT"); got != "" {
+			t.Errorf("Expect-CT set despite ExpectCT=false: %q", got)
+		}
+	})
+}
+
 func passthroughHandler() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
