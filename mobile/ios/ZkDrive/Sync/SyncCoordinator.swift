@@ -60,6 +60,12 @@ final class SyncCoordinator: ObservableObject {
             lastCursor = cursor
             state = .succeeded(applied: applied, at: Date())
             return applied
+        } catch is CancellationError {
+            // Cooperative cancellation (BGTask expiration or the user navigating
+            // away from a pull-to-refresh) is not a failure to surface — just
+            // return to idle and let the durable cursor resume next time.
+            state = .idle
+            return 0
         } catch {
             state = .failed(error.asAppError().userMessage)
             return 0
@@ -69,6 +75,10 @@ final class SyncCoordinator: ObservableObject {
     private func drain(workspaceID: String, maxPages: Int) async throws -> Int {
         var total = 0
         for _ in 0..<maxPages {
+            // Stop starting new pages once cancelled. A blocking FFI poll already
+            // in flight can't be interrupted, but this bounds the wasted work to
+            // a single page rather than the full `maxPages`.
+            try Task.checkCancellation()
             let page = try await bridgeCall {
                 try self.bridge.syncEngine(forWorkspace: workspaceID).pollOnce(limit: 200)
             }

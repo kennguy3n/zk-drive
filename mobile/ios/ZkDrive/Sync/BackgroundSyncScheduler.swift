@@ -57,16 +57,44 @@ final class BackgroundSyncScheduler {
         // doesn't break the cadence.
         scheduleNext()
 
+        // `setTaskCompleted` must be called exactly once; calling it twice is
+        // undefined behaviour and crashes. The work Task and the OS
+        // `expirationHandler` race to finish, and `work.cancel()` only *requests*
+        // cancellation (a blocking FFI poll may still be mid-flight), so without
+        // this guard both paths could complete the task. Whichever claims the
+        // guard first wins; the loser is a no-op.
+        let completion = CompletionGuard()
+
         let work = Task {
             let applied = await coordinator.syncNow()
-            logger.info("Background sync applied \(applied, privacy: .public) changes")
-            task.setTaskCompleted(success: true)
+            if completion.claim() {
+                logger.info("Background sync applied \(applied, privacy: .public) changes")
+                task.setTaskCompleted(success: !Task.isCancelled)
+            }
         }
 
         // Honour the OS expiration deadline.
         task.expirationHandler = {
             work.cancel()
-            task.setTaskCompleted(success: false)
+            if completion.claim() {
+                task.setTaskCompleted(success: false)
+            }
         }
+    }
+}
+
+/// One-shot, thread-safe completion latch. `claim()` returns `true` exactly
+/// once (for the first caller) so a `BGTask` can be completed from whichever
+/// of the work Task or the expiration handler finishes first, never both.
+private final class CompletionGuard: @unchecked Sendable {
+    private let lock = NSLock()
+    private var claimed = false
+
+    func claim() -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        if claimed { return false }
+        claimed = true
+        return true
     }
 }

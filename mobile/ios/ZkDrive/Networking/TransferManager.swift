@@ -37,6 +37,12 @@ final class TransferManager: NSObject, ObservableObject {
     /// all background events have been delivered.
     var backgroundCompletionHandler: (() -> Void)?
 
+    /// Jobs the user explicitly cancelled. The background task still fires a
+    /// `didCompleteWithError` (NSURLErrorCancelled) afterwards; this set lets
+    /// `finishTask` ignore that late callback so the terminal "Cancelled"
+    /// status isn't overwritten by the system error string.
+    private var cancelledJobs: Set<String> = []
+
     /// Pending upload metadata keyed by task description (a UUID). Needed
     /// to call confirm-upload after the PUT completes, surviving relaunch
     /// via UserDefaults.
@@ -147,6 +153,7 @@ final class TransferManager: NSObject, ObservableObject {
         session.getAllTasks { tasks in
             for task in tasks where task.taskDescription == job.id { task.cancel() }
         }
+        cancelledJobs.insert(job.id)
         removePendingUpload(jobID: job.id)
         removePendingDownload(jobID: job.id)
         updateJob(job.id) { $0.status = .failed("Cancelled") }
@@ -253,6 +260,9 @@ extension TransferManager: URLSessionDataDelegate, URLSessionDownloadDelegate {
     // MARK: Completion handling (main actor)
 
     private func finishTask(jobID: String, isUpload: Bool, statusCode: Int, errorMessage: String?) async {
+        // A user-initiated cancel already set the terminal status and cleaned
+        // up; swallow the late delegate callback so it can't overwrite it.
+        if cancelledJobs.remove(jobID) != nil { return }
         guard isUpload else {
             // A *successful* download is finalised in `didFinishDownloadingTo`.
             // That delegate never fires for a transport-level failure (timeout,
