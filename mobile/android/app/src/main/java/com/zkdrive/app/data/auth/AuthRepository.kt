@@ -90,9 +90,14 @@ class AuthRepository @Inject constructor(
         val (api, tokenManager) = buildAuthedClients(result.tokens, result.tokenEndpoint)
         val workspaceId: String
         var engine: SyncEngine? = null
+        val tokens: uniffi.zk_mobile_bridge.TokenBundle
         try {
             workspaceId = fetchPrimaryWorkspaceId(result.tokens.accessToken)
             engine = buildSyncEngine(workspaceId, api)
+            // Read the token snapshot while the handle is still local and owned
+            // by us — once install() hands it to the holder a concurrent logout
+            // could dispose it, so an unleased snapshot() afterwards would race.
+            tokens = tokenManager.snapshot() ?: result.tokens
             // install() takes ownership of the native handles from here on.
             bridgeHolder.install(BridgeSession(tokenManager, api, engine, workspaceId))
         } catch (t: Throwable) {
@@ -105,7 +110,7 @@ class AuthRepository @Inject constructor(
 
         tokenStore.save(
             PersistedSession(
-                tokens = tokenManager.snapshot() ?: result.tokens,
+                tokens = tokens,
                 idToken = result.idToken,
                 workspaceId = workspaceId,
                 tokenEndpoint = result.tokenEndpoint,
@@ -179,9 +184,16 @@ class AuthRepository @Inject constructor(
         tokenEndpoint: String,
     ): Pair<ApiClient, TokenManager> {
         val tokenManager = TokenManager(appConfig.oidcClientId, tokenEndpoint)
-        tokenManager.setTokens(tokens)
-        val api = ApiClient(appConfig.bridgeBaseUrl, tokenManager)
-        return api to tokenManager
+        try {
+            tokenManager.setTokens(tokens)
+            val api = ApiClient(appConfig.bridgeBaseUrl, tokenManager)
+            return api to tokenManager
+        } catch (t: Throwable) {
+            // setTokens / the ApiClient constructor failed before the caller's
+            // try/catch could take ownership — dispose the orphaned native handle.
+            runCatching { tokenManager.close() }
+            throw t
+        }
     }
 
     private fun buildSyncEngine(workspaceId: String, api: ApiClient): SyncEngine {

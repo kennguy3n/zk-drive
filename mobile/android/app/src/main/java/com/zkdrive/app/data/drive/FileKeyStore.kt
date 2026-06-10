@@ -92,8 +92,11 @@ class FileKeyStore @Inject constructor(
 
     /** Persist [key] for [objectKey] and link it to [fileId] for later cleanup. */
     fun put(fileId: String, objectKey: String, key: EnvelopeKey) {
-        prefs.edit().putString(objectKey, json.encodeToString(EnvelopeKey.serializer(), key)).apply()
+        // Hold the index lock across BOTH writes so a concurrent removeForFile()
+        // can't interleave between the DEK write and the index update and leave
+        // an orphaned key (DEK present + indexed) for an already-deleted file.
         synchronized(indexLock) {
+            prefs.edit().putString(objectKey, json.encodeToString(EnvelopeKey.serializer(), key)).apply()
             val keys = readIndex(fileId).toMutableSet().apply { add(objectKey) }
             fileIndex.edit().putString(fileId, json.encodeToString(setSerializer, keys)).apply()
         }

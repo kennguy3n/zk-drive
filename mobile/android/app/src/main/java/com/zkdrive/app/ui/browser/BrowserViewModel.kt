@@ -134,7 +134,7 @@ class BrowserViewModel @Inject constructor(
                 if (current.id == null) driveRepository.listRoot()
                 else driveRepository.openFolder(current.id)
             }.onSuccess { contents ->
-                applyContents(contents, contents.folder?.encryptionMode ?: EncryptionMode.Unknown, refreshing = true)
+                applyContents(contents, contents.folder?.encryptionMode ?: EncryptionMode.Unknown)
             }.onFailure { e -> _uiState.update { it.copy(refreshing = false, error = e.message) } }
         }
     }
@@ -207,8 +207,9 @@ class BrowserViewModel @Inject constructor(
     private fun applyContents(
         contents: FolderContents,
         mode: EncryptionMode,
-        refreshing: Boolean = false,
     ) {
+        // Always clears both loading and refreshing: whichever spinner was
+        // showing, the arrival of fresh contents ends it.
         _uiState.update {
             it.copy(
                 loading = false,

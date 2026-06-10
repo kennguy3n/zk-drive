@@ -1,17 +1,20 @@
 <?xml version="1.0" encoding="utf-8"?>
 <data-extraction-rules>
     <cloud-backup>
-        <!-- OAuth tokens (zk_secure_tokens) and per-object DEKs (zk_object_keys)
-             are Keystore-wrapped and device-local by design: their master key
-             never leaves this device, so backing the ciphertext up is useless
-             and exporting key material off-device is a privacy risk. -->
+        <!-- OAuth tokens (zk_secure_tokens), per-object DEKs (zk_object_keys),
+             and the fileId->objectKey index (zk_object_key_index) are
+             Keystore-wrapped and device-local by design: their master key never
+             leaves this device, so backing the ciphertext up is useless and
+             exporting key material off-device is a privacy risk. -->
         <exclude domain="sharedpref" path="zk_secure_tokens.xml" />
         <exclude domain="sharedpref" path="zk_object_keys.xml" />
+        <exclude domain="sharedpref" path="zk_object_key_index.xml" />
         <exclude domain="file" path="catalogue/" />
     </cloud-backup>
     <device-transfer>
         <exclude domain="sharedpref" path="zk_secure_tokens.xml" />
         <exclude domain="sharedpref" path="zk_object_keys.xml" />
+        <exclude domain="sharedpref" path="zk_object_key_index.xml" />
         <exclude domain="file" path="catalogue/" />
     </device-transfer>
 </data-extraction-rules>

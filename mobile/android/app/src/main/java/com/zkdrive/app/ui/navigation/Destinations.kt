@@ -33,10 +33,10 @@ object Routes {
         "$BROWSER?$ARG_FOLDER_ID=${encode(folderId)}&$ARG_FOLDER_NAME=${encode(folderName)}"
 
     fun preview(fileId: String, name: String, mime: String): String =
-        "$PREVIEW/$fileId?$ARG_FILE_NAME=${encode(name)}&$ARG_FILE_MIME=${encode(mime)}"
+        "$PREVIEW/${encode(fileId)}?$ARG_FILE_NAME=${encode(name)}&$ARG_FILE_MIME=${encode(mime)}"
 
     fun share(resourceType: String, resourceId: String, name: String): String =
-        "$SHARE/$resourceType/$resourceId?$ARG_RESOURCE_NAME=${encode(name)}"
+        "$SHARE/$resourceType/${encode(resourceId)}?$ARG_RESOURCE_NAME=${encode(name)}"
 
     /**
      * Percent-encode a navigation argument. Uses [android.net.Uri.encode] (which
