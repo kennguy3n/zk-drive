@@ -248,12 +248,39 @@ func (c *Client) PutObject(ctx context.Context, objectKey, contentType string, b
 	return nil
 }
 
+// streamUploadMaxIdleConnsPerHost sizes the keep-alive pool the stream
+// upload client holds to the object-storage gateway. The stdlib default
+// (2) re-dials TLS for every concurrent ONLYOFFICE save beyond the
+// second; at 5000-tenant scale a single popular workspace can fan out
+// many simultaneous saves, so the warm pool is sized to absorb that
+// burst without per-PUT handshakes. Smaller than the fabric metadata
+// pool (64) because saves are user-driven, not machine-driven.
+const streamUploadMaxIdleConnsPerHost = 32
+
 // streamUploadClient performs the raw HTTP PUT for PutObjectStream. It
 // has no client-level timeout on purpose: a large document upload can
 // legitimately run longer than any fixed window, and the per-call
-// context (set by the caller) already bounds the request. Connections
-// are pooled and reused across uploads via the default transport.
-var streamUploadClient = &http.Client{}
+// context (set by the caller) already bounds the request. Its transport
+// clones http.DefaultTransport (inheriting proxy/dialer defaults) and
+// then enables HTTP/2 and raises the idle-connection pool so concurrent
+// saves reuse warm, multiplexed connections instead of re-dialing TLS
+// per PUT (mirrors internal/fabric.newDefaultTransport).
+var streamUploadClient = &http.Client{Transport: newStreamUploadTransport()}
+
+func newStreamUploadTransport() *http.Transport {
+	base, ok := http.DefaultTransport.(*http.Transport)
+	if !ok {
+		// Always *http.Transport in the stdlib; defensive fallback so a
+		// future change can never nil-panic here.
+		base = &http.Transport{}
+	}
+	t := base.Clone()
+	t.ForceAttemptHTTP2 = true
+	t.MaxIdleConns = 128
+	t.MaxIdleConnsPerHost = streamUploadMaxIdleConnsPerHost
+	t.IdleConnTimeout = 90 * time.Second
+	return t
+}
 
 // PutObjectStream streams body (exactly size bytes) to objectKey
 // without buffering the whole payload in memory. It works by minting a

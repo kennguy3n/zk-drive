@@ -271,6 +271,12 @@ var writeKeywords = []string{
 	"INSERT", "UPDATE", "DELETE", "MERGE",
 	"FOR UPDATE", "FOR NO KEY UPDATE", "FOR SHARE", "FOR KEY SHARE",
 	"NEXTVAL", "SETVAL", // sequence mutation via SELECT nextval(...)
+	// SELECT ... INTO new_table is table-creating DDL (a write) that
+	// would fail on a read-only replica. Matching the word "INTO"
+	// anywhere forces the primary; INSERT INTO is already caught by
+	// INSERT, and a read-only SELECT that merely mentions the standalone
+	// word INTO is conservatively (harmlessly) routed to the primary.
+	"INTO",
 }
 
 // stripLeadingSQLNoise removes leading whitespace and SQL line/block

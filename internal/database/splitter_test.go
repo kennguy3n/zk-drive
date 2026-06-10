@@ -21,8 +21,11 @@ func TestIsReadOnlySQL(t *testing.T) {
 		{"leading line comment then select", "-- fetch row\nSELECT * FROM files", true},
 		{"leading block comment then select", "/* hint */ SELECT * FROM files", true},
 		{"select mentioning column updated_at", "SELECT updated_at FROM files", true},
+		{"select column with into substring", "SELECT into_count FROM files", true},
 
 		// Mutations and ambiguous statements route to the primary.
+		{"select into new table", "SELECT * INTO new_table FROM files", false},
+		{"select into lower", "select id into tmp from files where workspace_id=$1", false},
 		{"insert", "INSERT INTO files (id) VALUES ($1)", false},
 		{"update", "UPDATE files SET name=$1 WHERE id=$2", false},
 		{"delete", "DELETE FROM files WHERE id=$1", false},

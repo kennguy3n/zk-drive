@@ -25,17 +25,23 @@ const searchCacheTTL = 30 * time.Second
 
 // searchCacheKey builds a collision-free cache discriminator from every
 // input that changes the result set: the normalised query, the resolved
-// FTS language, the fuzzy toggle, and the pagination window. The query
-// is length-prefixed so e.g. ("ab","c…") and ("a","bc…") cannot alias
-// onto the same key.
+// FTS language, the fuzzy toggle, and the pagination window. Every
+// variable-length, free-form field (query AND language) is length-
+// prefixed so no choice of `|`-containing values can alias two distinct
+// tuples onto the same key — the encoding is injective. The remaining
+// fields are fixed-alphabet (fuzzy is "0"/"1"; limit/offset are decimal
+// integers) and cannot contain the separator, so they need no prefix.
+// Language is server-controlled today (workspaces.search_language), but
+// length-prefixing it removes the latent footgun if it ever becomes
+// user-influenced.
 func searchCacheKey(query string, opts search.Options, limit, offset int) string {
 	fuzzy := "0"
 	if opts.FuzzyEnabled {
 		fuzzy = "1"
 	}
-	return fmt.Sprintf("%d:%s|%s|%s|%s|%s",
+	return fmt.Sprintf("%d:%s|%d:%s|%s|%s|%s",
 		len(query), query,
-		opts.Language,
+		len(opts.Language), opts.Language,
 		fuzzy,
 		strconv.Itoa(limit),
 		strconv.Itoa(offset),
