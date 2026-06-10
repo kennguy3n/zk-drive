@@ -14,10 +14,10 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
@@ -26,6 +26,7 @@ import androidx.compose.material.icons.automirrored.outlined.InsertDriveFile
 import androidx.compose.material.icons.automirrored.outlined.OpenInNew
 import androidx.compose.material.icons.outlined.Share
 import androidx.compose.material3.Button
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -34,6 +35,7 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -50,6 +52,9 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import coil.compose.AsyncImage
 import com.zkdrive.app.ui.components.ErrorState
 import com.zkdrive.app.ui.components.LoadingBox
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+import java.io.Closeable
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -111,31 +116,60 @@ fun PreviewScreen(
 @Composable
 private fun PdfView(uri: Uri) {
     val context = LocalContext.current
-    // Render off the main thread: PdfRenderer + per-page Bitmap rasterisation
-    // is heavy CPU/IO and must not block composition.
-    var pages by remember(uri) { mutableStateOf<List<Bitmap>?>(null) }
-    LaunchedEffect(uri) {
-        pages = withContext(Dispatchers.IO) {
-            runCatching { renderPdf(context, uri) }.getOrDefault(emptyList())
+    // Open the document once and render each page lazily as it scrolls into
+    // view, so heap usage is bounded by the visible pages rather than the whole
+    // document — a large PDF previously rasterised every page up front and could
+    // OOM. The renderer is closed when the preview leaves composition.
+    var document by remember(uri) { mutableStateOf<PdfDocument?>(null) }
+    var failed by remember(uri) { mutableStateOf(false) }
+    DisposableEffect(uri) {
+        val opened = runCatching { openPdf(context, uri) }.getOrNull()
+        document = opened
+        failed = opened == null
+        onDispose {
+            opened?.close()
+            document = null
         }
     }
-    when (val bitmaps = pages) {
-        null -> LoadingBox()
-        else -> if (bitmaps.isEmpty()) {
-            ErrorState("Unable to render PDF")
-        } else {
-            LazyColumn(Modifier.fillMaxSize()) {
-                items(bitmaps) { bmp ->
-                    Image(
-                        bitmap = bmp.asImageBitmap(),
-                        contentDescription = null,
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(8.dp)
-                            .background(ComposeColor.White),
-                    )
-                }
-            }
+
+    val doc = document
+    when {
+        failed -> ErrorState("Unable to render PDF")
+        doc == null -> LoadingBox()
+        else -> LazyColumn(Modifier.fillMaxSize()) {
+            items(doc.pageCount) { index -> PdfPage(doc, index) }
+        }
+    }
+}
+
+@Composable
+private fun PdfPage(doc: PdfDocument, index: Int) {
+    var bitmap by remember(doc, index) { mutableStateOf<Bitmap?>(null) }
+    LaunchedEffect(doc, index) {
+        bitmap = doc.renderPage(index)
+    }
+    val bmp = bitmap
+    if (bmp != null) {
+        Image(
+            bitmap = bmp.asImageBitmap(),
+            contentDescription = null,
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(8.dp)
+                .background(ComposeColor.White),
+        )
+    } else {
+        // Reserve roughly an A4 page so the list lays out (and stays lazy)
+        // before the bitmap is ready.
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .aspectRatio(0.707f)
+                .padding(8.dp)
+                .background(ComposeColor.White),
+            contentAlignment = Alignment.Center,
+        ) {
+            CircularProgressIndicator()
         }
     }
 }
@@ -169,14 +203,22 @@ private fun UnsupportedView(onOpen: () -> Unit, onShare: () -> Unit) {
     }
 }
 
-private fun renderPdf(context: Context, uri: Uri): List<Bitmap> {
-    val descriptor: ParcelFileDescriptor =
-        context.contentResolver.openFileDescriptor(uri, "r") ?: return emptyList()
-    descriptor.use { pfd ->
-        PdfRenderer(pfd).use { renderer ->
-            val out = ArrayList<Bitmap>(renderer.pageCount)
-            for (i in 0 until renderer.pageCount) {
-                renderer.openPage(i).use { page ->
+/**
+ * A lazily-rendered PDF: keeps a single [PdfRenderer] open and rasterises pages
+ * one at a time on demand. [PdfRenderer] only allows one open page at a time and
+ * is not thread-safe, so access is serialised through [mutex].
+ */
+private class PdfDocument(
+    private val pfd: ParcelFileDescriptor,
+    private val renderer: PdfRenderer,
+) : Closeable {
+    val pageCount: Int = renderer.pageCount
+    private val mutex = Mutex()
+
+    suspend fun renderPage(index: Int): Bitmap? = mutex.withLock {
+        withContext(Dispatchers.IO) {
+            runCatching {
+                renderer.openPage(index).use { page ->
                     val scale = 2
                     val bitmap = Bitmap.createBitmap(
                         page.width * scale,
@@ -185,12 +227,25 @@ private fun renderPdf(context: Context, uri: Uri): List<Bitmap> {
                     )
                     bitmap.eraseColor(Color.WHITE)
                     page.render(bitmap, null, null, PdfRenderer.Page.RENDER_MODE_FOR_DISPLAY)
-                    out.add(bitmap)
+                    bitmap
                 }
-            }
-            return out
+            }.getOrNull()
         }
     }
+
+    override fun close() {
+        runCatching { renderer.close() }
+        runCatching { pfd.close() }
+    }
+}
+
+private fun openPdf(context: Context, uri: Uri): PdfDocument? {
+    val pfd = context.contentResolver.openFileDescriptor(uri, "r") ?: return null
+    return runCatching { PdfDocument(pfd, PdfRenderer(pfd)) }
+        .getOrElse {
+            runCatching { pfd.close() }
+            null
+        }
 }
 
 private fun shareFile(context: Context, uri: Uri, mime: String) {

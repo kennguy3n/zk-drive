@@ -15,6 +15,7 @@ import com.zkdrive.app.push.NotificationChannels
 import dagger.assisted.Assisted
 import dagger.assisted.AssistedInject
 import java.io.File
+import kotlin.coroutines.cancellation.CancellationException
 
 /**
  * Uploads one file in the background so transfers survive app backgrounding or
@@ -47,13 +48,28 @@ class UploadWorker @AssistedInject constructor(
             transferManager.upload(
                 folderId = folderId,
                 encryptionMode = mode,
-                input = UploadInput(displayName, mimeType, staged.readBytes()),
+                file = staged,
+                displayName = displayName,
+                mimeType = mimeType,
             )
-            Result.success()
-        } catch (e: Exception) {
-            if (runAttemptCount < MAX_ATTEMPTS) Result.retry() else Result.failure()
-        } finally {
+            // Only delete the staged file once the upload has fully succeeded.
             staged.delete()
+            Result.success()
+        } catch (e: CancellationException) {
+            // Stopped by WorkManager (e.g. constraints lost): keep the staged
+            // file so the rescheduled run can resume, then propagate.
+            throw e
+        } catch (e: Exception) {
+            if (runAttemptCount < MAX_ATTEMPTS) {
+                // Retry later — keep the staged file, since the next attempt is
+                // handed the same cache path and would otherwise find it gone
+                // and fail permanently (silent data loss).
+                Result.retry()
+            } else {
+                // Out of retries: give up and reclaim the staged bytes.
+                staged.delete()
+                Result.failure()
+            }
         }
     }
 
@@ -66,8 +82,13 @@ class UploadWorker @AssistedInject constructor(
                 .setOngoing(true)
                 .setProgress(0, 0, true)
                 .build()
-        return ForegroundInfo(NOTIFICATION_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC)
+        return ForegroundInfo(notificationId(), notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC)
     }
+
+    // Derive a stable, per-work-request notification id so concurrent uploads
+    // each get their own foreground notification instead of overwriting a
+    // single shared one.
+    private fun notificationId(): Int = NOTIFICATION_ID_BASE + (id.hashCode() and 0xFFFF)
 
     companion object {
         const val KEY_CACHE_PATH = "cache_path"
@@ -76,7 +97,7 @@ class UploadWorker @AssistedInject constructor(
         const val KEY_FOLDER_ID = "folder_id"
         const val KEY_MODE = "encryption_mode"
 
-        private const val NOTIFICATION_ID = 0x2001
+        private const val NOTIFICATION_ID_BASE = 0x2001
         private const val MAX_ATTEMPTS = 3
     }
 }

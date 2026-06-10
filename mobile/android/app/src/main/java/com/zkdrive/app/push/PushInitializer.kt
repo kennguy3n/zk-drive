@@ -28,7 +28,13 @@ class PushInitializer @Inject constructor(
             BuildConfig.FCM_API_KEY.isNotBlank() &&
             BuildConfig.FCM_SENDER_ID.isNotBlank()
 
-    /** Ensure FirebaseApp exists; safe to call repeatedly. */
+    /**
+     * Ensure FirebaseApp exists; safe to call repeatedly and from multiple
+     * threads. Synchronised so the check-then-initialise sequence is atomic:
+     * two callers racing here would otherwise both observe "no app" and the
+     * second `initializeApp` would throw because the default app already exists.
+     */
+    @Synchronized
     fun ensureInitialized(): Boolean {
         if (!configured) return false
         if (FirebaseApp.getApps(context).isNotEmpty()) return true
@@ -38,8 +44,15 @@ class PushInitializer @Inject constructor(
             .setApiKey(BuildConfig.FCM_API_KEY)
             .setGcmSenderId(BuildConfig.FCM_SENDER_ID)
             .build()
-        FirebaseApp.initializeApp(context, options)
-        return true
+        return try {
+            FirebaseApp.initializeApp(context, options)
+            true
+        } catch (e: IllegalStateException) {
+            // The default app was already initialised (e.g. by the
+            // google-services bootstrap or a concurrent caller that beat the
+            // lock on a prior process); treat an existing app as success.
+            FirebaseApp.getApps(context).isNotEmpty()
+        }
     }
 
     /** Fetch the current token and register it with the server. */
