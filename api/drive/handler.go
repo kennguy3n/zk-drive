@@ -88,9 +88,18 @@ type Handler struct {
 	onlyOfficeSaveSem          chan struct{}
 	onlyOfficeMaxDocumentBytes int64
 	onlyOfficeSaveConcurrency  int
-	tagSuggest                 TagSuggester
-	queryExpand                QueryExpander
-	respCache                  *responsecache.Cache
+	// onlyOfficeStreamSaveSem optionally bounds concurrency on the
+	// constant-memory streaming save path (distinct from
+	// onlyOfficeSaveSem, which guards the buffered fallback). nil means
+	// UNLIMITED — the default, preserving the streaming path's unbounded
+	// concurrency. Sized by WithOnlyOfficeStreamSaveConcurrency from
+	// config.OnlyOfficeStreamSaveMaxConcurrent. onlyOfficeStreamSaveLimit
+	// retains the capacity for startup logging (0 == unlimited).
+	onlyOfficeStreamSaveSem   chan struct{}
+	onlyOfficeStreamSaveLimit int
+	tagSuggest                TagSuggester
+	queryExpand               QueryExpander
+	respCache                 *responsecache.Cache
 }
 
 // TagSuggester is the narrow interface the drive handler needs from

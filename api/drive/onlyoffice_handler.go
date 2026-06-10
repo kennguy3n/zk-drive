@@ -24,6 +24,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -218,6 +219,47 @@ func (h *Handler) WithOnlyOfficeSaveLimits(memoryBudgetBytes, maxDocumentBytes i
 	h.onlyOfficeSaveConcurrency = concurrency
 	h.onlyOfficeSaveSem = make(chan struct{}, concurrency)
 	return h
+}
+
+// WithOnlyOfficeStreamSaveConcurrency optionally caps concurrency on the
+// constant-memory streaming save path. n <= 0 (the default) leaves it
+// UNLIMITED — the streaming path uses a fixed copy buffer regardless of
+// document size, so it needs no memory-derived gate and concurrent
+// saves are intentionally unbounded. A positive n installs a semaphore
+// of that size; a save beyond it is shed with errOnlyOfficeSaveBusy (a
+// retryable 503) so the Document Server keeps the bytes and retries,
+// rather than blocking a callback goroutine. Wired from
+// config.OnlyOfficeStreamSaveMaxConcurrent.
+func (h *Handler) WithOnlyOfficeStreamSaveConcurrency(n int) *Handler {
+	if n <= 0 {
+		h.onlyOfficeStreamSaveSem = nil
+		h.onlyOfficeStreamSaveLimit = 0
+		return h
+	}
+	h.onlyOfficeStreamSaveLimit = n
+	h.onlyOfficeStreamSaveSem = make(chan struct{}, n)
+	return h
+}
+
+// acquireStreamSaveSlot reserves a streaming-save concurrency slot. When
+// no cap is configured (sem == nil) it is a no-op that always admits,
+// returning a no-op release — this is the default unbounded behaviour.
+// When a cap is configured it tries a non-blocking acquire: on success
+// it returns a release that frees the slot exactly once (idempotent via
+// the channel receive being paired to this send) and ok=true; when the
+// semaphore is full it returns ok=false so the caller sheds the save
+// with a retryable error rather than blocking the callback goroutine.
+func (h *Handler) acquireStreamSaveSlot() (release func(), ok bool) {
+	if h.onlyOfficeStreamSaveSem == nil {
+		return func() {}, true
+	}
+	select {
+	case h.onlyOfficeStreamSaveSem <- struct{}{}:
+		var once sync.Once
+		return func() { once.Do(func() { <-h.onlyOfficeStreamSaveSem }) }, true
+	default:
+		return nil, false
+	}
 }
 
 // ensureNotSuspended returns collab.ErrWorkspaceSuspended when the
@@ -653,6 +695,16 @@ func (h *Handler) writeEditedObject(ctx context.Context, store *storage.Client, 
 		if resp.ContentLength > maxBytes {
 			return 0, errors.New("onlyoffice: edited document exceeds the maximum allowed size")
 		}
+		// Optional high-watermark cap on concurrent streaming saves.
+		// Unbounded by default (streaming uses constant memory so it
+		// needs no memory gate); when configured, shed beyond the cap
+		// with a retryable 503 (bytes stay in the Document Server cache)
+		// rather than blocking the goroutine.
+		release, ok := h.acquireStreamSaveSlot()
+		if !ok {
+			return 0, errOnlyOfficeSaveBusy
+		}
+		defer release()
 		size := resp.ContentLength
 		if err := h.billing.CheckStorageQuota(ctx, workspaceID, size); err != nil {
 			return 0, err

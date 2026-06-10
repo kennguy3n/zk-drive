@@ -235,12 +235,29 @@ DATABASE_URL=postgres://app@primary:5432/zkdrive?sslmode=require
 DATABASE_READ_URL=postgres://app@replica:5432/zkdrive?sslmode=require
 ```
 
-| Variable            | Default        | Purpose                                                                 |
-| ------------------- | -------------- | ----------------------------------------------------------------------- |
-| `DATABASE_READ_URL` | _(unset)_      | Read-replica DSN. Unset (or equal to `DATABASE_URL`) → reads use the primary. |
+| Variable             | Default                   | Purpose                                                                                                  |
+| -------------------- | ------------------------- | -------------------------------------------------------------------------------------------------------- |
+| `DATABASE_READ_URL`  | _(unset)_                 | Read-replica DSN. Unset (or equal to `DATABASE_URL`) → reads use the primary.                            |
+| `DB_READ_MAX_CONNS`  | _(inherits `DB_MAX_CONNS`)_ | Maximum open connections in the **read-replica** pool. Clamped to `[2, 200]`. Unset → same as the primary. |
+| `DB_READ_MIN_CONNS`  | _(inherits `DB_MIN_CONNS`)_ | Minimum idle connections kept warm in the read pool. Clamped to `[0, DB_READ_MAX_CONNS]`. Unset → same as the primary. |
+
+**Independent read-pool sizing.** Reads are usually offloaded
+asymmetrically — the replica fields far more `SELECT` traffic than the
+primary fields writes — so `DB_READ_MAX_CONNS` / `DB_READ_MIN_CONNS` let
+you size the read pool **independently** of the primary. When unset they
+inherit the primary's resolved values, so an existing deployment that
+sets neither keeps both pools sized identically (no behaviour change).
+Typical use: a beefier replica (or PgBouncer read pool) gets a larger
+`DB_READ_MAX_CONNS`, while the primary keeps a tighter `DB_MAX_CONNS`.
+The read pool reuses `DB_MAX_CONN_IDLE_TIME` for idle reaping (no
+separate knob). Remember the per-process math from
+[Sizing the pool across replicas](#sizing-the-pool-across-replicas-read-this-before-scaling-out)
+applies to the read pool too: peak replica backends ≈
+`server_replicas × DB_READ_MAX_CONNS`.
 
 **Routing.** When set and distinct from `DATABASE_URL`, the server opens
-a second `pgxpool` (sized by the same `DB_MAX_CONNS` / `DB_MIN_CONNS` /
+a second `pgxpool` (sized by `DB_READ_MAX_CONNS` / `DB_READ_MIN_CONNS`,
+each inheriting the matching primary knob when unset, and sharing
 `DB_MAX_CONN_IDLE_TIME`) and wires the read-heavy repositories (folder
 tree walks, file listings, version/tag lookups) through a
 `ReadWriteSplitter` (`internal/database/splitter.go`). The splitter
@@ -506,6 +523,7 @@ key and must not see plaintext.
 | `ONLYOFFICE_SECRET` | _empty_ | Shared JWT secret matching the Document Server's `JWT_SECRET` (`JWT_ENABLED=true`). ZK Drive signs the editor config with it (HS256) and verifies the inbound save callback against it. When empty, the config is emitted unsigned and the callback skips verification — acceptable only for trusted local development. |
 | `ONLYOFFICE_MAX_DOCUMENT_MB` | `100` | Maximum size (MiB) of a single edited document the save callback will accept before rejecting it. Generous — real office documents are 1–50 MiB. Enforced on both the streaming path (against the advertised `Content-Length`) and the buffered fallback. |
 | `ONLYOFFICE_SAVE_MEMORY_BUDGET_MB` | `256` | Memory (MiB) budget for the **buffered fallback** save path. The fallback-concurrency cap is **derived** as `budget ÷ per-document`, so its worst case (`concurrency × per-document`) never exceeds the budget. Must be `>=` `ONLYOFFICE_MAX_DOCUMENT_MB` or the server refuses to start. With streaming saves (the normal path) this budget is rarely exercised. |
+| `ONLYOFFICE_STREAM_SAVE_MAX_CONCURRENT` | `0` (unlimited) | Optional high-watermark cap on **concurrent streaming saves**. `0` (the default) leaves the streaming path unbounded (the WS5 design — streaming uses constant memory). A positive value caps concurrent gateway PUTs; saves beyond the cap are shed with a retryable `503` (the Document Server keeps the bytes and retries), never blocked. Use it to protect the storage gateway from a thundering herd of editors closing documents at once. |
 
 **Save path: streaming, with a bounded buffered fallback.** The save
 callback relays the edited document from the Document Server straight to
@@ -530,7 +548,7 @@ production API container in
 Excess **buffered-fallback** callbacks are shed with a retryable `503` —
 the Document Server keeps the edited bytes in its cache and retries, so a
 storm degrades gracefully instead of OOMing. Streaming saves are never
-shed.
+shed **unless** you opt into `ONLYOFFICE_STREAM_SAVE_MAX_CONCURRENT`.
 
 - **Throughput** is no longer gated for the streaming path; raising
   `ONLYOFFICE_SAVE_MEMORY_BUDGET_MB` only widens the rarely-used buffered
@@ -539,6 +557,18 @@ shed.
 - **Smaller documents** (lowering `ONLYOFFICE_MAX_DOCUMENT_MB`) raises
   fallback concurrency at the same budget, but rejects larger legitimate
   documents — keep it above your largest expected office file.
+- **Capping gateway PUTs** (optional): the streaming path issues one
+  PUT to the object-storage gateway per save, and a burst of editors
+  closing documents simultaneously can spike concurrent PUTs. This is
+  bounded in practice by the number of open editing sessions, but if you
+  want a hard ceiling — e.g. to protect a shared gateway — set
+  `ONLYOFFICE_STREAM_SAVE_MAX_CONCURRENT` to the maximum concurrent saves
+  the gateway should see. Saves beyond it are shed with a retryable `503`
+  (same graceful-degradation contract as the buffered fallback), so the
+  Document Server retries shortly after. Leave it at `0` to keep the
+  default unbounded behaviour. This is a concurrency cap only — it does
+  **not** buffer documents, so it carries no memory cost regardless of
+  the value.
 
 The callback URL the Document Server posts to is composed from
 [`PUBLIC_URL`](#transactional-email-guest-invite-delivery): `${PUBLIC_URL}/api/files/{id}/editor-callback?workspace_id={ws}`.

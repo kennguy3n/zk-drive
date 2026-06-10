@@ -96,6 +96,7 @@ func requireEnv(t *testing.T, envs map[string]string) {
 		// SUSPENSION_FAIL_CLOSED must not bleed into tests exercising
 		// the default-sizing / fail-open paths.
 		"ONLYOFFICE_MAX_DOCUMENT_MB", "ONLYOFFICE_SAVE_MEMORY_BUDGET_MB",
+		"ONLYOFFICE_STREAM_SAVE_MAX_CONCURRENT",
 		"SUSPENSION_FAIL_CLOSED",
 		// Preview pipeline scaling env vars. Same convention as the
 		// blocks above: buildConfigFromEnv reads each of these via
@@ -123,6 +124,12 @@ func requireEnv(t *testing.T, envs map[string]string) {
 		// non-default values (e.g. TestJWTKeyRefreshInterval) t.Setenv the
 		// specific var themselves after requireEnv runs.
 		"DB_MAX_CONNS", "DB_MIN_CONNS", "DB_MAX_CONN_IDLE_TIME",
+		// Read-replica pool sizing (WS5 follow-up). buildConfigFromEnv
+		// reads these via dbReadMaxConnsFromEnv / dbReadMinConnsFromEnv,
+		// which treat unset identically to "inherit the primary". Clear
+		// them at baseline so a CI runner exporting e.g.
+		// DB_READ_MAX_CONNS=2 cannot bleed into the inherit-path tests.
+		"DB_READ_MAX_CONNS", "DB_READ_MIN_CONNS",
 		"JWT_ALGORITHM", "JWT_KEY_REFRESH_INTERVAL",
 		// Deployment-profile selector + auto-migrate toggle (WS2). Same
 		// convention as the blocks above: Load applies the profile's
@@ -743,6 +750,78 @@ func TestJWTKeyRefreshIntervalFromEnv(t *testing.T) {
 			}
 			if got := jwtKeyRefreshIntervalFromEnv(); got != tc.want {
 				t.Errorf("jwtKeyRefreshIntervalFromEnv() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestDBReadMaxConnsFromEnv pins the read-pool MaxConns contract:
+// unset inherits the primary's resolved max verbatim (both pools sized
+// alike, the pre-knob behaviour); a set value clamps to the same
+// [minDBMaxConns, maxDBMaxConns] bounds as the primary.
+func TestDBReadMaxConnsFromEnv(t *testing.T) {
+	const primaryMax int32 = 40
+	tests := []struct {
+		name  string
+		set   bool
+		value string
+		want  int32
+	}{
+		{name: "unset_inherits_primary", set: false, want: primaryMax},
+		{name: "empty_inherits_primary", set: true, value: "", want: primaryMax},
+		{name: "whitespace_inherits_primary", set: true, value: "   ", want: primaryMax},
+		{name: "malformed_inherits_primary", set: true, value: "abc", want: primaryMax},
+		{name: "in_range_overrides", set: true, value: "120", want: 120},
+		{name: "below_floor_clamps_up", set: true, value: "1", want: minDBMaxConns},
+		{name: "above_ceiling_clamps_down", set: true, value: "9999", want: maxDBMaxConns},
+		{name: "zero_inherits_via_parseIntDefault", set: true, value: "0", want: primaryMax},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.set {
+				t.Setenv("DB_READ_MAX_CONNS", tc.value)
+			} else if err := os.Unsetenv("DB_READ_MAX_CONNS"); err != nil {
+				t.Fatalf("Unsetenv: %v", err)
+			}
+			if got := dbReadMaxConnsFromEnv(primaryMax); got != tc.want {
+				t.Errorf("dbReadMaxConnsFromEnv(%d) = %d, want %d", primaryMax, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestDBReadMinConnsFromEnv pins the read-pool MinConns contract: unset
+// inherits the primary's min; an explicit 0 is honoured (lazy pool); a
+// negative is ignored (inherit retained); and the result is clamped to
+// the read pool's resolved max so MinConns can never exceed MaxConns
+// (which pgxpool rejects), including when an inherited primary min is
+// larger than a smaller, explicitly-set read max.
+func TestDBReadMinConnsFromEnv(t *testing.T) {
+	tests := []struct {
+		name       string
+		set        bool
+		value      string
+		primaryMin int32
+		readMax    int32
+		want       int32
+	}{
+		{name: "unset_inherits_primary", set: false, primaryMin: 5, readMax: 40, want: 5},
+		{name: "empty_inherits_primary", set: true, value: "", primaryMin: 5, readMax: 40, want: 5},
+		{name: "explicit_zero_honoured", set: true, value: "0", primaryMin: 5, readMax: 40, want: 0},
+		{name: "negative_ignored_inherits", set: true, value: "-3", primaryMin: 5, readMax: 40, want: 5},
+		{name: "in_range_overrides", set: true, value: "12", primaryMin: 5, readMax: 40, want: 12},
+		{name: "set_above_readmax_clamps", set: true, value: "100", primaryMin: 5, readMax: 40, want: 40},
+		{name: "inherited_above_smaller_readmax_clamps", set: false, primaryMin: 20, readMax: 8, want: 8},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.set {
+				t.Setenv("DB_READ_MIN_CONNS", tc.value)
+			} else if err := os.Unsetenv("DB_READ_MIN_CONNS"); err != nil {
+				t.Fatalf("Unsetenv: %v", err)
+			}
+			if got := dbReadMinConnsFromEnv(tc.primaryMin, tc.readMax); got != tc.want {
+				t.Errorf("dbReadMinConnsFromEnv(%d, %d) = %d, want %d", tc.primaryMin, tc.readMax, got, tc.want)
 			}
 		})
 	}

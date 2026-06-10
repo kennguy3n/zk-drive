@@ -38,6 +38,24 @@ type Config struct {
 	DBMinConns        int32
 	DBMaxConnIdleTime time.Duration
 
+	// Read-replica connection-pool sizing. These tune the SECOND
+	// pgxpool that cmd/server opens against DATABASE_READ_URL (the
+	// replica feeding the ReadWriteSplitter). Sourced from
+	// DB_READ_MAX_CONNS and DB_READ_MIN_CONNS, clamped with the same
+	// bounds as the primary ([2, 200] / [0, DBReadMaxConns]).
+	//
+	// When their env vars are unset, each INHERITS the primary's
+	// resolved value (DBReadMaxConns = DBMaxConns, DBReadMinConns =
+	// DBMinConns), so deployments that don't set them keep the prior
+	// behaviour exactly (both pools sized identically). They exist so an
+	// operator who offloads reads to the replica can size the read pool
+	// larger — or a small replica smaller — than the primary WITHOUT
+	// changing code. The replica idle timeout intentionally reuses
+	// DBMaxConnIdleTime (no separate knob) to keep the surface minimal;
+	// idle reaping is uniform across both pools.
+	DBReadMaxConns int32
+	DBReadMinConns int32
+
 	// JWTAlgorithm selects the session-token signing algorithm:
 	//   - "auto" (default): sign with ES256 when an active asymmetric
 	//     signing key exists in jwt_signing_keys, otherwise fall back
@@ -507,6 +525,26 @@ type Config struct {
 	// would shed every save).
 	OnlyOfficeSaveMemoryBudgetBytes int64
 
+	// OnlyOfficeStreamSaveMaxConcurrent optionally caps how many save
+	// callbacks may stream to object storage concurrently. The streaming
+	// save path uses constant memory (it relays the Document Server body
+	// straight into a presigned PUT), so it is intentionally NOT bounded
+	// by the memory-derived OnlyOfficeMaxConcurrentSaves gate that
+	// protects the buffered fallback. That makes concurrent streaming
+	// saves effectively unlimited — exactly the WS5 goal — but a burst of
+	// editors closing documents at once can still translate into many
+	// simultaneous PUTs to the storage gateway and GETs to the Document
+	// Server cache. This knob lets an operator put a high-watermark cap
+	// on that concurrency without reintroducing a memory budget: a save
+	// beyond the cap is shed with a retryable 503 (the Document Server
+	// keeps the bytes and retries), never blocked.
+	//
+	// Sourced from ONLYOFFICE_STREAM_SAVE_MAX_CONCURRENT. 0 (the default,
+	// also the value for an unset/negative/malformed var) means
+	// UNLIMITED — preserving the prior behaviour exactly. A positive
+	// value sizes the streaming-save semaphore.
+	OnlyOfficeStreamSaveMaxConcurrent int
+
 	// SuspensionFailClosed flips the workspace-suspension enforcement
 	// posture from fail-OPEN (default) to fail-CLOSED. Suspension is an
 	// availability control, so by default a suspension-lookup error
@@ -611,14 +649,25 @@ func buildConfigFromEnv() *Config {
 	// Read DB_MAX_CONNS once: DBMinConns is clamped against the same
 	// resolved maximum, so re-reading the env var would be redundant.
 	dbMaxConns := dbMaxConnsFromEnv()
+	dbMinConns := dbMinConnsFromEnv(dbMaxConns)
+	// Read-replica pool sizing inherits the primary's resolved values
+	// when its env vars are unset (read max from primary max, read min
+	// from primary min), so an unconfigured deployment sizes both pools
+	// identically — exactly the prior behaviour. read-min is finally
+	// clamped against the RESOLVED read-max so an inherited primary min
+	// can never exceed a smaller, explicitly-set read max.
+	dbReadMaxConns := dbReadMaxConnsFromEnv(dbMaxConns)
+	dbReadMinConns := dbReadMinConnsFromEnv(dbMinConns, dbReadMaxConns)
 	platformAdmins, invalidPlatformAdmins := platformAdminUserIDsFromEnv()
 	return &Config{
 		DatabaseURL:                            os.Getenv("DATABASE_URL"),
 		DatabaseReadURL:                        os.Getenv("DATABASE_READ_URL"),
 		JWTSecret:                              os.Getenv("JWT_SECRET"),
 		DBMaxConns:                             dbMaxConns,
-		DBMinConns:                             dbMinConnsFromEnv(dbMaxConns),
+		DBMinConns:                             dbMinConns,
 		DBMaxConnIdleTime:                      parseDurationDefault(os.Getenv("DB_MAX_CONN_IDLE_TIME"), defaultDBMaxConnIdleTime),
+		DBReadMaxConns:                         dbReadMaxConns,
+		DBReadMinConns:                         dbReadMinConns,
 		JWTAlgorithm:                           normaliseJWTAlgorithm(os.Getenv("JWT_ALGORITHM")),
 		JWTKeyRefreshInterval:                  jwtKeyRefreshIntervalFromEnv(),
 		PlatformAdminUserIDs:                   platformAdmins,
@@ -717,6 +766,9 @@ func buildConfigFromEnv() *Config {
 		OnlyOfficeAllowInsecure:         parseBoolDefault(os.Getenv("ONLYOFFICE_ALLOW_INSECURE"), false),
 		OnlyOfficeMaxDocumentBytes:      onlyOfficeBytesFromEnv("ONLYOFFICE_MAX_DOCUMENT_MB", defaultOnlyOfficeMaxDocumentMB),
 		OnlyOfficeSaveMemoryBudgetBytes: onlyOfficeBytesFromEnv("ONLYOFFICE_SAVE_MEMORY_BUDGET_MB", defaultOnlyOfficeSaveMemoryBudgetMB),
+		// Default 0 = unlimited (preserves the streaming path's
+		// unbounded-concurrency behaviour); negative/malformed also → 0.
+		OnlyOfficeStreamSaveMaxConcurrent: parseNonNegativeIntDefault(os.Getenv("ONLYOFFICE_STREAM_SAVE_MAX_CONCURRENT"), 0),
 
 		SuspensionFailClosed: parseBoolDefault(os.Getenv("SUSPENSION_FAIL_CLOSED"), false),
 
@@ -1083,6 +1135,51 @@ func dbMinConnsFromEnv(maxConns int32) int32 {
 		return maxConns
 	}
 	return int32(n)
+}
+
+// dbReadMaxConnsFromEnv resolves the read-replica pool's MaxConns.
+// DB_READ_MAX_CONNS is unset for the common case (one shared sizing),
+// so an empty value INHERITS primaryMax — keeping both pools identical
+// and preserving the pre-knob behaviour. A set value is clamped to the
+// same [minDBMaxConns, maxDBMaxConns] bounds as the primary so a typo
+// can neither starve the read pool nor exhaust the replica's
+// max_connections. Note the inherit branch returns primaryMax verbatim
+// (already clamped by dbMaxConnsFromEnv), not the raw default, so the
+// two pools stay in lockstep when only DB_MAX_CONNS is tuned.
+func dbReadMaxConnsFromEnv(primaryMax int32) int32 {
+	s := strings.TrimSpace(os.Getenv("DB_READ_MAX_CONNS"))
+	if s == "" {
+		return primaryMax
+	}
+	n := parseIntDefault(s, int(primaryMax))
+	if n < minDBMaxConns {
+		n = minDBMaxConns
+	}
+	if n > maxDBMaxConns {
+		n = maxDBMaxConns
+	}
+	return int32(n)
+}
+
+// dbReadMinConnsFromEnv resolves the read-replica pool's MinConns.
+// DB_READ_MIN_CONNS unset INHERITS primaryMin; a set value honours an
+// explicit 0 (lazy pool) and ignores a negative (default retained),
+// mirroring dbMinConnsFromEnv. The result is finally clamped to
+// readMax so MinConns can never exceed the read pool's MaxConns —
+// critical because an inherited primaryMin could otherwise exceed a
+// smaller, explicitly-set DB_READ_MAX_CONNS and make pgxpool reject the
+// config at NewWithConfig time.
+func dbReadMinConnsFromEnv(primaryMin, readMax int32) int32 {
+	n := primaryMin
+	if s := strings.TrimSpace(os.Getenv("DB_READ_MIN_CONNS")); s != "" {
+		if v, err := strconv.Atoi(s); err == nil && v >= 0 {
+			n = int32(v)
+		}
+	}
+	if n > readMax {
+		return readMax
+	}
+	return n
 }
 
 // normaliseJWTAlgorithm canonicalises the JWT_ALGORITHM env var to
