@@ -268,8 +268,14 @@ resource "aws_ecs_task_definition" "server" {
       dependsOn = [
         { containerName = "pgbouncer", condition = "START" },
       ]
+      # The server image (slim distroless or combined debian-slim) ships
+      # no shell, wget, or curl, so the probe runs the bundled
+      # /app/healthcheck binary directly (CMD, not CMD-SHELL). It GETs
+      # /healthz on the loopback interface and maps the result to an exit
+      # code. This is the container-level liveness check; ALB target-group
+      # health is configured separately on the listener/target group.
       healthCheck = {
-        command     = ["CMD-SHELL", "wget -qO- http://localhost:8080/healthz || exit 1"]
+        command     = ["CMD", "/app/healthcheck"]
         interval    = 30
         timeout     = 5
         retries     = 3

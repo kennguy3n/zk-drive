@@ -31,9 +31,15 @@ compatibility.
 
 | Dockerfile          | Base                              | Size    | Ships                                                                                  |
 | ------------------- | --------------------------------- | ------- | -------------------------------------------------------------------------------------- |
-| `Dockerfile.server` | `gcr.io/distroless/static-debian12` | ~30MB   | `/app/server`, `/app/migrate`, `/app/migrations/`. No preview tooling.                 |
+| `Dockerfile.server` | `gcr.io/distroless/static-debian12` | ~30MB   | `/app/server`, `/app/migrate`, `/app/healthcheck`, `/app/migrations/`. No preview tooling. |
 | `Dockerfile.worker` | `debian:bookworm-slim`            | ~800MB  | `/app/worker`, `/app/reconciler`, `/app/orphan-gc`, `/app/audit-archiver`, `/app/audit-restore` + LibreOffice / FFmpeg / ImageMagick. |
-| `Dockerfile`        | `debian:bookworm-slim`            | ~800MB  | **Combined** — all of the above plus `/app/compact` (the compact supervisor).          |
+| `Dockerfile`        | `debian:bookworm-slim`            | ~800MB  | **Combined** — all of the above plus `/app/compact` (the compact supervisor) and `/app/healthcheck`. |
+
+> **Health checks:** distroless and debian-slim ship no `wget`/`curl`, so
+> container-level probes (ECS task definitions, Compose `healthcheck:`) run the
+> bundled `/app/healthcheck` binary, which performs one HTTP GET against
+> `/healthz` (port from `LISTEN_ADDR`, default `:8080`) and exits 0/1. Helm and
+> GCP Cloud Run use native `httpGet` probes instead and don't need it.
 
 ```bash
 # Build the split images:

@@ -11,9 +11,11 @@
 # the ~800MB combined image, which slashes pull time, cold-start
 # latency, and the CVE surface across a fleet of 5000 SME tenants.
 #
-# Contents: /app/server, /app/migrate, /app/migrations/. The migrate
-# binary rides along so the same image can run the schema Job (or the
-# server's own --auto-migrate path) without a second tag.
+# Contents: /app/server, /app/migrate, /app/healthcheck, /app/migrations/.
+# The migrate binary rides along so the same image can run the schema Job
+# (or the server's own --auto-migrate path) without a second tag, and the
+# healthcheck binary gives orchestrators an HTTP liveness probe the
+# shell-less distroless base otherwise can't provide.
 FROM golang:1.25-alpine AS builder
 WORKDIR /src
 
@@ -27,6 +29,7 @@ COPY . .
 ARG APP_VERSION=dev
 RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w -X github.com/kennguy3n/zk-drive/internal/version.Version=${APP_VERSION}" -o /out/server ./cmd/server
 RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w -X github.com/kennguy3n/zk-drive/internal/version.Version=${APP_VERSION}" -o /out/migrate ./cmd/migrate
+RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w -X github.com/kennguy3n/zk-drive/internal/version.Version=${APP_VERSION}" -o /out/healthcheck ./cmd/healthcheck
 
 # ---- Runtime stage ----
 # distroless/static-debian12: no libc beyond what a CGO_ENABLED=0 Go
@@ -40,6 +43,7 @@ WORKDIR /app
 
 COPY --from=builder /out/server /app/server
 COPY --from=builder /out/migrate /app/migrate
+COPY --from=builder /out/healthcheck /app/healthcheck
 COPY --from=builder /src/migrations /app/migrations
 
 EXPOSE 8080

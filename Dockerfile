@@ -49,6 +49,11 @@ RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w -X github.com/ke
 # the /app/server and /app/worker child processes that this same image
 # already ships — keeping every all-in-one entrypoint in one tag.
 RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w -X github.com/kennguy3n/zk-drive/internal/version.Version=${APP_VERSION}" -o /out/compact ./cmd/compact
+# HTTP liveness-probe binary. debian:bookworm-slim ships no wget/curl, so
+# container-level health checks (ECS task definitions, docker-compose
+# `healthcheck:`) invoke `/app/healthcheck` instead of shelling out. Same
+# one-image-many-entrypoints pattern as the binaries above.
+RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w -X github.com/kennguy3n/zk-drive/internal/version.Version=${APP_VERSION}" -o /out/healthcheck ./cmd/healthcheck
 
 # ---- Runtime stage ----
 # debian:bookworm-slim (instead of distroless static) so the worker
@@ -104,6 +109,7 @@ COPY --from=builder /out/orphan-gc /app/orphan-gc
 COPY --from=builder /out/audit-archiver /app/audit-archiver
 COPY --from=builder /out/audit-restore /app/audit-restore
 COPY --from=builder /out/compact /app/compact
+COPY --from=builder /out/healthcheck /app/healthcheck
 COPY --from=builder /src/migrations /app/migrations
 
 # Writable JetStream store for the embedded NATS broker the /app/compact
