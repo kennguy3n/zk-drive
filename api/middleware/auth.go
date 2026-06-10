@@ -11,6 +11,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/kennguy3n/zk-drive/internal/logging"
+	"github.com/kennguy3n/zk-drive/internal/session"
 	"github.com/kennguy3n/zk-drive/internal/tenantctx"
 	"github.com/kennguy3n/zk-drive/internal/tracing"
 )
@@ -54,6 +55,13 @@ type Claims struct {
 	WorkspaceID uuid.UUID `json:"workspace_id"`
 	Role        string    `json:"role"`
 	Purpose     string    `json:"purpose,omitempty"`
+	// SessionID binds the token to a server-side session record so a
+	// specific device can be listed and revoked (6.2). It is empty on
+	// purpose-scoped tokens (mfa_challenge / mfa_enroll) and on tokens
+	// minted before sessions were tracked; AuthMiddleware only runs
+	// the per-session existence + device-anomaly checks when it is
+	// present, so legacy tokens keep working until they expire.
+	SessionID string `json:"sid,omitempty"`
 	jwt.RegisteredClaims
 }
 
@@ -122,7 +130,15 @@ func IssueToken(secret string, userID, workspaceID uuid.UUID, role string, ttl t
 // IssueTokenWith is IssueToken parameterised by a Signer, so callers
 // holding a KeyManager mint ES256 (or HS256-fallback) tokens.
 func IssueTokenWith(s Signer, userID, workspaceID uuid.UUID, role string, ttl time.Duration) (string, time.Time, error) {
-	return issueWithPurpose(s, userID, workspaceID, role, "", ttl)
+	return issueWithPurpose(s, userID, workspaceID, role, "", "", ttl)
+}
+
+// IssueSessionTokenWith mints a session JWT bound to a server-side
+// session record via the sid claim. The login / refresh flow passes
+// the id of the session it just created so AuthMiddleware can enforce
+// per-session revocation and device-anomaly detection (6.2).
+func IssueSessionTokenWith(s Signer, userID, workspaceID uuid.UUID, role, sessionID string, ttl time.Duration) (string, time.Time, error) {
+	return issueWithPurpose(s, userID, workspaceID, role, "", sessionID, ttl)
 }
 
 // IssueMFAChallengeToken signs a short-lived JWT marked with
@@ -141,7 +157,7 @@ func IssueMFAChallengeTokenWith(s Signer, userID, workspaceID uuid.UUID) (string
 	// here would invite a future bug where some handler bypasses
 	// AuthMiddleware's purpose check and treats the challenge as a
 	// session.
-	return issueWithPurpose(s, userID, workspaceID, "", PurposeMFAChallenge, MFAChallengeTokenTTL)
+	return issueWithPurpose(s, userID, workspaceID, "", PurposeMFAChallenge, "", MFAChallengeTokenTTL)
 }
 
 // IssueMFAEnrollToken signs a short-lived JWT marked with
@@ -155,10 +171,10 @@ func IssueMFAEnrollToken(secret string, userID, workspaceID uuid.UUID) (string, 
 // IssueMFAEnrollTokenWith is IssueMFAEnrollToken parameterised by a
 // Signer.
 func IssueMFAEnrollTokenWith(s Signer, userID, workspaceID uuid.UUID) (string, time.Time, error) {
-	return issueWithPurpose(s, userID, workspaceID, "", PurposeMFAEnroll, MFAChallengeTokenTTL)
+	return issueWithPurpose(s, userID, workspaceID, "", PurposeMFAEnroll, "", MFAChallengeTokenTTL)
 }
 
-func issueWithPurpose(s Signer, userID, workspaceID uuid.UUID, role, purpose string, ttl time.Duration) (string, time.Time, error) {
+func issueWithPurpose(s Signer, userID, workspaceID uuid.UUID, role, purpose, sessionID string, ttl time.Duration) (string, time.Time, error) {
 	if ttl == 0 {
 		ttl = TokenTTL
 	}
@@ -169,6 +185,7 @@ func issueWithPurpose(s Signer, userID, workspaceID uuid.UUID, role, purpose str
 		WorkspaceID: workspaceID,
 		Role:        role,
 		Purpose:     purpose,
+		SessionID:   sessionID,
 		RegisteredClaims: jwt.RegisteredClaims{
 			IssuedAt:  jwt.NewNumericDate(now),
 			ExpiresAt: jwt.NewNumericDate(exp),
@@ -218,6 +235,25 @@ type SessionChecker interface {
 	IsRevoked(ctx context.Context, workspaceID, userID uuid.UUID, issuedAt time.Time) (bool, error)
 }
 
+// SessionValidator is consulted by AuthMiddleware for tokens that
+// carry a session id (sid). It enforces the device-bound half of the
+// session-security model (6.2): the session must still exist (per-
+// session revocation via DELETE /sessions/:id, logout, or expiry) and
+// the request's device fingerprint must match the one captured when
+// the session was created.
+//
+// It returns session.ErrSessionNotFound when no live session backs the
+// token and session.ErrSessionAnomaly when the device fingerprint no
+// longer matches; AuthMiddleware maps both to 401 (with distinct error
+// codes) so the client re-authenticates. Any other (transport) error
+// makes the middleware fail closed, identical to the IsRevoked path.
+//
+// *session.RedisSessionStore satisfies both this and SessionChecker;
+// production passes the same store as both.
+type SessionValidator interface {
+	ValidateSession(ctx context.Context, workspaceID uuid.UUID, sessionID, userAgent, clientIP string) error
+}
+
 // SessionCheckTimeout is the upper bound on how long AuthMiddleware
 // will wait for a SessionChecker.IsRevoked call before giving up and
 // failing closed.
@@ -254,7 +290,27 @@ func AuthMiddleware(secret string, checker SessionChecker) func(http.Handler) ht
 // Production wiring passes the ES256 KeyManager so tokens are verified
 // against the asymmetric keys first, with automatic HS256 fallback for
 // sessions issued before the cutover.
+//
+// It detects whether checker also implements SessionValidator and, if
+// so, enables per-session existence + device-anomaly enforcement for
+// tokens carrying a sid. The trusted-proxy depth defaults to 0 here
+// (client IP read from RemoteAddr); production calls
+// AuthMiddlewareWithSessions to supply the real depth so the
+// fingerprint IP is taken from the correct X-Forwarded-For hop and
+// cannot be spoofed by an untrusted client.
 func AuthMiddlewareWithKeys(signer Signer, checker SessionChecker) func(http.Handler) http.Handler {
+	validator, _ := checker.(SessionValidator)
+	return AuthMiddlewareWithSessions(signer, checker, validator, 0)
+}
+
+// AuthMiddlewareWithSessions is AuthMiddlewareWithKeys with explicit
+// control over the SessionValidator and the trusted-proxy depth used
+// to resolve the client IP for device-anomaly detection. Production
+// wires this directly so the fingerprint IP comes from the correct
+// proxy hop. A nil validator disables per-session enforcement (the
+// stateless-JWT + per-user-cutoff behaviour), which tests and the
+// deprecated in-memory path rely on.
+func AuthMiddlewareWithSessions(signer Signer, checker SessionChecker, validator SessionValidator, trustedProxyDepth int) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			raw, ok := extractBearerToken(r)
@@ -309,6 +365,43 @@ func AuthMiddlewareWithKeys(signer Signer, checker SessionChecker) func(http.Han
 				}
 				if revoked {
 					RespondError(w, http.StatusUnauthorized, ErrCodeAuthRevokedToken, "token revoked")
+					return
+				}
+			}
+			// Per-session enforcement (6.2): only for tokens that
+			// carry a sid AND when a validator is wired. Legacy
+			// tokens (no sid) and the stateless path (nil validator)
+			// skip straight through, preserving backward
+			// compatibility. The existence check makes per-session
+			// revocation real for a stateless JWT; the fingerprint
+			// check forces re-auth when a token is replayed from a
+			// different browser or network.
+			if validator != nil && claims.SessionID != "" {
+				clientIP := ""
+				if ip := ClientIPFromRequest(r, trustedProxyDepth); ip != nil {
+					clientIP = ip.String()
+				}
+				// Bound the validation read identically to the
+				// IsRevoked path so a partial Redis stall can't hang
+				// every authenticated request for the full client
+				// read deadline.
+				vctx, cancel := context.WithTimeout(r.Context(), SessionCheckTimeout)
+				verr := validator.ValidateSession(vctx, claims.WorkspaceID, claims.SessionID, r.UserAgent(), clientIP)
+				cancel()
+				switch {
+				case verr == nil:
+					// session live and device matches
+				case errors.Is(verr, session.ErrSessionAnomaly):
+					RespondError(w, http.StatusUnauthorized, ErrCodeSessionAnomaly, "device changed; re-authentication required")
+					return
+				case errors.Is(verr, session.ErrSessionNotFound):
+					RespondError(w, http.StatusUnauthorized, ErrCodeAuthRevokedToken, "session revoked")
+					return
+				default:
+					// Fail closed on store unreachable, same as the
+					// IsRevoked path: a session check that cannot
+					// complete must not admit the request.
+					RespondError(w, http.StatusUnauthorized, ErrCodeRevocationCheck, "session check failed")
 					return
 				}
 			}

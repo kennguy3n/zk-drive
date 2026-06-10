@@ -53,6 +53,7 @@ const (
 	ErrCodeAuthBadPurpose         ErrorCode = "AUTH_BAD_PURPOSE"
 	ErrCodeAuthMissingIat         ErrorCode = "AUTH_MISSING_IAT"
 	ErrCodeRevocationCheck        ErrorCode = "AUTH_REVOCATION_CHECK_FAILED"
+	ErrCodeSessionAnomaly         ErrorCode = "AUTH_SESSION_ANOMALY"
 	ErrCodeAuthInvalidCredentials ErrorCode = "AUTH_INVALID_CREDENTIALS"
 	ErrCodeAuthPasswordReverify   ErrorCode = "AUTH_PASSWORD_REVERIFY_FAILED"
 	ErrCodeMFARequired            ErrorCode = "AUTH_MFA_REQUIRED"

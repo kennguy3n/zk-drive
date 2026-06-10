@@ -410,6 +410,11 @@ func setupEnv(t *testing.T) *testEnv {
 				r.Use(middleware.AuthMiddleware(testJWTSecret, sessionStore))
 				r.Post("/logout", authHandler.Logout)
 				r.Post("/refresh", authHandler.Refresh)
+				// Device-session management (6.2) — mirror
+				// cmd/server/main.go so integration tests exercise
+				// the real list/revoke handlers.
+				r.Get("/sessions", authHandler.ListSessions)
+				r.Delete("/sessions/{id}", authHandler.RevokeSession)
 			})
 
 			// TOTP routes mirror cmd/server/main.go wiring so
@@ -674,6 +679,14 @@ func findMigrationsDir(t *testing.T) string {
 // the response status plus body bytes. It closes the response body.
 func (e *testEnv) httpRequest(method, path, token string, payload any) (int, []byte) {
 	e.t.Helper()
+	return e.httpRequestWithHeaders(method, path, token, payload, nil)
+}
+
+// httpRequestWithHeaders is httpRequest with caller-supplied extra
+// headers, used by the session-security tests to vary the User-Agent
+// and exercise device-anomaly detection through the real HTTP stack.
+func (e *testEnv) httpRequestWithHeaders(method, path, token string, payload any, headers map[string]string) (int, []byte) {
+	e.t.Helper()
 	var body io.Reader
 	if payload != nil {
 		buf, err := json.Marshal(payload)
@@ -691,6 +704,9 @@ func (e *testEnv) httpRequest(method, path, token string, payload any) (int, []b
 	}
 	if token != "" {
 		req.Header.Set("Authorization", "Bearer "+token)
+	}
+	for k, v := range headers {
+		req.Header.Set(k, v)
 	}
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {

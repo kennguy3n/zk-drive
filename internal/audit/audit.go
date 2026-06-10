@@ -19,6 +19,12 @@ import (
 const (
 	ActionLogin              = "auth.login"
 	ActionLogout             = "auth.logout"
+	// ActionSessionRevoke records a user revoking one of their own
+	// device sessions via DELETE /api/auth/sessions/:id (6.2). The
+	// metadata blob carries the revoked session id so operators can
+	// correlate a "signed out a device" action with later access
+	// attempts from that device fingerprint.
+	ActionSessionRevoke      = "auth.session_revoke"
 	ActionPasswordChange     = "auth.password_change"
 	ActionSSOLink            = "auth.sso_link"
 	ActionSSOLogin           = "auth.sso_login"

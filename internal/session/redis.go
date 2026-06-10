@@ -32,9 +32,14 @@ package session
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
+	"net"
+	"sort"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -45,6 +50,84 @@ import (
 // unknown or has been revoked. Callers translate this to a 401 so the
 // client knows to re-authenticate.
 var ErrSessionNotFound = errors.New("session not found")
+
+// ErrSessionAnomaly is returned by ValidateSession when the request's
+// device fingerprint (User-Agent + IP network) no longer matches the
+// fingerprint captured when the session was established. The caller
+// (AuthMiddleware) translates this to a 401 so a token replayed from a
+// different browser or a different network forces re-authentication —
+// the session-security guarantee that a stolen bearer token cannot be
+// silently reused from the attacker's machine.
+var ErrSessionAnomaly = errors.New("session device anomaly")
+
+// maxUserAgentLen bounds the stored User-Agent so a hostile client
+// cannot blow up the session hash (and the secondary index it feeds)
+// with a multi-megabyte header. Real User-Agents are well under this;
+// the cap only trims pathological inputs before they reach Redis.
+const maxUserAgentLen = 512
+
+// lastSeenThrottle is the minimum interval between last_seen writes
+// for a single session. ValidateSession runs on every authenticated
+// request, so without throttling a busy session would issue a Redis
+// write per request purely to advance a display timestamp. Updating
+// at most once per interval keeps the hot path effectively read-only
+// while still giving the sessions list a "last active" value that is
+// fresh to within the throttle window.
+const lastSeenThrottle = 60 * time.Second
+
+// SessionRecord is the device-aware view of a single session. It is
+// returned by ListForUser (for the "your active sessions" surface)
+// and underpins ValidateSession's anomaly check. The JSON tags shape
+// the api/auth list response directly; UserID / WorkspaceID stay
+// server-side (the caller already knows its own identity and tenant).
+type SessionRecord struct {
+	SessionID   string    `json:"session_id"`
+	UserID      uuid.UUID `json:"-"`
+	WorkspaceID uuid.UUID `json:"-"`
+	UserAgent   string    `json:"user_agent"`
+	IP          string    `json:"ip"`
+	DeviceHash  string    `json:"device_hash"`
+	CreatedAt   time.Time `json:"created_at"`
+	LastSeenAt  time.Time `json:"last_seen_at"`
+}
+
+// Fingerprint derives the device fingerprint stored on a session and
+// compared on every request. It combines the User-Agent with the IP
+// *network* prefix (a /16 for IPv4, /48 for IPv6) rather than the
+// exact address: a legitimate client on a dynamic address within the
+// same ISP/region keeps a stable fingerprint, while a different
+// browser OR a different network (the signature of a token replayed
+// elsewhere) yields a different fingerprint and forces
+// re-authentication. Coarsening to the network prefix is the
+// deliberate trade that keeps anomaly detection from logging out
+// mobile users on every DHCP lease change while still catching
+// cross-ISP / cross-geo replay.
+func Fingerprint(userAgent, ip string) string {
+	h := sha256.New()
+	h.Write([]byte(strings.TrimSpace(userAgent)))
+	h.Write([]byte{0})
+	h.Write([]byte(networkPrefix(ip)))
+	return hex.EncodeToString(h.Sum(nil))
+}
+
+// networkPrefix returns a stable network-scope key for an IP: the
+// /16 for IPv4 and the /48 for IPv6. An unparseable address falls
+// back to its trimmed string so a missing / malformed IP still
+// produces a deterministic (if coarse) fingerprint component rather
+// than collapsing every such request to the same bucket as a valid
+// network.
+func networkPrefix(ip string) string {
+	parsed := net.ParseIP(strings.TrimSpace(ip))
+	if parsed == nil {
+		return strings.TrimSpace(ip)
+	}
+	if v4 := parsed.To4(); v4 != nil {
+		return fmt.Sprintf("%d.%d.0.0/16", v4[0], v4[1])
+	}
+	// IPv6: mask to the routing-prefix /48.
+	masked := parsed.Mask(net.CIDRMask(48, 128))
+	return masked.String() + "/48"
+}
 
 // RedisSessionStore persists session metadata in Redis so revocation
 // works across multiple replicas of the API server.
@@ -121,20 +204,59 @@ return 0
 // index. The TTL is applied to both keys so an abandoned session
 // expires from the index along with the hash and we never accumulate
 // dangling references.
+//
+// Set is the device-agnostic constructor retained for callers that
+// only need revocation bookkeeping; Create is the device-aware
+// equivalent used by the login flow. Both share the same write path.
 func (s *RedisSessionStore) Set(ctx context.Context, sessionID string, userID, workspaceID uuid.UUID, ttl time.Duration) error {
-	if sessionID == "" {
+	now := time.Now().UTC()
+	return s.Create(ctx, SessionRecord{
+		SessionID:   sessionID,
+		UserID:      userID,
+		WorkspaceID: workspaceID,
+		CreatedAt:   now,
+		LastSeenAt:  now,
+	}, ttl)
+}
+
+// Create stores (or refreshes) a device-aware session hash and
+// registers it in the user's secondary index. It is the single write
+// path for sessions: the login flow calls it with a fresh fingerprint
+// and the refresh flow calls it again with the same SessionID to
+// extend the lease.
+//
+// created_at is written with HSetNX so a refresh that re-Creates an
+// existing session preserves the original "signed in" timestamp while
+// still advancing last_seen and the TTL. The User-Agent is clamped to
+// maxUserAgentLen so a hostile header can't bloat the hash.
+func (s *RedisSessionStore) Create(ctx context.Context, rec SessionRecord, ttl time.Duration) error {
+	if rec.SessionID == "" {
 		return errors.New("session id required")
 	}
-	skey := sessionKey(workspaceID, sessionID)
-	ukey := userSessionsKey(workspaceID, userID)
+	if rec.CreatedAt.IsZero() {
+		rec.CreatedAt = time.Now().UTC()
+	}
+	if rec.LastSeenAt.IsZero() {
+		rec.LastSeenAt = rec.CreatedAt
+	}
+	skey := sessionKey(rec.WorkspaceID, rec.SessionID)
+	ukey := userSessionsKey(rec.WorkspaceID, rec.UserID)
 
 	pipe := s.client.TxPipeline()
 	pipe.HSet(ctx, skey, map[string]any{
-		"user_id":      userID.String(),
-		"workspace_id": workspaceID.String(),
+		"user_id":      rec.UserID.String(),
+		"workspace_id": rec.WorkspaceID.String(),
+		"user_agent":   clampString(rec.UserAgent, maxUserAgentLen),
+		"ip":           rec.IP,
+		"device_hash":  rec.DeviceHash,
+		"last_seen":    strconv.FormatInt(rec.LastSeenAt.UTC().Unix(), 10),
 	})
+	// created_at must survive a refresh that re-Creates the same
+	// session, so it is seeded once via HSetNX rather than overwritten
+	// on every call.
+	pipe.HSetNX(ctx, skey, "created_at", strconv.FormatInt(rec.CreatedAt.UTC().Unix(), 10))
 	pipe.Expire(ctx, skey, ttl)
-	pipe.SAdd(ctx, ukey, sessionID)
+	pipe.SAdd(ctx, ukey, rec.SessionID)
 	// The user_sessions SET TTL must never shrink: a short-lived
 	// session followed by a long-lived one would otherwise expire
 	// the index before the long-lived hash, leaving
@@ -149,6 +271,18 @@ func (s *RedisSessionStore) Set(ctx context.Context, sessionID string, userID, w
 		return fmt.Errorf("redis session set: %w", err)
 	}
 	return nil
+}
+
+// clampString truncates s to at most n bytes. It is byte-oriented
+// (not rune-aware) because the only caller bounds a User-Agent header,
+// where the cap is a safety limit rather than a display constraint;
+// the rare multi-byte rune split at the boundary is harmless for an
+// opaque fingerprint input.
+func clampString(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[:n]
 }
 
 // Get reads a session hash and returns the bound user / workspace.
@@ -187,6 +321,226 @@ func (s *RedisSessionStore) Get(ctx context.Context, workspaceID uuid.UUID, sess
 		return uuid.Nil, uuid.Nil, fmt.Errorf("parse workspace_id: %w", err)
 	}
 	return uid, wid, nil
+}
+
+// recordFromHash decodes a Redis session hash into a SessionRecord.
+// It returns ErrSessionNotFound for an empty or identity-incomplete
+// hash (a hash missing user_id/workspace_id is either expired,
+// half-written, or a stray touch on a vanished key) so every caller
+// treats "no usable session" uniformly. The device columns are
+// optional: a session written by the legacy Set path has none, and
+// such a record simply reports empty device fields and skips the
+// anomaly check.
+func recordFromHash(sessionID string, values map[string]string) (SessionRecord, error) {
+	if len(values) == 0 {
+		return SessionRecord{}, ErrSessionNotFound
+	}
+	uidStr, ok := values["user_id"]
+	if !ok {
+		return SessionRecord{}, ErrSessionNotFound
+	}
+	wsStr, ok := values["workspace_id"]
+	if !ok {
+		return SessionRecord{}, ErrSessionNotFound
+	}
+	uid, err := uuid.Parse(uidStr)
+	if err != nil {
+		return SessionRecord{}, fmt.Errorf("parse user_id: %w", err)
+	}
+	wid, err := uuid.Parse(wsStr)
+	if err != nil {
+		return SessionRecord{}, fmt.Errorf("parse workspace_id: %w", err)
+	}
+	return SessionRecord{
+		SessionID:   sessionID,
+		UserID:      uid,
+		WorkspaceID: wid,
+		UserAgent:   values["user_agent"],
+		IP:          values["ip"],
+		DeviceHash:  values["device_hash"],
+		CreatedAt:   unixToTime(values["created_at"]),
+		LastSeenAt:  unixToTime(values["last_seen"]),
+	}, nil
+}
+
+// unixToTime parses a unix-seconds string into a UTC time, returning
+// the zero time for empty / malformed values so a missing timestamp
+// degrades to "unknown" rather than failing the whole lookup.
+func unixToTime(s string) time.Time {
+	if s == "" {
+		return time.Time{}
+	}
+	secs, err := strconv.ParseInt(s, 10, 64)
+	if err != nil {
+		return time.Time{}
+	}
+	return time.Unix(secs, 0).UTC()
+}
+
+// GetRecord reads the full device-aware session record. Returns
+// ErrSessionNotFound when the session has been revoked or expired.
+func (s *RedisSessionStore) GetRecord(ctx context.Context, workspaceID uuid.UUID, sessionID string) (SessionRecord, error) {
+	if sessionID == "" {
+		return SessionRecord{}, ErrSessionNotFound
+	}
+	values, err := s.client.HGetAll(ctx, sessionKey(workspaceID, sessionID)).Result()
+	if err != nil {
+		return SessionRecord{}, fmt.Errorf("redis session get: %w", err)
+	}
+	return recordFromHash(sessionID, values)
+}
+
+// ListForUser returns every active session for a user, newest activity
+// first, for the "your active sessions" surface. It reads the
+// secondary index, then pipelines one HGETALL per session id. Dangling
+// index entries — ids whose hash has already expired — are pruned with
+// SRem so the index self-heals and the list never reports a session the
+// user can no longer be using.
+//
+// The work is bounded by the user's active session count (single
+// digits in practice), so the pipeline stays cheap.
+func (s *RedisSessionStore) ListForUser(ctx context.Context, workspaceID, userID uuid.UUID) ([]SessionRecord, error) {
+	ukey := userSessionsKey(workspaceID, userID)
+	ids, err := s.client.SMembers(ctx, ukey).Result()
+	if err != nil {
+		return nil, fmt.Errorf("redis session list: %w", err)
+	}
+	if len(ids) == 0 {
+		return nil, nil
+	}
+
+	pipe := s.client.Pipeline()
+	cmds := make(map[string]*redis.MapStringStringCmd, len(ids))
+	for _, id := range ids {
+		cmds[id] = pipe.HGetAll(ctx, sessionKey(workspaceID, id))
+	}
+	if _, err := pipe.Exec(ctx); err != nil {
+		return nil, fmt.Errorf("redis session list fetch: %w", err)
+	}
+
+	records := make([]SessionRecord, 0, len(ids))
+	var stale []string
+	for _, id := range ids {
+		values, err := cmds[id].Result()
+		if err != nil {
+			return nil, fmt.Errorf("redis session list decode: %w", err)
+		}
+		rec, err := recordFromHash(id, values)
+		if errors.Is(err, ErrSessionNotFound) {
+			stale = append(stale, id)
+			continue
+		}
+		if err != nil {
+			return nil, err
+		}
+		records = append(records, rec)
+	}
+
+	// Best-effort prune of expired index entries. A failure here is
+	// non-fatal: the list is already correct, and the next call will
+	// retry the cleanup.
+	if len(stale) > 0 {
+		anyStale := make([]any, len(stale))
+		for i, id := range stale {
+			anyStale[i] = id
+		}
+		_ = s.client.SRem(ctx, ukey, anyStale...).Err()
+	}
+
+	sort.Slice(records, func(i, j int) bool {
+		return records[i].LastSeenAt.After(records[j].LastSeenAt)
+	})
+	return records, nil
+}
+
+// RevokeForUser deletes a single session but only when it belongs to
+// the supplied user, then removes it from that user's index. It powers
+// DELETE /api/auth/sessions/:id, where one user must never be able to
+// revoke another user's session by guessing an id. The bool reports
+// whether a session owned by the user was actually deleted so the
+// handler can answer 404 for an unknown / already-gone id versus 204
+// for a real revocation.
+func (s *RedisSessionStore) RevokeForUser(ctx context.Context, workspaceID, userID uuid.UUID, sessionID string) (bool, error) {
+	if sessionID == "" {
+		return false, nil
+	}
+	skey := sessionKey(workspaceID, sessionID)
+	ownerStr, err := s.client.HGet(ctx, skey, "user_id").Result()
+	if errors.Is(err, redis.Nil) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("redis session owner lookup: %w", err)
+	}
+	if ownerStr != userID.String() {
+		// Session exists but is not the caller's: treat as
+		// not-found rather than leaking its existence or revoking
+		// another user's device.
+		return false, nil
+	}
+
+	pipe := s.client.TxPipeline()
+	pipe.Del(ctx, skey)
+	pipe.SRem(ctx, userSessionsKey(workspaceID, userID), sessionID)
+	if _, err := pipe.Exec(ctx); err != nil {
+		return false, fmt.Errorf("redis session revoke-for-user: %w", err)
+	}
+	return true, nil
+}
+
+// ValidateSession is the per-request session gate consulted by
+// AuthMiddleware whenever a token carries a session id. It enforces
+// two invariants:
+//
+//   - The session still exists. A revoked (DELETE /sessions/:id),
+//     logged-out, or expired session has no hash, so the bearer token
+//     is rejected even though its signature and expiry are still valid
+//     — this is what makes per-session revocation real for stateless
+//     JWTs.
+//   - The request's device fingerprint matches the one captured at
+//     login. A mismatch (different browser, different network) returns
+//     ErrSessionAnomaly so a replayed token forces re-authentication.
+//
+// On a successful match it advances last_seen at most once per
+// lastSeenThrottle window, keeping the hot path effectively read-only.
+// A session written by the legacy device-less path has no stored
+// fingerprint and skips the anomaly check (it cannot be evaluated)
+// while still enforcing existence.
+func (s *RedisSessionStore) ValidateSession(ctx context.Context, workspaceID uuid.UUID, sessionID, userAgent, clientIP string) error {
+	rec, err := s.GetRecord(ctx, workspaceID, sessionID)
+	if err != nil {
+		return err
+	}
+	if rec.DeviceHash != "" && Fingerprint(userAgent, clientIP) != rec.DeviceHash {
+		return ErrSessionAnomaly
+	}
+	now := time.Now().UTC()
+	if now.Sub(rec.LastSeenAt) >= lastSeenThrottle {
+		// Best-effort, existence-guarded touch: a failure here only
+		// staleness the display timestamp, never the auth decision.
+		_ = s.touch(ctx, workspaceID, sessionID, now)
+	}
+	return nil
+}
+
+// touchScript advances last_seen only when the session hash still
+// exists, so a touch that races session expiry / revocation can never
+// resurrect a vanished session as a partial hash (which would lack
+// user_id and read back as ErrSessionNotFound anyway, but would leak a
+// key past its TTL).
+var touchScript = redis.NewScript(`
+if redis.call('EXISTS', KEYS[1]) == 1 then
+	redis.call('HSET', KEYS[1], 'last_seen', ARGV[1])
+	return 1
+end
+return 0
+`)
+
+func (s *RedisSessionStore) touch(ctx context.Context, workspaceID uuid.UUID, sessionID string, at time.Time) error {
+	return touchScript.Run(ctx, s.client,
+		[]string{sessionKey(workspaceID, sessionID)},
+		strconv.FormatInt(at.UTC().Unix(), 10),
+	).Err()
 }
 
 // Revoke deletes a single session. The hash is read first so we can

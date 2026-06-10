@@ -392,3 +392,327 @@ func TestSessionTTL(t *testing.T) {
 		t.Fatalf("expected expired session to be missing: %v", err)
 	}
 }
+
+// --- 6.2 device-aware session tests ---
+
+const (
+	uaChrome  = "Mozilla/5.0 (X11; Linux x86_64) Chrome/120"
+	uaFirefox = "Mozilla/5.0 (X11; Linux x86_64) Firefox/121"
+)
+
+// TestFingerprintStability pins the coarsening contract: same browser
+// on a different host within the same /16 keeps a stable fingerprint
+// (so a DHCP lease change doesn't log the user out), while a different
+// browser OR a different /16 network changes it (so a replayed token
+// from elsewhere is caught).
+func TestFingerprintStability(t *testing.T) {
+	base := Fingerprint(uaChrome, "203.0.113.10")
+	cases := []struct {
+		name     string
+		ua       string
+		ip       string
+		wantSame bool
+	}{
+		{"identical", uaChrome, "203.0.113.10", true},
+		{"same /16 different host", uaChrome, "203.0.200.55", true},
+		{"different /16", uaChrome, "198.51.100.10", false},
+		{"different UA same IP", uaFirefox, "203.0.113.10", false},
+		{"empty ip stable", uaChrome, "", false},
+	}
+	for _, c := range cases {
+		c := c
+		t.Run(c.name, func(t *testing.T) {
+			got := Fingerprint(c.ua, c.ip)
+			if (got == base) != c.wantSame {
+				t.Fatalf("Fingerprint(%q,%q)==base = %v, want %v", c.ua, c.ip, got == base, c.wantSame)
+			}
+		})
+	}
+}
+
+// TestFingerprintIPv6Coarsening pins that IPv6 addresses are coarsened
+// to the /48 routing prefix so addresses within the same allocation
+// share a fingerprint while a different /48 does not.
+func TestFingerprintIPv6Coarsening(t *testing.T) {
+	a := Fingerprint(uaChrome, "2001:db8:1:abcd::1")
+	if a != Fingerprint(uaChrome, "2001:db8:1:ffff::9") {
+		t.Error("addresses in the same /48 must share a fingerprint")
+	}
+	if a == Fingerprint(uaChrome, "2001:db8:2:abcd::1") {
+		t.Error("addresses in different /48 blocks must differ")
+	}
+}
+
+// TestCreatePersistsDeviceInfoAndRefreshKeepsCreatedAt verifies the
+// device columns round-trip through GetRecord and that re-Creating an
+// existing session (the refresh path) preserves created_at while
+// advancing last_seen — the contract that keeps "signed in at" stable
+// across token refreshes.
+func TestCreatePersistsDeviceInfoAndRefreshKeepsCreatedAt(t *testing.T) {
+	store, _ := newTestStore(t)
+	ctx := context.Background()
+	userID, wsID := uuid.New(), uuid.New()
+	sid := uuid.NewString()
+
+	created := time.Now().UTC().Add(-time.Hour).Truncate(time.Second)
+	rec := SessionRecord{
+		SessionID: sid, UserID: userID, WorkspaceID: wsID,
+		UserAgent: uaChrome, IP: "203.0.113.5",
+		DeviceHash: Fingerprint(uaChrome, "203.0.113.5"),
+		CreatedAt:  created, LastSeenAt: created,
+	}
+	if err := store.Create(ctx, rec, time.Hour); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+
+	got, err := store.GetRecord(ctx, wsID, sid)
+	if err != nil {
+		t.Fatalf("get-record: %v", err)
+	}
+	if got.UserAgent != uaChrome || got.IP != "203.0.113.5" || got.DeviceHash != rec.DeviceHash {
+		t.Fatalf("device info not persisted: %+v", got)
+	}
+	if !got.CreatedAt.Equal(created) {
+		t.Fatalf("created_at: got %v want %v", got.CreatedAt, created)
+	}
+
+	// Refresh: same sid, later last_seen, different created_at input —
+	// created_at must NOT move (HSetNX), last_seen MUST advance.
+	later := created.Add(30 * time.Minute)
+	rec.CreatedAt = later
+	rec.LastSeenAt = later
+	if err := store.Create(ctx, rec, time.Hour); err != nil {
+		t.Fatalf("refresh create: %v", err)
+	}
+	got, err = store.GetRecord(ctx, wsID, sid)
+	if err != nil {
+		t.Fatalf("get-record after refresh: %v", err)
+	}
+	if !got.CreatedAt.Equal(created) {
+		t.Fatalf("created_at must survive refresh: got %v want %v", got.CreatedAt, created)
+	}
+	if !got.LastSeenAt.Equal(later) {
+		t.Fatalf("last_seen must advance on refresh: got %v want %v", got.LastSeenAt, later)
+	}
+}
+
+// TestListForUserSortsAndScopes verifies ListForUser returns only the
+// target user's sessions, newest-activity first.
+func TestListForUserSortsAndScopes(t *testing.T) {
+	store, _ := newTestStore(t)
+	ctx := context.Background()
+	userID, wsID := uuid.New(), uuid.New()
+	other := uuid.New()
+	base := time.Now().UTC().Truncate(time.Second)
+
+	mk := func(uid uuid.UUID, lastSeen time.Time) string {
+		sid := uuid.NewString()
+		if err := store.Create(ctx, SessionRecord{
+			SessionID: sid, UserID: uid, WorkspaceID: wsID,
+			UserAgent: uaChrome, IP: "203.0.113.5",
+			DeviceHash: Fingerprint(uaChrome, "203.0.113.5"),
+			CreatedAt:  base, LastSeenAt: lastSeen,
+		}, time.Hour); err != nil {
+			t.Fatalf("create: %v", err)
+		}
+		return sid
+	}
+	oldSid := mk(userID, base.Add(time.Minute))
+	newSid := mk(userID, base.Add(time.Hour))
+	mk(other, base.Add(2*time.Hour)) // must not appear
+
+	recs, err := store.ListForUser(ctx, wsID, userID)
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(recs) != 2 {
+		t.Fatalf("expected 2 sessions for user, got %d", len(recs))
+	}
+	if recs[0].SessionID != newSid || recs[1].SessionID != oldSid {
+		t.Fatalf("sessions not sorted newest-first: %s then %s", recs[0].SessionID, recs[1].SessionID)
+	}
+}
+
+// TestListForUserPrunesStaleIndexEntries verifies that an index entry
+// whose hash has expired is dropped from the result AND removed from
+// the secondary index so it self-heals.
+func TestListForUserPrunesStaleIndexEntries(t *testing.T) {
+	store, mr := newTestStore(t)
+	ctx := context.Background()
+	userID, wsID := uuid.New(), uuid.New()
+
+	shortSid := uuid.NewString()
+	if err := store.Create(ctx, SessionRecord{
+		SessionID: shortSid, UserID: userID, WorkspaceID: wsID,
+		UserAgent: uaChrome, IP: "203.0.113.5", DeviceHash: Fingerprint(uaChrome, "203.0.113.5"),
+	}, time.Minute); err != nil {
+		t.Fatalf("create short: %v", err)
+	}
+	longSid := uuid.NewString()
+	if err := store.Create(ctx, SessionRecord{
+		SessionID: longSid, UserID: userID, WorkspaceID: wsID,
+		UserAgent: uaChrome, IP: "203.0.113.5", DeviceHash: Fingerprint(uaChrome, "203.0.113.5"),
+	}, time.Hour); err != nil {
+		t.Fatalf("create long: %v", err)
+	}
+
+	mr.FastForward(5 * time.Minute) // short hash gone, index entry dangling
+
+	recs, err := store.ListForUser(ctx, wsID, userID)
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(recs) != 1 || recs[0].SessionID != longSid {
+		t.Fatalf("expected only the long-lived session, got %+v", recs)
+	}
+	// Index must have been pruned: the SET now holds exactly one id.
+	members, err := mr.Members(userSessionsKey(wsID, userID))
+	if err != nil {
+		t.Fatalf("set members: %v", err)
+	}
+	if len(members) != 1 || members[0] != longSid {
+		t.Fatalf("stale index entry not pruned: members = %v", members)
+	}
+}
+
+// TestRevokeForUserOwnershipScoped verifies a user can only revoke
+// their own session and that an unknown id reports not-deleted.
+func TestRevokeForUserOwnershipScoped(t *testing.T) {
+	store, _ := newTestStore(t)
+	ctx := context.Background()
+	userID, wsID := uuid.New(), uuid.New()
+	other := uuid.New()
+
+	mine := uuid.NewString()
+	if err := store.Create(ctx, SessionRecord{
+		SessionID: mine, UserID: userID, WorkspaceID: wsID,
+		UserAgent: uaChrome, IP: "203.0.113.5", DeviceHash: Fingerprint(uaChrome, "203.0.113.5"),
+	}, time.Hour); err != nil {
+		t.Fatalf("create mine: %v", err)
+	}
+	theirs := uuid.NewString()
+	if err := store.Create(ctx, SessionRecord{
+		SessionID: theirs, UserID: other, WorkspaceID: wsID,
+		UserAgent: uaChrome, IP: "203.0.113.5", DeviceHash: Fingerprint(uaChrome, "203.0.113.5"),
+	}, time.Hour); err != nil {
+		t.Fatalf("create theirs: %v", err)
+	}
+
+	// Cannot revoke another user's session.
+	deleted, err := store.RevokeForUser(ctx, wsID, userID, theirs)
+	if err != nil {
+		t.Fatalf("revoke theirs: %v", err)
+	}
+	if deleted {
+		t.Fatal("must not revoke another user's session")
+	}
+	if _, err := store.GetRecord(ctx, wsID, theirs); err != nil {
+		t.Fatalf("victim session should be intact: %v", err)
+	}
+
+	// Unknown id → not deleted, no error.
+	if deleted, err := store.RevokeForUser(ctx, wsID, userID, uuid.NewString()); err != nil || deleted {
+		t.Fatalf("unknown id: deleted=%v err=%v", deleted, err)
+	}
+
+	// Own session → deleted.
+	deleted, err = store.RevokeForUser(ctx, wsID, userID, mine)
+	if err != nil || !deleted {
+		t.Fatalf("revoke mine: deleted=%v err=%v", deleted, err)
+	}
+	if _, err := store.GetRecord(ctx, wsID, mine); !errors.Is(err, ErrSessionNotFound) {
+		t.Fatalf("own session should be gone: %v", err)
+	}
+}
+
+// TestValidateSession covers the per-request gate: device match passes,
+// mismatch is an anomaly, a missing session is ErrSessionNotFound, and a
+// legacy device-less session skips the anomaly check.
+func TestValidateSession(t *testing.T) {
+	store, _ := newTestStore(t)
+	ctx := context.Background()
+	userID, wsID := uuid.New(), uuid.New()
+
+	sid := uuid.NewString()
+	if err := store.Create(ctx, SessionRecord{
+		SessionID: sid, UserID: userID, WorkspaceID: wsID,
+		UserAgent: uaChrome, IP: "203.0.113.5", DeviceHash: Fingerprint(uaChrome, "203.0.113.5"),
+	}, time.Hour); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+
+	// Same device (same /16) → OK.
+	if err := store.ValidateSession(ctx, wsID, sid, uaChrome, "203.0.113.200"); err != nil {
+		t.Fatalf("same-device validate: %v", err)
+	}
+	// Different network → anomaly.
+	if err := store.ValidateSession(ctx, wsID, sid, uaChrome, "198.51.100.1"); !errors.Is(err, ErrSessionAnomaly) {
+		t.Fatalf("expected anomaly on different network, got %v", err)
+	}
+	// Different UA → anomaly.
+	if err := store.ValidateSession(ctx, wsID, sid, uaFirefox, "203.0.113.5"); !errors.Is(err, ErrSessionAnomaly) {
+		t.Fatalf("expected anomaly on different UA, got %v", err)
+	}
+	// Unknown session → not found.
+	if err := store.ValidateSession(ctx, wsID, uuid.NewString(), uaChrome, "203.0.113.5"); !errors.Is(err, ErrSessionNotFound) {
+		t.Fatalf("expected not-found, got %v", err)
+	}
+
+	// Legacy device-less session (written via Set) skips the anomaly
+	// check but still enforces existence.
+	legacy := uuid.NewString()
+	if err := store.Set(ctx, legacy, userID, wsID, time.Hour); err != nil {
+		t.Fatalf("set legacy: %v", err)
+	}
+	if err := store.ValidateSession(ctx, wsID, legacy, uaFirefox, "198.51.100.99"); err != nil {
+		t.Fatalf("legacy session must skip anomaly: %v", err)
+	}
+}
+
+// TestValidateSessionThrottlesLastSeen pins that last_seen is advanced
+// at most once per throttle window so the hot path stays read-only.
+// The throttle compares against the wall clock (not miniredis's TTL
+// clock), so we drive it by seeding last_seen near vs. well before
+// now rather than fast-forwarding.
+func TestValidateSessionThrottlesLastSeen(t *testing.T) {
+	store, _ := newTestStore(t)
+	ctx := context.Background()
+	userID, wsID := uuid.New(), uuid.New()
+
+	// Case 1: recent last_seen → validate must NOT touch.
+	fresh := uuid.NewString()
+	recent := time.Now().UTC().Truncate(time.Second)
+	if err := store.Create(ctx, SessionRecord{
+		SessionID: fresh, UserID: userID, WorkspaceID: wsID,
+		UserAgent: uaChrome, IP: "203.0.113.5", DeviceHash: Fingerprint(uaChrome, "203.0.113.5"),
+		CreatedAt: recent, LastSeenAt: recent,
+	}, time.Hour); err != nil {
+		t.Fatalf("create fresh: %v", err)
+	}
+	if err := store.ValidateSession(ctx, wsID, fresh, uaChrome, "203.0.113.5"); err != nil {
+		t.Fatalf("validate fresh: %v", err)
+	}
+	got, _ := store.GetRecord(ctx, wsID, fresh)
+	if !got.LastSeenAt.Equal(recent) {
+		t.Fatalf("last_seen moved inside throttle window: %v != %v", got.LastSeenAt, recent)
+	}
+
+	// Case 2: stale last_seen (older than the throttle) → validate
+	// advances it to ~now.
+	stale := uuid.NewString()
+	old := time.Now().UTC().Add(-2 * lastSeenThrottle).Truncate(time.Second)
+	if err := store.Create(ctx, SessionRecord{
+		SessionID: stale, UserID: userID, WorkspaceID: wsID,
+		UserAgent: uaChrome, IP: "203.0.113.5", DeviceHash: Fingerprint(uaChrome, "203.0.113.5"),
+		CreatedAt: old, LastSeenAt: old,
+	}, time.Hour); err != nil {
+		t.Fatalf("create stale: %v", err)
+	}
+	if err := store.ValidateSession(ctx, wsID, stale, uaChrome, "203.0.113.5"); err != nil {
+		t.Fatalf("validate stale: %v", err)
+	}
+	got, _ = store.GetRecord(ctx, wsID, stale)
+	if !got.LastSeenAt.After(old) {
+		t.Fatalf("last_seen should advance past throttle window: got %v want > %v", got.LastSeenAt, old)
+	}
+}

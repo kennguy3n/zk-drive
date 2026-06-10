@@ -176,6 +176,26 @@ authenticated session; tenant resolution happens in middleware.
 - `POST /api/auth/login`
 - `POST /api/auth/logout`
 - `POST /api/auth/refresh`
+- `GET /api/auth/sessions` — list the caller's active device sessions
+  (session id, User-Agent, IP, created/last-seen timestamps, and a
+  `current` flag). Scoped to the authenticated user + workspace from
+  the JWT, so one user can never enumerate another's sessions.
+- `DELETE /api/auth/sessions/:id` — revoke one of the caller's own
+  device sessions (404 if the id is unknown or belongs to another
+  user). Revoking the current session 401s its next request.
+
+**Device fingerprinting & anomaly detection.** Each session stores the
+device fingerprint captured at sign-in: a SHA-256 over the User-Agent
+plus the IP *network* prefix (`/16` for IPv4, `/48` for IPv6). The
+auth middleware recomputes this fingerprint on every authenticated
+request bound to a session and forces re-authentication
+(`401 AUTH_SESSION_ANOMALY`) when it no longer matches — so a stolen
+bearer token replayed from a different browser or a different network
+cannot be silently reused. Coarsening to the network prefix keeps
+mobile users on dynamic addresses from being logged out on every DHCP
+lease change while still catching cross-ISP / cross-geo replay. A
+session's `last_seen` is advanced at most once per 60s so this
+per-request check stays effectively read-only on the hot path.
 
 ### 3.2 Workspaces
 

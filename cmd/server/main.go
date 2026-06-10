@@ -528,6 +528,14 @@ func run() error {
 	if sessionStore != nil {
 		sessionChecker = sessionStore
 	}
+	// sessionValidator enables the per-session existence + device
+	// anomaly checks (6.2) for tokens carrying a sid. Same store,
+	// separate interface so the nil-guard above carries through
+	// without the typed-nil trap.
+	var sessionValidator middleware.SessionValidator
+	if sessionStore != nil {
+		sessionValidator = sessionStore
+	}
 
 	rateLimiter := func() func(http.Handler) http.Handler {
 		if redisClient != nil {
@@ -700,6 +708,11 @@ func run() error {
 	if sessionStore != nil {
 		authHandler = authHandler.WithSessionRevoker(sessionStore)
 	}
+	// The login flow resolves the client IP for the session device
+	// fingerprint with the SAME trusted-proxy depth AuthMiddleware
+	// uses to recompute it per request — a mismatch would make every
+	// authenticated request look like a device anomaly.
+	authHandler = authHandler.WithTrustedProxyDepth(cfg.TrustedProxyDepth)
 	oauthHandler := auth.NewOAuthHandler(authHandler, auth.OAuthConfig{
 		GoogleClientID:        cfg.GoogleClientID,
 		GoogleClientSecret:    cfg.GoogleClientSecret,
@@ -1092,9 +1105,15 @@ func run() error {
 			})
 
 			r.Group(func(r chi.Router) {
-				r.Use(middleware.AuthMiddlewareWithKeys(jwtKeyManager, sessionChecker))
+				r.Use(middleware.AuthMiddlewareWithSessions(jwtKeyManager, sessionChecker, sessionValidator, cfg.TrustedProxyDepth))
 				r.Post("/logout", authHandler.Logout)
 				r.Post("/refresh", authHandler.Refresh)
+				// Device-session management (6.2): list the
+				// caller's active sessions and revoke a specific
+				// one. Both are scoped to the authenticated
+				// user/workspace from the JWT.
+				r.Get("/sessions", authHandler.ListSessions)
+				r.Delete("/sessions/{id}", authHandler.RevokeSession)
 			})
 
 			// TOTP / 2FA routes. The three middleware
@@ -1117,7 +1136,7 @@ func run() error {
 					// a session JWT and is managing 2FA from
 					// account settings.
 					r.Group(func(r chi.Router) {
-						r.Use(middleware.AuthMiddlewareWithKeys(jwtKeyManager, sessionChecker))
+						r.Use(middleware.AuthMiddlewareWithSessions(jwtKeyManager, sessionChecker, sessionValidator, cfg.TrustedProxyDepth))
 						r.Post("/enroll/begin", totpHandler.EnrollBegin)
 						r.Post("/enroll/finalize", totpHandler.EnrollFinalize)
 						r.Post("/disable", totpHandler.Disable)
@@ -1150,7 +1169,7 @@ func run() error {
 		// frame, and TenantGuard's HTTP-method assumptions trip on
 		// the upgrade handshake.
 		r.Group(func(r chi.Router) {
-			r.Use(middleware.AuthMiddlewareWithKeys(jwtKeyManager, sessionChecker))
+			r.Use(middleware.AuthMiddlewareWithSessions(jwtKeyManager, sessionChecker, sessionValidator, cfg.TrustedProxyDepth))
 			// Suspension enforcement applies to the WS upgrade too: a
 			// suspended workspace must not be able to keep realtime sync
 			// or collaborative editing alive when every REST call is
@@ -1187,7 +1206,7 @@ func run() error {
 		})
 
 		r.Group(func(r chi.Router) {
-			r.Use(middleware.AuthMiddlewareWithKeys(jwtKeyManager, sessionChecker))
+			r.Use(middleware.AuthMiddlewareWithSessions(jwtKeyManager, sessionChecker, sessionValidator, cfg.TrustedProxyDepth))
 			r.Use(middleware.TenantGuard())
 			r.Use(middleware.SuspensionGuard(platformSvc, cfg.SuspensionFailClosed))
 			// IP allowlist enforcement runs after the tenant guard
@@ -1285,7 +1304,7 @@ func run() error {
 		})
 
 		r.Route("/admin", func(r chi.Router) {
-			r.Use(middleware.AuthMiddlewareWithKeys(jwtKeyManager, sessionChecker))
+			r.Use(middleware.AuthMiddlewareWithSessions(jwtKeyManager, sessionChecker, sessionValidator, cfg.TrustedProxyDepth))
 			r.Use(middleware.TenantGuard())
 			r.Use(middleware.SuspensionGuard(platformSvc, cfg.SuspensionFailClosed))
 			r.Use(middleware.AdminOnly())
@@ -1301,7 +1320,7 @@ func run() error {
 		})
 
 		r.Route("/kchat", func(r chi.Router) {
-			r.Use(middleware.AuthMiddlewareWithKeys(jwtKeyManager, sessionChecker))
+			r.Use(middleware.AuthMiddlewareWithSessions(jwtKeyManager, sessionChecker, sessionValidator, cfg.TrustedProxyDepth))
 			r.Use(middleware.TenantGuard())
 			r.Use(middleware.SuspensionGuard(platformSvc, cfg.SuspensionFailClosed))
 			// kchat is a data-plane feature (attachment uploads, room
