@@ -131,8 +131,12 @@ export default function AdminPage() {
             // only the baseline tabs and then visibly pop the audit/retention
             // tabs in once features load. Show a same-height skeleton strip
             // instead so the final tabs replace placeholders rather than
-            // appearing from nothing.
-            Array.from({ length: 4 }).map((_, i) => (
+            // appearing from nothing. Size it to visibleTabs.length — which,
+            // while loading, is exactly the always-on baseline tabs (users +
+            // storage) — so a Free workspace settles with zero layout shift;
+            // a higher tier reveals its extra tabs additively rather than the
+            // strip shrinking from a hardcoded count.
+            Array.from({ length: visibleTabs.length }).map((_, i) => (
               <Skeleton
                 key={i}
                 style={{ height: 34, width: 84, borderRadius: 6 }}
