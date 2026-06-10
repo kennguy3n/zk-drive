@@ -126,7 +126,7 @@ func init() {
 	// designInputFilenameForMime.
 	for mime := range designInputFilenameForMime {
 		mime := mime
-		Register(RendererFunc(func(ctx context.Context, src []byte) (image.Image, error) {
+		RegisterWeighted(WeightHeavy, RendererFunc(func(ctx context.Context, src []byte) (image.Image, error) {
 			return renderDesign(ctx, mime, src)
 		}), mime)
 	}

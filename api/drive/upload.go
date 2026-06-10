@@ -15,7 +15,9 @@ import (
 	"github.com/kennguy3n/zk-drive/api/middleware"
 	"github.com/kennguy3n/zk-drive/internal/activity"
 	"github.com/kennguy3n/zk-drive/internal/file"
+	"github.com/kennguy3n/zk-drive/internal/jobs"
 	"github.com/kennguy3n/zk-drive/internal/permission"
+	"github.com/kennguy3n/zk-drive/internal/preview"
 	"github.com/kennguy3n/zk-drive/internal/scan"
 	"github.com/kennguy3n/zk-drive/internal/storage"
 	"github.com/kennguy3n/zk-drive/internal/webhooks"
@@ -308,7 +310,7 @@ func (h *Handler) ConfirmUpload(w http.ResponseWriter, r *http.Request) {
 		// identically when NATS is not configured locally. Publish errors
 		// are logged and ignored so a flaky broker never fails an
 		// otherwise-successful upload — workers can be re-triggered later.
-		h.publishPostUploadJobs(r.Context(), f.ID, v.ID)
+		h.publishPostUploadJobs(r.Context(), f.ID, v.ID, f.MimeType)
 		// Outbound webhook fan-out. Same nil-safe pattern as
 		// publishPostUploadJobs: when no webhooks publisher is wired
 		// (NATS not configured), this is a no-op. Publish failures
@@ -326,12 +328,26 @@ func (h *Handler) ConfirmUpload(w http.ResponseWriter, r *http.Request) {
 // publishPostUploadJobs dispatches preview / scan / index jobs after a
 // successful ConfirmUpload. Factored out so tests can stub it and so
 // future subjects can be added in one place.
-func (h *Handler) publishPostUploadJobs(ctx context.Context, fileID, versionID uuid.UUID) {
+func (h *Handler) publishPostUploadJobs(ctx context.Context, fileID, versionID uuid.UUID, mimeType string) {
 	if h.jobs == nil {
 		return
 	}
-	if err := h.jobs.PublishPreview(ctx, fileID, versionID); err != nil {
-		logging.FromContext(ctx).Error("drive publish preview job failed", "file_id", fileID, "version_id", versionID, "err", err)
+	// Route the preview by renderer weight so the job only reaches a
+	// pod that ships the binaries to render it: pure-Go MIMEs go to the
+	// slim lightweight pool, subprocess MIMEs (LibreOffice / FFmpeg /
+	// ImageMagick / poppler / librsvg) to the heavy pool. When the
+	// heavy queue is saturated the publisher returns ErrPreviewDeferred
+	// — not a failure: the file simply has no thumbnail yet and the
+	// client renders the "generating…" placeholder until a later access
+	// or the backfill reconciler regenerates it.
+	heavy := preview.IsHeavyMime(mimeType)
+	if err := h.jobs.PublishPreviewWeighted(ctx, fileID, versionID, heavy); err != nil {
+		if errors.Is(err, jobs.ErrPreviewDeferred) {
+			logging.FromContext(ctx).Info("drive preview deferred: heavy queue saturated",
+				"file_id", fileID, "version_id", versionID, "mime_type", mimeType)
+		} else {
+			logging.FromContext(ctx).Error("drive publish preview job failed", "file_id", fileID, "version_id", versionID, "err", err)
+		}
 	}
 	if err := h.jobs.PublishScan(ctx, fileID, versionID); err != nil {
 		logging.FromContext(ctx).Error("drive publish scan job failed", "file_id", fileID, "version_id", versionID, "err", err)
@@ -405,6 +421,16 @@ func (h *Handler) DownloadURL(w http.ResponseWriter, r *http.Request) {
 	h.logActivity(r.Context(), activity.ActionFileDownload, permission.ResourceFile, f.ID, map[string]any{
 		"version_id": current.ID,
 	})
+	// NOTE: deliberately NOT Cache-Control-cacheable. This handler is a
+	// security + accounting gate that must run on every download click:
+	// the quarantine refusal above (a version can be quarantined
+	// asynchronously by the scan worker at any time), the permission
+	// check, the bandwidth-quota check, the download accounting, and the
+	// audit-log entry. A browser-cached response would let a client keep
+	// pulling a now-quarantined version's still-valid presigned URL — and
+	// skip quota/audit — for the whole cache window. The preview endpoint
+	// IS cacheable because its object is immutable per (file, version)
+	// and its quarantine check is only defence-in-depth (see preview.go).
 	writeJSON(w, http.StatusOK, downloadURLResponse{
 		DownloadURL: url,
 		ObjectKey:   current.ObjectKey,

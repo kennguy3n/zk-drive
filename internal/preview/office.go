@@ -153,7 +153,7 @@ func init() {
 	}
 	for _, m := range mimes {
 		mime := m
-		Register(RendererFunc(func(ctx context.Context, src []byte) (image.Image, error) {
+		RegisterWeighted(WeightHeavy, RendererFunc(func(ctx context.Context, src []byte) (image.Image, error) {
 			return renderOfficeDocument(ctx, mime, src)
 		}), mime)
 	}

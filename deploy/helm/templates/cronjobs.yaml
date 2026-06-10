@@ -29,7 +29,7 @@ spec:
           {{- include "zk-drive.imagePullSecrets" . | nindent 10 }}
           containers:
             - name: reconciler
-              image: {{ include "zk-drive.image" . }}
+              image: {{ include "zk-drive.workerImage" . }}
               imagePullPolicy: {{ .Values.image.pullPolicy }}
               command: ["/app/reconciler"]
               {{- include "zk-drive.envFrom" . | nindent 14 }}
@@ -68,7 +68,7 @@ spec:
           {{- include "zk-drive.imagePullSecrets" . | nindent 10 }}
           containers:
             - name: orphan-gc
-              image: {{ include "zk-drive.image" . }}
+              image: {{ include "zk-drive.workerImage" . }}
               imagePullPolicy: {{ .Values.image.pullPolicy }}
               command: ["/app/orphan-gc"]
               {{- include "zk-drive.envFrom" . | nindent 14 }}
@@ -110,7 +110,7 @@ spec:
           {{- include "zk-drive.imagePullSecrets" . | nindent 10 }}
           containers:
             - name: audit-archiver
-              image: {{ include "zk-drive.image" . }}
+              image: {{ include "zk-drive.workerImage" . }}
               imagePullPolicy: {{ .Values.image.pullPolicy }}
               command: ["/app/audit-archiver"]
               env:

@@ -12,10 +12,21 @@ namespace:
   name: ""
   create: false
 
-# Image used by server, worker, migrate Job, and all CronJobs — every
-# entrypoint ships in one tag (Dockerfile builds /app/server,
-# /app/worker, /app/migrate, /app/reconciler, /app/orphan-gc,
-# /app/audit-archiver).
+# Shared/combined image. Used as the DEFAULT for every workload and as
+# the fallback when a component-specific image (server.image /
+# worker.image below) is not set. The combined image (built from
+# Dockerfile) ships every entrypoint (/app/server, /app/worker,
+# /app/migrate, /app/reconciler, /app/orphan-gc, /app/audit-archiver,
+# /app/compact) in one tag.
+#
+# Split images (recommended for production): set server.image to the
+# slim API image (Dockerfile.server, ~30MB, no preview tooling) and
+# worker.image to the heavy image (Dockerfile.worker, with LibreOffice /
+# FFmpeg / ImageMagick). The migrate Job uses the server image (the
+# migrate binary ships in the slim image); the CronJobs use the worker
+# image (reconciler / orphan-gc / audit-archiver ride the heavy image).
+# Leave server.image / worker.image unset to run everything from this
+# one combined tag (backward-compatible default).
 image:
   repository: ghcr.io/kennguy3n/zk-drive
   tag: "0.1.0"
@@ -64,12 +75,24 @@ secrets:
 server:
   replicas: 2
   port: 8080
+  # Optional slim API image override. When repository is set, the
+  # server Deployment + migrate Job pull this instead of the shared
+  # `image` above. tag falls back to image.tag when empty.
+  #   image:
+  #     repository: ghcr.io/kennguy3n/zk-drive-server
+  #     tag: ""
+  image:
+    repository: ""
+    tag: ""
+  # Recommended: server pods 256Mi / 0.5 CPU. The API server is I/O
+  # bound (Postgres, S3, NATS) and never runs preview tooling, so it
+  # stays small. limits give 2x headroom for request bursts.
   resources:
     requests:
       cpu: 250m
       memory: 256Mi
     limits:
-      cpu: 1000m
+      cpu: 500m
       memory: 512Mi
   # podAntiAffinity (spread across nodes) + topology spread (multi-AZ).
   spread:
@@ -106,18 +129,32 @@ server:
 
 worker:
   replicas: 2
+  # Optional heavy worker image override. When repository is set, the
+  # worker Deployment + all CronJobs pull this instead of the shared
+  # `image` above. tag falls back to image.tag when empty.
+  #   image:
+  #     repository: ghcr.io/kennguy3n/zk-drive-worker
+  #     tag: ""
+  image:
+    repository: ""
+    tag: ""
   # Dedicated /metrics + /healthz port. Set to "" / "off" via
   # config.extra.WORKER_METRICS_ADDR to disable; then also set
   # worker.metricsEnabled=false so probes/ports/HPA are dropped.
   metricsPort: 9091
   metricsEnabled: true
+  # Recommended: worker pods 2Gi / 1 CPU. The worker shells out to
+  # LibreOffice / FFmpeg / ImageMagick for previews; a single
+  # office-doc conversion can transiently use hundreds of MB, so the
+  # 512Mi default OOM-killed conversions under load. requests reserve
+  # 1Gi for steady state; limits cap a conversion spike at 2Gi.
   resources:
     requests:
       cpu: 500m
-      memory: 384Mi
+      memory: 1Gi
     limits:
       cpu: 1000m
-      memory: 512Mi
+      memory: 2Gi
   spread:
     enabled: true
     topologyKey: kubernetes.io/hostname

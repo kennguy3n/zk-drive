@@ -9,6 +9,8 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/kennguy3n/zk-drive/internal/database"
 )
 
 // ErrNotFound is returned when the requested folder cannot be located (or has
@@ -30,8 +32,15 @@ type Repository interface {
 }
 
 // PostgresRepository implements Repository against Postgres.
+//
+// pool is a database.Querier rather than a concrete *pgxpool.Pool so the
+// repository can be wired against a read/write splitter: read methods
+// (ListChildren, ListDescendants, GetByID) then fan out to a Postgres
+// read replica while the write methods route to the primary. A plain
+// *pgxpool.Pool also satisfies database.Querier, so single-pool
+// deployments are unaffected.
 type PostgresRepository struct {
-	pool *pgxpool.Pool
+	pool database.Querier
 }
 
 // EncryptionModeForFile returns the encryption_mode of the folder
@@ -59,9 +68,11 @@ SELECT f.encryption_mode
 	return mode, nil
 }
 
-// NewPostgresRepository returns a PostgresRepository using the supplied pool.
-func NewPostgresRepository(pool *pgxpool.Pool) *PostgresRepository {
-	return &PostgresRepository{pool: pool}
+// NewPostgresRepository returns a PostgresRepository using the supplied
+// querier. Pass a *pgxpool.Pool for single-pool deployments or a
+// *database.ReadWriteSplitter to fan reads out to a replica.
+func NewPostgresRepository(db database.Querier) *PostgresRepository {
+	return &PostgresRepository{pool: db}
 }
 
 const folderColumns = "id, workspace_id, parent_folder_id, name, path, encryption_mode, created_by, created_at, updated_at, deleted_at"

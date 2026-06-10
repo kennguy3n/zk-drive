@@ -42,6 +42,18 @@ RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w -X github.com/ke
 # compliance "produce all admin actions in workspace X between
 # two dates" requests. Operators run it ad-hoc, not on a schedule.
 RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w -X github.com/kennguy3n/zk-drive/internal/version.Version=${APP_VERSION}" -o /out/audit-restore ./cmd/audit-restore
+# Compact supervisor binary. Used ONLY by the combined image (the
+# split server/worker images never run it) to drive the single-command
+# SME deployment (deploy/docker-compose.compact.yml): it embeds a NATS
+# JetStream server in-process, auto-migrates the schema, and supervises
+# the /app/server and /app/worker child processes that this same image
+# already ships — keeping every all-in-one entrypoint in one tag.
+RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w -X github.com/kennguy3n/zk-drive/internal/version.Version=${APP_VERSION}" -o /out/compact ./cmd/compact
+# HTTP liveness-probe binary. debian:bookworm-slim ships no wget/curl, so
+# container-level health checks (ECS task definitions, docker-compose
+# `healthcheck:`) invoke `/app/healthcheck` instead of shelling out. Same
+# one-image-many-entrypoints pattern as the binaries above.
+RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w -X github.com/kennguy3n/zk-drive/internal/version.Version=${APP_VERSION}" -o /out/healthcheck ./cmd/healthcheck
 
 # ---- Runtime stage ----
 # debian:bookworm-slim (instead of distroless static) so the worker
@@ -96,7 +108,20 @@ COPY --from=builder /out/reconciler /app/reconciler
 COPY --from=builder /out/orphan-gc /app/orphan-gc
 COPY --from=builder /out/audit-archiver /app/audit-archiver
 COPY --from=builder /out/audit-restore /app/audit-restore
+COPY --from=builder /out/compact /app/compact
+COPY --from=builder /out/healthcheck /app/healthcheck
 COPY --from=builder /src/migrations /app/migrations
+
+# Writable JetStream store for the embedded NATS broker the /app/compact
+# supervisor runs (deploy/docker-compose.compact.yml sets
+# ZKDRIVE_NATS_STORE_DIR here and mounts a volume on it). It must be owned
+# by the nonroot runtime user: Docker initialises a fresh empty named
+# volume with the ownership/permissions of this directory in the image, so
+# creating it nonroot-owned here is what makes the mounted volume writable
+# without an init container or running as root. Unused by the server-only
+# default entrypoint; harmless when no volume is mounted.
+RUN mkdir -p /var/lib/zk-drive/nats \
+    && chown -R 65532:65532 /var/lib/zk-drive
 
 USER nonroot:nonroot
 EXPOSE 8080

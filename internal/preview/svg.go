@@ -45,7 +45,7 @@ func renderSVG(ctx context.Context, src []byte) (image.Image, error) {
 }
 
 func init() {
-	Register(RendererFunc(renderSVG),
+	RegisterWeighted(WeightHeavy, RendererFunc(renderSVG),
 		"image/svg+xml",
 		"image/svg",
 	)

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"flag"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -18,6 +19,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	chimw "github.com/go-chi/chi/v5/middleware"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/nats-io/nats.go"
 	"github.com/redis/go-redis/extra/redisotel/v9"
 	"github.com/redis/go-redis/v9"
@@ -56,6 +58,7 @@ import (
 	"github.com/kennguy3n/zk-drive/internal/permission"
 	"github.com/kennguy3n/zk-drive/internal/platform"
 	"github.com/kennguy3n/zk-drive/internal/preview"
+	"github.com/kennguy3n/zk-drive/internal/responsecache"
 	"github.com/kennguy3n/zk-drive/internal/retention"
 	"github.com/kennguy3n/zk-drive/internal/search"
 	"github.com/kennguy3n/zk-drive/internal/session"
@@ -81,10 +84,25 @@ func run() error {
 	logging.Init("server")
 	slog.Info("zk-drive server starting", "version", version.Version)
 
+	// --auto-migrate applies pending migrations under the schema
+	// advisory lock before the HTTP listener comes up. It ORs with
+	// ZKDRIVE_AUTO_MIGRATE (which the compact profile defaults to
+	// true) so either the flag or the env var enables it. Production
+	// K8s leaves both off and runs the separate migrate Job so schema
+	// changes stay decoupled from pod rollout. A dedicated FlagSet
+	// (rather than the global flag.CommandLine) keeps server flag
+	// parsing self-contained and testable.
+	fs := flag.NewFlagSet("server", flag.ContinueOnError)
+	autoMigrateFlag := fs.Bool("auto-migrate", false, "apply pending database migrations on startup before serving (advisory-locked; safe with multiple replicas)")
+	if err := fs.Parse(os.Args[1:]); err != nil {
+		return err
+	}
+
 	cfg, err := config.Load()
 	if err != nil {
 		return err
 	}
+	autoMigrate := cfg.AutoMigrate || *autoMigrateFlag
 
 	ctx, cancel := context.WithCancel(context.Background())
 
@@ -133,6 +151,12 @@ func run() error {
 		cancel()
 		return fmt.Errorf("connect postgres: %w", err)
 	}
+	// readPool is the optional read-replica pool (DATABASE_READ_URL).
+	// Declared here — like redisClient — so its Close defer registers in
+	// the right LIFO position relative to the primary pool teardown. nil
+	// when no replica is configured, in which case the ReadWriteSplitter
+	// routes reads to the primary.
+	var readPool *pgxpool.Pool
 	// redisClient is declared here (rather than inline at the Redis
 	// init block below) so the Close defer can be registered in the
 	// right LIFO position relative to the WaitGroup and pool teardown.
@@ -163,12 +187,37 @@ func run() error {
 	var bgGoroutines sync.WaitGroup
 	defer pool.Close()
 	defer func() {
+		if readPool != nil {
+			readPool.Close()
+		}
+	}()
+	defer func() {
 		if redisClient != nil {
 			_ = redisClient.Close()
 		}
 	}()
 	defer bgGoroutines.Wait()
 	defer cancel()
+
+	// When --auto-migrate (or ZKDRIVE_AUTO_MIGRATE / the compact
+	// profile) is set, apply pending migrations before the readiness
+	// check. database.Migrate serialises on a session-scoped Postgres
+	// advisory lock, so even if several server replicas start with
+	// auto-migrate enabled they race safely: the first holder applies
+	// the schema and the rest block, then observe an up-to-date
+	// database and no-op. Default (off) preserves the production
+	// contract below — migrations run out-of-band via the migrate
+	// Job and the server only verifies the schema is current.
+	if autoMigrate {
+		start := time.Now()
+		if err := database.Migrate(ctx, pool, cfg.MigrationsDir); err != nil {
+			return fmt.Errorf("auto-migrate: %w", err)
+		}
+		slog.Info("auto-migrate completed",
+			"duration", time.Since(start).Round(time.Millisecond).String(),
+			"migrations_dir", cfg.MigrationsDir,
+		)
+	}
 
 	// Migrations are applied out-of-band by the `migrate` binary (a
 	// Kubernetes Job, a Compose service, or an operator command) so
@@ -181,16 +230,42 @@ func run() error {
 		return fmt.Errorf("startup precondition: %w", err)
 	}
 
+	// Optional Postgres read replica. When DATABASE_READ_URL is set and
+	// distinct from the primary, open a second pgxpool against it; the
+	// ReadWriteSplitter then routes SELECT-family statements to the
+	// replica and every mutation / transaction to the primary. Read-heavy
+	// repositories (folder tree walks, file listings) are wired against
+	// the splitter; everything that does read-your-write work stays on
+	// the primary pool. A replica connect failure is fatal — an operator
+	// who configured a replica wants to know immediately if it is
+	// unreachable rather than silently serving every read off the
+	// primary.
+	if rd := strings.TrimSpace(cfg.DatabaseReadURL); rd != "" && rd != strings.TrimSpace(cfg.DatabaseURL) {
+		readPool, err = database.ConnectWithPool(ctx, rd, database.PoolConfig{
+			MaxConns:        cfg.DBMaxConns,
+			MinConns:        cfg.DBMinConns,
+			MaxConnIdleTime: cfg.DBMaxConnIdleTime,
+		})
+		if err != nil {
+			return fmt.Errorf("connect read replica: %w", err)
+		}
+		slog.Info("postgres read replica connected; SELECT traffic routed to replica", "read_url_set", true)
+	}
+	// dbRouter is a Querier: a *ReadWriteSplitter when a replica is
+	// configured, otherwise a thin wrapper that routes every read back to
+	// the primary (readPool == nil → splitter falls back to primary).
+	dbRouter := database.NewReadWriteSplitter(pool, readPool)
+
 	userRepo := user.NewPostgresRepository(pool)
 	userSvc := user.NewService(userRepo)
 
 	wsRepo := workspace.NewPostgresRepository(pool)
 	wsSvc := workspace.NewService(wsRepo)
 
-	folderRepo := folder.NewPostgresRepository(pool)
+	folderRepo := folder.NewPostgresRepository(dbRouter)
 	folderSvc := folder.NewService(folderRepo)
 
-	fileRepo := file.NewPostgresRepository(pool)
+	fileRepo := file.NewPostgresRepository(dbRouter)
 	fileSvc := file.NewService(fileRepo)
 
 	documentRepo := document.NewPostgresRepository(pool)
@@ -427,7 +502,7 @@ func run() error {
 				slog.Warn("nats jetstream context failed", "err", jerr)
 				nc.Close()
 			} else {
-				jobPublisher = jobs.NewPublisher(js)
+				jobPublisher = jobs.NewPublisher(js).WithHeavyBackpressure(cfg.PreviewHeavyQueueBackpressureThreshold)
 				webhookPublisher = webhooks.NewPublisher(js)
 				natsConn = nc
 				slog.Info("nats connected, post-upload jobs enabled", "url", natsURL)
@@ -513,6 +588,17 @@ func run() error {
 		})
 	}
 
+	// wsProxyMode is the EFFECTIVE proxy decision: the operator asked for
+	// it (WS_PROXY_MODE) AND Redis is wired (the API and the external
+	// proxy tier communicate through Redis pub/sub). If WS_PROXY_MODE is
+	// set without REDIS_URL we cannot reach a proxy, so we log and fall
+	// back to the in-process hub rather than silently dropping every
+	// real-time event.
+	wsProxyMode := cfg.WSProxyMode && redisClient != nil
+	if cfg.WSProxyMode && redisClient == nil {
+		slog.Warn("WS_PROXY_MODE set but REDIS_URL is empty; falling back to in-process WebSocket fan-out")
+	}
+
 	// WebSocket hub fans real-time notification events to connected
 	// clients. The hub itself is always in-process; when redisClient
 	// is non-nil we additionally subscribe to ws:* so notifications
@@ -520,6 +606,13 @@ func run() error {
 	// notification service receives the publisher and is nil-safe,
 	// so a misconfigured Redis still leaves the rest of the API
 	// working — we just log and fall back to local fan-out.
+	//
+	// In WS proxy mode the in-process hub holds no client connections
+	// (an external Centrifugo/Pusher tier does), so we still construct
+	// and Run it — it is the LocalBroadcaster the web-push wrapper and
+	// the IsConnected presence check expect — but we never subscribe it
+	// to Redis. Events flow API → Redis (ws:* channels) → external proxy
+	// → clients.
 	hub := ws.NewHub()
 	bgGoroutines.Add(1)
 	go func() {
@@ -532,13 +625,21 @@ func run() error {
 	if redisClient != nil {
 		rp := notification.NewRedisPublisher(redisClient)
 		notificationPublisher = rp
-		bgGoroutines.Add(1)
-		go func() {
-			defer bgGoroutines.Done()
-			if err := rp.Subscribe(ctx, hub); err != nil && !errors.Is(err, context.Canceled) {
-				slog.Error("redis ws subscribe loop exited", "err", err)
-			}
-		}()
+		if wsProxyMode {
+			slog.Info("WS proxy mode enabled; publishing real-time events to Redis ws:* for the external proxy tier (in-process /api/ws disabled)")
+		} else {
+			// Single in-process fan-out tier: subscribe the local hub to
+			// ws:* so events produced on any replica reach this replica's
+			// own clients. Skipped in proxy mode (the external proxy is
+			// the subscriber).
+			bgGoroutines.Add(1)
+			go func() {
+				defer bgGoroutines.Done()
+				if err := rp.Subscribe(ctx, hub); err != nil && !errors.Is(err, context.Canceled) {
+					slog.Error("redis ws subscribe loop exited", "err", err)
+				}
+			}()
+		}
 	}
 
 	// notifRepo backs both the notification service and the web-push
@@ -566,6 +667,19 @@ func run() error {
 		notificationPublisher = notification.NewWebPushPublisher(notificationPublisher, hub, webPushSvc).
 			WithWaitGroup(&bgGoroutines)
 		slog.Info("web push enabled, offline notifications will fan out via VAPID")
+		if wsProxyMode {
+			// In proxy mode the in-process hub holds no client
+			// connections, so the replica-local IsConnected presence
+			// check always reports "not connected" and the web-push
+			// fallback fires for EVERY notification — even for users
+			// with a live socket on the external proxy tier. Operators
+			// who enable both will see push volume spike. The fix is to
+			// drive presence from the proxy (Centrifugo exposes
+			// presence); warn loudly so this is not a silent surprise.
+			// See deploy/WEBSOCKET_PROXY.md ("Presence / web-push
+			// fallback").
+			slog.Warn("WS_PROXY_MODE and web push are both enabled: in-process presence is always 'not connected' in proxy mode, so web push fires for every notification (including users connected to the proxy). Drive presence from the proxy tier to suppress redundant pushes — see deploy/WEBSOCKET_PROXY.md")
+		}
 	} else {
 		slog.Warn("web push disabled (VAPID_PUBLIC_KEY / VAPID_PRIVATE_KEY unset), /api/push/* will respond 501")
 	}
@@ -583,13 +697,21 @@ func run() error {
 	if redisClient != nil {
 		cfRP := changefeed.NewRedisPublisher(redisClient)
 		changefeedPublisher = cfRP
-		bgGoroutines.Add(1)
-		go func() {
-			defer bgGoroutines.Done()
-			if err := cfRP.Subscribe(ctx, hub); err != nil && !errors.Is(err, context.Canceled) {
-				slog.Error("redis changefeed subscribe loop exited", "err", err)
-			}
-		}()
+		// Mirror the notification publisher above: keep publishing change
+		// events to Redis (the external proxy tier consumes them), but in
+		// proxy mode do NOT subscribe the in-process hub — the /api/ws
+		// endpoint is disabled there so the hub holds no changefeed
+		// clients, and a local subscribe loop would only burn Redis I/O
+		// and hub-mutex time delivering to nobody.
+		if !wsProxyMode {
+			bgGoroutines.Add(1)
+			go func() {
+				defer bgGoroutines.Done()
+				if err := cfRP.Subscribe(ctx, hub); err != nil && !errors.Is(err, context.Canceled) {
+					slog.Error("redis changefeed subscribe loop exited", "err", err)
+				}
+			}()
+		}
 	}
 	changefeedSvc := changefeed.NewService(changefeed.NewPostgresRepository(pool)).
 		WithPublisher(changefeedPublisher)
@@ -744,8 +866,23 @@ func run() error {
 	} else {
 		slog.Warn("billing STRIPE_SECRET_KEY not set, /api/admin/billing/{checkout,portal}-session will respond 501")
 	}
+	// Workspace-scoped response cache for hot read endpoints (folder
+	// listings, search results, storage-usage aggregation). Nil-safe:
+	// responsecache.New returns a nil *Cache when Redis is unconfigured,
+	// and every call site treats that as a permanent miss (compute on
+	// every request). Invalidation is wired through the changefeed
+	// content-cache buster below so any persisted mutation invalidates
+	// the affected workspace immediately; per-entry TTLs are the
+	// backstop. A single instance is shared across handlers so they
+	// observe the same generation counters.
+	respCache := responsecache.New(redisClient)
+	if respCache.Enabled() {
+		slog.Info("response cache enabled (folder listings, search, storage usage)")
+	}
+
 	driveHandler := drive.NewHandler(pool, wsSvc, folderSvc, fileSvc, userSvc, storageClient, permissionSvc, activitySvc).
 		WithStorageFactory(storageFactory).
+		WithResponseCache(respCache).
 		WithDocuments(documentSvc).
 		WithCollab(collabHub).
 		WithSharing(sharingSvc).
@@ -805,7 +942,8 @@ func run() error {
 		WithFabric(fabricClient, provisioner, storageFactory).
 		WithWorkspaces(wsSvc).
 		WithWebhooks(webhookPublisher).
-		WithIPAllow(ipAllowSvc)
+		WithIPAllow(ipAllowSvc).
+		WithResponseCache(respCache)
 
 	// Platform control plane (Session 9): fleet-wide tenant management
 	// authenticated by platform API keys, mounted under /api/platform
@@ -984,6 +1122,17 @@ func run() error {
 			"flag_enabled", cfg.PerformanceCacheEnabled,
 			"redis_configured", redisClient != nil,
 		)
+	}
+
+	// Wire the content response cache (folder listings, search) onto the
+	// changefeed so every persisted mutation invalidates the affected
+	// workspace's generation before the WS broadcast lands. Independent
+	// of the permission-cache flag/ordering above: the content cache has
+	// no WithCache-before-buster dependency (it keys directly off Redis),
+	// so it is wired whenever Redis is configured. A disabled (nil) cache
+	// leaves this unset and the listings recompute every request.
+	if respCache.Enabled() {
+		changefeedSvc.WithContentCacheBuster(respCache)
 	}
 
 	r := chi.NewRouter()
@@ -1257,7 +1406,18 @@ func run() error {
 			// the upgrade-handshake reasons noted below) and runs on
 			// the initial HTTP request before the upgrade.
 			r.Use(middleware.IPAllowlist(ipAllowSvc, cfg.TrustedProxyDepth))
-			r.Get("/ws", wsHandler.ServeWS)
+			if wsProxyMode {
+				// WS proxy mode: client connections terminate at the
+				// external proxy tier (Centrifugo/Pusher), not here.
+				// Respond 501 so a client still dialing the API directly
+				// fails loudly instead of opening a socket the proxy
+				// will never feed events into.
+				r.Get("/ws", func(w http.ResponseWriter, _ *http.Request) {
+					middleware.RespondError(w, http.StatusNotImplemented, middleware.ErrCodeUnsupportedOp, "websocket proxy mode enabled; connect via the external proxy tier")
+				})
+			} else {
+				r.Get("/ws", wsHandler.ServeWS)
+			}
 			// Collab WS endpoint: per-document Yjs relay. Mounted
 			// next to /ws because both are long-lived upgrade
 			// endpoints that must skip TenantGuard / rateLimiter
