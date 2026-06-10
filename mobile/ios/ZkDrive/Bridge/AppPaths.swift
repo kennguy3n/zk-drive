@@ -19,9 +19,25 @@ enum AppPaths {
 
     /// Per-workspace catalogue database path.
     static func catalogueURL(workspaceID: String) throws -> URL {
+        let safe = try safeIdentifier(workspaceID)
         let dir = try baseDirectory().appendingPathComponent("catalogues", isDirectory: true)
         try ensureDirectory(dir)
-        return dir.appendingPathComponent("\(workspaceID).sqlite", isDirectory: false)
+        return dir.appendingPathComponent("\(safe).sqlite", isDirectory: false)
+    }
+
+    /// Defense-in-depth guard for IDs that become filesystem path components.
+    /// Server-issued IDs are UUIDs, so anything containing a path separator,
+    /// NUL, or a parent-directory traversal is malformed/hostile and must not
+    /// be allowed to escape the intended directory.
+    static func safeIdentifier(_ raw: String) throws -> String {
+        let isUnsafe = raw.isEmpty
+            || raw == "." || raw == ".."
+            || raw.contains("/") || raw.contains("\\")
+            || raw.contains("..") || raw.unicodeScalars.contains("\u{0}")
+        guard !isUnsafe else {
+            throw AppError(category: .invalidInput, message: "Invalid identifier", httpStatus: nil)
+        }
+        return raw
     }
 
     /// Directory holding encrypted offline blobs.

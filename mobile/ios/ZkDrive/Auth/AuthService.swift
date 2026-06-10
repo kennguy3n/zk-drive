@@ -20,6 +20,13 @@ final class AuthService: ObservableObject {
     private let oauth: OAuthService
     private let defaults: UserDefaults
 
+    /// Collaborators cleaned up on sign-out. They're constructed after
+    /// `AuthService`, so `AppServices` wires them in post-init. Weak because
+    /// `AppServices` owns them for the whole session.
+    weak var pushManager: PushManager?
+    weak var syncCoordinator: SyncCoordinator?
+    weak var offlineStore: OfflineStore?
+
     private static let tokenAccount = "oidc-token-bundle"
     static let biometricLockKey = "settings.biometricLockEnabled"
 
@@ -98,10 +105,20 @@ final class AuthService: ObservableObject {
         }
     }
 
-    /// Sign out: clear the bridge tokens and wipe persisted credentials.
+    /// Sign out: unregister push, clear the bridge tokens, wipe persisted
+    /// credentials and drop this user's on-device footprint so the next
+    /// account on a shared device can't inherit any of it.
     func signOut() async {
+        // Unregister the APNs token *first*: the server call needs a valid
+        // access token, which we're about to clear. Best-effort — a failed
+        // unregister must never block sign-out.
+        await pushManager?.unregisterCurrentToken()
         try? await bridge.clearTokens()
         try? keychain.delete(account: Self.tokenAccount)
+        // Stop syncing the old workspace and erase its encrypted offline blobs
+        // so a new user on this device starts from a clean slate.
+        syncCoordinator?.deactivate()
+        try? await offlineStore?.evictAll()
         identity = nil
         state = .signedOut
     }

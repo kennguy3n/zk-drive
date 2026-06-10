@@ -34,10 +34,18 @@ final class AppServices {
         self.push = PushManager(api: api)
         self.background = BackgroundSyncScheduler(coordinator: sync)
 
-        // Let the UIKit AppDelegate forward APNs tokens and background
-        // URLSession events to these services.
+        // Let the UIKit AppDelegate forward APNs tokens, background
+        // URLSession events and BGTask runs to these services.
         AppDelegateRouter.shared.push = push
         AppDelegateRouter.shared.transfers = transfers
+        AppDelegateRouter.shared.background = background
+
+        // Wire the collaborators AuthService must clean up on sign-out. They're
+        // built after AuthService, so they're injected here rather than in its
+        // initializer.
+        auth.pushManager = push
+        auth.syncCoordinator = sync
+        auth.offlineStore = offline
     }
 }
 
@@ -58,7 +66,6 @@ final class AppBootstrap: ObservableObject {
         let config = await AppConfigLoader().load()
         do {
             let services = try AppServices(config: config)
-            services.background.register()
             await services.auth.bootstrap()
             phase = .ready(services)
             services.background.scheduleNext()

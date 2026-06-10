@@ -18,23 +18,33 @@ final class BackgroundSyncScheduler {
         self.coordinator = coordinator
     }
 
-    /// Register the launch handler. Must be called before the app
-    /// finishes launching (per `BGTaskScheduler` contract).
-    func register() {
-        // The launch handler is invoked on a non-main queue. `handle(_:)` and
-        // everything it touches (`coordinator`, `logger`) are `@MainActor`, so
-        // hop onto the main actor before doing any work to avoid a data race.
-        BGTaskScheduler.shared.register(forTaskWithIdentifier: Self.taskIdentifier, using: nil) { [weak self] task in
+    /// Register the BGTask launch handler. This **must** run before the app
+    /// finishes launching (`BGTaskScheduler.register` throws otherwise), so it
+    /// is called from `AppDelegate.application(_:didFinishLaunchingWithOptions:)`
+    /// — long before the async `AppServices` graph (and therefore any
+    /// `BackgroundSyncScheduler` instance) exists. The handler is intentionally
+    /// instance-free: when iOS actually runs the task it resolves the live
+    /// scheduler from `AppDelegateRouter`, which `AppServices` wires up once
+    /// built.
+    static func registerLaunchHandler() {
+        // The launch handler is invoked on a non-main queue, while the
+        // scheduler and everything it touches are `@MainActor`, so hop onto the
+        // main actor before doing any work to avoid a data race.
+        BGTaskScheduler.shared.register(forTaskWithIdentifier: taskIdentifier, using: nil) { task in
             guard let refreshTask = task as? BGAppRefreshTask else {
                 task.setTaskCompleted(success: false)
                 return
             }
-            Task { @MainActor [weak self] in
-                guard let self else {
+            Task { @MainActor in
+                guard let scheduler = AppDelegateRouter.shared.background else {
+                    // iOS launched the app for this task but the services graph
+                    // isn't up yet. Complete cleanly; the occurrence re-armed at
+                    // the next launch (or by `scheduleNext`) will catch up using
+                    // the durable cursor.
                     refreshTask.setTaskCompleted(success: false)
                     return
                 }
-                self.handle(refreshTask)
+                scheduler.handle(refreshTask)
             }
         }
     }
@@ -52,7 +62,7 @@ final class BackgroundSyncScheduler {
         }
     }
 
-    private func handle(_ task: BGAppRefreshTask) {
+    func handle(_ task: BGAppRefreshTask) {
         // Always line up the next occurrence first so a crash mid-sync
         // doesn't break the cadence.
         scheduleNext()

@@ -31,11 +31,11 @@ final class SettingsViewModel: ObservableObject {
     }
 
     func refreshOfflineSize() async {
-        offlineBytes = offline.totalBytes()
+        offlineBytes = await offline.totalBytes()
     }
 
     func clearOfflineCache() async {
-        try? offline.evictAll()
+        try? await offline.evictAll()
         await refreshOfflineSize()
     }
 

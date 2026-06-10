@@ -47,6 +47,11 @@ struct BiometricAuth {
             }
         } catch let laError as LAError {
             throw AppError(category: .auth, message: laError.localizedDescription, httpStatus: nil)
+        } catch {
+            // Any non-LAError (e.g. a future OS surfacing a different type)
+            // is still normalised so callers always see an AppError. An
+            // AppError thrown above passes through unchanged.
+            throw error.asAppError()
         }
     }
 }

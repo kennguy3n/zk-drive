@@ -10,6 +10,12 @@ final class AppDelegateRouter {
     static let shared = AppDelegateRouter()
     weak var push: PushManager?
     weak var transfers: TransferManager?
+    /// The live background-sync scheduler. The BGTask launch handler is
+    /// registered at `didFinishLaunchingWithOptions` (per Apple's contract,
+    /// before launch finishes) but the scheduler — like the rest of
+    /// `AppServices` — is built asynchronously afterwards, so the handler
+    /// resolves it from here when iOS actually runs the task.
+    weak var background: BackgroundSyncScheduler?
     /// Held on the router itself (not on `TransferManager`) because iOS can
     /// relaunch the app to deliver background-URLSession events — and this
     /// handler — before `AppServices` has constructed the `TransferManager`.
@@ -24,6 +30,11 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
     func application(_ application: UIApplication,
                      didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]? = nil) -> Bool {
         UNUserNotificationCenter.current().delegate = self
+        // `BGTaskScheduler.register` must run before launch finishes, so it
+        // happens here rather than from the async `AppServices` bootstrap. The
+        // handler resolves the live scheduler from `AppDelegateRouter` at fire
+        // time (it's wired in once the services graph is built).
+        BackgroundSyncScheduler.registerLaunchHandler()
         return true
     }
 

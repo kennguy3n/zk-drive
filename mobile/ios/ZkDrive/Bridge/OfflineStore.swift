@@ -47,7 +47,8 @@ final class OfflineStore: @unchecked Sendable {
     }
 
     private func blobURL(fileID: String) throws -> URL {
-        try AppPaths.offlineCacheDirectory().appendingPathComponent("\(fileID).enc", isDirectory: false)
+        let safe = try AppPaths.safeIdentifier(fileID)
+        return try AppPaths.offlineCacheDirectory().appendingPathComponent("\(safe).enc", isDirectory: false)
     }
 
     /// True if an encrypted offline copy exists for `fileID`.
@@ -82,22 +83,29 @@ final class OfflineStore: @unchecked Sendable {
     }
 
     /// Drop every offline blob (e.g. on sign-out or "clear offline data").
-    func evictAll() throws {
-        let dir = try AppPaths.offlineCacheDirectory()
-        let fm = FileManager.default
-        for entry in (try? fm.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil)) ?? [] {
-            try? fm.removeItem(at: entry)
-        }
+    /// Scans and deletes a whole directory, so the work runs off the main
+    /// thread to avoid UI hitches when the cache holds many files.
+    func evictAll() async throws {
+        try await Task.detached(priority: .utility) {
+            let dir = try AppPaths.offlineCacheDirectory()
+            let fm = FileManager.default
+            for entry in (try? fm.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil)) ?? [] {
+                try? fm.removeItem(at: entry)
+            }
+        }.value
     }
 
-    /// Total bytes consumed by offline blobs on disk.
-    func totalBytes() -> Int64 {
-        guard let dir = try? AppPaths.offlineCacheDirectory() else { return 0 }
-        let fm = FileManager.default
-        let entries = (try? fm.contentsOfDirectory(at: dir, includingPropertiesForKeys: [.fileSizeKey])) ?? []
-        return entries.reduce(0) { sum, url in
-            let size = (try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
-            return sum + Int64(size)
-        }
+    /// Total bytes consumed by offline blobs on disk. Enumerates the cache
+    /// directory, so the work runs off the main thread.
+    func totalBytes() async -> Int64 {
+        await Task.detached(priority: .utility) {
+            guard let dir = try? AppPaths.offlineCacheDirectory() else { return 0 }
+            let fm = FileManager.default
+            let entries = (try? fm.contentsOfDirectory(at: dir, includingPropertiesForKeys: [.fileSizeKey])) ?? []
+            return entries.reduce(Int64(0)) { sum, url in
+                let size = (try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
+                return sum + Int64(size)
+            }
+        }.value
     }
 }
