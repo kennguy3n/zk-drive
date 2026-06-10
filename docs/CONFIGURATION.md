@@ -17,8 +17,12 @@ is read-only against S3.
 
 | Variable       | Purpose                                                |
 | -------------- | ------------------------------------------------------ |
-| `DATABASE_URL` | Postgres DSN (pgx-style).                              |
+| `DATABASE_URL` | Postgres DSN (pgx-style). Primary (writes + read-your-write). |
 | `JWT_SECRET`   | HS256 signing secret for session tokens.               |
+
+> `DATABASE_READ_URL` (optional) points the read path at a Postgres
+> read replica or a PgBouncer read pool. See
+> [Read replicas](#read-replicas-database_read_url) below.
 
 ## Server runtime
 
@@ -151,6 +155,58 @@ refused (`FATAL: sorry, too many clients already`).
 > explicitly, raise Postgres `max_connections`, or adopt PgBouncer as
 > part of the upgrade — make it a conscious choice rather than a
 > surprise.
+
+### Read replicas (`DATABASE_READ_URL`)
+
+For read-heavy workloads (5000 SME tenants + B2C consumers browsing
+folders and searching), offload `SELECT` traffic to one or more Postgres
+read replicas. Set `DATABASE_READ_URL` to the replica DSN (or a PgBouncer
+pool that fronts the replicas):
+
+```
+DATABASE_URL=postgres://app@primary:5432/zkdrive?sslmode=require
+DATABASE_READ_URL=postgres://app@replica:5432/zkdrive?sslmode=require
+```
+
+| Variable            | Default        | Purpose                                                                 |
+| ------------------- | -------------- | ----------------------------------------------------------------------- |
+| `DATABASE_READ_URL` | _(unset)_      | Read-replica DSN. Unset (or equal to `DATABASE_URL`) → reads use the primary. |
+
+**Routing.** When set and distinct from `DATABASE_URL`, the server opens
+a second `pgxpool` (sized by the same `DB_MAX_CONNS` / `DB_MIN_CONNS` /
+`DB_MAX_CONN_IDLE_TIME`) and wires the read-heavy repositories (folder
+tree walks, file listings, version/tag lookups) through a
+`ReadWriteSplitter` (`internal/database/splitter.go`). The splitter
+classifies each statement:
+
+- **Replica:** plain `SELECT` / read-only CTE (`WITH … SELECT`) /
+  `VALUES` / `TABLE` / `SHOW` / `EXPLAIN` (without `ANALYZE`).
+- **Primary (always):** `INSERT` / `UPDATE` / `DELETE` / `MERGE`,
+  data-modifying CTEs, `SELECT … FOR UPDATE/SHARE`, sequence functions
+  (`nextval`), `EXPLAIN ANALYZE`, every `Exec`, `CopyFrom`, `SendBatch`,
+  and **all transactions** (`Begin` / `BeginTx`, including read-only
+  transactions — a unit of work is never split across hosts).
+
+The classifier is conservative: anything it cannot positively prove is
+read-only is routed to the primary, so a misclassification only costs a
+missed offload, never a write sent to a read-only host.
+
+**Replica lag & read-your-write.** Physical replicas are asynchronous,
+so a `SELECT` issued immediately after a write may observe a slightly
+stale replica. Code paths that require read-your-write consistency
+(e.g. re-reading a row inside the same logical operation) run inside a
+transaction, which the splitter pins to the primary. If you front the
+replica with PgBouncer, use **session or transaction pooling** — not
+statement pooling — so the GUC-based tenant isolation
+(`SELECT set_config('app.workspace_id', …)` on connection acquire) and
+RLS policies behave identically to the primary.
+
+**Health.** Both pools are pinged at startup; a configured-but-
+unreachable replica fails the boot fast rather than silently serving all
+reads off the primary.
+
+See `deploy/POSTGRES_SCALING.md` for the full PgBouncer + replica
+topology, example configs, and HPA sizing math.
 
 ## JWT signing
 

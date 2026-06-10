@@ -18,6 +18,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	chimw "github.com/go-chi/chi/v5/middleware"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/nats-io/nats.go"
 	"github.com/redis/go-redis/extra/redisotel/v9"
 	"github.com/redis/go-redis/v9"
@@ -131,6 +132,12 @@ func run() error {
 		cancel()
 		return fmt.Errorf("connect postgres: %w", err)
 	}
+	// readPool is the optional read-replica pool (DATABASE_READ_URL).
+	// Declared here — like redisClient — so its Close defer registers in
+	// the right LIFO position relative to the primary pool teardown. nil
+	// when no replica is configured, in which case the ReadWriteSplitter
+	// routes reads to the primary.
+	var readPool *pgxpool.Pool
 	// redisClient is declared here (rather than inline at the Redis
 	// init block below) so the Close defer can be registered in the
 	// right LIFO position relative to the WaitGroup and pool teardown.
@@ -161,6 +168,11 @@ func run() error {
 	var bgGoroutines sync.WaitGroup
 	defer pool.Close()
 	defer func() {
+		if readPool != nil {
+			readPool.Close()
+		}
+	}()
+	defer func() {
 		if redisClient != nil {
 			_ = redisClient.Close()
 		}
@@ -179,16 +191,42 @@ func run() error {
 		return fmt.Errorf("startup precondition: %w", err)
 	}
 
+	// Optional Postgres read replica. When DATABASE_READ_URL is set and
+	// distinct from the primary, open a second pgxpool against it; the
+	// ReadWriteSplitter then routes SELECT-family statements to the
+	// replica and every mutation / transaction to the primary. Read-heavy
+	// repositories (folder tree walks, file listings) are wired against
+	// the splitter; everything that does read-your-write work stays on
+	// the primary pool. A replica connect failure is fatal — an operator
+	// who configured a replica wants to know immediately if it is
+	// unreachable rather than silently serving every read off the
+	// primary.
+	if rd := strings.TrimSpace(cfg.DatabaseReadURL); rd != "" && rd != strings.TrimSpace(cfg.DatabaseURL) {
+		readPool, err = database.ConnectWithPool(ctx, rd, database.PoolConfig{
+			MaxConns:        cfg.DBMaxConns,
+			MinConns:        cfg.DBMinConns,
+			MaxConnIdleTime: cfg.DBMaxConnIdleTime,
+		})
+		if err != nil {
+			return fmt.Errorf("connect read replica: %w", err)
+		}
+		slog.Info("postgres read replica connected; SELECT traffic routed to replica", "read_url_set", true)
+	}
+	// dbRouter is a Querier: a *ReadWriteSplitter when a replica is
+	// configured, otherwise a thin wrapper that routes every read back to
+	// the primary (readPool == nil → splitter falls back to primary).
+	dbRouter := database.NewReadWriteSplitter(pool, readPool)
+
 	userRepo := user.NewPostgresRepository(pool)
 	userSvc := user.NewService(userRepo)
 
 	wsRepo := workspace.NewPostgresRepository(pool)
 	wsSvc := workspace.NewService(wsRepo)
 
-	folderRepo := folder.NewPostgresRepository(pool)
+	folderRepo := folder.NewPostgresRepository(dbRouter)
 	folderSvc := folder.NewService(folderRepo)
 
-	fileRepo := file.NewPostgresRepository(pool)
+	fileRepo := file.NewPostgresRepository(dbRouter)
 	fileSvc := file.NewService(fileRepo)
 
 	documentRepo := document.NewPostgresRepository(pool)

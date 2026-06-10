@@ -18,6 +18,16 @@ type Config struct {
 	DatabaseURL string
 	JWTSecret   string
 
+	// DatabaseReadURL is an optional DSN for a Postgres read replica
+	// (or a PgBouncer read pool). When set and distinct from
+	// DatabaseURL, internal/database.ConnectReadWrite opens a second
+	// pgxpool against it and the ReadWriteSplitter routes SELECT-family
+	// statements there while every mutation and transaction stays on the
+	// primary (DatabaseURL). Sourced from DATABASE_READ_URL; empty means
+	// "no replica" (reads use the primary). See docs/CONFIGURATION.md and
+	// deploy/POSTGRES_SCALING.md.
+	DatabaseReadURL string
+
 	// DB connection-pool sizing. These tune the pgxpool created by
 	// internal/database.ConnectWithPool. Sourced from DB_MAX_CONNS,
 	// DB_MIN_CONNS, and DB_MAX_CONN_IDLE_TIME. DBMaxConns is clamped
@@ -517,6 +527,7 @@ func buildConfigFromEnv() *Config {
 	platformAdmins, invalidPlatformAdmins := platformAdminUserIDsFromEnv()
 	return &Config{
 		DatabaseURL:                   os.Getenv("DATABASE_URL"),
+		DatabaseReadURL:               os.Getenv("DATABASE_READ_URL"),
 		JWTSecret:                     os.Getenv("JWT_SECRET"),
 		DBMaxConns:                    dbMaxConns,
 		DBMinConns:                    dbMinConnsFromEnv(dbMaxConns),
