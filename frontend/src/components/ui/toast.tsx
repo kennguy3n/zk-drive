@@ -77,7 +77,7 @@ export function ToastProvider({ children }: { children: ReactNode }) {
         {toasts.map((t) => (
           <RToast.Root
             key={t.id}
-            duration={t.durationMs ?? 5000}
+            duration={t.durationMs === 0 ? Infinity : (t.durationMs ?? 5000)}
             onOpenChange={(open) => {
               if (!open) dismiss(t.id);
             }}

@@ -18,8 +18,18 @@ import {
 } from "../api/client";
 import { translateApiError } from "../api/errors";
 import { useAuth } from "../hooks/useAuth";
+import { useFeatures } from "../hooks/useFeatures";
+import { Feature } from "../features/featureKeys";
 
 type Tab = "users" | "audit" | "retention" | "storage";
+
+// Admin tabs that require a feature flag. "users" and "storage" are baseline
+// admin surfaces (always available to an admin); the rest are progressive
+// disclosure tied to billing tier.
+const TAB_FEATURE: Partial<Record<Tab, string>> = {
+  audit: Feature.AuditLog,
+  retention: Feature.RetentionPolicies,
+};
 
 // AdminPage is the single-page admin console. Sub-views are tab-switched
 // inline (rather than separate routes) because the underlying data sets
@@ -28,8 +38,20 @@ type Tab = "users" | "audit" | "retention" | "storage";
 // console localizes alongside the rest of the SPA.
 export default function AdminPage() {
   const { isAdmin, logout } = useAuth();
+  const { isEnabled } = useFeatures();
   const { t } = useTranslation();
   const [tab, setTab] = useState<Tab>("users");
+
+  const visibleTabs = (["users", "audit", "retention", "storage"] as Tab[]).filter(
+    (id) => {
+      const feature = TAB_FEATURE[id];
+      return !feature || isEnabled(feature);
+    },
+  );
+  // If the active tab gets gated out (e.g. tier downgrade, or it was selected
+  // before features resolved), fall back to the first visible tab so we never
+  // render a hidden sub-view.
+  const activeTab = visibleTabs.includes(tab) ? tab : visibleTabs[0];
 
   if (!isAdmin) {
     return (
@@ -60,9 +82,11 @@ export default function AdminPage() {
           <Link to="/admin/encryption" style={{ marginRight: 16 }}>
             {t("admin.encryption")}
           </Link>
-          <Link to="/admin/kchat" style={{ marginRight: 16 }}>
-            {t("nav.kchatRooms")}
-          </Link>
+          {isEnabled(Feature.KChat) ? (
+            <Link to="/admin/kchat" style={{ marginRight: 16 }}>
+              {t("nav.kchatRooms")}
+            </Link>
+          ) : null}
           <Link to="/billing" style={{ marginRight: 16 }}>
             {t("nav.billing")}
           </Link>
@@ -80,15 +104,16 @@ export default function AdminPage() {
           marginBottom: 16,
         }}
       >
-        {(["users", "audit", "retention", "storage"] as Tab[]).map((id) => (
+        {visibleTabs.map((id) => (
           <button
             key={id}
             onClick={() => setTab(id)}
             style={{
               padding: "8px 12px",
-              background: tab === id ? "#eff6ff" : "transparent",
+              background: activeTab === id ? "#eff6ff" : "transparent",
               border: "none",
-              borderBottom: tab === id ? "2px solid #2563eb" : "2px solid transparent",
+              borderBottom:
+                activeTab === id ? "2px solid #2563eb" : "2px solid transparent",
               cursor: "pointer",
             }}
           >
@@ -96,10 +121,10 @@ export default function AdminPage() {
           </button>
         ))}
       </nav>
-      {tab === "users" && <UsersTab />}
-      {tab === "audit" && <AuditTab />}
-      {tab === "retention" && <RetentionTab />}
-      {tab === "storage" && <StorageTab />}
+      {activeTab === "users" && <UsersTab />}
+      {activeTab === "audit" && <AuditTab />}
+      {activeTab === "retention" && <RetentionTab />}
+      {activeTab === "storage" && <StorageTab />}
     </div>
   );
 }

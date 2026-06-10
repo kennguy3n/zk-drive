@@ -71,6 +71,40 @@ describe("useFeatures", () => {
     expect(screen.getByTestId("folders").textContent).toBe("false");
   });
 
+  it("ignores a slow features response that resolves after logout", async () => {
+    // Login fetch is in flight and resolves only after we trigger logout.
+    let resolve!: (v: unknown) => void;
+    getFeatures.mockReturnValue(
+      new Promise((r) => {
+        resolve = r;
+      }),
+    );
+    const { rerender } = render(
+      <FeaturesProvider>
+        <Probe />
+      </FeaturesProvider>,
+    );
+    expect(getFeatures).toHaveBeenCalledTimes(1);
+
+    // User logs out before the response arrives.
+    mockToken = null;
+    rerender(
+      <FeaturesProvider>
+        <Probe />
+      </FeaturesProvider>,
+    );
+
+    // The stale login response now resolves; it must NOT repaint the cleared
+    // state with the previous session's features.
+    await act(async () => {
+      resolve({ tier: "business", features: { sso: true, folders: true } });
+      await Promise.resolve();
+    });
+    expect(screen.getByTestId("tier").textContent).toBe("free");
+    expect(screen.getByTestId("sso").textContent).toBe("false");
+    expect(screen.getByTestId("folders").textContent).toBe("false");
+  });
+
   it("does not fetch and reports nothing enabled when logged out", async () => {
     mockToken = null;
     render(

@@ -53,10 +53,16 @@ export function FeaturesProvider({ children }: { children: ReactNode }) {
 
   const load = useCallback(async () => {
     if (!token) {
+      // Invalidate any in-flight request from the previous session so its
+      // late response can't pass the staleness guard below and repaint the
+      // cleared state with the old workspace's features (logout, or
+      // logout→login into a different workspace).
+      ++reqSeq.current;
       setFeatures({});
       setTier("free");
       setLoaded(false);
       setError(false);
+      setLoading(false);
       return;
     }
     const seq = ++reqSeq.current;
