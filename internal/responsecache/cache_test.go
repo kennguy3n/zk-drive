@@ -155,6 +155,33 @@ func TestNilCacheIsPassThrough(t *testing.T) {
 	}
 }
 
+// TestNewWithTypedNilClient guards the typed-nil interface trap: passing a
+// nil *redis.Client (the value cmd/server holds when REDIS_URL is unset) must
+// yield a no-op cache, not a non-nil *Cache that panics on first use. A plain
+// `rdb == nil` check inside New would NOT catch this because the interface
+// carries a non-nil type descriptor.
+func TestNewWithTypedNilClient(t *testing.T) {
+	var typedNil *redis.Client // nil concrete pointer
+	c := New(typedNil)         // implicitly converted to redis.UniversalClient
+	if c != nil {
+		t.Fatalf("New(typed-nil *redis.Client) = %v, want nil *Cache", c)
+	}
+	if c.Enabled() {
+		t.Fatal("typed-nil-constructed cache should report !Enabled")
+	}
+	// The whole point: these must not panic on a Redis-less deployment.
+	var calls atomic.Int64
+	compute := func(context.Context) (payload, error) { calls.Add(1); return payload{N: 3}, nil }
+	got, err := GetOrCompute(context.Background(), c, uuid.New(), "folder", "k", time.Minute, compute)
+	if err != nil || got.N != 3 {
+		t.Fatalf("got %+v err %v", got, err)
+	}
+	c.BustWorkspace(context.Background(), uuid.New()) // must be a no-op, not a panic
+	if calls.Load() != 1 {
+		t.Fatalf("compute calls=%d, want 1", calls.Load())
+	}
+}
+
 func TestFailOpenOnRedisOutage(t *testing.T) {
 	c, mr := newTestCache(t)
 	ws := uuid.New()

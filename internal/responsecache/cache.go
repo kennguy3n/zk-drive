@@ -23,6 +23,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"reflect"
 	"strconv"
 	"sync"
 	"time"
@@ -73,15 +74,45 @@ type generationEntry struct {
 //
 //	cache := responsecache.New(redisClient) // redisClient may be nil
 //
-// and get a no-op cache when Redis is unconfigured.
+// and get a no-op cache when Redis is unconfigured. This holds even when
+// the caller passes a typed-nil concrete client (e.g. a (*redis.Client)(nil)
+// implicitly converted to the interface) — see isNilRedisClient.
 func New(rdb redis.UniversalClient) *Cache {
-	if rdb == nil {
+	if isNilRedisClient(rdb) {
 		return nil
 	}
 	return &Cache{
 		rdb: rdb,
 		gen: make(map[uuid.UUID]*generationEntry),
 	}
+}
+
+// isNilRedisClient returns true when c is either an untyped nil interface
+// value OR a typed-nil concrete pointer wrapped in an interface (e.g.
+// (*redis.Client)(nil) implicitly converted to redis.UniversalClient).
+// The plain `c == nil` comparison only catches the first case; the
+// typed-nil case is a Go interface pitfall where the interface value
+// carries a non-nil type descriptor and a nil data pointer, so a later
+// method call panics with a nil dereference far from the caller that
+// "passed nil". Without this guard New would hand back a non-nil *Cache
+// whose Enabled() reports true, and the first Get/Incr would panic on
+// every Redis-less deployment.
+//
+// Mirrors internal/permission/service.go: reflect rather than a type
+// switch because redis.UniversalClient is satisfied by several concrete
+// types (*redis.Client, *redis.ClusterClient, *redis.Ring,
+// *redis.SentinelClient) and enumerating them couples this helper to the
+// redis library's class hierarchy.
+func isNilRedisClient(c redis.UniversalClient) bool {
+	if c == nil {
+		return true
+	}
+	rv := reflect.ValueOf(c)
+	switch rv.Kind() {
+	case reflect.Ptr, reflect.Interface, reflect.Chan, reflect.Func, reflect.Map, reflect.Slice:
+		return rv.IsNil()
+	}
+	return false
 }
 
 // Enabled reports whether c will actually talk to Redis. False for a nil
