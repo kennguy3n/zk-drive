@@ -62,6 +62,12 @@ export default function FileBrowserPage() {
   const [subfolders, setSubfolders] = useState<Folder[]>([]);
   const [files, setFiles] = useState<FileItem[]>([]);
   const [error, setError] = useState<string | null>(null);
+  // True until the first listing for the current view resolves. Gates the
+  // onboarding empty state so returning users don't see a flash of the
+  // "upload your first file" cards before their real content loads (the
+  // folder/file arrays start empty, which would otherwise read as "empty
+  // workspace" on the very first render).
+  const [loading, setLoading] = useState(true);
   const [shareTarget, setShareTarget] = useState<ShareTarget | null>(null);
   const [selectedFiles, setSelectedFiles] = useState<Set<string>>(new Set());
   const [createFolderOpen, setCreateFolderOpen] = useState(false);
@@ -82,6 +88,7 @@ export default function FileBrowserPage() {
 
   const refresh = useCallback(async () => {
     setError(null);
+    setLoading(true);
     try {
       if (currentFolderID) {
         const { folder: f, children, files: f2 } = await getFolderContents(currentFolderID);
@@ -98,6 +105,8 @@ export default function FileBrowserPage() {
       }
     } catch (err) {
       setError(translateApiError(err, t));
+    } finally {
+      setLoading(false);
     }
   }, [currentFolderID, t]);
 
@@ -141,9 +150,15 @@ export default function FileBrowserPage() {
   // First-run experience: at the workspace root with nothing in it yet, show
   // the onboarding action cards instead of empty folder/file sections. The
   // explicit files.length check keeps this correct if root-level file listing
-  // is ever added (today files is [] at root).
+  // is ever added (today files is [] at root). Gated on !loading so a
+  // workspace that already has content never flashes the cards before its
+  // first listing resolves.
   const showOnboarding =
-    !currentFolderID && subfolders.length === 0 && files.length === 0 && !error;
+    !loading &&
+    !currentFolderID &&
+    subfolders.length === 0 &&
+    files.length === 0 &&
+    !error;
 
   return (
     <div style={{ display: "flex", minHeight: "100vh" }}>
@@ -223,7 +238,6 @@ export default function FileBrowserPage() {
 
         {showOnboarding ? (
           <OnboardingEmptyState
-            workspaceName={folder?.name}
             onUpload={() => uploadOpenRef.current?.()}
             onCreateFolder={handleCreateFolder}
             onInvite={isAdmin ? () => nav("/admin") : undefined}
