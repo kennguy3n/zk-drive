@@ -287,22 +287,50 @@ func run() error {
 	// Session-token signing. The KeyManager signs/verifies with ES256
 	// when an active asymmetric key exists in jwt_signing_keys
 	// (migration 034), and otherwise falls back to HS256 using
-	// cfg.JWTSecret. Verification always accepts both, so rotating to
-	// ES256 (POST /api/platform/jwt/rotate) never invalidates sessions
-	// issued before the cutover. JWT_ALGORITHM forces a mode; the
-	// default ("auto") picks ES256-when-available.
+	// cfg.JWTSecret. In the non-production profiles verification
+	// accepts both, so rotating to ES256 (POST /api/platform/jwt/rotate)
+	// never invalidates sessions issued before the cutover.
+	// JWT_ALGORITHM forces a mode; its default is profile-dependent
+	// ("ES256" in production, "auto" otherwise).
+	// Under the production profile, JWT signing is asymmetric-only:
+	// the KeyManager refuses to verify HS256 tokens (a leaked
+	// JWT_SECRET must not be usable to forge a session) and
+	// cfg.JWTAlgorithm defaults to ES256 (refuses to mint HS256).
+	var keyManagerOpts []cryptopkg.KeyManagerOption
+	if cfg.IsProduction() {
+		keyManagerOpts = append(keyManagerOpts, cryptopkg.WithHMACVerificationDisabled())
+	}
 	jwtKeyManager, err := cryptopkg.NewKeyManager(
 		ctx,
 		cryptopkg.NewPostgresSigningKeyStore(pool),
 		credentialCodec,
 		cfg.JWTSecret,
 		cfg.JWTAlgorithm,
+		keyManagerOpts...,
 	)
 	if err != nil {
 		cancel()
 		return fmt.Errorf("jwt key manager: %w", err)
 	}
-	slog.Info("jwt signing", "algorithm", jwtKeyManager.Algorithm())
+
+	// Production NoOps guarantee: an SME admin should never have to
+	// run POST /api/platform/jwt/rotate by hand before the first
+	// login works. When the production profile is active and no
+	// active ES256 key exists yet (Algorithm() reports HS256 only
+	// when no asymmetric signing key is loaded), generate one now and
+	// audit the event. RotateKey persists the encrypted private key
+	// and reloads the in-memory set, so the manager signs ES256 from
+	// the very first issued token.
+	if cfg.IsProduction() && jwtKeyManager.Algorithm() != cryptopkg.AlgES256 {
+		rec, rerr := jwtKeyManager.RotateKey(ctx)
+		if rerr != nil {
+			cancel()
+			return fmt.Errorf("auto-generate production ES256 signing key: %w", rerr)
+		}
+		slog.Info("auto-generated ES256 signing key for production profile",
+			"kid", rec.ID, "algorithm", rec.Algorithm)
+	}
+	slog.Info("jwt signing", "algorithm", jwtKeyManager.Algorithm(), "profile", cfg.Profile)
 
 	// Cross-replica key-rotation propagation. RotateKey only reloads
 	// the replica that served POST /api/platform/jwt/rotate; every other

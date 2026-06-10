@@ -124,6 +124,12 @@ func requireEnv(t *testing.T, envs map[string]string) {
 		// specific var themselves after requireEnv runs.
 		"DB_MAX_CONNS", "DB_MIN_CONNS", "DB_MAX_CONN_IDLE_TIME",
 		"JWT_ALGORITHM", "JWT_KEY_REFRESH_INTERVAL",
+		// ZKDRIVE_PROFILE selects the deployment profile and shifts the
+		// JWT_ALGORITHM default (ES256 under production). Baseline-clear
+		// it so a runner exporting ZKDRIVE_PROFILE=production cannot
+		// bleed an ES256 default into tests exercising the "auto"
+		// fallback path.
+		"ZKDRIVE_PROFILE",
 	}
 	// WORKER_METRICS_ADDR is intentionally NOT included in the keys
 	// list above. t.Setenv(k, "") makes os.LookupEnv return
@@ -733,6 +739,61 @@ func TestJWTKeyRefreshIntervalFromEnv(t *testing.T) {
 			}
 			if got := jwtKeyRefreshIntervalFromEnv(); got != tc.want {
 				t.Errorf("jwtKeyRefreshIntervalFromEnv() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestNormaliseProfile pins the ZKDRIVE_PROFILE parsing contract:
+// case-insensitive, whitespace-tolerant, "prod" alias, and a safe
+// fall-back to development for empty/unknown values (never production).
+func TestNormaliseProfile(t *testing.T) {
+	tests := []struct {
+		in   string
+		want string
+	}{
+		{"", ProfileDevelopment},
+		{"   ", ProfileDevelopment},
+		{"production", ProfileProduction},
+		{"PRODUCTION", ProfileProduction},
+		{"  Production  ", ProfileProduction},
+		{"prod", ProfileProduction},
+		{"compact", ProfileCompact},
+		{"development", ProfileDevelopment},
+		{"dev", ProfileDevelopment},
+		{"nonsense", ProfileDevelopment},
+	}
+	for _, tc := range tests {
+		if got := normaliseProfile(tc.in); got != tc.want {
+			t.Errorf("normaliseProfile(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}
+
+// TestJWTAlgorithmFromEnv pins the profile-aware default: an explicit,
+// recognised JWT_ALGORITHM always wins; when unset/unrecognised the
+// default is ES256 under production and auto otherwise.
+func TestJWTAlgorithmFromEnv(t *testing.T) {
+	tests := []struct {
+		name    string
+		raw     string
+		profile string
+		want    string
+	}{
+		{"explicit_es256_dev", "ES256", ProfileDevelopment, "ES256"},
+		{"explicit_hs256_prod_wins", "HS256", ProfileProduction, "HS256"},
+		{"explicit_auto_prod_wins", "auto", ProfileProduction, "auto"},
+		{"case_insensitive", "es256", ProfileDevelopment, "ES256"},
+		{"unset_prod_defaults_es256", "", ProfileProduction, "ES256"},
+		{"unset_dev_defaults_auto", "", ProfileDevelopment, "auto"},
+		{"unset_compact_defaults_auto", "", ProfileCompact, "auto"},
+		{"unrecognised_prod_defaults_es256", "garbage", ProfileProduction, "ES256"},
+		{"unrecognised_dev_defaults_auto", "garbage", ProfileDevelopment, "auto"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := jwtAlgorithmFromEnv(tc.raw, tc.profile); got != tc.want {
+				t.Errorf("jwtAlgorithmFromEnv(%q, %q) = %q, want %q", tc.raw, tc.profile, got, tc.want)
 			}
 		})
 	}

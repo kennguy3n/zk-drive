@@ -18,6 +18,22 @@ type Config struct {
 	DatabaseURL string
 	JWTSecret   string
 
+	// Profile selects a deployment profile that bundles security
+	// defaults so a non-technical SME operator gets a hardened
+	// configuration from a single env var rather than tuning a dozen
+	// knobs. Sourced from ZKDRIVE_PROFILE:
+	//   - "production": hardened defaults. JWT signing is ES256 only
+	//     (a leaked JWT_SECRET cannot forge or verify any session —
+	//     HS256 is rejected on both sign AND verify), the server
+	//     auto-generates an ES256 signing key at startup if none
+	//     exists, and Expect-CT is emitted for TLS deployments.
+	//   - "compact" / "development" (default): relaxed defaults that
+	//     keep the HS256 fallback for single-binary / local-dev
+	//     simplicity.
+	// Parsed case-insensitively; unrecognised or empty values fall
+	// back to "development".
+	Profile string
+
 	// DB connection-pool sizing. These tune the pgxpool created by
 	// internal/database.ConnectWithPool. Sourced from DB_MAX_CONNS,
 	// DB_MIN_CONNS, and DB_MAX_CONN_IDLE_TIME. DBMaxConns is clamped
@@ -29,14 +45,17 @@ type Config struct {
 	DBMaxConnIdleTime time.Duration
 
 	// JWTAlgorithm selects the session-token signing algorithm:
-	//   - "auto" (default): sign with ES256 when an active asymmetric
+	//   - "auto": sign with ES256 when an active asymmetric
 	//     signing key exists in jwt_signing_keys, otherwise fall back
 	//     to HS256 using JWTSecret. Verification always accepts both.
 	//   - "ES256": force ES256 signing (still verifies HS256 tokens
 	//     issued before the cutover so existing sessions survive).
 	//   - "HS256": force HS256 signing (legacy behaviour).
-	// Parsed case-insensitively; unrecognised values fall back to
-	// "auto".
+	// Parsed case-insensitively. The default depends on Profile:
+	// "ES256" under the production profile (asymmetric-only signing
+	// is mandatory there), "auto" otherwise. An explicit JWT_ALGORITHM
+	// always wins over the profile default. Unrecognised values fall
+	// back to the profile default.
 	JWTAlgorithm string
 
 	// JWTKeyRefreshInterval is how often each replica re-reads the
@@ -515,13 +534,15 @@ func buildConfigFromEnv() *Config {
 	// resolved maximum, so re-reading the env var would be redundant.
 	dbMaxConns := dbMaxConnsFromEnv()
 	platformAdmins, invalidPlatformAdmins := platformAdminUserIDsFromEnv()
+	profile := normaliseProfile(os.Getenv("ZKDRIVE_PROFILE"))
 	return &Config{
 		DatabaseURL:                   os.Getenv("DATABASE_URL"),
 		JWTSecret:                     os.Getenv("JWT_SECRET"),
+		Profile:                       profile,
 		DBMaxConns:                    dbMaxConns,
 		DBMinConns:                    dbMinConnsFromEnv(dbMaxConns),
 		DBMaxConnIdleTime:             parseDurationDefault(os.Getenv("DB_MAX_CONN_IDLE_TIME"), defaultDBMaxConnIdleTime),
-		JWTAlgorithm:                  normaliseJWTAlgorithm(os.Getenv("JWT_ALGORITHM")),
+		JWTAlgorithm:                  jwtAlgorithmFromEnv(os.Getenv("JWT_ALGORITHM"), profile),
 		JWTKeyRefreshInterval:         jwtKeyRefreshIntervalFromEnv(),
 		PlatformAdminUserIDs:          platformAdmins,
 		PlatformAdminUserIDsInvalid:   invalidPlatformAdmins,
@@ -973,17 +994,57 @@ func dbMinConnsFromEnv(maxConns int32) int32 {
 	return int32(n)
 }
 
-// normaliseJWTAlgorithm canonicalises the JWT_ALGORITHM env var to
-// one of "auto", "ES256", or "HS256". Parsing is case-insensitive and
-// whitespace-tolerant; an empty or unrecognised value falls back to
-// "auto" so a typo can't silently disable asymmetric signing.
-func normaliseJWTAlgorithm(s string) string {
-	switch strings.ToUpper(strings.TrimSpace(s)) {
+// Deployment-profile identifiers parsed from ZKDRIVE_PROFILE. See the
+// Config.Profile doc for the security defaults each one bundles.
+const (
+	ProfileProduction  = "production"
+	ProfileCompact     = "compact"
+	ProfileDevelopment = "development"
+)
+
+// normaliseProfile canonicalises ZKDRIVE_PROFILE to one of the known
+// profile identifiers. Parsing is case-insensitive and
+// whitespace-tolerant. An empty or unrecognised value falls back to
+// "development" — the safe default for a local checkout, never
+// "production" (which would surprise a developer by demanding an
+// ES256 key on first boot). Operators opt INTO the hardened profile
+// explicitly.
+func normaliseProfile(s string) string {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case ProfileProduction, "prod":
+		return ProfileProduction
+	case ProfileCompact:
+		return ProfileCompact
+	default:
+		return ProfileDevelopment
+	}
+}
+
+// IsProduction reports whether the server is running under the
+// hardened production profile.
+func (c *Config) IsProduction() bool {
+	return c.Profile == ProfileProduction
+}
+
+// jwtAlgorithmFromEnv resolves the effective JWT signing algorithm
+// from an explicit JWT_ALGORITHM value and the active profile. An
+// explicit, recognised value always wins. When JWT_ALGORITHM is unset
+// (or unrecognised) the default is profile-dependent: "ES256" under
+// the production profile (asymmetric-only signing is mandatory there)
+// and "auto" otherwise.
+func jwtAlgorithmFromEnv(raw, profile string) string {
+	switch strings.ToUpper(strings.TrimSpace(raw)) {
 	case "ES256":
 		return "ES256"
 	case "HS256":
 		return "HS256"
+	case "AUTO":
+		return "auto"
 	default:
+		// Unset or unrecognised: fall back to the profile default.
+		if profile == ProfileProduction {
+			return "ES256"
+		}
 		return "auto"
 	}
 }

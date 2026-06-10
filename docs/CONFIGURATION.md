@@ -20,6 +20,27 @@ is read-only against S3.
 | `DATABASE_URL` | Postgres DSN (pgx-style).                              |
 | `JWT_SECRET`   | HS256 signing secret for session tokens.               |
 
+## Deployment profile
+
+| Variable          | Default       | Purpose |
+| ----------------- | ------------- | ------- |
+| `ZKDRIVE_PROFILE` | `development` | Bundles security defaults so a non-technical SME operator gets a hardened configuration from one variable instead of tuning a dozen knobs. Parsed case-insensitively (`prod` is accepted as an alias of `production`); empty or unrecognised values fall back to `development` — the server never silently assumes production. |
+
+Profiles:
+
+- **`production`** — hardened. JWT signing is **asymmetric-only**: the
+  default `JWT_ALGORITHM` becomes `ES256`, the server **auto-generates
+  an ES256 signing key at startup** if none exists yet (so first login
+  works with no manual rotation step), and HS256 tokens are **rejected
+  on verification** — a leaked `JWT_SECRET` can neither sign nor forge
+  a session the server will accept. `Expect-CT` is emitted for TLS
+  deployments.
+- **`compact`** / **`development`** (default) — relaxed. The HS256
+  fallback is retained for single-binary and local-dev simplicity
+  (`JWT_ALGORITHM` defaults to `auto`).
+
+An explicit `JWT_ALGORITHM` always overrides the profile default.
+
 ## Server runtime
 
 | Variable         | Default      | Purpose                                                                                       |
@@ -156,7 +177,7 @@ refused (`FATAL: sorry, too many clients already`).
 
 | Variable                   | Default | Purpose                                                                                                                                            |
 | -------------------------- | ------- | -------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `JWT_ALGORITHM`            | `auto`  | Session-token signing algorithm. `auto` signs with ES256 when an active asymmetric key exists in `jwt_signing_keys`, else HS256 (`JWT_SECRET`). `ES256` forces asymmetric signing — if no active key has been rotated in yet, token signing **fails** rather than silently downgrading to HS256 (run `POST /api/platform/jwt/rotate` first). `HS256` forces legacy symmetric signing. Verification always accepts both, so rotating to ES256 never invalidates existing HS256 sessions. |
+| `JWT_ALGORITHM`            | `auto` (`ES256` under the `production` profile)  | Session-token signing algorithm. `auto` signs with ES256 when an active asymmetric key exists in `jwt_signing_keys`, else HS256 (`JWT_SECRET`). `ES256` forces asymmetric signing — if no active key has been rotated in yet, token signing **fails** rather than silently downgrading to HS256 (run `POST /api/platform/jwt/rotate` first, or use the `production` profile which auto-generates one at startup). `HS256` forces legacy symmetric signing. Under non-production profiles verification accepts both, so rotating to ES256 never invalidates existing HS256 sessions; under the `production` profile HS256 tokens are **rejected** on verification (asymmetric-only). The default is profile-dependent — see [Deployment profile](#deployment-profile). |
 | `JWT_KEY_REFRESH_INTERVAL` | `60s`   | How often each replica re-reads `jwt_signing_keys` so a key rotation performed on one replica propagates to all others without a restart. Go duration string, clamped to `[10s, 1h]`. A non-positive value (e.g. `0`) disables the background refresh — appropriate for single-replica deployments. |
 | `PLATFORM_ADMIN_USER_IDS`  | _(empty)_ | **Legacy / no longer used.** Earlier releases gated a per-workspace admin JWT-rotation endpoint behind this allowlist. Rotation has since moved to the platform control plane (`POST /api/platform/jwt/rotate`, gated by the `keys:manage` platform-API-key capability) and the admin endpoint was removed, so this var no longer gates anything. The server logs a startup warning if it is still set; drop it from your config. |
 
