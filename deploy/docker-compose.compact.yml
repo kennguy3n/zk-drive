@@ -83,6 +83,13 @@ services:
       dockerfile: Dockerfile
     # Run the supervisor instead of the image's default /app/server.
     entrypoint: ["/app/compact"]
+    # Inject an init process (tini) as PID 1. The compact supervisor
+    # reaps its own direct children (server/worker) via cmd.Wait(), but
+    # if a child is SIGKILLed while it has its own descendants (e.g. the
+    # worker shelled out to LibreOffice/FFmpeg), those grandchildren are
+    # reparented to PID 1. tini reaps such orphans so they cannot
+    # accumulate as zombies over a long-lived SME deployment.
+    init: true
     depends_on:
       postgres:
         condition: service_healthy

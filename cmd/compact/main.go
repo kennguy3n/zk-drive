@@ -45,9 +45,11 @@ import (
 	"time"
 
 	natsserver "github.com/nats-io/nats-server/v2/server"
+	"github.com/nats-io/nats.go"
 
 	"github.com/kennguy3n/zk-drive/internal/config"
 	"github.com/kennguy3n/zk-drive/internal/database"
+	"github.com/kennguy3n/zk-drive/internal/jobs"
 	"github.com/kennguy3n/zk-drive/internal/logging"
 	"github.com/kennguy3n/zk-drive/internal/version"
 )
@@ -62,6 +64,15 @@ const (
 	// natsReadyTimeout bounds the wait for the embedded NATS server to
 	// accept connections before we give up and fail startup.
 	natsReadyTimeout = 15 * time.Second
+
+	// jobsStreamReadyTimeout bounds how long we wait for the worker to
+	// create the DRIVE_JOBS stream before starting the server anyway.
+	// It is an availability ceiling, not a hard requirement: if the
+	// worker is unhealthy we still bring the API up (the publisher
+	// tolerates a transiently missing stream and the worker supervisor
+	// keeps retrying), we just prefer to close the cold-start race when
+	// the worker comes up promptly, which it does.
+	jobsStreamReadyTimeout = 30 * time.Second
 
 	// restartBackoffMin / restartBackoffMax bound the exponential
 	// backoff between child restarts. A child that stays up longer than
@@ -137,26 +148,42 @@ func run() error {
 		return err
 	}
 
-	// 4) Supervise both children. Start the worker first so the
-	//    DRIVE_JOBS JetStream stream exists before the server publishes
-	//    its first job. Each child runs in its own supervise loop; when
-	//    ctx is cancelled both loops terminate their child gracefully
-	//    and return, and Wait unblocks so the NATS defer can run.
+	// 4) Supervise both children. Each runs in its own supervise loop;
+	//    when ctx is cancelled both loops terminate their child
+	//    gracefully and return, and wg.Wait unblocks so the NATS defer
+	//    can run.
+	//
+	//    Ordering matters: the worker creates the DRIVE_JOBS WorkQueue
+	//    stream, and a WorkQueue stream silently DROPS messages
+	//    published to a subject that has no stream yet. The server's job
+	//    publishes are async (PublishMsgAsync), so starting the server
+	//    before the stream exists could lose the first jobs in a cold
+	//    start. So we start the worker, then block (bounded) until the
+	//    stream actually exists before starting the server — a real
+	//    barrier, not just goroutine-launch order. The worker remains
+	//    the single creator of the stream; we only wait on it.
 	env := childEnv()
 	var wg sync.WaitGroup
-	for _, c := range []struct {
-		name string
-		bin  string
-	}{
-		{"worker", workerBin},
-		{"server", serverBin},
-	} {
+	supervise := func(name, bin string) {
 		wg.Add(1)
-		go func(name, bin string) {
+		go func() {
 			defer wg.Done()
 			superviseChild(ctx, name, bin, env)
-		}(c.name, c.bin)
+		}()
 	}
+
+	supervise("worker", workerBin)
+	if err := waitForJobsStream(ctx, cfg.NATSURL, jobsStreamReadyTimeout); err != nil {
+		if ctx.Err() != nil {
+			// Shutting down before the worker came up; skip the server.
+			wg.Wait()
+			return nil
+		}
+		// Bounded wait elapsed: start the server anyway (availability
+		// over the narrow cold-start race — see jobsStreamReadyTimeout).
+		slog.Warn("starting server before DRIVE_JOBS stream is ready", "err", err)
+	}
+	supervise("server", serverBin)
 
 	<-ctx.Done()
 	slog.Info("signal received; draining child processes")
@@ -247,6 +274,49 @@ func migrate(ctx context.Context, cfg *config.Config) error {
 	return nil
 }
 
+// waitForJobsStream blocks until the worker has created the DRIVE_JOBS
+// JetStream stream, or until timeout / ctx cancellation. The supervisor
+// owns the embedded broker, so it connects as a plain client and polls
+// StreamInfo rather than creating the stream itself — the worker stays
+// the single source of truth for the stream's config. Returns nil as
+// soon as the stream exists; a non-nil error means "not ready" (timeout
+// or shutdown), which the caller treats as non-fatal.
+func waitForJobsStream(ctx context.Context, natsURL string, timeout time.Duration) error {
+	url := natsURL
+	if url == "" {
+		url = nats.DefaultURL
+	}
+	nc, err := nats.Connect(url,
+		nats.Name("zk-drive-compact-supervisor"),
+		nats.Timeout(5*time.Second),
+	)
+	if err != nil {
+		return fmt.Errorf("connect NATS for stream readiness: %w", err)
+	}
+	defer nc.Close()
+
+	js, err := nc.JetStream()
+	if err != nil {
+		return fmt.Errorf("jetstream context: %w", err)
+	}
+
+	deadline := time.Now().Add(timeout)
+	for {
+		if _, err := js.StreamInfo(jobs.StreamName); err == nil {
+			slog.Info("DRIVE_JOBS stream ready", "stream", jobs.StreamName)
+			return nil
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("stream %q not ready within %s", jobs.StreamName, timeout)
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(100 * time.Millisecond):
+		}
+	}
+}
+
 // childEnv returns the environment passed to the child processes: the
 // supervisor's own environment (which already carries the resolved
 // compact-profile defaults from applyProfileDefaults) with
@@ -335,7 +405,13 @@ func runChildOnce(ctx context.Context, name, bin string, env []string) error {
 		case <-waitErr:
 		case <-time.After(childShutdownGrace):
 			slog.Warn("child did not exit within grace period; killing", "child", name, "grace", childShutdownGrace)
-			_ = cmd.Process.Kill()
+			// SIGKILL the whole process group (negative PID), not just
+			// the child's PID. We set Setpgid above precisely so a hung
+			// child's grandchildren — e.g. a stuck LibreOffice/FFmpeg the
+			// worker shelled out to — are reaped with it instead of being
+			// reparented and leaked. os.Process.Kill() targets only the
+			// single PID, which is the bug this avoids.
+			_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
 			<-waitErr
 		}
 		return nil
