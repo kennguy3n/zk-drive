@@ -43,6 +43,7 @@ import (
 	"github.com/kennguy3n/zk-drive/internal/document"
 	"github.com/kennguy3n/zk-drive/internal/email"
 	"github.com/kennguy3n/zk-drive/internal/fabric"
+	"github.com/kennguy3n/zk-drive/internal/feature"
 	"github.com/kennguy3n/zk-drive/internal/file"
 	"github.com/kennguy3n/zk-drive/internal/folder"
 	"github.com/kennguy3n/zk-drive/internal/health"
@@ -679,6 +680,13 @@ func run() error {
 	}).WithAudit(auditSvc)
 	billingRepo := billing.NewPostgresRepository(pool)
 	billingSvc := billing.NewService(billingRepo)
+	// Progressive feature disclosure: the active feature set for a
+	// workspace is its tier defaults (resolved from the billing plan)
+	// with per-workspace overrides layered on top. Backs GET /api/features.
+	featureSvc := feature.NewService(
+		feature.NewPostgresRepository(pool),
+		feature.NewBillingTierResolver(billingSvc),
+	)
 	stripeService := billing.NewStripeService(
 		billingSvc,
 		billingRepo,
@@ -711,6 +719,7 @@ func run() error {
 		WithPreviews(previewRepo).
 		WithAudit(auditSvc).
 		WithBilling(billingSvc).
+		WithFeatures(featureSvc).
 		WithWebhooks(webhookPublisher).
 		WithOnlyOffice(cfg.OnlyOfficeURL, cfg.OnlyOfficeSecret, cfg.PublicURL).
 		WithOnlyOfficeSaveLimits(cfg.OnlyOfficeSaveMemoryBudgetBytes, cfg.OnlyOfficeMaxDocumentBytes)
@@ -1168,6 +1177,11 @@ func run() error {
 			// lock themselves out of their own workspace.
 			r.Use(middleware.IPAllowlist(ipAllowSvc, cfg.TrustedProxyDepth))
 			r.Use(rateLimiter())
+
+			// Progressive feature disclosure: the SPA fetches this
+			// once on login to gate UI behind the workspace's tier +
+			// overrides (see frontend/src/hooks/useFeatures.ts).
+			r.Get("/features", driveHandler.GetFeatures)
 
 			r.Get("/workspaces", driveHandler.ListWorkspaces)
 			r.Post("/workspaces", driveHandler.CreateWorkspace)
