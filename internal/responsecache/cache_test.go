@@ -182,6 +182,38 @@ func TestNewWithTypedNilClient(t *testing.T) {
 	}
 }
 
+// TestBustSetsGenerationTTL verifies the generation counter is created
+// with a bounded, sliding TTL (so abandoned workspaces don't leave a
+// permanent key) and that the TTL is refreshed on each subsequent bust.
+func TestBustSetsGenerationTTL(t *testing.T) {
+	c, mr := newTestCache(t)
+	ws := uuid.New()
+	key := generationKey(ws)
+
+	c.BustWorkspace(context.Background(), ws)
+	ttl := mr.TTL(key)
+	if ttl <= 0 {
+		t.Fatalf("generation key has no TTL after bust: %v", ttl)
+	}
+	if ttl > generationKeyTTL {
+		t.Fatalf("generation TTL %v exceeds bound %v", ttl, generationKeyTTL)
+	}
+
+	// Let some of the TTL elapse, then bust again: the TTL must be
+	// refreshed (slide forward), not left to decay toward expiry.
+	mr.FastForward(generationKeyTTL / 2)
+	c.BustWorkspace(context.Background(), ws)
+	if refreshed := mr.TTL(key); refreshed <= generationKeyTTL/2 {
+		t.Fatalf("bust did not refresh TTL: %v (want > %v)", refreshed, generationKeyTTL/2)
+	}
+
+	// A workspace that stops mutating eventually drops its counter.
+	mr.FastForward(generationKeyTTL + time.Second)
+	if mr.Exists(key) {
+		t.Fatal("generation key should have expired after idle TTL window")
+	}
+}
+
 func TestFailOpenOnRedisOutage(t *testing.T) {
 	c, mr := newTestCache(t)
 	ws := uuid.New()

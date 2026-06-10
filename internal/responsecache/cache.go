@@ -54,6 +54,23 @@ const KeyPrefix = "ws:resp"
 // of cache lookups a single page render fires.
 const generationStaleAfter = 500 * time.Millisecond
 
+// generationKeyTTL bounds how long a workspace's generation counter
+// survives with no mutations. BustWorkspace refreshes it on every bump,
+// so an actively-written workspace never loses its counter; a workspace
+// idle (no mutations) for this long lets the counter expire, which is
+// how abandoned/deleted workspaces are reclaimed from Redis instead of
+// accumulating one permanent key each — essential at millions-of-B2C
+// scale (NoOps: no manual sweep).
+//
+// Expiry is safe because it is strictly longer than any entry TTL: for
+// the counter to expire there must have been no bust for 30 days, by
+// which point every cached entry (seconds-to-minutes TTL) is long gone.
+// If the counter later resets, a replica that still remembers a higher
+// generation keeps serving its own namespace (the monotonic guard in
+// loadGeneration), and any genuinely stale read remains bounded by the
+// entry TTL — the same backstop that already covers a missed bust.
+const generationKeyTTL = 30 * 24 * time.Hour
+
 // Cache is a workspace-scoped, generation-invalidated read-through
 // cache. The zero value is not usable; construct with New. A nil *Cache
 // is valid and behaves as a permanent miss (see package doc).
@@ -174,11 +191,20 @@ func (c *Cache) loadGeneration(ctx context.Context, workspaceID uuid.UUID) (int6
 // a bust never fails the mutation that triggered it — the entry TTL is
 // the backstop. The local generation copy is refreshed on the next read
 // via the generationStaleAfter window.
+//
+// The INCR is paired with an EXPIRE in a single pipeline so the counter
+// carries a sliding generationKeyTTL: every mutation refreshes it, and a
+// workspace that stops mutating eventually drops its counter rather than
+// leaving a permanent key (see generationKeyTTL).
 func (c *Cache) BustWorkspace(ctx context.Context, workspaceID uuid.UUID) {
 	if !c.Enabled() {
 		return
 	}
-	if err := c.rdb.Incr(ctx, generationKey(workspaceID)).Err(); err != nil {
+	key := generationKey(workspaceID)
+	pipe := c.rdb.Pipeline()
+	pipe.Incr(ctx, key)
+	pipe.Expire(ctx, key, generationKeyTTL)
+	if _, err := pipe.Exec(ctx); err != nil {
 		logging.FromContext(ctx).Debug("response cache: bust failed (entries will expire via TTL)",
 			"workspace_id", workspaceID, "err", err)
 		return
