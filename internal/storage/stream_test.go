@@ -97,6 +97,52 @@ func TestPutObjectStreamGatewayError(t *testing.T) {
 	}
 }
 
+// TestPutObjectStreamFeedsErrorRate pins that the streaming PUT path
+// (the ONLYOFFICE document-save write) feeds the same rolling error-rate
+// window the admin health dashboard's storage probe reads, exactly like
+// the SDK Put/Get/Delete/List paths. A success records a clean op and a
+// gateway rejection records a failed op, so the dashboard cannot show
+// storage green while large-body saves are failing.
+func TestPutObjectStreamFeedsErrorRate(t *testing.T) {
+	var fail bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.Copy(io.Discard, r.Body)
+		if fail {
+			w.WriteHeader(http.StatusForbidden)
+			_, _ = w.Write([]byte("AccessDenied"))
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	c := newTestClient(t, srv.URL)
+	ctx := context.Background()
+
+	if got := c.RecentErrorStats().Total; got != 0 {
+		t.Fatalf("precondition: fresh client Total = %d, want 0", got)
+	}
+
+	// A successful stream PUT records one clean op (0 errors).
+	if err := c.PutObjectStream(ctx, "ws/file/ok.docx", "text/plain", strings.NewReader("data"), 4); err != nil {
+		t.Fatalf("PutObjectStream (success): %v", err)
+	}
+	s := c.RecentErrorStats()
+	if s.Total != 1 || s.Errors != 0 {
+		t.Fatalf("after success: Total=%d Errors=%d, want Total=1 Errors=0", s.Total, s.Errors)
+	}
+
+	// A gateway rejection records a failed op so the error rate climbs.
+	fail = true
+	if err := c.PutObjectStream(ctx, "ws/file/bad.docx", "text/plain", strings.NewReader("data"), 4); err == nil {
+		t.Fatal("expected error on non-2xx gateway response, got nil")
+	}
+	s = c.RecentErrorStats()
+	if s.Total != 2 || s.Errors != 1 {
+		t.Fatalf("after gateway error: Total=%d Errors=%d, want Total=2 Errors=1", s.Total, s.Errors)
+	}
+}
+
 // TestPutObjectStreamValidation pins the cheap guard rails.
 func TestPutObjectStreamValidation(t *testing.T) {
 	c := newTestClient(t, "http://127.0.0.1:0")

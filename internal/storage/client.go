@@ -377,8 +377,19 @@ func (c *Client) PutObjectStream(ctx context.Context, objectKey, contentType str
 	if strings.TrimSpace(contentType) != "" {
 		req.Header.Set("Content-Type", contentType)
 	}
+	// The raw streamed PUT is a server-side gateway operation just like
+	// the SDK Put/Get/Delete/List paths, so its outcome feeds the same
+	// rolling error-rate window the admin health dashboard's storage
+	// probe reads. Without this the dashboard would be blind to
+	// ONLYOFFICE save failures (this is the document-save write path)
+	// and could show storage green while large-body PUTs were failing.
+	// The earlier GenerateUploadURL step is deliberately NOT recorded:
+	// presigning is a local signing operation that never touches the
+	// gateway, so it carries no reachability signal (same rationale as
+	// the presign hot path).
 	resp, err := streamUploadClient.Do(req)
 	if err != nil {
+		c.recordOp(err)
 		return fmt.Errorf("storage: stream put: %w", err)
 	}
 	defer func() { _ = resp.Body.Close() }()
@@ -387,8 +398,11 @@ func (c *Client) PutObjectStream(ctx context.Context, objectKey, contentType str
 		// auth / quota / policy rejection is diagnosable without
 		// leaking an unbounded response into logs.
 		snippet, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
-		return fmt.Errorf("storage: stream put unexpected status %s: %s", resp.Status, strings.TrimSpace(string(snippet)))
+		statusErr := fmt.Errorf("storage: stream put unexpected status %s: %s", resp.Status, strings.TrimSpace(string(snippet)))
+		c.recordOp(statusErr)
+		return statusErr
 	}
+	c.recordOp(nil)
 	return nil
 }
 
