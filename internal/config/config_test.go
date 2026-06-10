@@ -1,6 +1,7 @@
 package config
 
 import (
+	"bytes"
 	"os"
 	"strings"
 	"testing"
@@ -97,6 +98,7 @@ func requireEnv(t *testing.T, envs map[string]string) {
 		// SUSPENSION_FAIL_CLOSED must not bleed into tests exercising
 		// the default-sizing / fail-open paths.
 		"ONLYOFFICE_MAX_DOCUMENT_MB", "ONLYOFFICE_SAVE_MEMORY_BUDGET_MB",
+		"ONLYOFFICE_STREAM_SAVE_MAX_CONCURRENT",
 		"SUSPENSION_FAIL_CLOSED",
 		// Preview pipeline scaling env vars. Same convention as the
 		// blocks above: buildConfigFromEnv reads each of these via
@@ -122,7 +124,7 @@ func requireEnv(t *testing.T, envs map[string]string) {
 		// Same convention as the blocks above: buildConfigFromEnv reads
 		// each of these (dbMaxConnsFromEnv / dbMinConnsFromEnv /
 		// parseDurationDefault(DB_MAX_CONN_IDLE_TIME) /
-		// normaliseJWTAlgorithm / jwtKeyRefreshIntervalFromEnv), and all
+		// jwtAlgorithmFromEnv / jwtKeyRefreshIntervalFromEnv), and all
 		// of them treat an empty value identically to unset (fall back to
 		// the clamped default), so a CI runner that exports e.g.
 		// DB_MAX_CONNS=2 or JWT_ALGORITHM=ES256 would otherwise bleed into
@@ -130,17 +132,61 @@ func requireEnv(t *testing.T, envs map[string]string) {
 		// non-default values (e.g. TestJWTKeyRefreshInterval) t.Setenv the
 		// specific var themselves after requireEnv runs.
 		"DB_MAX_CONNS", "DB_MIN_CONNS", "DB_MAX_CONN_IDLE_TIME",
+		// Read-replica pool sizing (WS5 follow-up). buildConfigFromEnv
+		// reads these via dbReadMaxConnsFromEnv / dbReadMinConnsFromEnv,
+		// which treat unset identically to "inherit the primary". Clear
+		// them at baseline so a CI runner exporting e.g.
+		// DB_READ_MAX_CONNS=2 cannot bleed into the inherit-path tests.
+		"DB_READ_MAX_CONNS", "DB_READ_MIN_CONNS",
 		"JWT_ALGORITHM", "JWT_KEY_REFRESH_INTERVAL",
-		// Deployment-profile selector + auto-migrate toggle (WS2). Same
-		// convention as the blocks above: Load applies the profile's
-		// env-var defaults (applyProfileDefaults) and buildConfigFromEnv
-		// reads both, so a CI runner that exports ZKDRIVE_PROFILE=production
-		// would otherwise make every test here fail validateProfile (it
-		// requires Redis + NATS). Baseline-clearing to "" yields the
-		// no-profile state (normaliseProfile("") == ""), preserving the
-		// pre-profile behaviour. Profile-specific tests live in
+		// Pre-existing env vars that buildConfigFromEnv reads but were
+		// never baseline-cleared (closing the gap the WS5-follow-up
+		// review flagged). Each is read via os.Getenv / strings.TrimSpace
+		// / parse{,NonNegative}IntDefault / parseBoolDefault, all of
+		// which treat an empty value identically to unset → the safe
+		// default (no replica / OIDC disabled / web-push disabled / proxy
+		// off / default worker counts), so clearing them to "" here just
+		// pins the production "unset" state and cannot bleed a CI runner's
+		// export into the default-path tests. WORKER_METRICS_ADDR is the
+		// sole intentional exception (handled via Unsetenv above, since
+		// for it empty != unset).
+		//   - DATABASE_READ_URL: read-replica DSN (empty → primary only).
+		//   - IAM_CORE_*: OIDC SSO config (all empty → SSO disabled).
+		//   - PREVIEW_LIGHTWEIGHT/HEAVY/WORKER_CONCURRENCY/HEAVY_QUEUE_*:
+		//     WS5 preview-fleet sizing (empty → clamped defaults).
+		//   - TRUSTED_PROXY_DEPTH: X-Forwarded-For trust depth.
+		//   - VAPID_*: Web Push keys (empty → push disabled).
+		//   - WS_PROXY_MODE: WS proxy-tier toggle (empty → in-process hub).
+		"DATABASE_READ_URL",
+		"IAM_CORE_ISSUER_URL", "IAM_CORE_CLIENT_ID", "IAM_CORE_CLIENT_SECRET",
+		"IAM_CORE_CALLBACK_URL", "IAM_CORE_AUDIENCE", "IAM_CORE_SCOPES",
+		"PREVIEW_LIGHTWEIGHT_WORKERS", "PREVIEW_HEAVY_WORKERS",
+		"PREVIEW_WORKER_CONCURRENCY", "PREVIEW_HEAVY_QUEUE_BACKPRESSURE_THRESHOLD",
+		"TRUSTED_PROXY_DEPTH",
+		"VAPID_PUBLIC_KEY", "VAPID_PRIVATE_KEY", "VAPID_SUBSCRIBER",
+		"WS_PROXY_MODE",
+		// ZKDRIVE_PROFILE selects the deployment profile and shifts
+		// env-var defaults. On this branch it shifts the JWT_ALGORITHM
+		// default (ES256 under production); for WS2 it also drives
+		// applyProfileDefaults + validateProfile (production requires
+		// Redis + NATS). Baseline-clear it so a runner exporting
+		// ZKDRIVE_PROFILE=production cannot bleed an ES256 default into
+		// tests exercising the "auto" fallback, nor force the
+		// profile-validation path on every test here. ZKDRIVE_AUTO_MIGRATE
+		// is the WS2 auto-migrate toggle read by buildConfigFromEnv;
+		// cleared for the same reason. Profile-specific tests live in
 		// profiles_test.go and manage these vars themselves.
 		"ZKDRIVE_PROFILE", "ZKDRIVE_AUTO_MIGRATE",
+		// Security-header knobs whose defaults are profile- or
+		// constant-derived. Baseline-clear them so a runner exporting
+		// e.g. SECURITY_HEADERS_EXPECT_CT=true can't bleed into tests
+		// asserting the profile default.
+		"SECURITY_HEADERS_CSP_NONCE", "SECURITY_HEADERS_EXPECT_CT",
+		// AUDIT_HMAC_KEY selects the audit-chain HMAC key source
+		// (6.6). Baseline-clear it so a runner exporting an explicit
+		// key cannot change the derived-from-JWT_SECRET default that
+		// TestDeriveAuditHMACKeyDefaultsToJWTSecret asserts.
+		"AUDIT_HMAC_KEY",
 	}
 	// WORKER_METRICS_ADDR is intentionally NOT included in the keys
 	// list above. t.Setenv(k, "") makes os.LookupEnv return
@@ -810,6 +856,173 @@ func TestJWTKeyRefreshIntervalFromEnv(t *testing.T) {
 	}
 }
 
+// TestSecurityHeaderDefaults pins the 6.5 config contract:
+//   - CSP nonce defaults ON (additive hardening) regardless of profile.
+//   - Expect-CT defaults ON under production, OFF otherwise.
+//   - Explicit env values override the profile default either way.
+func TestSecurityHeaderDefaults(t *testing.T) {
+	t.Run("development defaults", func(t *testing.T) {
+		requireEnv(t, map[string]string{
+			"DATABASE_URL": "postgres://x/y",
+			"JWT_SECRET":   "secret",
+		})
+		cfg, err := Load()
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		if !cfg.SecurityHeadersCSPNonce {
+			t.Errorf("CSP nonce should default on")
+		}
+		if cfg.SecurityHeadersExpectCT {
+			t.Errorf("Expect-CT should default off outside production")
+		}
+	})
+	t.Run("production defaults Expect-CT on", func(t *testing.T) {
+		requireEnv(t, map[string]string{
+			"DATABASE_URL":    "postgres://x/y",
+			"JWT_SECRET":      "secret",
+			"ZKDRIVE_PROFILE": "production",
+			// production fails closed without Redis + NATS
+			// (validateProfile); supply them so Load succeeds and the
+			// security-header defaults are what's under test here.
+			"REDIS_URL": "redis://127.0.0.1:6379",
+			"NATS_URL":  "nats://127.0.0.1:4222",
+		})
+		cfg, err := Load()
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		if !cfg.SecurityHeadersExpectCT {
+			t.Errorf("Expect-CT should default on under production")
+		}
+		if !cfg.SecurityHeadersCSPNonce {
+			t.Errorf("CSP nonce should default on under production")
+		}
+	})
+	t.Run("explicit env overrides profile", func(t *testing.T) {
+		requireEnv(t, map[string]string{
+			"DATABASE_URL":               "postgres://x/y",
+			"JWT_SECRET":                 "secret",
+			"ZKDRIVE_PROFILE":            "production",
+			"REDIS_URL":                  "redis://127.0.0.1:6379",
+			"NATS_URL":                   "nats://127.0.0.1:4222",
+			"SECURITY_HEADERS_EXPECT_CT": "false",
+			"SECURITY_HEADERS_CSP_NONCE": "false",
+		})
+		cfg, err := Load()
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		if cfg.SecurityHeadersExpectCT {
+			t.Errorf("explicit SECURITY_HEADERS_EXPECT_CT=false ignored")
+		}
+		if cfg.SecurityHeadersCSPNonce {
+			t.Errorf("explicit SECURITY_HEADERS_CSP_NONCE=false ignored")
+		}
+	})
+}
+
+// TestJWTAlgorithmFromEnv pins the profile-aware default: an explicit,
+// recognised JWT_ALGORITHM always wins; when unset/unrecognised the
+// default is ES256 under production and auto otherwise.
+func TestJWTAlgorithmFromEnv(t *testing.T) {
+	tests := []struct {
+		name    string
+		raw     string
+		profile Profile
+		want    string
+	}{
+		{"explicit_es256_dev", "ES256", ProfileDevelopment, "ES256"},
+		{"explicit_hs256_prod_wins", "HS256", ProfileProduction, "HS256"},
+		{"explicit_auto_prod_wins", "auto", ProfileProduction, "auto"},
+		{"case_insensitive", "es256", ProfileDevelopment, "ES256"},
+		{"unset_prod_defaults_es256", "", ProfileProduction, "ES256"},
+		{"unset_dev_defaults_auto", "", ProfileDevelopment, "auto"},
+		{"unset_compact_defaults_auto", "", ProfileCompact, "auto"},
+		{"unrecognised_prod_defaults_es256", "garbage", ProfileProduction, "ES256"},
+		{"unrecognised_dev_defaults_auto", "garbage", ProfileDevelopment, "auto"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := jwtAlgorithmFromEnv(tc.raw, tc.profile); got != tc.want {
+				t.Errorf("jwtAlgorithmFromEnv(%q, %q) = %q, want %q", tc.raw, tc.profile, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestDBReadMaxConnsFromEnv pins the read-pool MaxConns contract:
+// unset inherits the primary's resolved max verbatim (both pools sized
+// alike, the pre-knob behaviour); a set value clamps to the same
+// [minDBMaxConns, maxDBMaxConns] bounds as the primary.
+func TestDBReadMaxConnsFromEnv(t *testing.T) {
+	const primaryMax int32 = 40
+	tests := []struct {
+		name  string
+		set   bool
+		value string
+		want  int32
+	}{
+		{name: "unset_inherits_primary", set: false, want: primaryMax},
+		{name: "empty_inherits_primary", set: true, value: "", want: primaryMax},
+		{name: "whitespace_inherits_primary", set: true, value: "   ", want: primaryMax},
+		{name: "malformed_inherits_primary", set: true, value: "abc", want: primaryMax},
+		{name: "in_range_overrides", set: true, value: "120", want: 120},
+		{name: "below_floor_clamps_up", set: true, value: "1", want: minDBMaxConns},
+		{name: "above_ceiling_clamps_down", set: true, value: "9999", want: maxDBMaxConns},
+		{name: "zero_inherits_via_parseIntDefault", set: true, value: "0", want: primaryMax},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.set {
+				t.Setenv("DB_READ_MAX_CONNS", tc.value)
+			} else if err := os.Unsetenv("DB_READ_MAX_CONNS"); err != nil {
+				t.Fatalf("Unsetenv: %v", err)
+			}
+			if got := dbReadMaxConnsFromEnv(primaryMax); got != tc.want {
+				t.Errorf("dbReadMaxConnsFromEnv(%d) = %d, want %d", primaryMax, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestDBReadMinConnsFromEnv pins the read-pool MinConns contract: unset
+// inherits the primary's min; an explicit 0 is honoured (lazy pool); a
+// negative is ignored (inherit retained); and the result is clamped to
+// the read pool's resolved max so MinConns can never exceed MaxConns
+// (which pgxpool rejects), including when an inherited primary min is
+// larger than a smaller, explicitly-set read max.
+func TestDBReadMinConnsFromEnv(t *testing.T) {
+	tests := []struct {
+		name       string
+		set        bool
+		value      string
+		primaryMin int32
+		readMax    int32
+		want       int32
+	}{
+		{name: "unset_inherits_primary", set: false, primaryMin: 5, readMax: 40, want: 5},
+		{name: "empty_inherits_primary", set: true, value: "", primaryMin: 5, readMax: 40, want: 5},
+		{name: "explicit_zero_honoured", set: true, value: "0", primaryMin: 5, readMax: 40, want: 0},
+		{name: "negative_ignored_inherits", set: true, value: "-3", primaryMin: 5, readMax: 40, want: 5},
+		{name: "in_range_overrides", set: true, value: "12", primaryMin: 5, readMax: 40, want: 12},
+		{name: "set_above_readmax_clamps", set: true, value: "100", primaryMin: 5, readMax: 40, want: 40},
+		{name: "inherited_above_smaller_readmax_clamps", set: false, primaryMin: 20, readMax: 8, want: 8},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.set {
+				t.Setenv("DB_READ_MIN_CONNS", tc.value)
+			} else if err := os.Unsetenv("DB_READ_MIN_CONNS"); err != nil {
+				t.Fatalf("Unsetenv: %v", err)
+			}
+			if got := dbReadMinConnsFromEnv(tc.primaryMin, tc.readMax); got != tc.want {
+				t.Errorf("dbReadMinConnsFromEnv(%d, %d) = %d, want %d", tc.primaryMin, tc.readMax, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestPlatformAdminUserIDsFromEnv(t *testing.T) {
 	id1 := uuid.New()
 	id2 := uuid.New()
@@ -1020,6 +1233,63 @@ func TestLoadAuditArchiveDefaults(t *testing.T) {
 	}
 	if cfg.AuditArchiveMaxRowsPerBatch != 50000 {
 		t.Errorf("AuditArchiveMaxRowsPerBatch = %d, want 50000", cfg.AuditArchiveMaxRowsPerBatch)
+	}
+}
+
+// TestDeriveAuditHMACKeyDefaultsToJWTSecret: with no AUDIT_HMAC_KEY the
+// key must be derived from JWT_SECRET (32 bytes, source "derived") so a
+// fresh install is self-operating without extra config, while keeping
+// the key out of the database.
+func TestDeriveAuditHMACKeyDefaultsToJWTSecret(t *testing.T) {
+	requireEnv(t, map[string]string{
+		"DATABASE_URL": "postgres://localhost/zkdrive",
+		"JWT_SECRET":   "test-secret",
+	})
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.AuditHMACKeySource != AuditHMACKeySourceDerived {
+		t.Errorf("AuditHMACKeySource = %q, want %q", cfg.AuditHMACKeySource, AuditHMACKeySourceDerived)
+	}
+	if len(cfg.AuditHMACKey) != 32 {
+		t.Fatalf("AuditHMACKey len = %d, want 32", len(cfg.AuditHMACKey))
+	}
+	// Deriving twice from the same secret is stable, and a different
+	// JWT_SECRET yields a different key.
+	again, _ := deriveAuditHMACKey("", "test-secret")
+	if !bytes.Equal(again, cfg.AuditHMACKey) {
+		t.Error("derived key not stable for the same JWT_SECRET")
+	}
+	other, _ := deriveAuditHMACKey("", "different-secret")
+	if bytes.Equal(other, cfg.AuditHMACKey) {
+		t.Error("derived key did not change with JWT_SECRET")
+	}
+}
+
+// TestDeriveAuditHMACKeyExplicitWins: an explicit AUDIT_HMAC_KEY must be
+// used (source "explicit") and must differ from the JWT_SECRET-derived
+// key even when the same secret material is reused, thanks to distinct
+// HKDF info labels (domain separation).
+func TestDeriveAuditHMACKeyExplicitWins(t *testing.T) {
+	requireEnv(t, map[string]string{
+		"DATABASE_URL":   "postgres://localhost/zkdrive",
+		"JWT_SECRET":     "shared-secret",
+		"AUDIT_HMAC_KEY": "shared-secret",
+	})
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.AuditHMACKeySource != AuditHMACKeySourceExplicit {
+		t.Errorf("AuditHMACKeySource = %q, want %q", cfg.AuditHMACKeySource, AuditHMACKeySourceExplicit)
+	}
+	if len(cfg.AuditHMACKey) != 32 {
+		t.Fatalf("AuditHMACKey len = %d, want 32", len(cfg.AuditHMACKey))
+	}
+	derived, _ := deriveAuditHMACKey("", "shared-secret")
+	if bytes.Equal(cfg.AuditHMACKey, derived) {
+		t.Error("explicit and derived keys collide despite distinct HKDF info labels")
 	}
 }
 

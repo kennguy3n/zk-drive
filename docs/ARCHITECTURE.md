@@ -176,6 +176,26 @@ authenticated session; tenant resolution happens in middleware.
 - `POST /api/auth/login`
 - `POST /api/auth/logout`
 - `POST /api/auth/refresh`
+- `GET /api/auth/sessions` — list the caller's active device sessions
+  (session id, User-Agent, IP, created/last-seen timestamps, and a
+  `current` flag). Scoped to the authenticated user + workspace from
+  the JWT, so one user can never enumerate another's sessions.
+- `DELETE /api/auth/sessions/:id` — revoke one of the caller's own
+  device sessions (404 if the id is unknown or belongs to another
+  user). Revoking the current session 401s its next request.
+
+**Device fingerprinting & anomaly detection.** Each session stores the
+device fingerprint captured at sign-in: a SHA-256 over the User-Agent
+plus the IP *network* prefix (`/16` for IPv4, `/48` for IPv6). The
+auth middleware recomputes this fingerprint on every authenticated
+request bound to a session and forces re-authentication
+(`401 AUTH_SESSION_ANOMALY`) when it no longer matches — so a stolen
+bearer token replayed from a different browser or a different network
+cannot be silently reused. Coarsening to the network prefix keeps
+mobile users on dynamic addresses from being logged out on every DHCP
+lease change while still catching cross-ISP / cross-geo replay. A
+session's `last_seen` is advanced at most once per 60s so this
+per-request check stays effectively read-only on the hot path.
 
 ### 3.2 Workspaces
 
@@ -229,6 +249,13 @@ authenticated session; tenant resolution happens in middleware.
 - `POST /api/admin/users`
 - `DELETE /api/admin/users/:id`
 - `GET /api/admin/audit-log`
+- `GET /api/admin/audit-log/verify` — recomputes the per-workspace
+  audit-log HMAC hash chain and returns `{valid, rows_checked,
+  head_seq, first_invalid_seq, detail}`. `valid:false` means the
+  request succeeded but a row was inserted/deleted/mutated out of
+  band (detectable even against a DB admin, since the HMAC key is
+  env-derived and never stored). See
+  [`CONFIGURATION.md`](CONFIGURATION.md#audit-log-tamper-evidence-hash-chain).
 - `GET /api/admin/storage-usage`
 - `GET /api/admin/billing/plan` — current plan tier and limits.
 - `PUT /api/admin/billing/plan` — manual tier override (e.g. for
@@ -596,6 +623,40 @@ Each folder carries an `encryption_mode` column stored in the
 - Moving a file to a folder in a different mode requires an explicit
   re-upload in the new mode; it is not a silent metadata move.
 - The UI surfaces the mode on every folder and warns on mode changes.
+
+### 8.4 Workspace default encryption mode (Strict ZK as a default)
+
+Each workspace carries a `default_encryption_mode` column
+(`workspaces` table) constrained to `managed_encrypted` (the default)
+or `strict_zk`. It governs the mode applied to **new top-level (root)
+folders** created without an explicit `encryption_mode`:
+
+- A Secure Business workspace can flip its default to `strict_zk` so
+  every new root folder is zero-knowledge by default — privacy by
+  default rather than by opt-in. Sub-folders always inherit their
+  parent's mode, so the workspace default only governs roots.
+- An explicit `encryption_mode` in the create request always wins; the
+  workspace default is consulted only when the caller omits one.
+- Resolution is **fail-closed**: if the workspace default lookup errors
+  (a transient read failure), folder creation fails rather than
+  silently downgrading a strict-ZK workspace to managed-encrypted.
+- Existing folders are never rewritten; changing the default only
+  affects folders created afterwards.
+
+Admins manage it via the REST surface (admin role required):
+
+| Method | Path                                          | Purpose                                                      |
+| ------ | --------------------------------------------- | ------------------------------------------------------------ |
+| `GET`  | `/api/admin/workspace/default-encryption-mode`| Return the current default and the supported allow-list.     |
+| `PUT`  | `/api/admin/workspace/default-encryption-mode`| Set the default (`{"mode":"strict_zk"}`). Validated + audited.|
+
+The transition is audited as
+`workspace.default_encryption_mode_change` with the previous and
+current values. The admin console surfaces the toggle on the
+Encryption page (Secure Business tier). The hot path
+(`GetDefaultEncryptionMode`, hit per new root folder) uses a dedicated
+single-column query (`GetDefaultEncryptionModeByID`) rather than a
+full-row read.
 
 ---
 

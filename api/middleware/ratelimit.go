@@ -62,8 +62,18 @@ func RateLimiter(ctx context.Context, cfg RateLimitConfig) func(http.Handler) ht
 				return
 			}
 			workspaceID, _ := WorkspaceIDFromContext(r.Context())
-			if wait := limiter.reserve(workspaceID, userID); wait > 0 {
-				retry := int(math.Ceil(wait.Seconds()))
+			res := limiter.reserve(workspaceID, userID)
+			// Report the configured steady-state per-user rate as the
+			// limit, identical to the Redis limiter
+			// (ratelimit_redis.go) so X-RateLimit-Limit means the same
+			// thing — the operator's RATE_LIMIT_PER_USER — no matter
+			// which backend is active. The token bucket's 2x burst
+			// capacity stays an internal grace: setRateLimitHeaders
+			// clamps Remaining to the limit so the advertised budget
+			// never over-promises what a sustained client may send.
+			setRateLimitHeaders(w, int(limiter.userRate), res.remaining, res.reset)
+			if res.wait > 0 {
+				retry := int(math.Ceil(res.wait.Seconds()))
 				if retry < 1 {
 					retry = 1
 				}
@@ -102,10 +112,11 @@ func newRateLimiter(userRate, wsRate float64) *rateLimiter {
 }
 
 // reserve attempts to consume a token from both the per-user and
-// per-workspace buckets. Returns the shortest wait interval the
-// caller must respect before retrying, or 0 if the request is
-// allowed.
-func (l *rateLimiter) reserve(workspaceID, userID uuid.UUID) time.Duration {
+// per-workspace buckets. Returns a reservation whose wait is the
+// shortest interval the caller must respect before retrying (0 when
+// allowed), along with the per-user remaining budget and reset time
+// for the X-RateLimit-* headers.
+func (l *rateLimiter) reserve(workspaceID, userID uuid.UUID) reservation {
 	now := time.Now()
 	l.mu.Lock()
 	u := l.users[userID]
@@ -128,17 +139,17 @@ func (l *rateLimiter) reserve(workspaceID, userID uuid.UUID) time.Duration {
 	l.mu.Unlock()
 
 	if wait := u.consume(now); wait > 0 {
-		return wait
+		return u.reservation(wait, now)
 	}
 	if ws != nil {
 		if wait := ws.consume(now); wait > 0 {
 			// Refund the user token so a workspace-level block does
 			// not unfairly drain the user's bucket.
 			u.refund()
-			return wait
+			return u.reservation(wait, now)
 		}
 	}
-	return 0
+	return u.reservation(0, now)
 }
 
 // runJanitor evicts buckets that haven't been touched in twice the
@@ -203,4 +214,49 @@ func (b *tokenBucket) refund() {
 	if b.tokens > b.capacity {
 		b.tokens = b.capacity
 	}
+}
+
+// reservation snapshots the bucket's remaining whole tokens and the
+// time it will refill to capacity, for the X-RateLimit-* headers.
+// reset is the unix second at which a fully-drained bucket would be
+// back at capacity; for a partially-filled bucket it is sooner.
+func (b *tokenBucket) reservation(wait time.Duration, now time.Time) reservation {
+	b.mu.Lock()
+	tokens := b.tokens
+	deficit := b.capacity - tokens
+	rate := b.rate
+	b.mu.Unlock()
+
+	remaining := int(math.Floor(tokens))
+	if remaining < 0 {
+		remaining = 0
+	}
+	resetIn := time.Second
+	if rate > 0 && deficit > 0 {
+		resetIn = time.Duration(deficit / rate * float64(time.Second))
+	}
+	return reservation{wait: wait, remaining: remaining, reset: now.Add(resetIn).Unix()}
+}
+
+// setRateLimitHeaders writes the standard rate-limit telemetry headers
+// on every rate-limited response (allowed or throttled) so clients can
+// self-pace. X-RateLimit-Limit is the per-window budget,
+// X-RateLimit-Remaining the requests left in the current window, and
+// X-RateLimit-Reset the unix second the window resets. Must be called
+// before the response status is written.
+func setRateLimitHeaders(w http.ResponseWriter, limit, remaining int, reset int64) {
+	if remaining < 0 {
+		remaining = 0
+	}
+	// Keep the advertised contract honest: Remaining must never
+	// exceed Limit. The in-memory token bucket can momentarily hold
+	// up to its 2x burst capacity, but we report the steady-state
+	// rate as the limit, so clamp the burst surplus down to it.
+	if remaining > limit {
+		remaining = limit
+	}
+	h := w.Header()
+	h.Set("X-RateLimit-Limit", strconv.Itoa(limit))
+	h.Set("X-RateLimit-Remaining", strconv.Itoa(remaining))
+	h.Set("X-RateLimit-Reset", strconv.FormatInt(reset, 10))
 }

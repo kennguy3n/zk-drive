@@ -289,5 +289,62 @@ func (f *FailoverStore) IsRevoked(ctx context.Context, workspaceID, userID uuid.
 	return f.fallback.IsRevoked(ctx, workspaceID, userID, issuedAt)
 }
 
+func (f *FailoverStore) Create(ctx context.Context, rec SessionRecord, ttl time.Duration) error {
+	if f.healthy.Load() {
+		err := f.primary.Create(ctx, rec, ttl)
+		if !isUnavailable(err) {
+			return err
+		}
+		f.markDown("Create", err)
+	}
+	return f.fallback.Create(ctx, rec, ttl)
+}
+
+func (f *FailoverStore) GetRecord(ctx context.Context, workspaceID uuid.UUID, sessionID string) (SessionRecord, error) {
+	if f.healthy.Load() {
+		rec, err := f.primary.GetRecord(ctx, workspaceID, sessionID)
+		if !isUnavailable(err) {
+			return rec, err
+		}
+		f.markDown("GetRecord", err)
+	}
+	return f.fallback.GetRecord(ctx, workspaceID, sessionID)
+}
+
+func (f *FailoverStore) ListForUser(ctx context.Context, workspaceID, userID uuid.UUID) ([]SessionRecord, error) {
+	if f.healthy.Load() {
+		recs, err := f.primary.ListForUser(ctx, workspaceID, userID)
+		if !isUnavailable(err) {
+			return recs, err
+		}
+		f.markDown("ListForUser", err)
+	}
+	return f.fallback.ListForUser(ctx, workspaceID, userID)
+}
+
+func (f *FailoverStore) RevokeForUser(ctx context.Context, workspaceID, userID uuid.UUID, sessionID string) (bool, error) {
+	if f.healthy.Load() {
+		ok, err := f.primary.RevokeForUser(ctx, workspaceID, userID, sessionID)
+		if !isUnavailable(err) {
+			return ok, err
+		}
+		f.markDown("RevokeForUser", err)
+	}
+	return f.fallback.RevokeForUser(ctx, workspaceID, userID, sessionID)
+}
+
+func (f *FailoverStore) ValidateSession(ctx context.Context, workspaceID uuid.UUID, sessionID, userAgent, clientIP string) error {
+	if f.healthy.Load() {
+		err := f.primary.ValidateSession(ctx, workspaceID, sessionID, userAgent, clientIP)
+		// A device anomaly / not-found is a real auth decision, not a
+		// connectivity failure, so only an unavailable error fails over.
+		if !isUnavailable(err) {
+			return err
+		}
+		f.markDown("ValidateSession", err)
+	}
+	return f.fallback.ValidateSession(ctx, workspaceID, sessionID, userAgent, clientIP)
+}
+
 // Compile-time assertion that FailoverStore satisfies Store.
 var _ Store = (*FailoverStore)(nil)

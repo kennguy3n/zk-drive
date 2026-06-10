@@ -2,6 +2,7 @@ package session
 
 import (
 	"context"
+	"sort"
 	"sync"
 	"time"
 
@@ -21,6 +22,18 @@ type Store interface {
 	RevokeAllForUser(ctx context.Context, workspaceID, userID uuid.UUID) error
 	RevokeUser(ctx context.Context, workspaceID, userID uuid.UUID, at time.Time, ttl time.Duration) error
 	IsRevoked(ctx context.Context, workspaceID, userID uuid.UUID, issuedAt time.Time) (bool, error)
+
+	// Device-aware surface (6.2). Both backends implement it so the
+	// FailoverStore can route these calls to whichever is healthy and
+	// the auth handler / middleware keep working (with per-replica
+	// scope) through a Redis outage. Listing it here also lets the
+	// server depend on a single session.Store value for the
+	// SessionValidator / SessionRevoker consumer interfaces.
+	Create(ctx context.Context, rec SessionRecord, ttl time.Duration) error
+	GetRecord(ctx context.Context, workspaceID uuid.UUID, sessionID string) (SessionRecord, error)
+	ListForUser(ctx context.Context, workspaceID, userID uuid.UUID) ([]SessionRecord, error)
+	RevokeForUser(ctx context.Context, workspaceID, userID uuid.UUID, sessionID string) (bool, error)
+	ValidateSession(ctx context.Context, workspaceID uuid.UUID, sessionID, userAgent, clientIP string) error
 }
 
 // Compile-time assertions that both backends satisfy Store.
@@ -66,7 +79,16 @@ type MemoryStore struct {
 type memSession struct {
 	userID      uuid.UUID
 	workspaceID uuid.UUID
-	expiresAt   time.Time
+	// Device-aware columns (6.2). A session written by the legacy
+	// device-less Set path leaves userAgent/ip/deviceHash empty, in
+	// which case ValidateSession enforces existence but skips the
+	// fingerprint anomaly check — exactly as the Redis backend does.
+	userAgent  string
+	ip         string
+	deviceHash string
+	createdAt  time.Time
+	lastSeenAt time.Time
+	expiresAt  time.Time
 }
 
 type memUserIndex struct {
@@ -91,33 +113,200 @@ func NewMemoryStore() *MemoryStore {
 	}
 }
 
-// Set stores a session and registers it in the user's secondary index.
-func (m *MemoryStore) Set(_ context.Context, sessionID string, userID, workspaceID uuid.UUID, ttl time.Duration) error {
-	if sessionID == "" {
+// Set stores a device-less session and registers it in the user's
+// secondary index. Like the Redis backend it is a thin wrapper over
+// the device-aware Create so both stores share a single write path
+// (and identical index/TTL bookkeeping).
+func (m *MemoryStore) Set(ctx context.Context, sessionID string, userID, workspaceID uuid.UUID, ttl time.Duration) error {
+	now := m.now()
+	return m.Create(ctx, SessionRecord{
+		SessionID:   sessionID,
+		UserID:      userID,
+		WorkspaceID: workspaceID,
+		CreatedAt:   now,
+		LastSeenAt:  now,
+	}, ttl)
+}
+
+// Create stores (or refreshes) a device-aware session and registers it
+// in the user's secondary index, mirroring RedisSessionStore.Create so
+// a mid-request failover is transparent to callers. created_at is
+// preserved across a refresh that re-Creates the same session id (the
+// HSetNX semantics of the Redis path); the User-Agent is clamped to
+// maxUserAgentLen to match the Redis hash bound.
+func (m *MemoryStore) Create(_ context.Context, rec SessionRecord, ttl time.Duration) error {
+	if rec.SessionID == "" {
 		return errSessionIDRequired
 	}
 	now := m.now()
+	if rec.CreatedAt.IsZero() {
+		rec.CreatedAt = now
+	}
+	if rec.LastSeenAt.IsZero() {
+		rec.LastSeenAt = rec.CreatedAt
+	}
 	exp := now.Add(ttl)
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.sessions[sessionKey(workspaceID, sessionID)] = memSession{
-		userID:      userID,
-		workspaceID: workspaceID,
+	skey := sessionKey(rec.WorkspaceID, rec.SessionID)
+	createdAt := rec.CreatedAt
+	// Preserve the original "signed in" timestamp on a refresh that
+	// re-Creates an existing session, matching the Redis HSetNX seed.
+	if existing, ok := m.sessions[skey]; ok && !existing.createdAt.IsZero() {
+		createdAt = existing.createdAt
+	}
+	m.sessions[skey] = memSession{
+		userID:      rec.UserID,
+		workspaceID: rec.WorkspaceID,
+		userAgent:   clampString(rec.UserAgent, maxUserAgentLen),
+		ip:          rec.IP,
+		deviceHash:  rec.DeviceHash,
+		createdAt:   createdAt,
+		lastSeenAt:  rec.LastSeenAt,
 		expiresAt:   exp,
 	}
-	ukey := userSessionsKey(workspaceID, userID)
+	ukey := userSessionsKey(rec.WorkspaceID, rec.UserID)
 	idx := m.userIndex[ukey]
 	if idx == nil {
 		idx = &memUserIndex{sessionIDs: make(map[string]struct{})}
 		m.userIndex[ukey] = idx
 	}
-	idx.sessionIDs[sessionID] = struct{}{}
+	idx.sessionIDs[rec.SessionID] = struct{}{}
 	// Index TTL is max(current, ttl): the index must outlive its
 	// longest-lived member so RevokeAllForUser can still find it.
 	if exp.After(idx.expiresAt) {
 		idx.expiresAt = exp
 	}
 	return nil
+}
+
+// GetRecord returns the full device-aware record for a session, or
+// ErrSessionNotFound if it is unknown, revoked, or expired. It mirrors
+// RedisSessionStore.GetRecord and underpins ValidateSession.
+func (m *MemoryStore) GetRecord(_ context.Context, workspaceID uuid.UUID, sessionID string) (SessionRecord, error) {
+	if sessionID == "" {
+		return SessionRecord{}, ErrSessionNotFound
+	}
+	now := m.now()
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	key := sessionKey(workspaceID, sessionID)
+	s, ok := m.sessions[key]
+	if !ok || !s.expiresAt.After(now) {
+		if ok {
+			delete(m.sessions, key) // lazily reap the expired entry
+		}
+		return SessionRecord{}, ErrSessionNotFound
+	}
+	return memRecord(sessionID, s), nil
+}
+
+// ListForUser returns every active session for a user, newest activity
+// first, mirroring RedisSessionStore.ListForUser. Stale index entries
+// whose session has already expired are pruned so the index self-heals.
+func (m *MemoryStore) ListForUser(_ context.Context, workspaceID, userID uuid.UUID) ([]SessionRecord, error) {
+	now := m.now()
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	ukey := userSessionsKey(workspaceID, userID)
+	idx := m.userIndex[ukey]
+	if idx == nil {
+		return nil, nil
+	}
+	records := make([]SessionRecord, 0, len(idx.sessionIDs))
+	var stale []string
+	for sid := range idx.sessionIDs {
+		s, ok := m.sessions[sessionKey(workspaceID, sid)]
+		if !ok || !s.expiresAt.After(now) {
+			stale = append(stale, sid)
+			continue
+		}
+		records = append(records, memRecord(sid, s))
+	}
+	for _, sid := range stale {
+		delete(m.sessions, sessionKey(workspaceID, sid))
+		delete(idx.sessionIDs, sid)
+	}
+	if len(idx.sessionIDs) == 0 {
+		delete(m.userIndex, ukey)
+	}
+	sort.Slice(records, func(i, j int) bool {
+		return records[i].LastSeenAt.After(records[j].LastSeenAt)
+	})
+	return records, nil
+}
+
+// RevokeForUser deletes a single session only when it belongs to the
+// supplied user, returning whether one was actually deleted. It mirrors
+// RedisSessionStore.RevokeForUser so DELETE /api/auth/sessions/:id is
+// owner-scoped during a Redis outage too: a user can never revoke
+// another user's session by guessing its id.
+func (m *MemoryStore) RevokeForUser(_ context.Context, workspaceID, userID uuid.UUID, sessionID string) (bool, error) {
+	if sessionID == "" {
+		return false, nil
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	key := sessionKey(workspaceID, sessionID)
+	s, ok := m.sessions[key]
+	if !ok || s.userID != userID {
+		// Unknown id, or a session owned by someone else: treat as
+		// not-found rather than leaking its existence or revoking
+		// another user's device.
+		return false, nil
+	}
+	delete(m.sessions, key)
+	if idx := m.userIndex[userSessionsKey(workspaceID, userID)]; idx != nil {
+		delete(idx.sessionIDs, sessionID)
+		if len(idx.sessionIDs) == 0 {
+			delete(m.userIndex, userSessionsKey(workspaceID, userID))
+		}
+	}
+	return true, nil
+}
+
+// ValidateSession is the per-request session gate, mirroring
+// RedisSessionStore.ValidateSession: it enforces that the session still
+// exists and that the request's device fingerprint matches the one
+// captured at login (ErrSessionAnomaly on mismatch), advancing
+// last_seen at most once per lastSeenThrottle window. A session written
+// by the legacy device-less path has no stored fingerprint and skips
+// the anomaly check while still enforcing existence.
+func (m *MemoryStore) ValidateSession(_ context.Context, workspaceID uuid.UUID, sessionID, userAgent, clientIP string) error {
+	now := m.now().UTC()
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	key := sessionKey(workspaceID, sessionID)
+	s, ok := m.sessions[key]
+	if !ok || !s.expiresAt.After(now) {
+		if ok {
+			delete(m.sessions, key)
+		}
+		return ErrSessionNotFound
+	}
+	if s.deviceHash != "" && Fingerprint(userAgent, clientIP) != s.deviceHash {
+		return ErrSessionAnomaly
+	}
+	if now.Sub(s.lastSeenAt) >= lastSeenThrottle {
+		s.lastSeenAt = now
+		m.sessions[key] = s
+	}
+	return nil
+}
+
+// memRecord builds a SessionRecord view of a stored session. The caller
+// must hold m.mu.
+func memRecord(sessionID string, s memSession) SessionRecord {
+	return SessionRecord{
+		SessionID:   sessionID,
+		UserID:      s.userID,
+		WorkspaceID: s.workspaceID,
+		UserAgent:   s.userAgent,
+		IP:          s.ip,
+		DeviceHash:  s.deviceHash,
+		CreatedAt:   s.createdAt,
+		LastSeenAt:  s.lastSeenAt,
+	}
 }
 
 // Get returns the identity bound to a session, or ErrSessionNotFound

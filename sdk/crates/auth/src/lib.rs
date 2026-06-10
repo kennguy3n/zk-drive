@@ -13,7 +13,7 @@ mod token;
 
 pub use pkce::PkceChallenge;
 pub use store::{KeychainStore, MemoryStore, TokenStore};
-pub use token::{TokenSet, TokenSource};
+pub use token::{HttpRefresher, Refresher, TokenSet, TokenSource};
 
 use thiserror::Error;
 

@@ -158,6 +158,7 @@ func (h *Handler) WithResponseCache(c *responsecache.Cache) *Handler {
 // route group.
 func (h *Handler) RegisterRoutes(r chi.Router) {
 	r.Get("/audit-log", h.GetAuditLog)
+	r.Get("/audit-log/verify", h.VerifyAuditChain)
 	r.Get("/users", h.ListUsers)
 	r.Post("/users", h.InviteUser)
 	r.Delete("/users/{id}", h.DeactivateUser)
@@ -177,6 +178,8 @@ func (h *Handler) RegisterRoutes(r chi.Router) {
 	r.Patch("/workspace/mfa-policy", h.UpdateMFAPolicy)
 	r.Get("/workspace/search-language", h.GetSearchLanguage)
 	r.Put("/workspace/search-language", h.UpdateSearchLanguage)
+	r.Get("/workspace/default-encryption-mode", h.GetDefaultEncryptionMode)
+	r.Put("/workspace/default-encryption-mode", h.UpdateDefaultEncryptionMode)
 	r.Get("/ip-allowlist", h.ListIPAllowRules)
 	r.Post("/ip-allowlist", h.AddIPAllowRule)
 	r.Delete("/ip-allowlist/{id}", h.RemoveIPAllowRule)
@@ -366,6 +369,106 @@ func (h *Handler) UpdateSearchLanguage(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, searchLanguageResponse{
 		Language:  lang,
 		Supported: workspace.SupportedSearchLanguages(),
+	})
+}
+
+// defaultEncryptionModeRequest carries the new workspace default
+// encryption mode. A pointer distinguishes an absent key (→ 400) from
+// an explicit value, so a malformed body can't silently no-op.
+type defaultEncryptionModeRequest struct {
+	Mode *string `json:"mode"`
+}
+
+type defaultEncryptionModeResponse struct {
+	Mode      string   `json:"mode"`
+	Supported []string `json:"supported"`
+}
+
+// supportedEncryptionModes is the allow-list surfaced to the admin UI
+// so its picker doesn't ship a duplicate constant. Order is stable
+// (managed first) so the JSON response is byte-stable for clients that
+// cache or ETag it.
+var supportedEncryptionModes = []string{
+	workspace.EncryptionManagedEncrypted,
+	workspace.EncryptionStrictZK,
+}
+
+// GetDefaultEncryptionMode returns the workspace's current default
+// encryption mode for new root folders, alongside the supported set so
+// the admin UI can render the picker without a duplicated constant.
+func (h *Handler) GetDefaultEncryptionMode(w http.ResponseWriter, r *http.Request) {
+	if h.workspaces == nil {
+		middleware.RespondError(w, http.StatusNotImplemented, middleware.ErrCodeUnsupportedOp, "workspace service not wired")
+		return
+	}
+	workspaceID, ok := middleware.WorkspaceIDFromContext(r.Context())
+	if !ok {
+		middleware.RespondError(w, http.StatusInternalServerError, middleware.ErrCodeInternal, "workspace not in context")
+		return
+	}
+	mode, err := h.workspaces.GetDefaultEncryptionMode(r.Context(), workspaceID)
+	if err != nil {
+		middleware.RespondInternalError(w, r, "get default encryption mode", err)
+		return
+	}
+	writeJSON(w, http.StatusOK, defaultEncryptionModeResponse{
+		Mode:      mode,
+		Supported: supportedEncryptionModes,
+	})
+}
+
+// UpdateDefaultEncryptionMode flips workspaces.default_encryption_mode
+// for the caller's workspace. Validates against the allow-list
+// (workspace.IsValidDefaultEncryptionMode) and audits the transition
+// as a privacy-relevant policy change.
+func (h *Handler) UpdateDefaultEncryptionMode(w http.ResponseWriter, r *http.Request) {
+	if h.workspaces == nil {
+		middleware.RespondError(w, http.StatusNotImplemented, middleware.ErrCodeUnsupportedOp, "workspace service not wired")
+		return
+	}
+	workspaceID, ok := middleware.WorkspaceIDFromContext(r.Context())
+	if !ok {
+		middleware.RespondError(w, http.StatusInternalServerError, middleware.ErrCodeInternal, "workspace not in context")
+		return
+	}
+	actorID, _ := middleware.UserIDFromContext(r.Context())
+
+	var req defaultEncryptionModeRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		middleware.RespondError(w, http.StatusBadRequest, middleware.ErrCodeMalformedJSON, "invalid json body")
+		return
+	}
+	if req.Mode == nil {
+		middleware.RespondError(w, http.StatusBadRequest, middleware.ErrCodeMissingField, "mode is required")
+		return
+	}
+	mode := strings.ToLower(strings.TrimSpace(*req.Mode))
+	if !workspace.IsValidDefaultEncryptionMode(mode) {
+		middleware.RespondError(w, http.StatusBadRequest, middleware.ErrCodeBadRequest, "unsupported encryption mode")
+		return
+	}
+
+	prev, err := h.workspaces.SetDefaultEncryptionMode(r.Context(), workspaceID, mode)
+	if err != nil {
+		if errors.Is(err, workspace.ErrUnsupportedEncryptionMode) {
+			middleware.RespondError(w, http.StatusBadRequest, middleware.ErrCodeBadRequest, "unsupported encryption mode")
+			return
+		}
+		middleware.RespondInternalError(w, r, "update default encryption mode", err)
+		return
+	}
+
+	if h.audit != nil {
+		actor := actorID
+		h.audit.LogAction(r.Context(), workspaceID, &actor, audit.ActionWorkspaceDefaultEncryptionMode, "", nil, r, map[string]any{
+			"previous": prev,
+			"current":  mode,
+		})
+	}
+
+	writeJSON(w, http.StatusOK, defaultEncryptionModeResponse{
+		Mode:      mode,
+		Supported: supportedEncryptionModes,
 	})
 }
 
@@ -586,6 +689,34 @@ func (h *Handler) GetAuditLog(w http.ResponseWriter, r *http.Request) {
 		"limit":   limit,
 		"offset":  offset,
 	})
+}
+
+// VerifyAuditChain recomputes the tamper-evident HMAC hash chain (6.6)
+// over the current workspace's live audit_log rows and reports whether
+// it is intact and terminates at the separately-stored chain head.
+// This is the in-product surface for the "periodic external
+// verification" requirement: an admin (or a scheduled job hitting this
+// endpoint with an admin token) can confirm no audit row has been
+// inserted, deleted, or mutated out of band. A failed verification
+// returns HTTP 200 with valid=false and a machine-readable detail —
+// the request succeeded; it is the audit log that is compromised, so a
+// non-2xx would wrongly read as "verification could not run".
+func (h *Handler) VerifyAuditChain(w http.ResponseWriter, r *http.Request) {
+	if h.audit == nil {
+		middleware.RespondError(w, http.StatusNotImplemented, middleware.ErrCodeUnsupportedOp, "audit not configured")
+		return
+	}
+	workspaceID, ok := middleware.WorkspaceIDFromContext(r.Context())
+	if !ok {
+		middleware.RespondError(w, http.StatusUnauthorized, middleware.ErrCodeAuthMissingToken, "unauthenticated")
+		return
+	}
+	result, err := h.audit.VerifyChain(r.Context(), workspaceID)
+	if err != nil {
+		middleware.RespondInternalError(w, r, "verify audit chain", err)
+		return
+	}
+	writeJSON(w, http.StatusOK, result)
 }
 
 // User management ----------------------------------------------------

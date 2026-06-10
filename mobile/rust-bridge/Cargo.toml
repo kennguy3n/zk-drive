@@ -1,0 +1,65 @@
+[package]
+name = "zk-mobile-bridge"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.86"
+license = "Apache-2.0"
+repository = "https://github.com/kennguy3n/zk-drive"
+authors = ["ZK Drive Engineering <eng@uney.com>"]
+description = "UniFFI bridge exposing the ZK Drive Rust SDK (crypto, auth, api-client, sync-engine) to native iOS (Swift) and Android (Kotlin) apps."
+
+# Three crate types from one source of truth:
+#   * cdylib    — the .so loaded by Android via System.loadLibrary.
+#   * staticlib — the .a linked into the iOS app / XCFramework.
+#   * lib       — so `cargo test` can exercise the bridge in-process and
+#                 the `uniffi-bindgen` bin target can share the crate.
+[lib]
+name = "zk_mobile_bridge"
+crate-type = ["lib", "staticlib", "cdylib"]
+
+# Pinned helper binary so binding generation always runs the exact
+# uniffi version this crate is compiled against (the recommended
+# "library mode" workflow). build-{ios,android}.sh invoke it as
+# `cargo run --bin uniffi-bindgen -- generate ...`.
+[[bin]]
+name = "uniffi-bindgen"
+path = "src/bin/uniffi-bindgen.rs"
+
+[dependencies]
+# SDK crates being bridged. Path deps into the sibling Rust workspace
+# under sdk/; this crate is intentionally NOT a member of that
+# workspace so the mobile build (and its uniffi toolchain) stays out
+# of the headless desktop-SDK CI build.
+zk-sync-crypto = { path = "../../sdk/crates/crypto" }
+zk-sync-auth = { path = "../../sdk/crates/auth" }
+zk-sync-api = { path = "../../sdk/crates/api-client" }
+zk-sync-engine = { path = "../../sdk/crates/sync-engine" }
+
+uniffi = { version = "0.29", features = ["cli"] }
+
+tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "macros"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+async-trait = "0.1"
+url = "2"
+uuid = { version = "1", features = ["v4"] }
+chrono = { version = "0.4", features = ["serde"] }
+thiserror = "1"
+tracing = "0.1"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+
+[profile.release]
+# Small, fast mobile binaries. NOTE: we deliberately do NOT set
+# `strip` here. UniFFI binding generation runs in "library mode",
+# reading the FFI contract from the metadata symbols baked into the
+# compiled cdylib; `strip = "symbols"` removes exactly those symbols
+# from the .so and makes `uniffi-bindgen generate --library …` silently
+# emit nothing. The shipped artifacts are stripped explicitly during
+# packaging instead (build-android.sh runs llvm-strip on the jniLibs
+# after bindings are generated; the iOS staticlibs keep their symbols
+# for app linking and Xcode strips the final product on archive).
+lto = "thin"
+codegen-units = 1

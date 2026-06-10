@@ -1,6 +1,8 @@
 package config
 
 import (
+	"crypto/hkdf"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"os"
@@ -38,15 +40,36 @@ type Config struct {
 	DBMinConns        int32
 	DBMaxConnIdleTime time.Duration
 
+	// Read-replica connection-pool sizing. These tune the SECOND
+	// pgxpool that cmd/server opens against DATABASE_READ_URL (the
+	// replica feeding the ReadWriteSplitter). Sourced from
+	// DB_READ_MAX_CONNS and DB_READ_MIN_CONNS, clamped with the same
+	// bounds as the primary ([2, 200] / [0, DBReadMaxConns]).
+	//
+	// When their env vars are unset, each INHERITS the primary's
+	// resolved value (DBReadMaxConns = DBMaxConns, DBReadMinConns =
+	// DBMinConns), so deployments that don't set them keep the prior
+	// behaviour exactly (both pools sized identically). They exist so an
+	// operator who offloads reads to the replica can size the read pool
+	// larger — or a small replica smaller — than the primary WITHOUT
+	// changing code. The replica idle timeout intentionally reuses
+	// DBMaxConnIdleTime (no separate knob) to keep the surface minimal;
+	// idle reaping is uniform across both pools.
+	DBReadMaxConns int32
+	DBReadMinConns int32
+
 	// JWTAlgorithm selects the session-token signing algorithm:
-	//   - "auto" (default): sign with ES256 when an active asymmetric
+	//   - "auto": sign with ES256 when an active asymmetric
 	//     signing key exists in jwt_signing_keys, otherwise fall back
 	//     to HS256 using JWTSecret. Verification always accepts both.
 	//   - "ES256": force ES256 signing (still verifies HS256 tokens
 	//     issued before the cutover so existing sessions survive).
 	//   - "HS256": force HS256 signing (legacy behaviour).
-	// Parsed case-insensitively; unrecognised values fall back to
-	// "auto".
+	// Parsed case-insensitively. The default depends on Profile:
+	// "ES256" under the production profile (asymmetric-only signing
+	// is mandatory there), "auto" otherwise. An explicit JWT_ALGORITHM
+	// always wins over the profile default. Unrecognised values fall
+	// back to the profile default.
 	JWTAlgorithm string
 
 	// JWTKeyRefreshInterval is how often each replica re-reads the
@@ -116,6 +139,20 @@ type Config struct {
 	// not accidentally disable rate limiting entirely.
 	RateLimitPerUser      int
 	RateLimitPerWorkspace int
+
+	// Auth brute-force reputation — per-IP failed-sign-in tracking
+	// that escalates a cooldown after repeated failures (6.3). After
+	// AuthFailureThreshold failed attempts from one client IP the
+	// guard applies progressively longer cooldowns (1s, 5s, 30s,
+	// then a hard block of AuthBlockDuration) before the next attempt
+	// is accepted, and the reputation counter is retained for
+	// AuthReputationRetention. All three fall back to their defaults
+	// (declared alongside the middleware) when unset or <= 0. Sourced
+	// from AUTH_FAILURE_THRESHOLD, AUTH_BLOCK_DURATION,
+	// AUTH_REPUTATION_RETENTION.
+	AuthFailureThreshold    int
+	AuthBlockDuration       time.Duration
+	AuthReputationRetention time.Duration
 
 	// TrustedProxyDepth is the number of trusted reverse proxies in
 	// front of the server. It governs how the IP-allowlist
@@ -275,6 +312,27 @@ type Config struct {
 	// `'self' data: blob:`). Thumbnails / previews served from
 	// the storage gateway origin go here.
 	SecurityHeadersCSPImgExtra []string
+	// SecurityHeadersCSPNonce enables a per-request CSP nonce
+	// (6.5): a fresh `'nonce-<base64>'` source is added to
+	// `script-src` on every response and surfaced to the SPA via
+	// the `<meta name="csp-nonce">` tag in index.html, so an
+	// inline script the app legitimately needs can be allow-listed
+	// by nonce WITHOUT reopening `'unsafe-inline'`. Defaults to
+	// true (the policy already ships nonce-clean — there are no
+	// inline scripts — so enabling it is purely additive and
+	// future-proofs against a dependency that injects one). Set
+	// SECURITY_HEADERS_CSP_NONCE=false to suppress the per-request
+	// nonce (e.g. when a downstream CDN strips the meta tag).
+	SecurityHeadersCSPNonce bool
+	// SecurityHeadersExpectCT emits the Expect-CT header (6.5).
+	// Defaults to true under the production profile and false
+	// elsewhere; also suppressed when HSTS is disabled (Expect-CT
+	// is only meaningful over HTTPS). Sourced from
+	// SECURITY_HEADERS_EXPECT_CT when set (overrides the profile
+	// default). Expect-CT is superseded by browsers enforcing
+	// Certificate Transparency by default, but it is still honoured
+	// by deployed clients and is an explicit hardening requirement.
+	SecurityHeadersExpectCT bool
 
 	// WorkerMetricsAddr is the listen address for the worker
 	// binary's dedicated /metrics HTTP server. Default ":9091"
@@ -407,6 +465,27 @@ type Config struct {
 	// writes multiple JSONL.gz objects with distinct UUID
 	// suffixes — the restore tool joins them transparently.
 	AuditArchiveMaxRowsPerBatch int
+	// AuditHMACKey is the 32-byte key used to HMAC the audit-log
+	// hash chain (6.6): each audit_log row carries an HMAC over the
+	// previous row's hash, so any insertion / deletion / mutation
+	// is detectable by recomputing the chain — even by a DB admin,
+	// because the key never lives in the database. It is derived at
+	// load time, NEVER read from the DB:
+	//   - When AUDIT_HMAC_KEY is set, it is HKDF-expanded to 32
+	//     bytes (the raw env value is treated as input keying
+	//     material; any length is accepted). Operators SHOULD set a
+	//     dedicated key (ideally from a KMS / sealed secret) so the
+	//     audit chain stays verifiable across a JWT_SECRET rotation
+	//     and so a leaked JWT_SECRET cannot forge audit history.
+	//   - When unset, the key is HKDF-derived from JWT_SECRET (a
+	//     required, env-held secret) under a distinct info label so
+	//     a fresh install is self-operating (NoOps) with no extra
+	//     configuration while keeping the key out of the database.
+	// AuditHMACKeySource records which of the two paths produced the
+	// key so the server can log a one-line recommendation at
+	// startup when running on the derived fallback under production.
+	AuditHMACKey       []byte
+	AuditHMACKeySource string
 
 	// PerformanceCacheEnabled toggles the Redis-backed read-through
 	// cache in front of permission resolution (and, in future
@@ -468,6 +547,47 @@ type Config struct {
 	// reports reach them.
 	VAPIDSubscriber string
 
+	// Native mobile push (APNs for iOS, FCM for Android). Each provider is
+	// independently optional: when its credentials are unset that platform
+	// is simply disabled (the publisher skips it and
+	// /api/push/register-device responds 501 for that platform), so the
+	// rest of the notification path keeps working. Provider construction
+	// (reading the key files, parsing the keys) happens in
+	// cmd/server/main.go where IO errors are already logged; Config only
+	// carries the raw env inputs.
+
+	// FCMServiceAccountJSON is the inline Google service-account key JSON
+	// used to authenticate to the FCM HTTP v1 API. Set via
+	// FCM_SERVICE_ACCOUNT_JSON. Mutually exclusive with the file form;
+	// the inline form takes precedence when both are set.
+	FCMServiceAccountJSON string
+	// FCMServiceAccountFile is a path to the service-account key JSON,
+	// for deployments that mount the key as a file. Set via
+	// FCM_SERVICE_ACCOUNT_FILE.
+	FCMServiceAccountFile string
+
+	// APNsAuthKey is the inline contents of the APNs .p8 token-auth signing
+	// key (PEM). Set via APNS_AUTH_KEY. Mutually exclusive with the file
+	// form; inline takes precedence when both are set.
+	APNsAuthKey string
+	// APNsAuthKeyFile is a path to the .p8 key file. Set via
+	// APNS_AUTH_KEY_FILE.
+	APNsAuthKeyFile string
+	// APNsKeyID is the 10-char Key ID of the .p8 key (Apple Developer →
+	// Keys). Set via APNS_KEY_ID.
+	APNsKeyID string
+	// APNsTeamID is the 10-char Apple Developer Team ID. Set via
+	// APNS_TEAM_ID.
+	APNsTeamID string
+	// APNsTopic is the iOS app's bundle identifier (the APNs topic). Set
+	// via APNS_TOPIC.
+	APNsTopic string
+	// APNsProduction selects the production APNs host (api.push.apple.com)
+	// over the sandbox host (api.sandbox.push.apple.com). Set via
+	// APNS_PRODUCTION; defaults to false (sandbox) so a misconfiguration
+	// cannot accidentally target production devices.
+	APNsProduction bool
+
 	// OnlyOfficeURL is the base URL of the ONLYOFFICE Document Server
 	// (e.g. "https://onlyoffice.example.com"). When empty,
 	// collaborative office-document editing is disabled: the
@@ -506,6 +626,26 @@ type Config struct {
 	// cap or the server refuses to start (a budget below one document
 	// would shed every save).
 	OnlyOfficeSaveMemoryBudgetBytes int64
+
+	// OnlyOfficeStreamSaveMaxConcurrent optionally caps how many save
+	// callbacks may stream to object storage concurrently. The streaming
+	// save path uses constant memory (it relays the Document Server body
+	// straight into a presigned PUT), so it is intentionally NOT bounded
+	// by the memory-derived OnlyOfficeMaxConcurrentSaves gate that
+	// protects the buffered fallback. That makes concurrent streaming
+	// saves effectively unlimited — exactly the WS5 goal — but a burst of
+	// editors closing documents at once can still translate into many
+	// simultaneous PUTs to the storage gateway and GETs to the Document
+	// Server cache. This knob lets an operator put a high-watermark cap
+	// on that concurrency without reintroducing a memory budget: a save
+	// beyond the cap is shed with a retryable 503 (the Document Server
+	// keeps the bytes and retries), never blocked.
+	//
+	// Sourced from ONLYOFFICE_STREAM_SAVE_MAX_CONCURRENT. 0 (the default,
+	// also the value for an unset/negative/malformed var) means
+	// UNLIMITED — preserving the prior behaviour exactly. A positive
+	// value sizes the streaming-save semaphore.
+	OnlyOfficeStreamSaveMaxConcurrent int
 
 	// SuspensionFailClosed flips the workspace-suspension enforcement
 	// posture from fail-OPEN (default) to fail-CLOSED. Suspension is an
@@ -563,6 +703,23 @@ func (c *Config) WebPushEnabled() bool {
 	return c.VAPIDPublicKey != "" && c.VAPIDPrivateKey != ""
 }
 
+// FCMConfigured reports whether an FCM service-account key is supplied
+// (inline or file). The server attempts to build the FCM provider only
+// when true; a parse failure still disables FCM (logged) without
+// aborting startup.
+func (c *Config) FCMConfigured() bool {
+	return c.FCMServiceAccountJSON != "" || c.FCMServiceAccountFile != ""
+}
+
+// APNsConfigured reports whether the full APNs token-auth credential set
+// is supplied: a signing key (inline or file) plus key id, team id and
+// topic. A partial set is treated as unconfigured so APNs stays disabled
+// rather than starting with a guaranteed-to-fail provider.
+func (c *Config) APNsConfigured() bool {
+	hasKey := c.APNsAuthKey != "" || c.APNsAuthKeyFile != ""
+	return hasKey && c.APNsKeyID != "" && c.APNsTeamID != "" && c.APNsTopic != ""
+}
+
 // Load reads configuration from environment variables and returns a populated
 // Config. It returns an error if any required variable is missing or empty.
 //
@@ -616,15 +773,29 @@ func buildConfigFromEnv() *Config {
 	// Read DB_MAX_CONNS once: DBMinConns is clamped against the same
 	// resolved maximum, so re-reading the env var would be redundant.
 	dbMaxConns := dbMaxConnsFromEnv()
+	dbMinConns := dbMinConnsFromEnv(dbMaxConns)
+	// Read-replica pool sizing inherits the primary's resolved values
+	// when its env vars are unset (read max from primary max, read min
+	// from primary min), so an unconfigured deployment sizes both pools
+	// identically — exactly the prior behaviour. read-min is finally
+	// clamped against the RESOLVED read-max so an inherited primary min
+	// can never exceed a smaller, explicitly-set read max.
+	dbReadMaxConns := dbReadMaxConnsFromEnv(dbMaxConns)
+	dbReadMinConns := dbReadMinConnsFromEnv(dbMinConns, dbReadMaxConns)
 	platformAdmins, invalidPlatformAdmins := platformAdminUserIDsFromEnv()
+	profile := normaliseProfile(os.Getenv("ZKDRIVE_PROFILE"))
+	auditKey, auditKeySource := deriveAuditHMACKey(os.Getenv("AUDIT_HMAC_KEY"), os.Getenv("JWT_SECRET"))
 	return &Config{
 		DatabaseURL:                            os.Getenv("DATABASE_URL"),
 		DatabaseReadURL:                        os.Getenv("DATABASE_READ_URL"),
 		JWTSecret:                              os.Getenv("JWT_SECRET"),
+		Profile:                                string(profile),
 		DBMaxConns:                             dbMaxConns,
-		DBMinConns:                             dbMinConnsFromEnv(dbMaxConns),
+		DBMinConns:                             dbMinConns,
 		DBMaxConnIdleTime:                      parseDurationDefault(os.Getenv("DB_MAX_CONN_IDLE_TIME"), defaultDBMaxConnIdleTime),
-		JWTAlgorithm:                           normaliseJWTAlgorithm(os.Getenv("JWT_ALGORITHM")),
+		DBReadMaxConns:                         dbReadMaxConns,
+		DBReadMinConns:                         dbReadMinConns,
+		JWTAlgorithm:                           jwtAlgorithmFromEnv(os.Getenv("JWT_ALGORITHM"), profile),
 		JWTKeyRefreshInterval:                  jwtKeyRefreshIntervalFromEnv(),
 		PlatformAdminUserIDs:                   platformAdmins,
 		PlatformAdminUserIDsInvalid:            invalidPlatformAdmins,
@@ -650,6 +821,9 @@ func buildConfigFromEnv() *Config {
 		IAMCoreCallbackURL:                     strings.TrimSpace(os.Getenv("IAM_CORE_CALLBACK_URL")),
 		RateLimitPerUser:                       parseIntDefault(os.Getenv("RATE_LIMIT_PER_USER"), 0),
 		RateLimitPerWorkspace:                  parseIntDefault(os.Getenv("RATE_LIMIT_PER_WORKSPACE"), 0),
+		AuthFailureThreshold:                   parseIntDefault(os.Getenv("AUTH_FAILURE_THRESHOLD"), 0),
+		AuthBlockDuration:                      parseDurationDefault(os.Getenv("AUTH_BLOCK_DURATION"), 0),
+		AuthReputationRetention:                parseDurationDefault(os.Getenv("AUTH_REPUTATION_RETENTION"), 0),
 		TrustedProxyDepth:                      parseNonNegativeIntDefault(os.Getenv("TRUSTED_PROXY_DEPTH"), defaultTrustedProxyDepth),
 		PreviewBudgetPerWorkspaceHour:          parseIntDefault(os.Getenv("PREVIEW_BUDGET_PER_WORKSPACE_HOUR"), 100),
 		PreviewPriorityWorkers:                 parseIntDefault(os.Getenv("PREVIEW_PRIORITY_WORKERS"), 6),
@@ -676,6 +850,10 @@ func buildConfigFromEnv() *Config {
 		SecurityHeadersCSPReportURI:    os.Getenv("SECURITY_HEADERS_CSP_REPORT_URI"),
 		SecurityHeadersCSPConnectExtra: parseCSVList(os.Getenv("SECURITY_HEADERS_CSP_CONNECT_EXTRA")),
 		SecurityHeadersCSPImgExtra:     parseCSVList(os.Getenv("SECURITY_HEADERS_CSP_IMG_EXTRA")),
+		SecurityHeadersCSPNonce:        parseBoolDefault(os.Getenv("SECURITY_HEADERS_CSP_NONCE"), true),
+		// Expect-CT defaults on under the production profile, off
+		// otherwise; an explicit env value wins either way.
+		SecurityHeadersExpectCT: parseBoolDefault(os.Getenv("SECURITY_HEADERS_EXPECT_CT"), profile == ProfileProduction),
 
 		// WorkerMetricsAddr uses LookupEnv (not getEnvDefault) so the
 		// documented contract holds: unset → default :9091; explicitly
@@ -709,6 +887,8 @@ func buildConfigFromEnv() *Config {
 		AuditArchivePrefix:          normaliseArchivePrefix(getEnvDefault("AUDIT_LOG_ARCHIVE_PREFIX", "audit-archive/")),
 		AuditArchiveBucket:          strings.TrimSpace(os.Getenv("AUDIT_LOG_ARCHIVE_BUCKET")),
 		AuditArchiveMaxRowsPerBatch: clampAuditMaxRowsPerBatch(parseIntDefault(os.Getenv("AUDIT_LOG_ARCHIVE_MAX_ROWS_PER_BATCH"), defaultAuditArchiveMaxRowsPerBatch)),
+		AuditHMACKey:                auditKey,
+		AuditHMACKeySource:          auditKeySource,
 
 		PerformanceCacheEnabled: parseBoolDefault(os.Getenv("PERFORMANCE_CACHE_ENABLED"), defaultPerformanceCacheEnabled),
 		PerformanceCacheTTL:     clampPerformanceCacheTTL(parseDurationDefault(os.Getenv("PERFORMANCE_CACHE_TTL"), defaultPerformanceCacheTTL)),
@@ -717,15 +897,27 @@ func buildConfigFromEnv() *Config {
 		VAPIDPrivateKey: strings.TrimSpace(os.Getenv("VAPID_PRIVATE_KEY")),
 		VAPIDSubscriber: strings.TrimSpace(os.Getenv("VAPID_SUBSCRIBER")),
 
+		FCMServiceAccountJSON: os.Getenv("FCM_SERVICE_ACCOUNT_JSON"),
+		FCMServiceAccountFile: strings.TrimSpace(os.Getenv("FCM_SERVICE_ACCOUNT_FILE")),
+
+		APNsAuthKey:     os.Getenv("APNS_AUTH_KEY"),
+		APNsAuthKeyFile: strings.TrimSpace(os.Getenv("APNS_AUTH_KEY_FILE")),
+		APNsKeyID:       strings.TrimSpace(os.Getenv("APNS_KEY_ID")),
+		APNsTeamID:      strings.TrimSpace(os.Getenv("APNS_TEAM_ID")),
+		APNsTopic:       strings.TrimSpace(os.Getenv("APNS_TOPIC")),
+		APNsProduction:  parseBoolDefault(os.Getenv("APNS_PRODUCTION"), false),
+
 		OnlyOfficeURL:                   strings.TrimSpace(os.Getenv("ONLYOFFICE_URL")),
 		OnlyOfficeSecret:                os.Getenv("ONLYOFFICE_SECRET"),
 		OnlyOfficeAllowInsecure:         parseBoolDefault(os.Getenv("ONLYOFFICE_ALLOW_INSECURE"), false),
 		OnlyOfficeMaxDocumentBytes:      onlyOfficeBytesFromEnv("ONLYOFFICE_MAX_DOCUMENT_MB", defaultOnlyOfficeMaxDocumentMB),
 		OnlyOfficeSaveMemoryBudgetBytes: onlyOfficeBytesFromEnv("ONLYOFFICE_SAVE_MEMORY_BUDGET_MB", defaultOnlyOfficeSaveMemoryBudgetMB),
+		// Default 0 = unlimited (preserves the streaming path's
+		// unbounded-concurrency behaviour); negative/malformed also → 0.
+		OnlyOfficeStreamSaveMaxConcurrent: parseNonNegativeIntDefault(os.Getenv("ONLYOFFICE_STREAM_SAVE_MAX_CONCURRENT"), 0),
 
 		SuspensionFailClosed: parseBoolDefault(os.Getenv("SUSPENSION_FAIL_CLOSED"), false),
 
-		Profile:     string(normaliseProfile(os.Getenv("ZKDRIVE_PROFILE"))),
 		AutoMigrate: parseBoolDefault(os.Getenv("ZKDRIVE_AUTO_MIGRATE"), false),
 	}
 }
@@ -1090,17 +1282,116 @@ func dbMinConnsFromEnv(maxConns int32) int32 {
 	return int32(n)
 }
 
-// normaliseJWTAlgorithm canonicalises the JWT_ALGORITHM env var to
-// one of "auto", "ES256", or "HS256". Parsing is case-insensitive and
-// whitespace-tolerant; an empty or unrecognised value falls back to
-// "auto" so a typo can't silently disable asymmetric signing.
-func normaliseJWTAlgorithm(s string) string {
-	switch strings.ToUpper(strings.TrimSpace(s)) {
+// IsProduction reports whether the server is running under the
+// hardened production profile (ZKDRIVE_PROFILE=production). The profile
+// machinery itself — the Profile type, normaliseProfile, the profile
+// env-var defaults, and validateProfile — lives in profiles.go.
+func (c *Config) IsProduction() bool {
+	return Profile(c.Profile) == ProfileProduction
+}
+
+// Audit HMAC key derivation constants (6.6). The key length is the
+// SHA-256 output size; the info labels are domain separators so the
+// explicit-key and JWT_SECRET-derived keys are distinct even if an
+// operator (mis)uses the same secret material for both.
+const (
+	auditHMACKeyLen            = sha256.Size
+	auditHMACInfoExplicit      = "zk-drive/audit-log-hmac/explicit/v1"
+	auditHMACInfoDerived       = "zk-drive/audit-log-hmac/derived-from-jwt-secret/v1"
+	AuditHMACKeySourceExplicit = "explicit"
+	AuditHMACKeySourceDerived  = "derived"
+)
+
+// deriveAuditHMACKey produces the 32-byte audit-chain HMAC key and
+// reports its provenance. An explicit AUDIT_HMAC_KEY (any length) is
+// HKDF-expanded; otherwise the key is HKDF-derived from JWT_SECRET
+// under a distinct info label. The key is intentionally derived in
+// process from env-held material and never persisted, so a DB admin
+// cannot forge the chain. HKDF is keyed by SHA-256; the only error it
+// can return is for an absurd output length, which is impossible with
+// the fixed 32-byte constant — but we fall back to a plain SHA-256 of
+// (label || secret) defensively rather than returning a nil key.
+func deriveAuditHMACKey(explicit, jwtSecret string) (key []byte, source string) {
+	explicit = strings.TrimSpace(explicit)
+	if explicit != "" {
+		return hkdfExpand([]byte(explicit), auditHMACInfoExplicit), AuditHMACKeySourceExplicit
+	}
+	return hkdfExpand([]byte(jwtSecret), auditHMACInfoDerived), AuditHMACKeySourceDerived
+}
+
+func hkdfExpand(secret []byte, info string) []byte {
+	k, err := hkdf.Key(sha256.New, secret, nil, info, auditHMACKeyLen)
+	if err != nil {
+		sum := sha256.Sum256(append([]byte(info+"\x00"), secret...))
+		return sum[:]
+	}
+	return k
+}
+
+// dbReadMaxConnsFromEnv resolves the read-replica pool's MaxConns.
+// DB_READ_MAX_CONNS is unset for the common case (one shared sizing),
+// so an empty value INHERITS primaryMax — keeping both pools identical
+// and preserving the pre-knob behaviour. A set value is clamped to the
+// same [minDBMaxConns, maxDBMaxConns] bounds as the primary so a typo
+// can neither starve the read pool nor exhaust the replica's
+// max_connections. Note the inherit branch returns primaryMax verbatim
+// (already clamped by dbMaxConnsFromEnv), not the raw default, so the
+// two pools stay in lockstep when only DB_MAX_CONNS is tuned.
+func dbReadMaxConnsFromEnv(primaryMax int32) int32 {
+	s := strings.TrimSpace(os.Getenv("DB_READ_MAX_CONNS"))
+	if s == "" {
+		return primaryMax
+	}
+	n := parseIntDefault(s, int(primaryMax))
+	if n < minDBMaxConns {
+		n = minDBMaxConns
+	}
+	if n > maxDBMaxConns {
+		n = maxDBMaxConns
+	}
+	return int32(n)
+}
+
+// dbReadMinConnsFromEnv resolves the read-replica pool's MinConns.
+// DB_READ_MIN_CONNS unset INHERITS primaryMin; a set value honours an
+// explicit 0 (lazy pool) and ignores a negative (default retained),
+// mirroring dbMinConnsFromEnv. The result is finally clamped to
+// readMax so MinConns can never exceed the read pool's MaxConns —
+// critical because an inherited primaryMin could otherwise exceed a
+// smaller, explicitly-set DB_READ_MAX_CONNS and make pgxpool reject the
+// config at NewWithConfig time.
+func dbReadMinConnsFromEnv(primaryMin, readMax int32) int32 {
+	n := primaryMin
+	if s := strings.TrimSpace(os.Getenv("DB_READ_MIN_CONNS")); s != "" {
+		if v, err := strconv.Atoi(s); err == nil && v >= 0 {
+			n = int32(v)
+		}
+	}
+	if n > readMax {
+		return readMax
+	}
+	return n
+}
+
+// jwtAlgorithmFromEnv resolves the effective JWT signing algorithm
+// from an explicit JWT_ALGORITHM value and the active profile. An
+// explicit, recognised value always wins. When JWT_ALGORITHM is unset
+// (or unrecognised) the default is profile-dependent: "ES256" under
+// the production profile (asymmetric-only signing is mandatory there)
+// and "auto" otherwise.
+func jwtAlgorithmFromEnv(raw string, profile Profile) string {
+	switch strings.ToUpper(strings.TrimSpace(raw)) {
 	case "ES256":
 		return "ES256"
 	case "HS256":
 		return "HS256"
+	case "AUTO":
+		return "auto"
 	default:
+		// Unset or unrecognised: fall back to the profile default.
+		if profile == ProfileProduction {
+			return "ES256"
+		}
 		return "auto"
 	}
 }

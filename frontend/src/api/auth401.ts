@@ -50,6 +50,12 @@ export const SESSION_DEAD_401_CODES = new Set<string>([
   // authenticate. Fail closed: the user re-auths so we never
   // accept a token whose revocation status we couldn't verify.
   "AUTH_REVOCATION_CHECK_FAILED",
+  // Session device fingerprint (User-Agent + IP network) no longer
+  // matches the one captured at login — the token was replayed from
+  // a different browser or network (6.2 anomaly detection). The
+  // session must be re-established, so clear it and route to /login;
+  // the en.json copy already tells the user to sign in again.
+  "AUTH_SESSION_ANOMALY",
 ]);
 
 // NON_SESSION_401_CODES — the JWT is fine (or absent intentionally

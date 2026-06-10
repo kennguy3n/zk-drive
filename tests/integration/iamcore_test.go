@@ -267,7 +267,12 @@ func setupIAMCoreEnv(t *testing.T) *iamCoreEnv {
 	fileSvc := file.NewService(file.NewPostgresRepository(pool))
 	permissionSvc := permission.NewService(permission.NewPostgresRepository(pool))
 	activitySvc := activity.NewService(activity.NewPostgresRepository(pool))
-	auditSvc := audit.NewService(audit.NewPostgresRepository(pool))
+	auditRepo, err := audit.NewPostgresRepository(pool, integrationAuditHMACKey)
+	if err != nil {
+		pool.Close()
+		t.Fatalf("audit repo: %v", err)
+	}
+	auditSvc := audit.NewService(auditRepo)
 	storageClient := buildTestStorageClient(t)
 
 	client, err := iamcore.NewClient(ctx, iamcore.Config{

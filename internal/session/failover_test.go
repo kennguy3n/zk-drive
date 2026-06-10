@@ -83,6 +83,36 @@ func (f *flakyStore) IsRevoked(ctx context.Context, ws, uid uuid.UUID, issuedAt 
 	}
 	return f.backing.IsRevoked(ctx, ws, uid, issuedAt)
 }
+func (f *flakyStore) Create(ctx context.Context, rec SessionRecord, ttl time.Duration) error {
+	if err := f.gate(); err != nil {
+		return err
+	}
+	return f.backing.Create(ctx, rec, ttl)
+}
+func (f *flakyStore) GetRecord(ctx context.Context, ws uuid.UUID, sid string) (SessionRecord, error) {
+	if err := f.gate(); err != nil {
+		return SessionRecord{}, err
+	}
+	return f.backing.GetRecord(ctx, ws, sid)
+}
+func (f *flakyStore) ListForUser(ctx context.Context, ws, uid uuid.UUID) ([]SessionRecord, error) {
+	if err := f.gate(); err != nil {
+		return nil, err
+	}
+	return f.backing.ListForUser(ctx, ws, uid)
+}
+func (f *flakyStore) RevokeForUser(ctx context.Context, ws, uid uuid.UUID, sid string) (bool, error) {
+	if err := f.gate(); err != nil {
+		return false, err
+	}
+	return f.backing.RevokeForUser(ctx, ws, uid, sid)
+}
+func (f *flakyStore) ValidateSession(ctx context.Context, ws uuid.UUID, sid, userAgent, clientIP string) error {
+	if err := f.gate(); err != nil {
+		return err
+	}
+	return f.backing.ValidateSession(ctx, ws, sid, userAgent, clientIP)
+}
 
 func quietLogger() *slog.Logger {
 	return slog.New(slog.NewTextHandler(io.Discard, nil))

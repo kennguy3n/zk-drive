@@ -79,6 +79,16 @@ because in-memory rate limiting / session revocation and an embedded
 broker are not safe across replicas. Migrations run out-of-band via the
 `migrate` Job, so `ZKDRIVE_AUTO_MIGRATE` stays off. All workers enabled.
 
+JWT signing is **asymmetric-only** under this profile (6.1): the default
+`JWT_ALGORITHM` becomes `ES256`, the server **auto-generates an ES256
+signing key at startup** if none exists yet (so first login works with
+no manual rotation step), and HS256 tokens are **rejected on
+verification** — a leaked `JWT_SECRET` can neither sign nor forge a
+session the server will accept. `Expect-CT` is emitted for TLS
+deployments. An explicit `JWT_ALGORITHM` always overrides this default;
+`compact`/`development` keep the HS256 `auto` fallback for
+single-binary and local-dev simplicity.
+
 ### `development` — local laptop
 
 The same dependency-free in-memory behaviour as `compact` but without
@@ -235,12 +245,29 @@ DATABASE_URL=postgres://app@primary:5432/zkdrive?sslmode=require
 DATABASE_READ_URL=postgres://app@replica:5432/zkdrive?sslmode=require
 ```
 
-| Variable            | Default        | Purpose                                                                 |
-| ------------------- | -------------- | ----------------------------------------------------------------------- |
-| `DATABASE_READ_URL` | _(unset)_      | Read-replica DSN. Unset (or equal to `DATABASE_URL`) → reads use the primary. |
+| Variable             | Default                   | Purpose                                                                                                  |
+| -------------------- | ------------------------- | -------------------------------------------------------------------------------------------------------- |
+| `DATABASE_READ_URL`  | _(unset)_                 | Read-replica DSN. Unset (or equal to `DATABASE_URL`) → reads use the primary.                            |
+| `DB_READ_MAX_CONNS`  | _(inherits `DB_MAX_CONNS`)_ | Maximum open connections in the **read-replica** pool. Clamped to `[2, 200]`. Unset → same as the primary. |
+| `DB_READ_MIN_CONNS`  | _(inherits `DB_MIN_CONNS`)_ | Minimum idle connections kept warm in the read pool. Clamped to `[0, DB_READ_MAX_CONNS]`. Unset → same as the primary. |
+
+**Independent read-pool sizing.** Reads are usually offloaded
+asymmetrically — the replica fields far more `SELECT` traffic than the
+primary fields writes — so `DB_READ_MAX_CONNS` / `DB_READ_MIN_CONNS` let
+you size the read pool **independently** of the primary. When unset they
+inherit the primary's resolved values, so an existing deployment that
+sets neither keeps both pools sized identically (no behaviour change).
+Typical use: a beefier replica (or PgBouncer read pool) gets a larger
+`DB_READ_MAX_CONNS`, while the primary keeps a tighter `DB_MAX_CONNS`.
+The read pool reuses `DB_MAX_CONN_IDLE_TIME` for idle reaping (no
+separate knob). Remember the per-process math from
+[Sizing the pool across replicas](#sizing-the-pool-across-replicas-read-this-before-scaling-out)
+applies to the read pool too: peak replica backends ≈
+`server_replicas × DB_READ_MAX_CONNS`.
 
 **Routing.** When set and distinct from `DATABASE_URL`, the server opens
-a second `pgxpool` (sized by the same `DB_MAX_CONNS` / `DB_MIN_CONNS` /
+a second `pgxpool` (sized by `DB_READ_MAX_CONNS` / `DB_READ_MIN_CONNS`,
+each inheriting the matching primary knob when unset, and sharing
 `DB_MAX_CONN_IDLE_TIME`) and wires the read-heavy repositories (folder
 tree walks, file listings, version/tag lookups) through a
 `ReadWriteSplitter` (`internal/database/splitter.go`). The splitter
@@ -279,7 +306,7 @@ topology, example configs, and HPA sizing math.
 
 | Variable                   | Default | Purpose                                                                                                                                            |
 | -------------------------- | ------- | -------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `JWT_ALGORITHM`            | `auto`  | Session-token signing algorithm. `auto` signs with ES256 when an active asymmetric key exists in `jwt_signing_keys`, else HS256 (`JWT_SECRET`). `ES256` forces asymmetric signing — if no active key has been rotated in yet, token signing **fails** rather than silently downgrading to HS256 (run `POST /api/platform/jwt/rotate` first). `HS256` forces legacy symmetric signing. Verification always accepts both, so rotating to ES256 never invalidates existing HS256 sessions. |
+| `JWT_ALGORITHM`            | `auto` (`ES256` under the `production` profile)  | Session-token signing algorithm. `auto` signs with ES256 when an active asymmetric key exists in `jwt_signing_keys`, else HS256 (`JWT_SECRET`). `ES256` forces asymmetric signing — if no active key has been rotated in yet, token signing **fails** rather than silently downgrading to HS256 (run `POST /api/platform/jwt/rotate` first, or use the `production` profile which auto-generates one at startup). `HS256` forces legacy symmetric signing. Under non-production profiles verification accepts both, so rotating to ES256 never invalidates existing HS256 sessions; under the `production` profile HS256 tokens are **rejected** on verification (asymmetric-only). The default is profile-dependent — see [Deployment profile](#deployment-profile). |
 | `JWT_KEY_REFRESH_INTERVAL` | `60s`   | How often each replica re-reads `jwt_signing_keys` so a key rotation performed on one replica propagates to all others without a restart. Go duration string, clamped to `[10s, 1h]`. A non-positive value (e.g. `0`) disables the background refresh — appropriate for single-replica deployments. |
 | `PLATFORM_ADMIN_USER_IDS`  | _(empty)_ | **Legacy / no longer used.** Earlier releases gated a per-workspace admin JWT-rotation endpoint behind this allowlist. Rotation has since moved to the platform control plane (`POST /api/platform/jwt/rotate`, gated by the `keys:manage` platform-API-key capability) and the admin endpoint was removed, so this var no longer gates anything. The server logs a startup warning if it is still set; drop it from your config. |
 
@@ -349,6 +376,43 @@ re-encryption runbook.
 | ------------------------- | ------- | ---------------------------------------------------------------------------------------------------------------------- |
 | `RATE_LIMIT_PER_USER`     | `0`     | Requests per user per minute. `0` disables. When `REDIS_URL` is set the limiter is Redis-backed and survives restarts.  |
 | `RATE_LIMIT_PER_WORKSPACE`| `0`     | Requests per workspace per minute. Same semantics as the per-user limiter, just a different scope.                      |
+
+Every rate-limited response (allowed **and** throttled) carries the
+standard telemetry headers so clients can self-pace:
+
+- `X-RateLimit-Limit` — the per-window request budget.
+- `X-RateLimit-Remaining` — requests left in the current window (`0` on a 429).
+- `X-RateLimit-Reset` — unix second at which the window resets.
+
+A `429` additionally carries `Retry-After` (seconds).
+
+### Auth brute-force reputation
+
+Independent of the per-user/-workspace limiter, `POST /api/auth/login`
+is protected by a **per-client-IP** brute-force guard. It tracks failed
+sign-ins per IP and, once the failure threshold is crossed, escalates a
+cooldown the IP must wait out before its next attempt is accepted: `1s`,
+then `5s`, then `30s`, then a hard block. Attempts made inside a cooldown
+are rejected with `429 AUTH_TOO_MANY_ATTEMPTS` + `Retry-After` **before**
+the password is checked, and a *successful* sign-in clears the IP's
+reputation so a legitimate user is never punished for earlier typos.
+
+The escalation is a cooldown, **not** a connection tarpit, so it adds no
+held goroutines/sockets (which an attacker could weaponise). The client
+IP is resolved with `TRUSTED_PROXY_DEPTH`, so a spoofed `X-Forwarded-For`
+cannot dodge the guard. With `REDIS_URL` set the reputation is shared
+across replicas (and retained for the window below); otherwise a
+per-replica in-memory fallback still provides best-effort protection.
+
+Because the key is the client IP, a large NAT (a whole office behind one
+egress IP) shares one reputation — which is why the hard block defaults
+to a short 15 minutes rather than the full retention window.
+
+| Variable                   | Default | Purpose                                                                                                                                            |
+| -------------------------- | ------- | -------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `AUTH_FAILURE_THRESHOLD`   | `5`     | Failed sign-ins tolerated per client IP before cooldowns begin. The first `threshold-1` failures are free (human typos); the threshold-th arms the first cooldown. `<= 0` falls back to the default. |
+| `AUTH_BLOCK_DURATION`      | `15m`   | Hard-block cooldown applied once the progressive `1s/5s/30s` delays are exhausted. Kept short so a shared-NAT office is not locked out for hours. Accepts a Go duration (e.g. `30m`). `<= 0` falls back to the default. |
+| `AUTH_REPUTATION_RETENTION`| `24h`   | How long an IP's failure counter survives with no further failures (the Redis TTL). Accepts a Go duration. `<= 0` falls back to the default.        |
 
 ## Preview pipeline
 
@@ -486,6 +550,62 @@ next login). The browser fetches the public key from
 `GET /api/push/vapid-public-key`; subscriptions are registered via
 `POST /api/push/subscribe` and removed via `DELETE /api/push/subscribe`.
 
+## Native mobile push — APNs & FCM (optional)
+
+The native iOS and Android apps receive the same notifications via their
+platform push services: **APNs** (Apple Push Notification service) for
+iOS and **FCM** (Firebase Cloud Messaging HTTP v1) for Android. Each
+provider is configured independently and is **fail-soft** — an
+unconfigured or mis-configured provider is skipped at startup (logged,
+never fatal) and simply disables that platform; the WebSocket + Web Push
+paths are unaffected. See [`docs/MOBILE_BRIDGE.md`](./MOBILE_BRIDGE.md#3-server-side-native-push)
+for the endpoint and delivery contract.
+
+Devices register their token via `POST /api/push/register-device` (and
+remove it via the `DELETE` variant). When **neither** provider is
+configured, that endpoint responds `501 Not Implemented` for every
+platform; when only one is configured, the other platform gets `501`.
+
+### FCM (Android)
+
+Authenticated with a Google **service-account** key (OAuth2 RS256 JWT →
+short-lived access token, cached and refreshed automatically). Supply the
+key inline **or** as a file path; inline takes precedence.
+
+| Variable | Default | Purpose |
+| -------- | ------- | ------- |
+| `FCM_SERVICE_ACCOUNT_JSON` | _empty_ | Inline service-account key JSON. |
+| `FCM_SERVICE_ACCOUNT_FILE` | _empty_ | Path to the service-account key JSON file. |
+
+The `project_id` and `client_email` are read from the key itself; the
+sends target `https://fcm.googleapis.com/v1/projects/{project_id}/messages:send`.
+FCM is enabled when either variable is non-empty.
+
+### APNs (iOS)
+
+Authenticated with a **token-based** `.p8` signing key (ES256 provider
+JWT, cached and rotated every ~40 min). The full credential set is
+required — a partial set is treated as unconfigured so APNs stays
+disabled rather than failing at send time. Supply the key inline **or**
+as a file path; inline takes precedence.
+
+| Variable | Default | Purpose |
+| -------- | ------- | ------- |
+| `APNS_AUTH_KEY` | _empty_ | Inline `.p8` token-auth signing key (PEM). |
+| `APNS_AUTH_KEY_FILE` | _empty_ | Path to the `.p8` key file. |
+| `APNS_KEY_ID` | _empty_ | 10-char Key ID of the `.p8` key (Apple Developer → Keys). |
+| `APNS_TEAM_ID` | _empty_ | 10-char Apple Developer Team ID. |
+| `APNS_TOPIC` | _empty_ | The iOS app's bundle identifier (APNs topic). |
+| `APNS_PRODUCTION` | `false` | `true` ⇒ `api.push.apple.com`; `false` ⇒ `api.sandbox.push.apple.com`. Defaults to sandbox so a misconfiguration never silently fails against production. |
+
+APNs is enabled only when a key (inline or file) **and** `APNS_KEY_ID`,
+`APNS_TEAM_ID`, and `APNS_TOPIC` are all set.
+
+A device token that a provider reports as permanently dead (APNs `410
+Unregistered` / `BadDeviceToken` / `DeviceTokenNotForTopic`, FCM
+`UNREGISTERED` / `SENDER_ID_MISMATCH`) is pruned automatically, exactly
+like a `410 Gone` Web Push subscription.
+
 ## Collaborative office editing (ONLYOFFICE)
 
 Lets users open office documents (`.docx`, `.xlsx`, `.pptx`, `.odt`,
@@ -506,6 +626,7 @@ key and must not see plaintext.
 | `ONLYOFFICE_SECRET` | _empty_ | Shared JWT secret matching the Document Server's `JWT_SECRET` (`JWT_ENABLED=true`). ZK Drive signs the editor config with it (HS256) and verifies the inbound save callback against it. When empty, the config is emitted unsigned and the callback skips verification — acceptable only for trusted local development. |
 | `ONLYOFFICE_MAX_DOCUMENT_MB` | `100` | Maximum size (MiB) of a single edited document the save callback will accept before rejecting it. Generous — real office documents are 1–50 MiB. Enforced on both the streaming path (against the advertised `Content-Length`) and the buffered fallback. |
 | `ONLYOFFICE_SAVE_MEMORY_BUDGET_MB` | `256` | Memory (MiB) budget for the **buffered fallback** save path. The fallback-concurrency cap is **derived** as `budget ÷ per-document`, so its worst case (`concurrency × per-document`) never exceeds the budget. Must be `>=` `ONLYOFFICE_MAX_DOCUMENT_MB` or the server refuses to start. With streaming saves (the normal path) this budget is rarely exercised. |
+| `ONLYOFFICE_STREAM_SAVE_MAX_CONCURRENT` | `0` (unlimited) | Optional high-watermark cap on **concurrent streaming saves**. `0` (the default) leaves the streaming path unbounded (the WS5 design — streaming uses constant memory). A positive value caps concurrent gateway PUTs; saves beyond the cap are shed with a retryable `503` (the Document Server keeps the bytes and retries), never blocked. Use it to protect the storage gateway from a thundering herd of editors closing documents at once. |
 
 **Save path: streaming, with a bounded buffered fallback.** The save
 callback relays the edited document from the Document Server straight to
@@ -530,7 +651,7 @@ production API container in
 Excess **buffered-fallback** callbacks are shed with a retryable `503` —
 the Document Server keeps the edited bytes in its cache and retries, so a
 storm degrades gracefully instead of OOMing. Streaming saves are never
-shed.
+shed **unless** you opt into `ONLYOFFICE_STREAM_SAVE_MAX_CONCURRENT`.
 
 - **Throughput** is no longer gated for the streaming path; raising
   `ONLYOFFICE_SAVE_MEMORY_BUDGET_MB` only widens the rarely-used buffered
@@ -539,6 +660,18 @@ shed.
 - **Smaller documents** (lowering `ONLYOFFICE_MAX_DOCUMENT_MB`) raises
   fallback concurrency at the same budget, but rejects larger legitimate
   documents — keep it above your largest expected office file.
+- **Capping gateway PUTs** (optional): the streaming path issues one
+  PUT to the object-storage gateway per save, and a burst of editors
+  closing documents simultaneously can spike concurrent PUTs. This is
+  bounded in practice by the number of open editing sessions, but if you
+  want a hard ceiling — e.g. to protect a shared gateway — set
+  `ONLYOFFICE_STREAM_SAVE_MAX_CONCURRENT` to the maximum concurrent saves
+  the gateway should see. Saves beyond it are shed with a retryable `503`
+  (same graceful-degradation contract as the buffered fallback), so the
+  Document Server retries shortly after. Leave it at `0` to keep the
+  default unbounded behaviour. This is a concurrency cap only — it does
+  **not** buffer documents, so it carries no memory cost regardless of
+  the value.
 
 The callback URL the Document Server posts to is composed from
 [`PUBLIC_URL`](#transactional-email-guest-invite-delivery): `${PUBLIC_URL}/api/files/{id}/editor-callback?workspace_id={ws}`.
@@ -605,6 +738,29 @@ rollouts.
 | `SECURITY_HEADERS_CSP_REPORT_ONLY`    | `false` | When `true`, the policy emits under `Content-Security-Policy-Report-Only` instead of enforcing — browsers report violations but do not block. Use during the first rollout, then flip to `false`. |
 | `SECURITY_HEADERS_CSP_REPORT_URI`     | _empty_ | When set, appended as `report-uri <value>` to the CSP value. Browsers POST violation reports there.                                                                      |
 | `SECURITY_HEADERS_DISABLE_HSTS`       | `false` | When `true`, skips `Strict-Transport-Security`. Use for local HTTP development only; keep `false` in production.                                                          |
+| `SECURITY_HEADERS_CSP_NONCE`          | `true`  | When `true`, a fresh per-request `'nonce-<base64>'` source is added to CSP `script-src` and the same nonce is injected into the `<meta name="csp-nonce">` tag of the served `index.html`. The policy already ships nonce-clean (no inline scripts), so this is purely additive: a future inline script can be allow-listed by nonce without reopening `'unsafe-inline'`. Read it in the SPA via `document.querySelector('meta[name=csp-nonce]').content`. |
+| `SECURITY_HEADERS_EXPECT_CT`          | _profile_ | Emits `Expect-CT: max-age=86400, enforce`. Defaults to **on** under the `production` profile and **off** otherwise; an explicit value wins. Suppressed automatically when HSTS is disabled (Expect-CT is HTTPS-only). Superseded by browsers enforcing Certificate Transparency by default, but still honoured by deployed clients. |
+
+### CSP nonce & inline scripts (6.5)
+
+`script-src` is nonce-clean: it carries **no** `'unsafe-inline'` and
+**no** `'unsafe-eval'`. Vite emits external, content-hashed bundles
+that load under `'self'`, so the SPA needs neither. When
+`SECURITY_HEADERS_CSP_NONCE` is on, the server stamps a cryptographically
+random 128-bit nonce into both the `script-src` directive and the
+`index.html` meta tag on **every navigation request** (the document is
+served `no-store` precisely so the nonce is never cached / reused). A
+component or dependency that must inject an inline `<script>`/`<style>`
+should copy that nonce onto the element so it satisfies the policy —
+this keeps the door to `'unsafe-inline'` permanently shut.
+
+`style-src` retains `'unsafe-inline'` because React's `style={}` prop
+compiles to inline `style=` attributes (governed by `style-src-attr`,
+which inherits `style-src`); removing it is a separate frontend
+workstream (refactor every inline style to a class). Camera, microphone
+and geolocation are denied outright via `Permissions-Policy`
+(`camera=()`, `microphone=()`, `geolocation=()`) — stricter than the
+"restrict to self" baseline, since the drive app uses none of them.
 
 ## Transactional email (guest-invite delivery)
 
@@ -702,6 +858,52 @@ Typical compliance windows:
 
 The full archive design and restore workflow are in
 [`OPERATIONS.md`](OPERATIONS.md#audit-log-cold-archival).
+
+## Audit-log tamper-evidence (hash chain)
+
+Every `audit_log` row carries an HMAC-SHA256 over the previous row's
+hash (a per-workspace hash chain). Any out-of-band insert, delete, or
+mutation — **including by a database administrator** — breaks the chain
+and is detected by recomputing it. The chain head (`seq`, `head_hash`)
+is stored separately in `audit_log_chain_head` so verification has an
+authenticated terminus that a tamperer would also have to forge.
+
+The HMAC key is **never stored in the database**; it is derived in
+process at startup from an environment-held secret, so a DB-only
+compromise cannot forge history.
+
+| Variable         | Default                | Purpose                                                                                                                                                                                                 |
+| ---------------- | ---------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `AUDIT_HMAC_KEY` | _(derive from `JWT_SECRET`)_ | Input keying material for the audit-chain HMAC key. Any length; HKDF-SHA256 expands it to 32 bytes. When unset, the key is HKDF-derived from `JWT_SECRET` under a distinct info label so a fresh install is self-operating (NoOps). |
+
+**Production recommendation:** set a dedicated `AUDIT_HMAC_KEY` (ideally
+from a KMS / sealed secret). This keeps the audit chain verifiable
+across a `JWT_SECRET` rotation and ensures a leaked `JWT_SECRET` cannot
+be used to forge audit history. When running on the derived fallback
+under `ZKDRIVE_PROFILE=production`, the server logs a one-line
+recommendation at startup.
+
+Verification is exposed to admins at
+`GET /api/admin/audit-log/verify` (see [`ARCHITECTURE.md`](ARCHITECTURE.md)). It
+returns `200` with a JSON body `{valid, rows_checked, head_seq,
+first_invalid_seq, detail}`; `valid:false` means the request succeeded
+but the log is compromised. A scheduled job can poll this endpoint with
+an admin token for the "periodic external verification" control.
+Verification tolerates cold-archived rows: it trusts the oldest
+surviving row's `prev_hash` as the boundary and still requires the live
+tail to terminate at the stored chain head.
+
+**Monitoring:** the live-endpoint verification is one half of the
+control; the other half is the periodic *external* snapshot of
+`(head_seq, head_hash)`. The endpoint reports `valid:true` for an empty
+live set (`rows_checked == 0`) because that is the legitimate shape after
+full cold-tier archival, and the endpoint alone cannot re-derive a head
+from no rows. To close that gap, alert when the response shows
+`head_seq > 0 && rows_checked == 0` *without* a corresponding archival
+run — that shape is also what a privileged DB operator would leave behind
+after deleting every live row and resetting the head, and only the
+retained external snapshot (a non-zero `head_seq`/`head_hash` that no
+longer matches a reset head) distinguishes tampering from archival.
 
 ## Worker runtime
 

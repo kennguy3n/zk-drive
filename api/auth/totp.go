@@ -280,7 +280,7 @@ func (h *TOTPHandler) Verify(w http.ResponseWriter, r *http.Request) {
 		"factor": factorLabel(usedRecovery),
 	})
 
-	writeToken(w, r, h.h.tokenSigner(), u.ID, u.WorkspaceID, u.Role)
+	h.h.issueSession(w, r, u.ID, u.WorkspaceID, u.Role, "")
 }
 
 func factorLabel(usedRecovery bool) string {

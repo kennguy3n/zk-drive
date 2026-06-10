@@ -18,6 +18,7 @@ import (
 	"github.com/kennguy3n/zk-drive/api/middleware"
 	"github.com/kennguy3n/zk-drive/internal/audit"
 	cryptopkg "github.com/kennguy3n/zk-drive/internal/crypto"
+	"github.com/kennguy3n/zk-drive/internal/session"
 	"github.com/kennguy3n/zk-drive/internal/totp"
 	"github.com/kennguy3n/zk-drive/internal/user"
 	"github.com/kennguy3n/zk-drive/internal/workspace"
@@ -46,6 +47,18 @@ type PostSignupHook func(ctx context.Context, workspaceID uuid.UUID, workspaceNa
 type SessionRevoker interface {
 	middleware.SessionChecker
 	RevokeUser(ctx context.Context, workspaceID, userID uuid.UUID, at time.Time, ttl time.Duration) error
+	// Create records a device-aware session at login / refresh so the
+	// token's sid claim is backed by a server-side record (6.2).
+	Create(ctx context.Context, rec session.SessionRecord, ttl time.Duration) error
+	// ListForUser powers GET /api/auth/sessions.
+	ListForUser(ctx context.Context, workspaceID, userID uuid.UUID) ([]session.SessionRecord, error)
+	// RevokeForUser powers DELETE /api/auth/sessions/:id; it only
+	// revokes a session owned by the caller and reports whether one
+	// was deleted.
+	RevokeForUser(ctx context.Context, workspaceID, userID uuid.UUID, sessionID string) (bool, error)
+	// RevokeAllForUser clears every session record for a user so the
+	// "active sessions" list is empty after a full logout.
+	RevokeAllForUser(ctx context.Context, workspaceID, userID uuid.UUID) error
 }
 
 // Handler serves authentication HTTP endpoints.
@@ -62,6 +75,14 @@ type Handler struct {
 	postSignup PostSignupHook
 	sessions   SessionRevoker
 	totp       *totp.Service
+	// trustedProxyDepth is the number of trusted reverse proxies in
+	// front of the API, used to resolve the real client IP for the
+	// session device fingerprint. It MUST match the depth passed to
+	// AuthMiddleware so the fingerprint computed at login equals the
+	// one recomputed on every request — otherwise the anomaly check
+	// would reject every authenticated request. Defaults to 0
+	// (RemoteAddr), matching the middleware default.
+	trustedProxyDepth int
 }
 
 // NewHandler constructs a Handler from the user and workspace services. The
@@ -129,6 +150,32 @@ func (h *Handler) WithSessionRevoker(s SessionRevoker) *Handler {
 	return h
 }
 
+// WithTrustedProxyDepth sets how many trusted reverse proxies sit in
+// front of the API so the login flow resolves the same client IP that
+// AuthMiddleware sees on subsequent requests. This MUST be wired with
+// the same value passed to AuthMiddleware (cfg.TrustedProxyDepth);
+// otherwise the device fingerprint captured at login would never match
+// the one recomputed per request and the anomaly check would reject
+// every request. Returns the handler for chaining.
+func (h *Handler) WithTrustedProxyDepth(depth int) *Handler {
+	if depth < 0 {
+		depth = 0
+	}
+	h.trustedProxyDepth = depth
+	return h
+}
+
+// clientIP resolves the request's client IP for the session device
+// fingerprint, honouring the configured trusted-proxy depth. Returns
+// the empty string when no IP can be determined so the fingerprint
+// still computes deterministically.
+func (h *Handler) clientIP(r *http.Request) string {
+	if ip := middleware.ClientIPFromRequest(r, h.trustedProxyDepth); ip != nil {
+		return ip.String()
+	}
+	return ""
+}
+
 // WithTOTP wires the TOTP service so Login can fork into the MFA
 // challenge path when the user has 2FA enrolled, and so the
 // /auth/totp/* endpoints can drive enrollment / verify / disable.
@@ -170,7 +217,7 @@ func (h *Handler) JWTSecret() string { return h.jwtSecret }
 // body. Exposed so other handlers (e.g. OAuth callbacks) can complete
 // the same login flow without duplicating JWT issuance.
 func (h *Handler) WriteToken(w http.ResponseWriter, r *http.Request, userID, workspaceID uuid.UUID, role string) {
-	writeToken(w, r, h.tokenSigner(), userID, workspaceID, role)
+	h.issueSession(w, r, userID, workspaceID, role, "")
 }
 
 type signupRequest struct {
@@ -244,7 +291,7 @@ func (h *Handler) Signup(w http.ResponseWriter, r *http.Request) {
 		h.postSignup(r.Context(), ws.ID, ws.Name)
 	}
 
-	writeToken(w, r, h.tokenSigner(), u.ID, ws.ID, u.Role)
+	h.issueSession(w, r, u.ID, ws.ID, u.Role, "")
 }
 
 // runSignupTx performs the workspace+user+owner writes in a single
@@ -391,7 +438,7 @@ func (h *Handler) Login(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 
-	writeToken(w, r, h.tokenSigner(), u.ID, u.WorkspaceID, u.Role)
+	h.issueSession(w, r, u.ID, u.WorkspaceID, u.Role, "")
 }
 
 // maybeIssueMFAChallenge runs after a successful password verify
@@ -510,6 +557,14 @@ func (h *Handler) Logout(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(http.StatusNoContent)
 			return
 		}
+		// Best-effort: drop the device-aware session records too so
+		// the user's "active sessions" list is empty after a full
+		// logout. The per-user cutoff above is what actually revokes
+		// the tokens; this just keeps the list consistent. A failure
+		// here is non-fatal — the records self-expire at TokenTTL.
+		cleanupCtx, cancelCleanup := context.WithTimeout(r.Context(), middleware.SessionCheckTimeout)
+		_ = h.sessions.RevokeAllForUser(cleanupCtx, claims.WorkspaceID, claims.UserID)
+		cancelCleanup()
 	}
 	h.logAudit(r.Context(), claims.WorkspaceID, &actor, audit.ActionLogout, r, nil)
 	w.WriteHeader(http.StatusNoContent)
@@ -572,11 +627,57 @@ func (h *Handler) Refresh(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	writeToken(w, r, h.tokenSigner(), claims.UserID, claims.WorkspaceID, claims.Role)
+	// Reuse the existing session id so refresh extends the same device
+	// session in place (preserving its created_at) rather than
+	// spawning a duplicate entry in the user's "active sessions" list.
+	h.issueSession(w, r, claims.UserID, claims.WorkspaceID, claims.Role, claims.SessionID)
 }
 
-func writeToken(w http.ResponseWriter, r *http.Request, signer middleware.Signer, userID, workspaceID uuid.UUID, role string) {
-	token, exp, err := middleware.IssueTokenWith(signer, userID, workspaceID, role, middleware.TokenTTL)
+// issueSession mints a session JWT and writes it as the HTTP response.
+// When a session store is wired it first records a device-aware
+// session (User-Agent, IP, fingerprint) so the token's sid claim is
+// backed by a server-side record that AuthMiddleware enforces for
+// per-session revocation and anomaly detection (6.2).
+//
+// sessionID is empty for a fresh login / signup (a new id is minted)
+// and set to the existing id on refresh so the same device session is
+// extended in place rather than spawning a duplicate — Create seeds
+// created_at via HSetNX, preserving the original "signed in" time
+// while advancing last_seen and the TTL.
+//
+// When no store is wired (single-process dev, test harnesses that
+// don't exercise sessions) the token is issued without a sid so the
+// middleware's per-session checks stay inert and behaviour matches the
+// pre-6.2 stateless flow.
+func (h *Handler) issueSession(w http.ResponseWriter, r *http.Request, userID, workspaceID uuid.UUID, role, sessionID string) {
+	signer := h.tokenSigner()
+	if h.sessions != nil {
+		if sessionID == "" {
+			sessionID = uuid.NewString()
+		}
+		ua := r.UserAgent()
+		ip := h.clientIP(r)
+		now := time.Now().UTC()
+		rec := session.SessionRecord{
+			SessionID:   sessionID,
+			UserID:      userID,
+			WorkspaceID: workspaceID,
+			UserAgent:   ua,
+			IP:          ip,
+			DeviceHash:  session.Fingerprint(ua, ip),
+			CreatedAt:   now,
+			LastSeenAt:  now,
+		}
+		if err := h.sessions.Create(r.Context(), rec, middleware.TokenTTL); err != nil {
+			middleware.RespondInternalError(w, r, "create session", err)
+			return
+		}
+	} else {
+		// No store: do not bind a sid the middleware can't validate.
+		sessionID = ""
+	}
+
+	token, exp, err := middleware.IssueSessionTokenWith(signer, userID, workspaceID, role, sessionID, middleware.TokenTTL)
 	if err != nil {
 		middleware.RespondInternalError(w, r, "issue token", err)
 		return

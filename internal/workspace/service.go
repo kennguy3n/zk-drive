@@ -116,3 +116,37 @@ func (s *Service) GetSearchLanguage(ctx context.Context, workspaceID uuid.UUID) 
 	}
 	return lang, nil
 }
+
+// ErrUnsupportedEncryptionMode is returned when the caller asks to
+// set a workspace default encryption mode that is not one of the two
+// recognised values.
+var ErrUnsupportedEncryptionMode = errors.New("workspace: unsupported encryption mode")
+
+// SetDefaultEncryptionMode updates workspaces.default_encryption_mode
+// after validating mode against IsValidDefaultEncryptionMode. Returns
+// the previous value (for the audit log) and
+// ErrUnsupportedEncryptionMode when mode is not recognised.
+func (s *Service) SetDefaultEncryptionMode(ctx context.Context, workspaceID uuid.UUID, mode string) (string, error) {
+	if !IsValidDefaultEncryptionMode(mode) {
+		return "", ErrUnsupportedEncryptionMode
+	}
+	return s.repo.SetDefaultEncryptionMode(ctx, workspaceID, mode)
+}
+
+// GetDefaultEncryptionMode returns the workspace's configured default
+// encryption mode for new root folders. Centralised here so callers
+// (folder-create flow, admin GET endpoint) don't reach through to the
+// repository. Falls back to DefaultEncryptionMode when the column is
+// somehow empty — defence in depth, matching GetSearchLanguage. Uses
+// the single-column GetDefaultEncryptionModeByID helper since the
+// folder-create path calls it per new root folder.
+func (s *Service) GetDefaultEncryptionMode(ctx context.Context, workspaceID uuid.UUID) (string, error) {
+	mode, err := s.repo.GetDefaultEncryptionModeByID(ctx, workspaceID)
+	if err != nil {
+		return "", err
+	}
+	if mode == "" {
+		return DefaultEncryptionMode, nil
+	}
+	return mode, nil
+}

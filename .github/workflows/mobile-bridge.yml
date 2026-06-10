@@ -1,0 +1,119 @@
+name: Mobile Bridge
+
+# Builds the UniFFI mobile bridge (mobile/rust-bridge) for every target
+# architecture and generates the Swift + Kotlin bindings from the single
+# proc-macro source of truth.
+#
+# This workflow is SCAFFOLDING for the follow-up native iOS / Android app
+# workstreams — it is intentionally NOT a merge gate. It runs only when
+# the bridge, the SDK crates it bridges, or this workflow change.
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'mobile/**'
+      - 'sdk/**'
+      - '.github/workflows/mobile-bridge.yml'
+  pull_request:
+    paths:
+      - 'mobile/**'
+      - 'sdk/**'
+      - '.github/workflows/mobile-bridge.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    working-directory: mobile/rust-bridge
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Android + cross-platform binding generation. Runs on Linux: the Android
+  # targets cross-compile here, and UniFFI's library-mode bindgen produces
+  # BOTH the Kotlin and Swift sources from the compiled cdylib (binding
+  # generation is host-agnostic — only the iOS *link* step needs macOS).
+  # ---------------------------------------------------------------------------
+  android:
+    name: Android jniLibs + Kotlin/Swift bindings
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain + Android targets
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android,armv7-linux-androideabi,x86_64-linux-android
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: mobile/rust-bridge
+
+      - name: Set up Android NDK
+        id: ndk
+        uses: nttld/setup-ndk@v1
+        with:
+          ndk-version: r26d
+
+      - name: Install cargo-ndk
+        run: cargo install cargo-ndk --locked
+
+      # The bridge is exercised in-process (crypto round-trips, token
+      # manager, sync-engine catalogue) on the host before cross-compiling.
+      - name: Test bridge (host)
+        run: cargo test --release
+
+      - name: Build Android jniLibs + Kotlin bindings
+        env:
+          ANDROID_NDK_HOME: ${{ steps.ndk.outputs.ndk-path }}
+        run: ./build-android.sh
+
+      # Swift bindings come from the SAME crate metadata; emit them on
+      # Linux too so the iOS job only has to do the macOS-only link.
+      - name: Generate Swift bindings
+        run: |
+          cargo run --quiet --bin uniffi-bindgen -- generate \
+            --library target/aarch64-linux-android/release/libzk_mobile_bridge.so \
+            --language swift \
+            --out-dir build/swift-bindings
+
+      - name: Upload Android artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-bridge
+          path: |
+            mobile/rust-bridge/build/android/jniLibs/**
+            mobile/rust-bridge/build/android/kotlin/**
+            mobile/rust-bridge/build/swift-bindings/**
+          if-no-files-found: error
+
+  # ---------------------------------------------------------------------------
+  # iOS XCFramework. Requires macOS/Xcode for the lipo + create-xcframework
+  # link step, so it runs on a macOS runner.
+  # ---------------------------------------------------------------------------
+  ios:
+    name: iOS XCFramework
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain + iOS targets
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-ios,aarch64-apple-ios-sim,x86_64-apple-ios
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: mobile/rust-bridge
+
+      - name: Build XCFramework + Swift bindings
+        run: ./build-ios.sh
+
+      - name: Upload iOS artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ios-bridge
+          path: |
+            mobile/rust-bridge/build/ios/**
+          if-no-files-found: error

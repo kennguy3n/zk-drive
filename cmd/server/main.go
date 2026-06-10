@@ -6,11 +6,13 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -258,15 +260,23 @@ func run() error {
 	// unreachable rather than silently serving every read off the
 	// primary.
 	if rd := strings.TrimSpace(cfg.DatabaseReadURL); rd != "" && rd != strings.TrimSpace(cfg.DatabaseURL) {
+		// Read pool sizes via the DB_READ_* knobs, which inherit the
+		// primary's values when unset (so an un-tuned deployment opens
+		// an identically-sized pool, as before). Idle reaping reuses the
+		// shared DBMaxConnIdleTime.
 		readPool, err = database.ConnectWithPool(ctx, rd, database.PoolConfig{
-			MaxConns:        cfg.DBMaxConns,
-			MinConns:        cfg.DBMinConns,
+			MaxConns:        cfg.DBReadMaxConns,
+			MinConns:        cfg.DBReadMinConns,
 			MaxConnIdleTime: cfg.DBMaxConnIdleTime,
 		})
 		if err != nil {
 			return fmt.Errorf("connect read replica: %w", err)
 		}
-		slog.Info("postgres read replica connected; SELECT traffic routed to replica", "read_url_set", true)
+		slog.Info("postgres read replica connected; SELECT traffic routed to replica",
+			"read_url_set", true,
+			"read_max_conns", cfg.DBReadMaxConns,
+			"read_min_conns", cfg.DBReadMinConns,
+		)
 	}
 	// dbRouter is a Querier: a *ReadWriteSplitter when a replica is
 	// configured, otherwise a thin wrapper that routes every read back to
@@ -280,7 +290,11 @@ func run() error {
 	wsSvc := workspace.NewService(wsRepo)
 
 	folderRepo := folder.NewPostgresRepository(dbRouter)
-	folderSvc := folder.NewService(folderRepo)
+	// Wire the workspace default-encryption-mode resolver so new root
+	// folders adopt the workspace's default_encryption_mode (Strict ZK
+	// as a default option, 6.4). Reads route through dbRouter to the
+	// replica (WS5) like the other data-plane repos.
+	folderSvc := folder.NewService(folderRepo, folder.WithWorkspaceDefaults(wsSvc))
 
 	fileRepo := file.NewPostgresRepository(dbRouter)
 	fileSvc := file.NewService(fileRepo)
@@ -381,22 +395,50 @@ func run() error {
 	// Session-token signing. The KeyManager signs/verifies with ES256
 	// when an active asymmetric key exists in jwt_signing_keys
 	// (migration 034), and otherwise falls back to HS256 using
-	// cfg.JWTSecret. Verification always accepts both, so rotating to
-	// ES256 (POST /api/platform/jwt/rotate) never invalidates sessions
-	// issued before the cutover. JWT_ALGORITHM forces a mode; the
-	// default ("auto") picks ES256-when-available.
+	// cfg.JWTSecret. In the non-production profiles verification
+	// accepts both, so rotating to ES256 (POST /api/platform/jwt/rotate)
+	// never invalidates sessions issued before the cutover.
+	// JWT_ALGORITHM forces a mode; its default is profile-dependent
+	// ("ES256" in production, "auto" otherwise).
+	// Under the production profile, JWT signing is asymmetric-only:
+	// the KeyManager refuses to verify HS256 tokens (a leaked
+	// JWT_SECRET must not be usable to forge a session) and
+	// cfg.JWTAlgorithm defaults to ES256 (refuses to mint HS256).
+	var keyManagerOpts []cryptopkg.KeyManagerOption
+	if cfg.IsProduction() {
+		keyManagerOpts = append(keyManagerOpts, cryptopkg.WithHMACVerificationDisabled())
+	}
 	jwtKeyManager, err := cryptopkg.NewKeyManager(
 		ctx,
 		cryptopkg.NewPostgresSigningKeyStore(pool),
 		credentialCodec,
 		cfg.JWTSecret,
 		cfg.JWTAlgorithm,
+		keyManagerOpts...,
 	)
 	if err != nil {
 		cancel()
 		return fmt.Errorf("jwt key manager: %w", err)
 	}
-	slog.Info("jwt signing", "algorithm", jwtKeyManager.Algorithm())
+
+	// Production NoOps guarantee: an SME admin should never have to
+	// run POST /api/platform/jwt/rotate by hand before the first
+	// login works. When the production profile is active and no
+	// active ES256 key exists yet (Algorithm() reports HS256 only
+	// when no asymmetric signing key is loaded), generate one now and
+	// audit the event. RotateKey persists the encrypted private key
+	// and reloads the in-memory set, so the manager signs ES256 from
+	// the very first issued token.
+	if cfg.IsProduction() && jwtKeyManager.Algorithm() != cryptopkg.AlgES256 {
+		rec, rerr := jwtKeyManager.RotateKey(ctx)
+		if rerr != nil {
+			cancel()
+			return fmt.Errorf("auto-generate production ES256 signing key: %w", rerr)
+		}
+		slog.Info("auto-generated ES256 signing key for production profile",
+			"kid", rec.ID, "algorithm", rec.Algorithm)
+	}
+	slog.Info("jwt signing", "algorithm", jwtKeyManager.Algorithm(), "profile", cfg.Profile)
 
 	// Cross-replica key-rotation propagation. RotateKey only reloads
 	// the replica that served POST /api/platform/jwt/rotate; every other
@@ -631,6 +673,14 @@ func run() error {
 	if sessionStore != nil {
 		sessionChecker = sessionStore
 	}
+	// sessionValidator enables the per-session existence + device
+	// anomaly checks (6.2) for tokens carrying a sid. Same store,
+	// separate interface so the nil-guard above carries through
+	// without the typed-nil trap.
+	var sessionValidator middleware.SessionValidator
+	if sessionStore != nil {
+		sessionValidator = sessionStore
+	}
 
 	rateLimiter := func() func(http.Handler) http.Handler {
 		if redisClient != nil {
@@ -644,6 +694,21 @@ func run() error {
 			PerWorkspace: cfg.RateLimitPerWorkspace,
 		})
 	}
+
+	// Brute-force reputation guard (6.3): tracks failed sign-ins per
+	// client IP and escalates a cooldown (1s → 5s → 30s → block) so an
+	// unauthenticated password-spray is slowed without a held-
+	// connection tarpit. Backed by Redis when configured (shared
+	// across replicas, 24h retention) and a per-replica in-memory
+	// fallback otherwise. Resolves the client IP with the same
+	// trusted-proxy depth as the auth middleware / session fingerprint
+	// so a spoofed X-Forwarded-For cannot dodge it.
+	authReputation := middleware.NewAuthReputation(redisClient, middleware.AuthReputationConfig{
+		FailureThreshold: cfg.AuthFailureThreshold,
+		BlockDuration:    cfg.AuthBlockDuration,
+		Retention:        cfg.AuthReputationRetention,
+	}, cfg.TrustedProxyDepth)
+	authReputationGuard := middleware.AuthReputationGuard(authReputation)
 
 	// wsProxyMode is the EFFECTIVE proxy decision: the operator asked for
 	// it (WS_PROXY_MODE) AND Redis is wired (the API and the external
@@ -741,6 +806,47 @@ func run() error {
 		slog.Warn("web push disabled (VAPID_PUBLIC_KEY / VAPID_PRIVATE_KEY unset), /api/push/* will respond 501")
 	}
 
+	// Native mobile push (APNs for iOS, FCM for Android). Each provider is
+	// built only when its credentials are configured; a build failure
+	// disables that provider (logged) without aborting startup. When at
+	// least one provider is configured, wrap the publisher so a
+	// "notification" event also fans out to the recipient's phones, and
+	// expose POST/DELETE /api/push/register-device. Wrap order is
+	// inner → WebPush → Mobile, so one publish reaches WebSocket, Web Push
+	// and native push.
+	mobilePushSvc := notification.NewMobilePushService(notifRepo)
+	if cfg.FCMConfigured() {
+		saJSON, err := loadCredentialMaterial(cfg.FCMServiceAccountJSON, cfg.FCMServiceAccountFile)
+		if err != nil {
+			slog.Error("fcm push disabled: cannot read service account", "err", err)
+		} else if fcm, err := notification.NewFCMProvider(saJSON); err != nil {
+			slog.Error("fcm push disabled: invalid service account", "err", err)
+		} else {
+			mobilePushSvc.WithProvider(fcm)
+			slog.Info("fcm push enabled, Android notifications will fan out via FCM HTTP v1")
+		}
+	}
+	if cfg.APNsConfigured() {
+		p8, err := loadCredentialMaterial(cfg.APNsAuthKey, cfg.APNsAuthKeyFile)
+		if err != nil {
+			slog.Error("apns push disabled: cannot read auth key", "err", err)
+		} else if apns, err := notification.NewAPNsProvider(p8, cfg.APNsKeyID, cfg.APNsTeamID, cfg.APNsTopic, cfg.APNsProduction); err != nil {
+			slog.Error("apns push disabled: invalid auth key", "err", err)
+		} else {
+			mobilePushSvc.WithProvider(apns)
+			slog.Info("apns push enabled, iOS notifications will fan out via APNs", "production", cfg.APNsProduction)
+		}
+	}
+	if mobilePushSvc.Enabled() {
+		notificationPublisher = notification.NewMobilePushPublisher(notificationPublisher, mobilePushSvc).
+			WithWaitGroup(&bgGoroutines)
+	} else {
+		// Keep nil so drive's WithMobilePush sees a disabled service and the
+		// register endpoint responds 501.
+		mobilePushSvc = nil
+		slog.Warn("mobile push disabled (no FCM / APNs credentials), /api/push/register-device will respond 501")
+	}
+
 	notificationSvc := notification.NewService(notifRepo).
 		WithPublisher(notificationPublisher)
 
@@ -816,8 +922,22 @@ func run() error {
 	emailSvc.LogStartup(ctx)
 
 	previewRepo := preview.NewPostgresRepository(pool)
-	auditSvc := audit.NewService(audit.NewPostgresRepository(pool))
+	auditRepo, err := audit.NewPostgresRepository(pool, cfg.AuditHMACKey)
+	if err != nil {
+		return fmt.Errorf("build audit repository: %w", err)
+	}
+	auditSvc := audit.NewService(auditRepo)
 	defer auditSvc.Close()
+	// The audit-log hash chain (6.6) is keyed by an env-derived
+	// secret that never touches the DB. Under production, recommend a
+	// dedicated AUDIT_HMAC_KEY so the chain stays verifiable across a
+	// JWT_SECRET rotation; the derived fallback keeps a fresh install
+	// self-operating with no extra config.
+	if cfg.IsProduction() && cfg.AuditHMACKeySource == config.AuditHMACKeySourceDerived {
+		slog.Warn("audit-log HMAC chain key derived from JWT_SECRET; set AUDIT_HMAC_KEY to a dedicated secret so the audit chain survives a JWT_SECRET rotation")
+	} else {
+		slog.Info("audit-log HMAC chain enabled", "key_source", cfg.AuditHMACKeySource)
+	}
 	retentionSvc := retention.NewService(retention.NewPostgresRepository(pool), pool)
 
 	totpRepo := totp.NewPostgresRepository(pool)
@@ -850,6 +970,11 @@ func run() error {
 	if sessionStore != nil {
 		authHandler = authHandler.WithSessionRevoker(sessionStore)
 	}
+	// The login flow resolves the client IP for the session device
+	// fingerprint with the SAME trusted-proxy depth AuthMiddleware
+	// uses to recompute it per request — a mismatch would make every
+	// authenticated request look like a device anomaly.
+	authHandler = authHandler.WithTrustedProxyDepth(cfg.TrustedProxyDepth)
 	oauthHandler := auth.NewOAuthHandler(authHandler, auth.OAuthConfig{
 		GoogleClientID:        cfg.GoogleClientID,
 		GoogleClientSecret:    cfg.GoogleClientSecret,
@@ -861,14 +986,18 @@ func run() error {
 
 	// Authentication front-end for the data plane (/api/* drive,
 	// admin, kchat, and the WebSocket upgrade). Defaults to the
-	// built-in session-JWT middleware; when iam-core is configured
-	// (IAM_CORE_ISSUER_URL set) it is replaced by the OIDC middleware,
-	// which binds the identical (workspaceID, userID, role) request
-	// context so every downstream handler and guard works unchanged.
+	// built-in session-JWT middleware, which also runs the per-session
+	// existence + device-anomaly checks (6.2) via sessionValidator so a
+	// replayed token from a materially different IP/UA is forced to
+	// re-auth. When iam-core is configured (IAM_CORE_ISSUER_URL set) it
+	// is replaced by the OIDC middleware, which binds the identical
+	// (workspaceID, userID, role) request context so every downstream
+	// handler and guard works unchanged; iam-core owns its own session
+	// lifecycle, so the built-in session validator does not apply there.
 	// The /api/auth password routes are simultaneously swapped for an
 	// SSO-only responder so password authentication cannot be used
 	// while an external IdP is the source of truth.
-	dataPlaneAuth := middleware.AuthMiddlewareWithKeys(jwtKeyManager, sessionChecker)
+	dataPlaneAuth := middleware.AuthMiddlewareWithSessions(jwtKeyManager, sessionChecker, sessionValidator, cfg.TrustedProxyDepth)
 	var iamCoreClient *iamcore.Client
 	if cfg.IAMCoreIssuerURL != "" {
 		client, err := iamcore.NewClient(ctx, iamcore.Config{
@@ -941,6 +1070,7 @@ func run() error {
 		WithJobs(jobPublisher).
 		WithNotifications(notificationSvc).
 		WithWebPush(webPushSvc).
+		WithMobilePush(mobilePushSvc).
 		WithChangefeed(changefeedSvc).
 		WithEmail(emailSvc).
 		WithPreviews(previewRepo).
@@ -948,12 +1078,20 @@ func run() error {
 		WithBilling(billingSvc).
 		WithWebhooks(webhookPublisher).
 		WithOnlyOffice(cfg.OnlyOfficeURL, cfg.OnlyOfficeSecret, cfg.PublicURL).
-		WithOnlyOfficeSaveLimits(cfg.OnlyOfficeSaveMemoryBudgetBytes, cfg.OnlyOfficeMaxDocumentBytes)
+		WithOnlyOfficeSaveLimits(cfg.OnlyOfficeSaveMemoryBudgetBytes, cfg.OnlyOfficeMaxDocumentBytes).
+		WithOnlyOfficeStreamSaveConcurrency(cfg.OnlyOfficeStreamSaveMaxConcurrent)
 	if cfg.OnlyOfficeURL != "" {
+		// 0 == unlimited: the constant-memory streaming path is
+		// intentionally unbounded unless an operator opts into a cap.
+		streamCap := "unlimited"
+		if cfg.OnlyOfficeStreamSaveMaxConcurrent > 0 {
+			streamCap = strconv.Itoa(cfg.OnlyOfficeStreamSaveMaxConcurrent)
+		}
 		slog.Info("onlyoffice save concurrency cap derived from memory budget",
 			"max_concurrent_saves", cfg.OnlyOfficeMaxConcurrentSaves(),
 			"save_memory_budget_mb", cfg.OnlyOfficeSaveMemoryBudgetBytes>>20,
-			"max_document_mb", cfg.OnlyOfficeMaxDocumentBytes>>20)
+			"max_document_mb", cfg.OnlyOfficeMaxDocumentBytes>>20,
+			"stream_save_max_concurrent", streamCap)
 		if cfg.OnlyOfficeSecret != "" {
 			slog.Info("onlyoffice integration enabled with callback JWT verification")
 		} else {
@@ -1250,6 +1388,8 @@ func run() error {
 		CSPConnectExtra: cfg.SecurityHeadersCSPConnectExtra,
 		CSPImgExtra:     cfg.SecurityHeadersCSPImgExtra,
 		DisableHSTS:     cfg.SecurityHeadersDisableHSTS,
+		Nonce:           cfg.SecurityHeadersCSPNonce,
+		ExpectCT:        cfg.SecurityHeadersExpectCT,
 	}))
 	// HTTP metrics middleware runs BEFORE Recoverer so the
 	// resulting chain is HTTPMiddleware(Recoverer(handler)).
@@ -1422,15 +1562,27 @@ func run() error {
 				return
 			}
 			r.Post("/signup", authHandler.Signup)
-			r.Post("/login", authHandler.Login)
+			// /login carries the brute-force reputation guard (6.3):
+			// the only credential-verifying endpoint reachable without
+			// an existing session, so it is the password-spray target.
+			// The guard records a failure on a 401 (bad credentials)
+			// and resets the IP on a 2xx (success or MFA challenge —
+			// either way the password was correct).
+			r.With(authReputationGuard).Post("/login", authHandler.Login)
 			r.Route("/oauth", func(r chi.Router) {
 				oauthHandler.RegisterRoutes(r)
 			})
 
 			r.Group(func(r chi.Router) {
-				r.Use(middleware.AuthMiddlewareWithKeys(jwtKeyManager, sessionChecker))
+				r.Use(middleware.AuthMiddlewareWithSessions(jwtKeyManager, sessionChecker, sessionValidator, cfg.TrustedProxyDepth))
 				r.Post("/logout", authHandler.Logout)
 				r.Post("/refresh", authHandler.Refresh)
+				// Device-session management (6.2): list the
+				// caller's active sessions and revoke a specific
+				// one. Both are scoped to the authenticated
+				// user/workspace from the JWT.
+				r.Get("/sessions", authHandler.ListSessions)
+				r.Delete("/sessions/{id}", authHandler.RevokeSession)
 			})
 
 			// TOTP / 2FA routes. The three middleware
@@ -1453,7 +1605,7 @@ func run() error {
 					// a session JWT and is managing 2FA from
 					// account settings.
 					r.Group(func(r chi.Router) {
-						r.Use(middleware.AuthMiddlewareWithKeys(jwtKeyManager, sessionChecker))
+						r.Use(middleware.AuthMiddlewareWithSessions(jwtKeyManager, sessionChecker, sessionValidator, cfg.TrustedProxyDepth))
 						r.Post("/enroll/begin", totpHandler.EnrollBegin)
 						r.Post("/enroll/finalize", totpHandler.EnrollFinalize)
 						r.Post("/disable", totpHandler.Disable)
@@ -1626,6 +1778,11 @@ func run() error {
 			r.Get("/push/vapid-public-key", driveHandler.VAPIDPublicKey)
 			r.Post("/push/subscribe", driveHandler.SubscribePush)
 			r.Delete("/push/subscribe", driveHandler.UnsubscribePush)
+
+			// Native mobile push (APNs / FCM) device-token registration.
+			// Respond 501 when no mobile push provider is configured.
+			r.Post("/push/register-device", driveHandler.RegisterDevice)
+			r.Delete("/push/register-device", driveHandler.UnregisterDevice)
 
 			r.Get("/activity", driveHandler.ListActivity)
 
@@ -1819,6 +1976,41 @@ func run() error {
 // safe when STATIC_DIR is a sibling of sensitive files.
 func spaHandler(dir string) http.HandlerFunc {
 	indexPath := filepath.Join(dir, "index.html")
+	// Pre-read index.html and split it on the nonce placeholder so
+	// each navigation request only pays a handful of plain writes to
+	// inject its per-request CSP nonce (6.5) — no per-request scan of
+	// the document. The bundle assets are still streamed verbatim via
+	// http.ServeFile; only the HTML document is templated. If the file
+	// is unreadable or carries no placeholder we fall back to serving
+	// it verbatim.
+	idxSegments, templated := loadIndexTemplate(indexPath)
+
+	serveIndex := func(w http.ResponseWriter, r *http.Request) {
+		if !templated {
+			http.ServeFile(w, r, indexPath)
+			return
+		}
+		nonce := middleware.CSPNonceFromContext(r.Context())
+		// index.html references content-hashed bundles, so it must
+		// never be cached: a stale copy would point at assets a new
+		// deploy has already replaced. The per-request nonce makes
+		// this doubly true.
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
+		w.WriteHeader(http.StatusOK)
+		// Write the pre-split segments interleaved with the nonce:
+		// seg[0], nonce, seg[1], nonce, ..., seg[n]. This substitutes
+		// EVERY placeholder occurrence, so a future inline
+		// <script nonce="__CSP_NONCE__"> is handled correctly rather
+		// than leaking the literal token past the first one.
+		for i, seg := range idxSegments {
+			if i > 0 {
+				_, _ = io.WriteString(w, nonce)
+			}
+			_, _ = io.WriteString(w, seg)
+		}
+	}
+
 	return func(w http.ResponseWriter, r *http.Request) {
 		clean := filepath.Clean("/" + strings.TrimPrefix(r.URL.Path, "/"))
 		if strings.Contains(clean, "..") {
@@ -1827,15 +2019,39 @@ func spaHandler(dir string) http.HandlerFunc {
 		}
 		candidate := filepath.Join(dir, clean)
 		if rel, err := filepath.Rel(dir, candidate); err != nil || strings.HasPrefix(rel, "..") {
-			http.ServeFile(w, r, indexPath)
+			serveIndex(w, r)
 			return
 		}
 		if info, err := os.Stat(candidate); err == nil && !info.IsDir() {
 			http.ServeFile(w, r, candidate)
 			return
 		}
-		http.ServeFile(w, r, indexPath)
+		serveIndex(w, r)
 	}
+}
+
+// indexNoncePlaceholder is the literal token the frontend's index.html
+// carries in its `<meta name="csp-nonce">` tag; spaHandler swaps it for
+// the per-request CSP nonce. Kept in sync with frontend/index.html.
+const indexNoncePlaceholder = "__CSP_NONCE__"
+
+// loadIndexTemplate reads index.html once and splits it on every nonce
+// placeholder occurrence. The returned segments are the literal text
+// between placeholders, so there are len(segments)-1 placeholders and
+// the caller writes the segments interleaved with the per-request
+// nonce. Returns templated=false (and nil segments) when the file can't
+// be read or carries no placeholder, in which case the caller serves it
+// verbatim with http.ServeFile.
+func loadIndexTemplate(indexPath string) (segments []string, templated bool) {
+	raw, err := os.ReadFile(indexPath)
+	if err != nil {
+		return nil, false
+	}
+	html := string(raw)
+	if !strings.Contains(html, indexNoncePlaceholder) {
+		return nil, false
+	}
+	return strings.Split(html, indexNoncePlaceholder), true
 }
 
 // folderCreatorAdapter bridges *folder.Service to
@@ -1876,6 +2092,30 @@ func buildEmailService(cfg *config.Config) (*email.Service, error) {
 		SMTPTLSServerName:         cfg.SMTPTLSServerName,
 		SMTPTLSInsecureSkipVerify: cfg.SMTPTLSInsecureSkipVerify,
 	})
+}
+
+// loadCredentialMaterial resolves a credential supplied either inline or
+// via a file path, used by the FCM / APNs provider wiring. The inline
+// value takes precedence: an operator who sets both gets the inline one
+// (and the file is ignored), matching the "inline wins" contract
+// documented on the Config fields. Returns an error only when neither is
+// usable (inline empty and the file cannot be read), so the caller can
+// disable just that provider and continue.
+func loadCredentialMaterial(inline, path string) ([]byte, error) {
+	if strings.TrimSpace(inline) != "" {
+		return []byte(inline), nil
+	}
+	if path == "" {
+		return nil, errors.New("no inline value and no file path configured")
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("read credential file %q: %w", path, err)
+	}
+	if len(data) == 0 {
+		return nil, fmt.Errorf("credential file %q is empty", path)
+	}
+	return data, nil
 }
 
 // otelChiSpanRenamer is a chi middleware that renames the
