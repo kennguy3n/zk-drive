@@ -36,9 +36,20 @@ type Workspace struct {
 	// scripts). Admins switch via PUT
 	// /api/admin/workspace/search-language, validated against the
 	// allow-list in workspace.IsSupportedSearchLanguage.
-	SearchLanguage string    `json:"search_language"`
-	CreatedAt      time.Time `json:"created_at"`
-	UpdatedAt      time.Time `json:"updated_at"`
+	SearchLanguage string `json:"search_language"`
+	// DefaultEncryptionMode is the encryption mode applied to
+	// newly-created ROOT folders when the caller does not specify
+	// one. Child folders always inherit their parent's mode, so this
+	// only governs the top of each subtree. One of
+	// folder.EncryptionManagedEncrypted (default) or
+	// folder.EncryptionStrictZK; a Secure Business workspace flips it
+	// to strict_zk via PUT /api/admin/workspace/default-encryption-mode
+	// so every new folder defaults to zero-knowledge. Mirrors the
+	// folder package's constants (kept as plain strings here to avoid
+	// a workspace→folder import cycle).
+	DefaultEncryptionMode string    `json:"default_encryption_mode"`
+	CreatedAt             time.Time `json:"created_at"`
+	UpdatedAt             time.Time `json:"updated_at"`
 }
 
 // DefaultSearchLanguage is the value migration 032 backfills onto
@@ -50,6 +61,38 @@ type Workspace struct {
 // any language. Workspaces that want stemming opt in via the admin
 // endpoint.
 const DefaultSearchLanguage = "simple"
+
+// Encryption-mode identifiers for the workspace-level
+// default_encryption_mode column. These mirror internal/folder's
+// EncryptionManagedEncrypted / EncryptionStrictZK constants but are
+// re-declared here (as plain strings) to keep the workspace package
+// free of a dependency on the folder package, avoiding an import
+// cycle (folder already depends on workspace defaults conceptually).
+// A compile-time guard in internal/folder asserts the two stay in
+// sync.
+const (
+	EncryptionManagedEncrypted = "managed_encrypted"
+	EncryptionStrictZK         = "strict_zk"
+)
+
+// DefaultEncryptionMode is the value migration 039 backfills onto
+// every existing workspace and the default for newly-created rows:
+// managed_encrypted preserves the historical behaviour (server-side
+// preview / scan / search enabled). Secure Business workspaces opt
+// into strict_zk via the admin endpoint.
+const DefaultEncryptionMode = EncryptionManagedEncrypted
+
+// IsValidDefaultEncryptionMode reports whether m is one of the two
+// recognised workspace default encryption modes. Shared by the admin
+// handler and the workspace.Service so the allow-list lives in one
+// place and matches the migration's CHECK constraint.
+func IsValidDefaultEncryptionMode(m string) bool {
+	switch m {
+	case EncryptionManagedEncrypted, EncryptionStrictZK:
+		return true
+	}
+	return false
+}
 
 // supportedSearchLanguages enumerates the Postgres dictionaries
 // the admin endpoint will accept. The 'simple' entry is the

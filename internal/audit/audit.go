@@ -39,6 +39,11 @@ const (
 	ActionWorkspaceCreate          = "workspace.create"
 	ActionWorkspaceUpdate          = "workspace.update"
 	ActionWorkspaceSearchLanguage  = "workspace.search_language_change"
+	// ActionWorkspaceDefaultEncryptionMode records a change to the
+	// workspace-level default_encryption_mode (managed_encrypted ↔
+	// strict_zk). A privacy-relevant policy change, so it carries the
+	// previous and current modes in the metadata blob.
+	ActionWorkspaceDefaultEncryptionMode = "workspace.default_encryption_mode_change"
 	ActionRetentionPolicyUpsert = "retention.policy_upsert"
 	ActionRetentionPolicyDelete = "retention.policy_delete"
 	ActionAdminBillingUpdate    = "admin.billing_update"

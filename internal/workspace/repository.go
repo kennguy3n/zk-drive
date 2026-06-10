@@ -45,6 +45,19 @@ type Repository interface {
 	// IsSupportedSearchLanguage — the repo does not re-validate
 	// (single source of truth lives in workspace.go).
 	SetSearchLanguage(ctx context.Context, workspaceID uuid.UUID, lang string) (previous string, err error)
+	// GetDefaultEncryptionModeByID is a hot-path helper used by the
+	// folder-create flow to resolve the workspace's default mode for
+	// new root folders. Like GetSearchLanguageByID it pulls JUST the
+	// one column with a primary-key lookup rather than the full-row
+	// GetByID scan. Returns ErrNotFound when no row matches, and
+	// ("", nil) when the column is empty (defence in depth) so the
+	// caller can fall back to the package default.
+	GetDefaultEncryptionModeByID(ctx context.Context, workspaceID uuid.UUID) (string, error)
+	// SetDefaultEncryptionMode updates workspaces.default_encryption_mode.
+	// Returns the previous value so the audit log can record the
+	// transition; returns ErrNotFound when no row matches. The caller
+	// MUST have already validated mode via IsValidDefaultEncryptionMode.
+	SetDefaultEncryptionMode(ctx context.Context, workspaceID uuid.UUID, mode string) (previous string, err error)
 }
 
 // PostgresRepository implements Repository against Postgres.
@@ -57,11 +70,11 @@ func NewPostgresRepository(pool *pgxpool.Pool) *PostgresRepository {
 	return &PostgresRepository{pool: pool}
 }
 
-const workspaceColumns = "id, name, owner_user_id, storage_quota_bytes, storage_used_bytes, tier, mfa_required, search_language, created_at, updated_at"
+const workspaceColumns = "id, name, owner_user_id, storage_quota_bytes, storage_used_bytes, tier, mfa_required, search_language, default_encryption_mode, created_at, updated_at"
 
 func scanWorkspace(row pgx.Row) (*Workspace, error) {
 	w := &Workspace{}
-	if err := row.Scan(&w.ID, &w.Name, &w.OwnerUserID, &w.StorageQuotaBytes, &w.StorageUsedBytes, &w.Tier, &w.MFARequired, &w.SearchLanguage, &w.CreatedAt, &w.UpdatedAt); err != nil {
+	if err := row.Scan(&w.ID, &w.Name, &w.OwnerUserID, &w.StorageQuotaBytes, &w.StorageUsedBytes, &w.Tier, &w.MFARequired, &w.SearchLanguage, &w.DefaultEncryptionMode, &w.CreatedAt, &w.UpdatedAt); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, ErrNotFound
 		}
@@ -100,18 +113,21 @@ func insertWorkspace(ctx context.Context, q workspaceQuerier, w *Workspace) erro
 	if w.SearchLanguage == "" {
 		w.SearchLanguage = DefaultSearchLanguage
 	}
-	// We RETURN search_language (alongside created_at / updated_at)
-	// so the in-memory struct mirrors the row Postgres just wrote.
-	// Without this, callers that immediately JSON-encode the
-	// returned Workspace see "search_language": "" even though the
-	// column on disk has the DEFAULT 'simple' applied — a subtle
-	// drift that bites the admin-page-after-create path.
+	if w.DefaultEncryptionMode == "" {
+		w.DefaultEncryptionMode = DefaultEncryptionMode
+	}
+	// We RETURN search_language / default_encryption_mode (alongside
+	// created_at / updated_at) so the in-memory struct mirrors the row
+	// Postgres just wrote. Without this, callers that immediately
+	// JSON-encode the returned Workspace see "search_language": ""
+	// even though the column on disk has the DEFAULT applied — a
+	// subtle drift that bites the admin-page-after-create path.
 	const stmt = `
-INSERT INTO workspaces (id, name, owner_user_id, storage_quota_bytes, storage_used_bytes, tier, search_language)
-VALUES ($1, $2, $3, $4, $5, $6, $7)
-RETURNING created_at, updated_at, search_language`
-	if err := q.QueryRow(ctx, stmt, w.ID, w.Name, w.OwnerUserID, w.StorageQuotaBytes, w.StorageUsedBytes, w.Tier, w.SearchLanguage).
-		Scan(&w.CreatedAt, &w.UpdatedAt, &w.SearchLanguage); err != nil {
+INSERT INTO workspaces (id, name, owner_user_id, storage_quota_bytes, storage_used_bytes, tier, search_language, default_encryption_mode)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+RETURNING created_at, updated_at, search_language, default_encryption_mode`
+	if err := q.QueryRow(ctx, stmt, w.ID, w.Name, w.OwnerUserID, w.StorageQuotaBytes, w.StorageUsedBytes, w.Tier, w.SearchLanguage, w.DefaultEncryptionMode).
+		Scan(&w.CreatedAt, &w.UpdatedAt, &w.SearchLanguage, &w.DefaultEncryptionMode); err != nil {
 		return fmt.Errorf("insert workspace: %w", err)
 	}
 	return nil
@@ -255,6 +271,57 @@ func (r *PostgresRepository) SetSearchLanguage(ctx context.Context, workspaceID 
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return "", fmt.Errorf("commit search_language: %w", err)
+	}
+	return prev, nil
+}
+
+// GetDefaultEncryptionModeByID returns just the
+// default_encryption_mode column via a primary-key lookup. The
+// folder-create flow calls this for every new root folder, so a
+// single-column read is cheaper than the full-row GetByID scan. See
+// GetSearchLanguageByID for the same reasoning. Returns ErrNotFound
+// when no row matches and ("", nil) when the column is empty.
+func (r *PostgresRepository) GetDefaultEncryptionModeByID(ctx context.Context, id uuid.UUID) (string, error) {
+	const q = "SELECT default_encryption_mode FROM workspaces WHERE id = $1"
+	var mode string
+	if err := r.pool.QueryRow(ctx, q, id).Scan(&mode); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return "", ErrNotFound
+		}
+		return "", fmt.Errorf("read default_encryption_mode: %w", err)
+	}
+	return mode, nil
+}
+
+// SetDefaultEncryptionMode updates workspaces.default_encryption_mode
+// under a SELECT ... FOR UPDATE / UPDATE pair so a concurrent toggle
+// can't misreport the previous value to the audit log. Same
+// concurrency reasoning as SetMFARequired / SetSearchLanguage.
+func (r *PostgresRepository) SetDefaultEncryptionMode(ctx context.Context, workspaceID uuid.UUID, mode string) (string, error) {
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return "", fmt.Errorf("begin tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	var prev string
+	if err := tx.QueryRow(ctx,
+		"SELECT default_encryption_mode FROM workspaces WHERE id = $1 FOR UPDATE",
+		workspaceID,
+	).Scan(&prev); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return "", ErrNotFound
+		}
+		return "", fmt.Errorf("read default_encryption_mode: %w", err)
+	}
+	if _, err := tx.Exec(ctx,
+		"UPDATE workspaces SET default_encryption_mode = $2, updated_at = now() WHERE id = $1",
+		workspaceID, mode,
+	); err != nil {
+		return "", fmt.Errorf("update default_encryption_mode: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return "", fmt.Errorf("commit default_encryption_mode: %w", err)
 	}
 	return prev, nil
 }

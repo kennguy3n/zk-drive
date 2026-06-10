@@ -514,6 +514,40 @@ Each folder carries an `encryption_mode` column stored in the
   re-upload in the new mode; it is not a silent metadata move.
 - The UI surfaces the mode on every folder and warns on mode changes.
 
+### 8.4 Workspace default encryption mode (Strict ZK as a default)
+
+Each workspace carries a `default_encryption_mode` column
+(`workspaces` table) constrained to `managed_encrypted` (the default)
+or `strict_zk`. It governs the mode applied to **new top-level (root)
+folders** created without an explicit `encryption_mode`:
+
+- A Secure Business workspace can flip its default to `strict_zk` so
+  every new root folder is zero-knowledge by default — privacy by
+  default rather than by opt-in. Sub-folders always inherit their
+  parent's mode, so the workspace default only governs roots.
+- An explicit `encryption_mode` in the create request always wins; the
+  workspace default is consulted only when the caller omits one.
+- Resolution is **fail-closed**: if the workspace default lookup errors
+  (a transient read failure), folder creation fails rather than
+  silently downgrading a strict-ZK workspace to managed-encrypted.
+- Existing folders are never rewritten; changing the default only
+  affects folders created afterwards.
+
+Admins manage it via the REST surface (admin role required):
+
+| Method | Path                                          | Purpose                                                      |
+| ------ | --------------------------------------------- | ------------------------------------------------------------ |
+| `GET`  | `/api/admin/workspace/default-encryption-mode`| Return the current default and the supported allow-list.     |
+| `PUT`  | `/api/admin/workspace/default-encryption-mode`| Set the default (`{"mode":"strict_zk"}`). Validated + audited.|
+
+The transition is audited as
+`workspace.default_encryption_mode_change` with the previous and
+current values. The admin console surfaces the toggle on the
+Encryption page (Secure Business tier). The hot path
+(`GetDefaultEncryptionMode`, hit per new root folder) uses a dedicated
+single-column query (`GetDefaultEncryptionModeByID`) rather than a
+full-row read.
+
 ---
 
 ## 9. Multi-Tenancy

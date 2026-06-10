@@ -189,7 +189,11 @@ func setupEnv(t *testing.T) *testEnv {
 
 	userSvc := user.NewService(user.NewPostgresRepository(pool))
 	wsSvc := workspace.NewService(workspace.NewPostgresRepository(pool))
-	folderSvc := folder.NewService(folder.NewPostgresRepository(pool))
+	// Mirror production wiring (cmd/server/main.go): new root folders
+	// inherit the workspace's default_encryption_mode (6.4). Without
+	// this the harness would silently diverge from production and mask
+	// the Strict-ZK-as-default behaviour.
+	folderSvc := folder.NewService(folder.NewPostgresRepository(pool), folder.WithWorkspaceDefaults(wsSvc))
 	fileSvc := file.NewService(file.NewPostgresRepository(pool))
 
 	storageClient := buildTestStorageClient(t)

@@ -20,6 +20,7 @@ func TestActionConstantsAreDotted(t *testing.T) {
 		ActionPermissionGrant, ActionPermissionRevoke,
 		ActionAdminUserInvite, ActionAdminUserDeactivate, ActionAdminUserRoleChange,
 		ActionWorkspaceCreate, ActionWorkspaceUpdate,
+		ActionWorkspaceSearchLanguage, ActionWorkspaceDefaultEncryptionMode,
 		ActionRetentionPolicyUpsert, ActionRetentionPolicyDelete,
 		ActionAdminBillingUpdate, ActionAdminBillingCheckout, ActionAdminBillingPortal,
 		ActionGuestInviteEmailed,

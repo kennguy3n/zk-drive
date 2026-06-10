@@ -255,7 +255,15 @@
     "cmkSaved": "CMK saved.",
     "cmkSchemesHint": "Accepted schemes: arn:aws:kms:..., kms://, vault://, transit://. Leave empty for the gateway default key.",
     "modesHeading": "Managed-encrypted vs strict zero-knowledge:",
-    "modesExplanation": "A CMK enables managed-encrypted folders where the gateway wraps per-object DEKs with the customer key — the server can still stream plaintext for preview, virus scan, and search. Strict-zero-knowledge folders remain end-to-end encrypted regardless of this setting; the server never sees plaintext there and all server-side processing is disabled."
+    "modesExplanation": "A CMK enables managed-encrypted folders where the gateway wraps per-object DEKs with the customer key — the server can still stream plaintext for preview, virus scan, and search. Strict-zero-knowledge folders remain end-to-end encrypted regardless of this setting; the server never sees plaintext there and all server-side processing is disabled.",
+    "defaultModeHeading": "Default encryption mode for new folders",
+    "defaultModeDescription": "Choose the encryption mode applied to new top-level folders by default. Members can still pick a mode per folder; this only sets the starting point. Existing folders are unaffected.",
+    "defaultModeManagedLabel": "Managed-encrypted (recommended for most teams)",
+    "defaultModeManagedHint": "New folders allow previews, full-text search, and virus scanning. Encrypted at rest; the server can read plaintext while handling requests.",
+    "defaultModeStrictLabel": "Strict zero-knowledge (Secure Business)",
+    "defaultModeStrictHint": "New folders are end-to-end encrypted by default — the server can never decrypt them, so previews, search, and scanning are disabled. Maximum privacy for sensitive workspaces.",
+    "defaultModeSaved": "Default encryption mode updated.",
+    "defaultModeSecureBusinessBadge": "Secure Business"
   },
   "privacy": {
     "pageTitle": "How your data is protected",

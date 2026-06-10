@@ -186,7 +186,10 @@ func run() error {
 	wsSvc := workspace.NewService(wsRepo)
 
 	folderRepo := folder.NewPostgresRepository(pool)
-	folderSvc := folder.NewService(folderRepo)
+	// Wire the workspace default-encryption-mode resolver so new root
+	// folders adopt the workspace's default_encryption_mode (Strict ZK
+	// as a default option, 6.4).
+	folderSvc := folder.NewService(folderRepo, folder.WithWorkspaceDefaults(wsSvc))
 
 	fileRepo := file.NewPostgresRepository(pool)
 	fileSvc := file.NewService(fileRepo)
