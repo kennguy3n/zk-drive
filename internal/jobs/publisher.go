@@ -39,11 +39,12 @@ import (
 // installed exporter.
 const publisherTracerName = "github.com/kennguy3n/zk-drive/internal/jobs"
 
-// StreamName is the JetStream stream that backs every drive.* job
-// subject. Exported here (rather than left as an unexported const in
-// cmd/worker) so the worker's stream declaration and the server's
-// admin health-dashboard stream-depth probe reference one source of
-// truth and cannot drift.
+// StreamName is the JetStream WorkQueue stream that backs every
+// drive.* job subject. The worker (cmd/worker) is the single creator
+// of this stream (ensureStream); other components — the server's admin
+// health-dashboard stream-depth probe, the compact supervisor's
+// readiness barrier, operator tooling — reference this constant so the
+// name has one source of truth and cannot drift.
 const StreamName = "DRIVE_JOBS"
 
 // Subject constants. Keep these in sync with cmd/worker/main.go — the

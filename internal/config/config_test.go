@@ -131,6 +131,16 @@ func requireEnv(t *testing.T, envs map[string]string) {
 		// specific var themselves after requireEnv runs.
 		"DB_MAX_CONNS", "DB_MIN_CONNS", "DB_MAX_CONN_IDLE_TIME",
 		"JWT_ALGORITHM", "JWT_KEY_REFRESH_INTERVAL",
+		// Deployment-profile selector + auto-migrate toggle (WS2). Same
+		// convention as the blocks above: Load applies the profile's
+		// env-var defaults (applyProfileDefaults) and buildConfigFromEnv
+		// reads both, so a CI runner that exports ZKDRIVE_PROFILE=production
+		// would otherwise make every test here fail validateProfile (it
+		// requires Redis + NATS). Baseline-clearing to "" yields the
+		// no-profile state (normaliseProfile("") == ""), preserving the
+		// pre-profile behaviour. Profile-specific tests live in
+		// profiles_test.go and manage these vars themselves.
+		"ZKDRIVE_PROFILE", "ZKDRIVE_AUTO_MIGRATE",
 	}
 	// WORKER_METRICS_ADDR is intentionally NOT included in the keys
 	// list above. t.Setenv(k, "") makes os.LookupEnv return

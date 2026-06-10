@@ -306,21 +306,6 @@ type Config struct {
 	// initialised but no traces exported).
 	OTELSamplerRatio float64
 
-	// Profile selects the deployment posture, sourced from
-	// ZKDRIVE_PROFILE (lower-cased, trimmed). The only recognised
-	// non-empty value is "compact" (logging.CompactProfile): the
-	// single-node, NoOps SME posture where the operator wants
-	// nothing but clean structured logs to stdout. In compact mode
-	// the OpenTelemetry OTLP exporter and the Prometheus /metrics
-	// endpoint are both forced off regardless of any OTEL_* env
-	// vars, so a non-technical admin can't accidentally half-wire
-	// an observability stack they have no collector for. Any other
-	// value (including empty) is the full posture: OTLP exports
-	// when OTEL_EXPORTER_OTLP_ENDPOINT is set, /metrics is always
-	// mounted. Consume via IsCompactProfile / TracingEnabled /
-	// MetricsEnabled rather than comparing the string directly.
-	Profile string
-
 	// Audit-log cold archival. When AuditArchiveEnabled
 	// is false (the default), the audit-archiver binary refuses
 	// to run — operators must explicitly opt in so a fresh
@@ -477,6 +462,26 @@ type Config struct {
 	// instead. Applies to both SuspensionGuard (REST/WS) and the
 	// ONLYOFFICE save-callback write boundary.
 	SuspensionFailClosed bool
+
+	// Profile is the resolved ZKDRIVE_PROFILE deployment shape
+	// ("compact", "production", "development", or "" for none). It is
+	// applied BEFORE the other fields are read so its env-var defaults
+	// (see internal/config/profiles.go) feed into the parsing below;
+	// the value recorded here drives logging / validateProfile and the
+	// compact observability gates (IsCompactProfile / TracingEnabled /
+	// MetricsEnabled): in the compact single-node SME posture the OTLP
+	// exporter and the Prometheus /metrics surface are both forced off
+	// regardless of any OTEL_* env vars, so a non-technical admin can't
+	// half-wire an observability stack they have no collector for.
+	Profile string
+
+	// AutoMigrate makes the server apply pending migrations under the
+	// schema advisory lock at startup, before it begins serving. It is
+	// sourced from ZKDRIVE_AUTO_MIGRATE (default false) and the compact
+	// profile defaults it to true. The cmd/server --auto-migrate flag
+	// ORs with this. Production K8s leaves it off and runs the separate
+	// migrate Job so schema changes are decoupled from pod rollout.
+	AutoMigrate bool
 }
 
 // OnlyOfficeMaxConcurrentSaves derives how many save callbacks may
@@ -511,6 +516,14 @@ func (c *Config) WebPushEnabled() bool {
 // bucket, access key, and secret key must also be set — a half-configured
 // storage client would only fail at request time.
 func Load() (*Config, error) {
+	// Resolve ZKDRIVE_PROFILE first so its env-var defaults are in
+	// place (only-if-unset) before buildConfigFromEnv reads them. An
+	// unknown profile name fails closed here rather than silently
+	// running with zero presets.
+	if _, err := applyProfileDefaults(); err != nil {
+		return nil, err
+	}
+
 	cfg := buildConfigFromEnv()
 
 	var missing []string
@@ -528,6 +541,9 @@ func Load() (*Config, error) {
 		return nil, err
 	}
 	if err := validateOnlyOfficeGroup(cfg); err != nil {
+		return nil, err
+	}
+	if err := validateProfile(cfg); err != nil {
 		return nil, err
 	}
 	return cfg, nil
@@ -626,8 +642,6 @@ func buildConfigFromEnv() *Config {
 		OTELDeploymentEnvironment:   os.Getenv("OTEL_DEPLOYMENT_ENVIRONMENT"),
 		OTELSamplerRatio:            parseFloatDefault(os.Getenv("OTEL_TRACES_SAMPLER_ARG"), 0.1),
 
-		Profile: normaliseProfile(os.Getenv("ZKDRIVE_PROFILE")),
-
 		AuditArchiveEnabled:         parseBoolDefault(os.Getenv("AUDIT_LOG_ARCHIVE_ENABLED"), false),
 		AuditLogRetentionDays:       clampAuditRetentionDays(parseIntDefault(os.Getenv("AUDIT_LOG_RETENTION_DAYS"), 90)),
 		AuditArchivePrefix:          normaliseArchivePrefix(getEnvDefault("AUDIT_LOG_ARCHIVE_PREFIX", "audit-archive/")),
@@ -648,6 +662,9 @@ func buildConfigFromEnv() *Config {
 		OnlyOfficeSaveMemoryBudgetBytes: onlyOfficeBytesFromEnv("ONLYOFFICE_SAVE_MEMORY_BUDGET_MB", defaultOnlyOfficeSaveMemoryBudgetMB),
 
 		SuspensionFailClosed: parseBoolDefault(os.Getenv("SUSPENSION_FAIL_CLOSED"), false),
+
+		Profile:     string(normaliseProfile(os.Getenv("ZKDRIVE_PROFILE"))),
+		AutoMigrate: parseBoolDefault(os.Getenv("ZKDRIVE_AUTO_MIGRATE"), false),
 	}
 }
 
@@ -1221,22 +1238,12 @@ func parseFloatDefault(s string, def float64) float64 {
 	return v
 }
 
-// compactProfile is the single recognised non-empty ZKDRIVE_PROFILE
-// value. Kept as a package-local const (rather than importing
-// internal/logging) so the low-level config package stays free of
-// the logging package's heavy transitive dependencies; logging
-// exports the same token as logging.CompactProfile and a test
-// asserts the two stay in sync.
-const compactProfile = "compact"
-
-// normaliseProfile lower-cases and trims the raw ZKDRIVE_PROFILE
-// value. An unrecognised value is preserved as-is (lower-cased) so
-// a future profile is not silently coerced to compact; only an
-// exact "compact" match flips the compact posture via
-// IsCompactProfile.
-func normaliseProfile(raw string) string {
-	return strings.ToLower(strings.TrimSpace(raw))
-}
+// compactProfile is the compact ZKDRIVE_PROFILE token, aliased from
+// ProfileCompact (internal/config/profiles.go) so the observability
+// gates below and the profile machinery share one source of truth.
+// logging.CompactProfile exports the same token and a test asserts the
+// two stay in sync.
+const compactProfile = string(ProfileCompact)
 
 // IsCompactProfile reports whether the compact single-node SME
 // posture is active (ZKDRIVE_PROFILE=compact).
