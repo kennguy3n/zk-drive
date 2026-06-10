@@ -421,11 +421,16 @@ func (h *Handler) DownloadURL(w http.ResponseWriter, r *http.Request) {
 	h.logActivity(r.Context(), activity.ActionFileDownload, permission.ResourceFile, f.ID, map[string]any{
 		"version_id": current.ID,
 	})
-	// Let the user's browser cache reuse this presigned-URL response
-	// for (almost) the URL's lifetime so a repeat click / resumed
-	// download skips a round-trip. private + sub-expiry max-age: see
-	// setPresignedURLCacheControl.
-	setPresignedURLCacheControl(w, storage.DefaultPresignExpiry)
+	// NOTE: deliberately NOT Cache-Control-cacheable. This handler is a
+	// security + accounting gate that must run on every download click:
+	// the quarantine refusal above (a version can be quarantined
+	// asynchronously by the scan worker at any time), the permission
+	// check, the bandwidth-quota check, the download accounting, and the
+	// audit-log entry. A browser-cached response would let a client keep
+	// pulling a now-quarantined version's still-valid presigned URL — and
+	// skip quota/audit — for the whole cache window. The preview endpoint
+	// IS cacheable because its object is immutable per (file, version)
+	// and its quarantine check is only defence-in-depth (see preview.go).
 	writeJSON(w, http.StatusOK, downloadURLResponse{
 		DownloadURL: url,
 		ObjectKey:   current.ObjectKey,

@@ -646,13 +646,21 @@ func run() error {
 	if redisClient != nil {
 		cfRP := changefeed.NewRedisPublisher(redisClient)
 		changefeedPublisher = cfRP
-		bgGoroutines.Add(1)
-		go func() {
-			defer bgGoroutines.Done()
-			if err := cfRP.Subscribe(ctx, hub); err != nil && !errors.Is(err, context.Canceled) {
-				slog.Error("redis changefeed subscribe loop exited", "err", err)
-			}
-		}()
+		// Mirror the notification publisher above: keep publishing change
+		// events to Redis (the external proxy tier consumes them), but in
+		// proxy mode do NOT subscribe the in-process hub — the /api/ws
+		// endpoint is disabled there so the hub holds no changefeed
+		// clients, and a local subscribe loop would only burn Redis I/O
+		// and hub-mutex time delivering to nobody.
+		if !wsProxyMode {
+			bgGoroutines.Add(1)
+			go func() {
+				defer bgGoroutines.Done()
+				if err := cfRP.Subscribe(ctx, hub); err != nil && !errors.Is(err, context.Canceled) {
+					slog.Error("redis changefeed subscribe loop exited", "err", err)
+				}
+			}()
+		}
 	}
 	changefeedSvc := changefeed.NewService(changefeed.NewPostgresRepository(pool)).
 		WithPublisher(changefeedPublisher)
