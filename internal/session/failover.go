@@ -3,6 +3,7 @@ package session
 import (
 	"context"
 	"errors"
+	"io"
 	"log/slog"
 	"net"
 	"sync/atomic"
@@ -30,7 +31,15 @@ import (
 // session created mid-outage is therefore not shared with siblings and
 // is dropped on recovery (the user re-authenticates once) — the
 // accepted availability-over-consistency cost of serving through an
-// outage instead of 401-ing every request.
+// outage instead of 401-ing every request. For the same reason the
+// device-aware ValidateSession gate degrades OPEN for a session the
+// fallback has never seen (one created before the outage, living only
+// in the unreachable Redis): it is admitted rather than 401'd, exactly
+// as the IsRevoked hot path degrades open on the same outage. A
+// pre-outage per-session revocation is invisible for the bounded
+// outage window and re-enforced automatically the instant Redis
+// recovers; a session the fallback DOES know (created mid-outage) stays
+// fully device-bound. See FailoverStore.ValidateSession.
 //
 // Revocations are the security-sensitive exception and are NOT simply
 // dropped. A force-sign-out / logout recorded while degraded is
@@ -95,6 +104,15 @@ func isUnavailable(err error) bool {
 	}
 	var netErr net.Error
 	if errors.As(err, &netErr) {
+		return true
+	}
+	// A bare io.EOF (or io.ErrUnexpectedEOF) surfaces when Redis closes
+	// the connection mid-command — a graceful server shutdown or a TLS
+	// layer teardown — without wrapping it in a net.OpError. Treat it as
+	// an outage so the very first request fails over immediately instead
+	// of failing closed and waiting for the next request to see a
+	// connection-refused net error.
+	if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
 		return true
 	}
 	if errors.Is(err, redis.ErrClosed) ||
@@ -336,14 +354,35 @@ func (f *FailoverStore) RevokeForUser(ctx context.Context, workspaceID, userID u
 func (f *FailoverStore) ValidateSession(ctx context.Context, workspaceID uuid.UUID, sessionID, userAgent, clientIP string) error {
 	if f.healthy.Load() {
 		err := f.primary.ValidateSession(ctx, workspaceID, sessionID, userAgent, clientIP)
-		// A device anomaly / not-found is a real auth decision, not a
-		// connectivity failure, so only an unavailable error fails over.
+		// A device anomaly / not-found from a reachable Redis is a real
+		// auth decision, not a connectivity failure, so only an
+		// unavailable error fails over.
 		if !isUnavailable(err) {
 			return err
 		}
 		f.markDown("ValidateSession", err)
 	}
-	return f.fallback.ValidateSession(ctx, workspaceID, sessionID, userAgent, clientIP)
+	// Degraded: the per-replica in-memory fallback only knows sessions
+	// created on this replica during the outage. A session that predates
+	// the outage lives solely in the now-unreachable Redis, so the
+	// fallback reports ErrSessionNotFound for it. Hard-401ing every such
+	// request would turn a transient Redis blip into a fleet-wide forced
+	// re-login — the exact operator burden FailoverStore exists to remove
+	// (WS8 8.4) — and would be inconsistent with the IsRevoked hot path,
+	// which degrades OPEN on the same outage (an empty fallback reports
+	// "not revoked"). So a session unknown to the fallback is admitted
+	// while degraded: the JWT signature/expiry and the per-user
+	// revocation cutoff still gate the request, the window is bounded by
+	// the health loop, and a pre-outage per-session revocation is
+	// re-enforced automatically the instant Redis recovers (its hash is
+	// still absent there). A session the fallback DOES know (created this
+	// outage) is still fully validated below, including the device-
+	// anomaly check, so an outage-created session stays device-bound.
+	err := f.fallback.ValidateSession(ctx, workspaceID, sessionID, userAgent, clientIP)
+	if errors.Is(err, ErrSessionNotFound) {
+		return nil
+	}
+	return err
 }
 
 // Compile-time assertion that FailoverStore satisfies Store.

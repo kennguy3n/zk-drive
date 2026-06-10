@@ -3,6 +3,7 @@ package session
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net"
@@ -131,6 +132,9 @@ func TestIsUnavailable(t *testing.T) {
 		{"net error", &net.OpError{Op: "dial", Err: errors.New("refused")}, true},
 		{"pool timeout", redis.ErrPoolTimeout, true},
 		{"closed client", redis.ErrClosed, true},
+		{"bare io.EOF (redis closed conn mid-command)", io.EOF, true},
+		{"unexpected EOF", io.ErrUnexpectedEOF, true},
+		{"wrapped io.EOF", fmt.Errorf("read tcp: %w", io.EOF), true},
 		{"logical error", errors.New("WRONGTYPE"), false},
 	}
 	for _, c := range cases {
@@ -317,5 +321,84 @@ func TestFailoverFlushesRevocationsOnRecovery(t *testing.T) {
 	}
 	if got, _ := primary.backing.IsRevoked(context.Background(), ws, uid, issuedAt); !got {
 		t.Fatal("revocation was not flushed into the primary store on recovery")
+	}
+}
+
+// TestFailoverValidateSessionDegradesOpenForUnknownSession is the
+// availability regression for the device-aware session gate (6.2)
+// under a Redis outage (WS8 8.4). A token whose session lives only in
+// Redis (created before the outage) must NOT be hard-401'd while
+// degraded: doing so would turn a transient Redis blip into a
+// fleet-wide forced re-login and contradict the IsRevoked hot path,
+// which degrades OPEN on the same outage. A session the fallback DOES
+// know (created during the outage) must still be fully validated,
+// including the device-anomaly check, so an outage-created session
+// stays device-bound.
+func TestFailoverValidateSessionDegradesOpenForUnknownSession(t *testing.T) {
+	primary := newFlakyStore()
+	fallback := NewMemoryStore()
+	f := NewFailoverStore(primary, fallback, func(context.Context) error { return nil }, quietLogger())
+
+	ws, uid := uuid.New(), uuid.New()
+
+	// Redis goes away mid-flight.
+	primary.setFail(&net.OpError{Op: "write", Err: errors.New("broken pipe")})
+
+	// A pre-outage session lives only in Redis, so the empty fallback
+	// has never heard of it. While degraded it must be admitted rather
+	// than 401'd — the JWT + per-user cutoff still gate the request.
+	if err := f.ValidateSession(context.Background(), ws, "pre-outage-sid", "Mozilla/5.0", "203.0.113.7"); err != nil {
+		t.Fatalf("degraded ValidateSession on an unknown (pre-outage) session must admit, got %v", err)
+	}
+	if f.Healthy() {
+		t.Fatal("precondition: store should be degraded after the connectivity error")
+	}
+
+	// A session created DURING the outage lands in the fallback and must
+	// stay device-bound even while degraded.
+	const loginUA, loginIP = "Mozilla/5.0 (login device)", "198.51.100.10"
+	rec := SessionRecord{
+		SessionID:   "outage-sid",
+		UserID:      uid,
+		WorkspaceID: ws,
+		UserAgent:   loginUA,
+		IP:          loginIP,
+		DeviceHash:  Fingerprint(loginUA, loginIP),
+		CreatedAt:   time.Now().UTC(),
+		LastSeenAt:  time.Now().UTC(),
+	}
+	if err := f.Create(context.Background(), rec, time.Hour); err != nil {
+		t.Fatalf("Create during outage: %v", err)
+	}
+	// Same device → admitted.
+	if err := f.ValidateSession(context.Background(), ws, "outage-sid", loginUA, loginIP); err != nil {
+		t.Fatalf("degraded ValidateSession for the originating device must admit, got %v", err)
+	}
+	// Different device → anomaly still enforced even while degraded: the
+	// softening applies ONLY to sessions the fallback does not know.
+	if err := f.ValidateSession(context.Background(), ws, "outage-sid", "curl/8.0 (attacker)", "10.0.0.9"); !errors.Is(err, ErrSessionAnomaly) {
+		t.Fatalf("degraded ValidateSession must still enforce device anomaly for an outage-created session, got %v", err)
+	}
+}
+
+// TestFailoverValidateSessionEnforcesWhenHealthy guards the other half
+// of the contract: while Redis is reachable, a genuinely revoked /
+// unknown session (ErrSessionNotFound from the primary) must still
+// 401. The degraded-window softening must never leak into the healthy
+// path.
+func TestFailoverValidateSessionEnforcesWhenHealthy(t *testing.T) {
+	primary := newFlakyStore()
+	fallback := NewMemoryStore()
+	f := NewFailoverStore(primary, fallback, func(context.Context) error { return nil }, quietLogger())
+
+	// Redis is healthy but the session does not exist (revoked/expired):
+	// the primary MemoryStore returns ErrSessionNotFound, which must
+	// surface so AuthMiddleware 401s.
+	err := f.ValidateSession(context.Background(), uuid.New(), "ghost-sid", "Mozilla/5.0", "203.0.113.7")
+	if !errors.Is(err, ErrSessionNotFound) {
+		t.Fatalf("healthy ValidateSession must surface ErrSessionNotFound, got %v", err)
+	}
+	if !f.Healthy() {
+		t.Fatal("a logical not-found must not degrade the store")
 	}
 }

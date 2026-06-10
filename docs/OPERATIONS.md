@@ -357,6 +357,16 @@ intervention; each transition is logged once at `warn` (degrade) and
   when Redis returns. While degraded, revocation is per-replica — the
   correct availability-over-consistency trade for a transient outage,
   and identical to healthy behaviour on the single-node SME profile.
+  Both auth gates degrade **open** and consistently: the per-user
+  revocation cutoff (`IsRevoked`) and the device-aware session check
+  (`ValidateSession`) admit a request whose session predates the outage
+  (it lives only in the unreachable Redis) rather than 401-ing it, so a
+  Redis blip does not force the whole fleet to re-login. The request is
+  still gated by the JWT signature/expiry; a force-sign-out issued
+  during the outage is replayed into Redis on recovery; and a pre-outage
+  per-session revocation is re-enforced automatically the instant Redis
+  returns (its hash is still absent there). Sessions created mid-outage
+  remain fully device-bound.
 
 ## Distributed tracing
 
