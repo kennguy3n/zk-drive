@@ -336,7 +336,17 @@ intervention; each transition is logged once at `warn` (degrade) and
 - **ClamAV down (worker):** virus scanning auto-disables, the scan
   worker flips its heartbeat to `degraded`, in-flight scans are skipped
   and ACKed (no Nak-loop), and a 60s health loop re-enables scanning the
-  moment clamd answers again.
+  moment clamd answers again. The availability flag has a **single
+  writer** — the dedicated health-loop ping. The scan handler does *not*
+  flip it on a failed dial: a single failed dial is not proof clamd is
+  down (it can be a transient blip), and disabling scanning on one
+  failure would mark every upload in the window `clean` *without
+  scanning it* — a worse failure mode for a security product than a few
+  bounded Nak-redeliveries. So when clamd drops between probes, scan
+  jobs Nak and redeliver (real scanning is still attempted) for up to
+  the 60s probe cadence until the next ping confirms the outage and
+  switches to skip-and-pass; recovery is likewise gated on a confirming
+  ping. The degraded state is visible on the health dashboard throughout.
 - **NATS down (worker):** reconnect uses exponential backoff with jitter
   (1s → 2s → … → 30s cap) so a fleet does not reconnect in lockstep.
 - **Poison preview job:** after `PreviewMaxAttempts` (3) consecutive
