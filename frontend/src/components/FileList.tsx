@@ -1,4 +1,4 @@
-import { useCallback, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import {
@@ -227,6 +227,13 @@ export default function FileList({
     });
     return copy;
   }, [files, sortKey, sortDir]);
+
+  // Keep the active row in bounds when the file set changes (e.g. navigating
+  // to a smaller folder). A stale out-of-range index would leave no row with
+  // tabIndex=0, making the grid unreachable by keyboard Tab.
+  useEffect(() => {
+    setActiveIndex((prev) => Math.min(prev, Math.max(sorted.length - 1, 0)));
+  }, [sorted.length]);
 
   const virtualize = sorted.length > VIRTUAL_THRESHOLD;
   const virtualizer = useVirtualizer({

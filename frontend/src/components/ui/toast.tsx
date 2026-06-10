@@ -84,7 +84,7 @@ export function ToastProvider({ children }: { children: ReactNode }) {
             className={cn(
               "pointer-events-auto flex w-[360px] max-w-[calc(100vw-2rem)] items-start gap-3",
               "rounded-card border border-border bg-overlay p-4 shadow-overlay",
-              "animate-slide-in-right data-[state=closed]:animate-fade-in",
+              "animate-slide-in-right data-[state=closed]:animate-slide-out-right",
             )}
           >
             <span className="mt-0.5 shrink-0">{variantIcon[t.variant ?? "info"]}</span>

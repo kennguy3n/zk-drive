@@ -103,6 +103,13 @@ export default function CommandPaletteDialog({
     [hits, filter],
   );
 
+  // Switching the type filter changes the visible list, so move the active
+  // highlight back to the first row rather than leaving it on a now-hidden
+  // (or out-of-range) index.
+  useEffect(() => {
+    setActiveIndex(0);
+  }, [filter]);
+
   const goToHit = (hit: SearchHit) => {
     setRecents(pushRecent(query));
     onOpenChange(false);

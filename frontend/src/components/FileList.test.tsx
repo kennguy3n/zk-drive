@@ -85,6 +85,32 @@ describe("FileList", () => {
     expect(onToggleSelect).toHaveBeenCalledTimes(1);
   });
 
+  it("keeps exactly one focusable row after navigating to a smaller folder", () => {
+    const many = Array.from({ length: 6 }, (_, i) =>
+      mkFile({ id: `m${i}`, name: `m${i}.txt` }),
+    );
+    const { rerender } = render(
+      <FileList files={many} onRename={() => {}} onDelete={() => {}} />,
+    );
+    const grid = screen.getByRole("grid");
+    // Move the active row to the last item (out of range for the next folder).
+    fireEvent.keyDown(grid, { key: "End" });
+    // Navigate to a 2-file folder: activeIndex must clamp so a row stays
+    // keyboard-focusable (tabIndex=0).
+    rerender(
+      <FileList
+        files={[mkFile({ id: "a", name: "a.txt" }), mkFile({ id: "b", name: "b.txt" })]}
+        onRename={() => {}}
+        onDelete={() => {}}
+      />,
+    );
+    const focusable = screen
+      .getAllByRole("row")
+      .slice(1)
+      .filter((r) => r.getAttribute("tabindex") === "0");
+    expect(focusable).toHaveLength(1);
+  });
+
   it("deletes the active row on Delete keypress", () => {
     const onDelete = vi.fn();
     render(<FileList files={files} onRename={() => {}} onDelete={onDelete} />);

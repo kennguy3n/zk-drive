@@ -138,9 +138,12 @@ export default function FileBrowserPage() {
     refresh();
   };
 
-  // First-run experience: at the workspace root with no folders yet, show
-  // the onboarding action cards instead of empty folder/file sections.
-  const showOnboarding = !currentFolderID && subfolders.length === 0 && !error;
+  // First-run experience: at the workspace root with nothing in it yet, show
+  // the onboarding action cards instead of empty folder/file sections. The
+  // explicit files.length check keeps this correct if root-level file listing
+  // is ever added (today files is [] at root).
+  const showOnboarding =
+    !currentFolderID && subfolders.length === 0 && files.length === 0 && !error;
 
   return (
     <div style={{ display: "flex", minHeight: "100vh" }}>

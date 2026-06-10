@@ -53,14 +53,16 @@ const (
 	FeatureAISummaries   = "ai_summaries"
 )
 
-// AllFeatures is the canonical, ordered list of every feature key the
-// system knows about. ActiveFeatures iterates this so the GET /api/features
-// response always reports the full set (each as enabled/disabled) rather
-// than only the enabled ones — the frontend can then reason about a fixed
-// schema instead of treating an absent key as ambiguous.
+// AllFeatures is the canonical list of every feature key the system knows
+// about. ActiveFeatures iterates this so the GET /api/features response
+// always reports the full set (each as enabled/disabled) rather than only
+// the enabled ones — the frontend can then reason about a fixed schema
+// instead of treating an absent key as ambiguous.
 //
-// Order is stable (baseline → business → secure) so the JSON payload and
-// any logs are deterministic across requests.
+// The slice is grouped baseline → business → secure for readability. (The
+// JSON payload key order is not governed by this slice: encoding/json
+// always marshals map keys sorted alphabetically, which is deterministic
+// regardless.)
 var AllFeatures = []string{
 	FeatureFolders,
 	FeatureFiles,
