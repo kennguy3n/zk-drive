@@ -90,6 +90,10 @@ func (h *Handler) PreviewURL(w http.ResponseWriter, r *http.Request) {
 		middleware.RespondInternalError(w, r, "preview url", err)
 		return
 	}
+	// Previews are immutable per (file, version) and re-fetched often
+	// as the user scrolls a grid, so the browser-cache win here is even
+	// larger than for downloads. Same private + sub-expiry policy.
+	setPresignedURLCacheControl(w, storage.DefaultPresignExpiry)
 	writeJSON(w, http.StatusOK, map[string]any{
 		"preview_url": url,
 		"object_key":  p.ObjectKey,

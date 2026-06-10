@@ -236,7 +236,7 @@ also be set; otherwise startup fails.
 
 | Variable         | Default | Purpose                                                                                                     |
 | ---------------- | ------- | ----------------------------------------------------------------------------------------------------------- |
-| `REDIS_URL`      | _empty_ | Redis / Valkey DSN. When set, sessions, rate-limit counters, and the WebSocket fan-out hub use Redis.        |
+| `REDIS_URL`      | _empty_ | Redis / Valkey DSN. When set, sessions, rate-limit counters, the WebSocket fan-out hub, the permission cache, and the response cache (folder listings, search, storage usage) use Redis. |
 | `NATS_URL`       | _empty_ | NATS JetStream URL. When set, the server publishes async-job and webhook events and the worker consumes.     |
 | `CLAMAV_ADDRESS` | _empty_ | `host:port` of a ClamAV INSTREAM daemon. When set, uploads are virus-scanned before becoming visible.        |
 

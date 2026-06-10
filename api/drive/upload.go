@@ -405,6 +405,11 @@ func (h *Handler) DownloadURL(w http.ResponseWriter, r *http.Request) {
 	h.logActivity(r.Context(), activity.ActionFileDownload, permission.ResourceFile, f.ID, map[string]any{
 		"version_id": current.ID,
 	})
+	// Let the user's browser cache reuse this presigned-URL response
+	// for (almost) the URL's lifetime so a repeat click / resumed
+	// download skips a round-trip. private + sub-expiry max-age: see
+	// setPresignedURLCacheControl.
+	setPresignedURLCacheControl(w, storage.DefaultPresignExpiry)
 	writeJSON(w, http.StatusOK, downloadURLResponse{
 		DownloadURL: url,
 		ObjectKey:   current.ObjectKey,

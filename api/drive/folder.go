@@ -1,16 +1,38 @@
 package drive
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 
 	"github.com/kennguy3n/zk-drive/api/middleware"
 	"github.com/kennguy3n/zk-drive/internal/activity"
+	"github.com/kennguy3n/zk-drive/internal/folder"
 	"github.com/kennguy3n/zk-drive/internal/permission"
+	"github.com/kennguy3n/zk-drive/internal/responsecache"
 )
+
+// folderListCacheTTL is the freshness backstop for cached folder
+// listings. Invalidation is normally immediate (the changefeed busts the
+// workspace generation on every content mutation), so this TTL only
+// matters if a bust is somehow missed — kept short for that reason while
+// still collapsing the burst of identical listing requests a single
+// directory open fires (folders pane + breadcrumb + move-dialog tree).
+const folderListCacheTTL = 15 * time.Second
+
+// folderListCacheKey is the per-parent discriminator for the listing
+// cache. Root (nil parent) and a specific parent folder are distinct
+// keyspaces; the workspace + generation are already encoded by the cache.
+func folderListCacheKey(parentID *uuid.UUID) string {
+	if parentID == nil {
+		return "root"
+	}
+	return parentID.String()
+}
 
 // Folder DTOs ---------------------------------------------------------------
 
@@ -126,7 +148,17 @@ func (h *Handler) ListFolders(w http.ResponseWriter, r *http.Request) {
 		}
 		parentID = &pid
 	}
-	list, err := h.folders.ListChildren(r.Context(), workspaceID, parentID)
+	// Cache the children listing per (workspace gen, parent). The
+	// listing is workspace-scoped (not per-user filtered) so the cache
+	// key needs only the parent id. The workspace generation counter is
+	// busted on every content mutation by the changefeed content-cache
+	// buster, so a create/rename/delete/move under this parent
+	// invalidates the entry immediately; the TTL is the backstop.
+	list, err := responsecache.GetOrCompute(r.Context(), h.respCache, workspaceID,
+		"folder-children", folderListCacheKey(parentID), folderListCacheTTL,
+		func(ctx context.Context) ([]*folder.Folder, error) {
+			return h.folders.ListChildren(ctx, workspaceID, parentID)
+		})
 	if err != nil {
 		middleware.RespondInternalError(w, r, "list folders", err)
 		return

@@ -3,6 +3,8 @@ package drive
 import (
 	"errors"
 	"net/http"
+	"strconv"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
@@ -15,6 +17,44 @@ import (
 	"github.com/kennguy3n/zk-drive/internal/user"
 	"github.com/kennguy3n/zk-drive/internal/workspace"
 )
+
+// presignCacheSafetyMargin is subtracted from a presigned URL's
+// validity window when deriving the Cache-Control max-age for the JSON
+// response that carries the URL. A client (or its forward/browser
+// cache) that re-uses a cached download-URL response must never hand
+// back a URL that has already expired at the storage gateway, so we
+// stop advertising the response as fresh a full minute before the
+// underlying URL lapses. This absorbs clock skew between the API pod
+// and the client plus the round-trip the client still needs to make to
+// storage after reading the cached response.
+const presignCacheSafetyMargin = 60 * time.Second
+
+// setPresignedURLCacheControl marks a response that carries a
+// presigned URL as privately cacheable for slightly less than the
+// URL's own validity window.
+//
+//   - `private`: a presigned URL is a bearer capability scoped to one
+//     authenticated user. It MUST NOT land in a shared/CDN cache keyed
+//     only on the request path, or one tenant's capability would be
+//     served to another. `private` confines reuse to the end user's
+//     own browser cache, which is exactly the repeat-click / resumed
+//     download case we want to accelerate.
+//   - `max-age`: the URL's remaining lifetime minus
+//     presignCacheSafetyMargin, floored at 0. A non-positive budget
+//     emits `no-store` so a URL too short-lived to safely cache is
+//     never advertised as fresh.
+//
+// Callers pass the same ttl they handed to the storage presigner so
+// the HTTP freshness window and the URL's cryptographic expiry stay in
+// lockstep.
+func setPresignedURLCacheControl(w http.ResponseWriter, ttl time.Duration) {
+	maxAge := ttl - presignCacheSafetyMargin
+	if maxAge <= 0 {
+		w.Header().Set("Cache-Control", "no-store")
+		return
+	}
+	w.Header().Set("Cache-Control", "private, max-age="+strconv.Itoa(int(maxAge.Seconds())))
+}
 
 func (h *Handler) requireWorkspaceMatch(r *http.Request) (*workspace.Workspace, error) {
 	workspaceID, _ := middleware.WorkspaceIDFromContext(r.Context())

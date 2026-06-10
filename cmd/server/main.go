@@ -55,6 +55,7 @@ import (
 	"github.com/kennguy3n/zk-drive/internal/permission"
 	"github.com/kennguy3n/zk-drive/internal/platform"
 	"github.com/kennguy3n/zk-drive/internal/preview"
+	"github.com/kennguy3n/zk-drive/internal/responsecache"
 	"github.com/kennguy3n/zk-drive/internal/retention"
 	"github.com/kennguy3n/zk-drive/internal/search"
 	"github.com/kennguy3n/zk-drive/internal/session"
@@ -760,8 +761,23 @@ func run() error {
 	} else {
 		slog.Warn("billing STRIPE_SECRET_KEY not set, /api/admin/billing/{checkout,portal}-session will respond 501")
 	}
+	// Workspace-scoped response cache for hot read endpoints (folder
+	// listings, search results, storage-usage aggregation). Nil-safe:
+	// responsecache.New returns a nil *Cache when Redis is unconfigured,
+	// and every call site treats that as a permanent miss (compute on
+	// every request). Invalidation is wired through the changefeed
+	// content-cache buster below so any persisted mutation invalidates
+	// the affected workspace immediately; per-entry TTLs are the
+	// backstop. A single instance is shared across handlers so they
+	// observe the same generation counters.
+	respCache := responsecache.New(redisClient)
+	if respCache.Enabled() {
+		slog.Info("response cache enabled (folder listings, search, storage usage)")
+	}
+
 	driveHandler := drive.NewHandler(pool, wsSvc, folderSvc, fileSvc, userSvc, storageClient, permissionSvc, activitySvc).
 		WithStorageFactory(storageFactory).
+		WithResponseCache(respCache).
 		WithDocuments(documentSvc).
 		WithCollab(collabHub).
 		WithSharing(sharingSvc).
@@ -820,7 +836,8 @@ func run() error {
 		WithFabric(fabricClient, provisioner, storageFactory).
 		WithWorkspaces(wsSvc).
 		WithWebhooks(webhookPublisher).
-		WithIPAllow(ipAllowSvc)
+		WithIPAllow(ipAllowSvc).
+		WithResponseCache(respCache)
 
 	// Platform control plane (Session 9): fleet-wide tenant management
 	// authenticated by platform API keys, mounted under /api/platform
@@ -999,6 +1016,17 @@ func run() error {
 			"flag_enabled", cfg.PerformanceCacheEnabled,
 			"redis_configured", redisClient != nil,
 		)
+	}
+
+	// Wire the content response cache (folder listings, search) onto the
+	// changefeed so every persisted mutation invalidates the affected
+	// workspace's generation before the WS broadcast lands. Independent
+	// of the permission-cache flag/ordering above: the content cache has
+	// no WithCache-before-buster dependency (it keys directly off Redis),
+	// so it is wired whenever Redis is configured. A disabled (nil) cache
+	// leaves this unset and the listings recompute every request.
+	if respCache.Enabled() {
+		changefeedSvc.WithContentCacheBuster(respCache)
 	}
 
 	r := chi.NewRouter()

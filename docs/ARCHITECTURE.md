@@ -490,6 +490,40 @@ layer metadata is not encrypted.
 This is an explicit tradeoff of strict-ZK mode and must be surfaced
 in the UI.
 
+### 6.4 Response caching (folder listings, search, storage usage)
+
+Three hot, expensive read endpoints share a single workspace-scoped,
+fail-open Redis cache (`internal/responsecache`):
+
+| Endpoint | Domain | TTL | Why cacheable |
+| --- | --- | --- | --- |
+| `GET /api/folders` | `folder-children` | 15s | Listing is workspace-scoped, not per-user filtered, so all members share one entry per parent. |
+| `GET /api/search` | `search` | 30s | Workspace-scoped FTS; identical queries across members collapse onto one entry keyed by query+language+fuzzy+page. |
+| `GET /api/admin/storage-usage` | `usage` | 60s | Advisory dashboard aggregate (full-table SUM/COUNT); quotas are still enforced synchronously on write. |
+
+**Invalidation.** Every entry key embeds a per-workspace *generation
+counter* (same design as the permission cache, `internal/permission`).
+The changefeed service holds a **content-cache buster**
+(`WithContentCacheBuster`) that `INCR`s the workspace counter on *every*
+persisted mutation — unlike the permission buster, which only fires on
+the narrow topology/grant set — because a listing/search result reflects
+the exact resource set and so must invalidate on create, rename, delete,
+and move alike. The bust fires before the WebSocket broadcast, so a
+client reacting to a live event re-fetches post-mutation state. TTLs are
+the backstop if a bust is ever missed.
+
+**Fail-open.** The cache is a latency accelerator, never a source of
+truth: any Redis error (or an unset `REDIS_URL`) degrades to computing
+the response from Postgres on every request. A nil cache is a valid
+permanent-miss.
+
+**Presigned-URL responses** (`download-url`, preview URL) are not stored
+server-side; instead they carry `Cache-Control: private, max-age=<below
+the URL's own expiry>` so the user's *own browser* can reuse a still-valid
+presigned URL on a repeat click. `private` (never `public`) is mandatory:
+a presigned URL is a per-user bearer capability and must never land in a
+shared/CDN cache. See `setPresignedURLCacheControl` in `api/drive`.
+
 ---
 
 ## 7. Permission Model
