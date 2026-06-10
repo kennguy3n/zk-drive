@@ -1,0 +1,77 @@
+name: Mobile iOS
+
+# Builds the native SwiftUI app (mobile/ios) end-to-end: cross-compiles
+# the Rust FFI bridge into an XCFramework + generated Swift bindings,
+# generates the Xcode project from the committed XcodeGen spec, then
+# builds and unit-tests the app on the iOS Simulator.
+#
+# Requires macOS for the Apple SDK (xcrun for the iOS targets), lipo and
+# xcodebuild, so the whole job runs on a macOS runner. Like the bridge
+# workflow this is intentionally NOT a merge gate; it runs only when the
+# app, the bridge, or the crates it bridges change.
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'mobile/**'
+      - 'sdk/**'
+      - '.github/workflows/mobile-ios.yml'
+  pull_request:
+    paths:
+      - 'mobile/**'
+      - 'sdk/**'
+      - '.github/workflows/mobile-ios.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-test:
+    name: Build XCFramework + app (iOS Simulator)
+    runs-on: macos-14
+    env:
+      # Disable code signing for the simulator build/test — no provisioning
+      # profile is needed and none is available on the runner.
+      CODE_SIGNING_ALLOWED: "NO"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain + iOS targets
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-ios,aarch64-apple-ios-sim,x86_64-apple-ios
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: mobile/rust-bridge
+
+      - name: Select Xcode
+        run: sudo xcode-select -switch /Applications/Xcode_15.4.app
+
+      # Builds the per-arch staticlibs, assembles ZkMobileBridge.xcframework,
+      # and emits the generated Swift bindings the app target compiles in.
+      - name: Build Rust bridge XCFramework + Swift bindings
+        working-directory: mobile/rust-bridge
+        run: ./build-ios.sh
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Generate Xcode project
+        working-directory: mobile/ios
+        run: xcodegen generate
+
+      - name: Build & test on iOS Simulator
+        working-directory: mobile/ios
+        run: |
+          xcodebuild \
+            -project ZkDrive.xcodeproj \
+            -scheme ZkDrive \
+            -configuration Debug \
+            -destination 'platform=iOS Simulator,name=iPhone 15,OS=latest' \
+            -derivedDataPath build/DerivedData \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            clean build test

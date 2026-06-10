@@ -1,0 +1,100 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleDevelopmentRegion</key>
+	<string>en</string>
+	<key>CFBundleDisplayName</key>
+	<string>ZK Drive</string>
+	<key>CFBundleExecutable</key>
+	<string>$(EXECUTABLE_NAME)</string>
+	<key>CFBundleIdentifier</key>
+	<string>$(PRODUCT_BUNDLE_IDENTIFIER)</string>
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
+	<key>CFBundleName</key>
+	<string>$(PRODUCT_NAME)</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleShortVersionString</key>
+	<string>$(MARKETING_VERSION)</string>
+	<key>CFBundleVersion</key>
+	<string>$(CURRENT_PROJECT_VERSION)</string>
+	<key>LSRequiresIPhoneOS</key>
+	<true/>
+	<key>UILaunchScreen</key>
+	<dict>
+		<key>UIColorName</key>
+		<string>BackgroundPrimary</string>
+	</dict>
+	<key>UISupportedInterfaceOrientations</key>
+	<array>
+		<string>UIInterfaceOrientationPortrait</string>
+		<string>UIInterfaceOrientationLandscapeLeft</string>
+		<string>UIInterfaceOrientationLandscapeRight</string>
+	</array>
+	<key>UISupportedInterfaceOrientations~ipad</key>
+	<array>
+		<string>UIInterfaceOrientationPortrait</string>
+		<string>UIInterfaceOrientationPortraitUpsideDown</string>
+		<string>UIInterfaceOrientationLandscapeLeft</string>
+		<string>UIInterfaceOrientationLandscapeRight</string>
+	</array>
+
+	<!-- Face ID / Touch ID unlock for returning users. -->
+	<key>NSFaceIDUsageDescription</key>
+	<string>ZK Drive uses Face ID to unlock your encrypted vault without re-entering your credentials.</string>
+	<!-- Camera capture for document/photo upload. -->
+	<key>NSCameraUsageDescription</key>
+	<string>ZK Drive uses the camera to capture documents and photos you upload to your drive.</string>
+	<key>NSPhotoLibraryUsageDescription</key>
+	<string>ZK Drive accesses your photo library so you can upload images to your drive.</string>
+
+	<!-- Background sync (BGAppRefreshTask) — must match the identifier
+	     registered in BackgroundSync.taskIdentifier. -->
+	<key>BGTaskSchedulerPermittedIdentifiers</key>
+	<array>
+		<string>com.zkdrive.app.sync.refresh</string>
+	</array>
+	<key>UIBackgroundModes</key>
+	<array>
+		<string>fetch</string>
+		<string>processing</string>
+		<string>remote-notification</string>
+	</array>
+
+	<!-- OAuth2 / OIDC PKCE callback. The custom scheme is the fallback
+	     redirect when a universal link is not configured; the registered
+	     scheme MUST match AppConfig.redirectURI's scheme. -->
+	<key>CFBundleURLTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleTypeRole</key>
+			<string>Editor</string>
+			<key>CFBundleURLName</key>
+			<string>com.zkdrive.app.oauth</string>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>zkdrive</string>
+			</array>
+		</dict>
+	</array>
+
+	<!-- Runtime configuration. These can be overridden per-environment by
+	     an xcconfig or the server /api/config endpoint at launch
+	     (see AppConfig). Defaults target a local dev server. -->
+	<key>ZKDriveConfig</key>
+	<dict>
+		<key>APIBaseURL</key>
+		<string>https://api.zkdrive.example.com</string>
+		<key>OIDCIssuer</key>
+		<string>https://iam.zkdrive.example.com</string>
+		<key>OIDCClientID</key>
+		<string>zk-drive-ios</string>
+		<key>OIDCRedirectURI</key>
+		<string>zkdrive://oauth/callback</string>
+		<key>OIDCScopes</key>
+		<string>openid profile email offline_access</string>
+	</dict>
+</dict>
+</plist>
