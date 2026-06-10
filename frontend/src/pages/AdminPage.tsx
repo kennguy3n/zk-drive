@@ -20,6 +20,7 @@ import { translateApiError } from "../api/errors";
 import { useAuth } from "../hooks/useAuth";
 import { useFeatures } from "../hooks/useFeatures";
 import { Feature } from "../features/featureKeys";
+import { Skeleton } from "../components/ui/Skeleton";
 
 type Tab = "users" | "audit" | "retention" | "storage";
 
@@ -38,7 +39,7 @@ const TAB_FEATURE: Partial<Record<Tab, string>> = {
 // console localizes alongside the rest of the SPA.
 export default function AdminPage() {
   const { isAdmin, logout } = useAuth();
-  const { isEnabled } = useFeatures();
+  const { isEnabled, loaded: featuresLoaded } = useFeatures();
   const { t } = useTranslation();
   const [tab, setTab] = useState<Tab>("users");
 
@@ -103,23 +104,40 @@ export default function AdminPage() {
           borderBottom: "1px solid #e5e7eb",
           marginBottom: 16,
         }}
+        role={featuresLoaded ? undefined : "status"}
+        aria-label={featuresLoaded ? undefined : t("common.loading")}
       >
-        {visibleTabs.map((id) => (
-          <button
-            key={id}
-            onClick={() => setTab(id)}
-            style={{
-              padding: "8px 12px",
-              background: activeTab === id ? "#eff6ff" : "transparent",
-              border: "none",
-              borderBottom:
-                activeTab === id ? "2px solid #2563eb" : "2px solid transparent",
-              cursor: "pointer",
-            }}
-          >
-            {t(`admin.tab.${id}`)}
-          </button>
-        ))}
+        {featuresLoaded
+          ? visibleTabs.map((id) => (
+              <button
+                key={id}
+                onClick={() => setTab(id)}
+                style={{
+                  padding: "8px 12px",
+                  background: activeTab === id ? "#eff6ff" : "transparent",
+                  border: "none",
+                  borderBottom:
+                    activeTab === id
+                      ? "2px solid #2563eb"
+                      : "2px solid transparent",
+                  cursor: "pointer",
+                }}
+              >
+                {t(`admin.tab.${id}`)}
+              </button>
+            ))
+          : // Until /api/features resolves, isEnabled() is fail-closed (false)
+            // for every gated tab, so rendering the real strip now would show
+            // only the baseline tabs and then visibly pop the audit/retention
+            // tabs in once features load. Show a same-height skeleton strip
+            // instead so the final tabs replace placeholders rather than
+            // appearing from nothing.
+            Array.from({ length: 4 }).map((_, i) => (
+              <Skeleton
+                key={i}
+                style={{ height: 34, width: 84, borderRadius: 6 }}
+              />
+            ))}
       </nav>
       {activeTab === "users" && <UsersTab />}
       {activeTab === "audit" && <AuditTab />}
