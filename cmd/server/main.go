@@ -683,6 +683,47 @@ func run() error {
 		slog.Warn("web push disabled (VAPID_PUBLIC_KEY / VAPID_PRIVATE_KEY unset), /api/push/* will respond 501")
 	}
 
+	// Native mobile push (APNs for iOS, FCM for Android). Each provider is
+	// built only when its credentials are configured; a build failure
+	// disables that provider (logged) without aborting startup. When at
+	// least one provider is configured, wrap the publisher so a
+	// "notification" event also fans out to the recipient's phones, and
+	// expose POST/DELETE /api/push/register-device. Wrap order is
+	// inner → WebPush → Mobile, so one publish reaches WebSocket, Web Push
+	// and native push.
+	mobilePushSvc := notification.NewMobilePushService(notifRepo)
+	if cfg.FCMConfigured() {
+		saJSON, err := loadCredentialMaterial(cfg.FCMServiceAccountJSON, cfg.FCMServiceAccountFile)
+		if err != nil {
+			slog.Error("fcm push disabled: cannot read service account", "err", err)
+		} else if fcm, err := notification.NewFCMProvider(saJSON); err != nil {
+			slog.Error("fcm push disabled: invalid service account", "err", err)
+		} else {
+			mobilePushSvc.WithProvider(fcm)
+			slog.Info("fcm push enabled, Android notifications will fan out via FCM HTTP v1")
+		}
+	}
+	if cfg.APNsConfigured() {
+		p8, err := loadCredentialMaterial(cfg.APNsAuthKey, cfg.APNsAuthKeyFile)
+		if err != nil {
+			slog.Error("apns push disabled: cannot read auth key", "err", err)
+		} else if apns, err := notification.NewAPNsProvider(p8, cfg.APNsKeyID, cfg.APNsTeamID, cfg.APNsTopic, cfg.APNsProduction); err != nil {
+			slog.Error("apns push disabled: invalid auth key", "err", err)
+		} else {
+			mobilePushSvc.WithProvider(apns)
+			slog.Info("apns push enabled, iOS notifications will fan out via APNs", "production", cfg.APNsProduction)
+		}
+	}
+	if mobilePushSvc.Enabled() {
+		notificationPublisher = notification.NewMobilePushPublisher(notificationPublisher, mobilePushSvc).
+			WithWaitGroup(&bgGoroutines)
+	} else {
+		// Keep nil so drive's WithMobilePush sees a disabled service and the
+		// register endpoint responds 501.
+		mobilePushSvc = nil
+		slog.Warn("mobile push disabled (no FCM / APNs credentials), /api/push/register-device will respond 501")
+	}
+
 	notificationSvc := notification.NewService(notifRepo).
 		WithPublisher(notificationPublisher)
 
@@ -883,6 +924,7 @@ func run() error {
 		WithJobs(jobPublisher).
 		WithNotifications(notificationSvc).
 		WithWebPush(webPushSvc).
+		WithMobilePush(mobilePushSvc).
 		WithChangefeed(changefeedSvc).
 		WithEmail(emailSvc).
 		WithPreviews(previewRepo).
@@ -1514,6 +1556,11 @@ func run() error {
 			r.Post("/push/subscribe", driveHandler.SubscribePush)
 			r.Delete("/push/subscribe", driveHandler.UnsubscribePush)
 
+			// Native mobile push (APNs / FCM) device-token registration.
+			// Respond 501 when no mobile push provider is configured.
+			r.Post("/push/register-device", driveHandler.RegisterDevice)
+			r.Delete("/push/register-device", driveHandler.UnregisterDevice)
+
 			r.Get("/activity", driveHandler.ListActivity)
 
 			// Change feed for desktop sync SDK. Live push rides
@@ -1763,6 +1810,30 @@ func buildEmailService(cfg *config.Config) (*email.Service, error) {
 		SMTPTLSServerName:         cfg.SMTPTLSServerName,
 		SMTPTLSInsecureSkipVerify: cfg.SMTPTLSInsecureSkipVerify,
 	})
+}
+
+// loadCredentialMaterial resolves a credential supplied either inline or
+// via a file path, used by the FCM / APNs provider wiring. The inline
+// value takes precedence: an operator who sets both gets the inline one
+// (and the file is ignored), matching the "inline wins" contract
+// documented on the Config fields. Returns an error only when neither is
+// usable (inline empty and the file cannot be read), so the caller can
+// disable just that provider and continue.
+func loadCredentialMaterial(inline, path string) ([]byte, error) {
+	if strings.TrimSpace(inline) != "" {
+		return []byte(inline), nil
+	}
+	if path == "" {
+		return nil, errors.New("no inline value and no file path configured")
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("read credential file %q: %w", path, err)
+	}
+	if len(data) == 0 {
+		return nil, fmt.Errorf("credential file %q is empty", path)
+	}
+	return data, nil
 }
 
 // otelChiSpanRenamer is a chi middleware that renames the

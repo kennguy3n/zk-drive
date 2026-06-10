@@ -486,6 +486,62 @@ next login). The browser fetches the public key from
 `GET /api/push/vapid-public-key`; subscriptions are registered via
 `POST /api/push/subscribe` and removed via `DELETE /api/push/subscribe`.
 
+## Native mobile push — APNs & FCM (optional)
+
+The native iOS and Android apps receive the same notifications via their
+platform push services: **APNs** (Apple Push Notification service) for
+iOS and **FCM** (Firebase Cloud Messaging HTTP v1) for Android. Each
+provider is configured independently and is **fail-soft** — an
+unconfigured or mis-configured provider is skipped at startup (logged,
+never fatal) and simply disables that platform; the WebSocket + Web Push
+paths are unaffected. See [`docs/MOBILE_BRIDGE.md`](./MOBILE_BRIDGE.md#3-server-side-native-push)
+for the endpoint and delivery contract.
+
+Devices register their token via `POST /api/push/register-device` (and
+remove it via the `DELETE` variant). When **neither** provider is
+configured, that endpoint responds `501 Not Implemented` for every
+platform; when only one is configured, the other platform gets `501`.
+
+### FCM (Android)
+
+Authenticated with a Google **service-account** key (OAuth2 RS256 JWT →
+short-lived access token, cached and refreshed automatically). Supply the
+key inline **or** as a file path; inline takes precedence.
+
+| Variable | Default | Purpose |
+| -------- | ------- | ------- |
+| `FCM_SERVICE_ACCOUNT_JSON` | _empty_ | Inline service-account key JSON. |
+| `FCM_SERVICE_ACCOUNT_FILE` | _empty_ | Path to the service-account key JSON file. |
+
+The `project_id` and `client_email` are read from the key itself; the
+sends target `https://fcm.googleapis.com/v1/projects/{project_id}/messages:send`.
+FCM is enabled when either variable is non-empty.
+
+### APNs (iOS)
+
+Authenticated with a **token-based** `.p8` signing key (ES256 provider
+JWT, cached and rotated every ~40 min). The full credential set is
+required — a partial set is treated as unconfigured so APNs stays
+disabled rather than failing at send time. Supply the key inline **or**
+as a file path; inline takes precedence.
+
+| Variable | Default | Purpose |
+| -------- | ------- | ------- |
+| `APNS_AUTH_KEY` | _empty_ | Inline `.p8` token-auth signing key (PEM). |
+| `APNS_AUTH_KEY_FILE` | _empty_ | Path to the `.p8` key file. |
+| `APNS_KEY_ID` | _empty_ | 10-char Key ID of the `.p8` key (Apple Developer → Keys). |
+| `APNS_TEAM_ID` | _empty_ | 10-char Apple Developer Team ID. |
+| `APNS_TOPIC` | _empty_ | The iOS app's bundle identifier (APNs topic). |
+| `APNS_PRODUCTION` | `false` | `true` ⇒ `api.push.apple.com`; `false` ⇒ `api.sandbox.push.apple.com`. Defaults to sandbox so a misconfiguration never silently fails against production. |
+
+APNs is enabled only when a key (inline or file) **and** `APNS_KEY_ID`,
+`APNS_TEAM_ID`, and `APNS_TOPIC` are all set.
+
+A device token that a provider reports as permanently dead (APNs `410
+Unregistered` / `BadDeviceToken` / `DeviceTokenNotForTopic`, FCM
+`UNREGISTERED` / `SENDER_ID_MISMATCH`) is pruned automatically, exactly
+like a `410 Gone` Web Push subscription.
+
 ## Collaborative office editing (ONLYOFFICE)
 
 Lets users open office documents (`.docx`, `.xlsx`, `.pptx`, `.odt`,

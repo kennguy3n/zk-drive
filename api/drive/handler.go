@@ -67,6 +67,7 @@ type Handler struct {
 	jobs           *jobs.Publisher
 	notifications  *notification.Service
 	webpush        *notification.WebPushService
+	mobilePush     *notification.MobilePushService
 	email          *email.Service
 	previews       preview.Repository
 	audit          *audit.Service
@@ -345,6 +346,15 @@ func (h *Handler) WithNotifications(s *notification.Service) *Handler {
 // this handler.
 func (h *Handler) WithWebPush(s *notification.WebPushService) *Handler {
 	h.webpush = s
+	return h
+}
+
+// WithMobilePush wires the native-mobile push service so the
+// /api/push/register-device endpoint can persist APNs / FCM device
+// tokens. A nil service (no provider configured) leaves the endpoint
+// responding 501, mirroring WithWebPush.
+func (h *Handler) WithMobilePush(s *notification.MobilePushService) *Handler {
+	h.mobilePush = s
 	return h
 }
 

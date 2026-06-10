@@ -124,8 +124,11 @@ func writeServiceError(w http.ResponseWriter, r *http.Request, err error) {
 		errors.Is(err, folder.ErrInvalidParent),
 		errors.Is(err, folder.ErrInvalidEncryptionMode),
 		errors.Is(err, file.ErrInvalidName),
-		errors.Is(err, notification.ErrInvalidSubscription):
+		errors.Is(err, notification.ErrInvalidSubscription),
+		errors.Is(err, notification.ErrInvalidDeviceToken):
 		middleware.RespondError(w, http.StatusBadRequest, middleware.ErrCodeValidation, err.Error())
+	case errors.Is(err, notification.ErrPlatformUnsupported):
+		middleware.RespondError(w, http.StatusNotImplemented, middleware.ErrCodeUnsupportedOp, err.Error())
 	case errors.Is(err, folder.ErrEncryptionModeMismatch):
 		middleware.RespondError(w, http.StatusConflict, middleware.ErrCodeConflict, err.Error())
 	case errors.Is(err, file.ErrVersionConflict):
