@@ -65,6 +65,14 @@ const (
 	// accept connections before we give up and fail startup.
 	natsReadyTimeout = 15 * time.Second
 
+	// natsShutdownTimeout bounds the wait for the embedded NATS server
+	// to finish shutting down. WaitForShutdown() is otherwise unbounded;
+	// if a stuck JetStream flush or consumer wedges it, a bare-metal
+	// compact process (no tini/container stop timeout to fall back on)
+	// would hang on exit forever. After this ceiling we log and proceed
+	// to process exit regardless.
+	natsShutdownTimeout = 10 * time.Second
+
 	// jobsStreamReadyTimeout bounds how long we wait for the worker to
 	// create the DRIVE_JOBS stream before starting the server anyway.
 	// It is an availability ceiling, not a hard requirement: if the
@@ -126,7 +134,16 @@ func run() error {
 	defer func() {
 		slog.Info("shutting down embedded NATS")
 		ns.Shutdown()
-		ns.WaitForShutdown()
+		done := make(chan struct{})
+		go func() {
+			ns.WaitForShutdown()
+			close(done)
+		}()
+		select {
+		case <-done:
+		case <-time.After(natsShutdownTimeout):
+			slog.Warn("embedded NATS did not shut down within timeout; proceeding to exit", "timeout", natsShutdownTimeout)
+		}
 	}()
 
 	// 2) Auto-migrate once, up front, under the advisory lock. Compact

@@ -81,7 +81,13 @@ COPY --from=builder /out/reconciler /app/reconciler
 COPY --from=builder /out/orphan-gc /app/orphan-gc
 COPY --from=builder /out/audit-archiver /app/audit-archiver
 COPY --from=builder /out/audit-restore /app/audit-restore
-COPY --from=builder /src/migrations /app/migrations
+# No /app/migrations here: the worker never applies migrations (it only
+# asserts a minimum schema version via a DB query — see
+# database.RequireMinMigrationVersion in cmd/worker). Schema changes are
+# owned by the migrate Job / server --auto-migrate, which run from the
+# server image that ships both /app/migrate and /app/migrations. Shipping
+# the SQL files here without the migrate binary was dead weight and
+# misleading to operators.
 
 USER nonroot:nonroot
 
