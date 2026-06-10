@@ -48,6 +48,7 @@ import (
 	"github.com/kennguy3n/zk-drive/internal/folder"
 	"github.com/kennguy3n/zk-drive/internal/health"
 	"github.com/kennguy3n/zk-drive/internal/heartbeat"
+	"github.com/kennguy3n/zk-drive/internal/iamcore"
 	"github.com/kennguy3n/zk-drive/internal/jobs"
 	"github.com/kennguy3n/zk-drive/internal/kchat"
 	"github.com/kennguy3n/zk-drive/internal/logging"
@@ -735,6 +736,45 @@ func run() error {
 		MicrosoftClientSecret: cfg.MicrosoftClientSecret,
 		MicrosoftRedirectURL:  cfg.MicrosoftRedirectURL,
 	}).WithAudit(auditSvc)
+
+	// Authentication front-end for the data plane (/api/* drive,
+	// admin, kchat, and the WebSocket upgrade). Defaults to the
+	// built-in session-JWT middleware; when iam-core is configured
+	// (IAM_CORE_ISSUER_URL set) it is replaced by the OIDC middleware,
+	// which binds the identical (workspaceID, userID, role) request
+	// context so every downstream handler and guard works unchanged.
+	// The /api/auth password routes are simultaneously swapped for an
+	// SSO-only responder so password authentication cannot be used
+	// while an external IdP is the source of truth.
+	dataPlaneAuth := middleware.AuthMiddlewareWithKeys(jwtKeyManager, sessionChecker)
+	var iamCoreClient *iamcore.Client
+	if cfg.IAMCoreIssuerURL != "" {
+		client, err := iamcore.NewClient(ctx, iamcore.Config{
+			IssuerURL:    cfg.IAMCoreIssuerURL,
+			ClientID:     cfg.IAMCoreClientID,
+			ClientSecret: cfg.IAMCoreClientSecret,
+			Audience:     cfg.IAMCoreAudience,
+			Scopes:       cfg.IAMCoreScopes,
+			CallbackURL:  cfg.IAMCoreCallbackURL,
+		}, nil)
+		if err != nil {
+			cancel()
+			return fmt.Errorf("iam-core client: %w", err)
+		}
+		iamCoreClient = client
+		iamCoreMW := iamcore.NewMiddleware(client.NewVerifier(), iamcore.NewTenantMapper(pool, wsSvc), userSvc).
+			WithAudit(auditSvc)
+		dataPlaneAuth = iamCoreMW.Handler
+		slog.Info("auth provider: iam-core OIDC", "issuer", client.Discovery().Issuer, "client_id", cfg.IAMCoreClientID)
+		if cfg.IAMCoreAudience != "" {
+			slog.Info("iam-core access-token audience validation enabled", "audience", cfg.IAMCoreAudience)
+		} else {
+			slog.Warn("iam-core IAM_CORE_AUDIENCE not set: access-token audience validation is DISABLED — a token minted for another relying party in the same iam-core tenant could be replayed against zk-drive; set IAM_CORE_AUDIENCE in production")
+		}
+	} else {
+		slog.Info("auth provider: built-in (password + optional Google/Microsoft SSO)")
+	}
+
 	billingRepo := billing.NewPostgresRepository(pool)
 	billingSvc := billing.NewService(billingRepo)
 	stripeService := billing.NewStripeService(
@@ -1150,6 +1190,56 @@ func run() error {
 		slog.Info("compact profile active: Prometheus /metrics endpoint not mounted")
 	}
 
+	// configHandler backs GET /api/config: a public, unauthenticated
+	// endpoint the SPA fetches at startup to discover which auth mode
+	// is active. In iam-core mode it returns the public OIDC parameters
+	// the SPA needs to run the Authorization Code + PKCE flow itself
+	// (authorize/token endpoints, client id, redirect uri, audience,
+	// scopes). It NEVER exposes the client secret. In built-in mode it
+	// returns {"auth_mode":"builtin"} so the SPA renders the password
+	// form. Marked no-store: the active mode is deployment config that
+	// must not be cached across an auth-provider switch.
+	configHandler := func(w http.ResponseWriter, req *http.Request) {
+		type payload struct {
+			AuthMode     string   `json:"auth_mode"`
+			Issuer       string   `json:"issuer,omitempty"`
+			AuthorizeURL string   `json:"authorize_url,omitempty"`
+			TokenURL     string   `json:"token_url,omitempty"`
+			ClientID     string   `json:"client_id,omitempty"`
+			RedirectURI  string   `json:"redirect_uri,omitempty"`
+			Audience     string   `json:"audience,omitempty"`
+			Scopes       []string `json:"scopes,omitempty"`
+		}
+		out := payload{AuthMode: "builtin"}
+		if iamCoreClient != nil {
+			d := iamCoreClient.Discovery()
+			out = payload{
+				AuthMode:     "iam-core",
+				Issuer:       d.Issuer,
+				AuthorizeURL: d.AuthorizationEndpoint,
+				TokenURL:     d.TokenEndpoint,
+				ClientID:     cfg.IAMCoreClientID,
+				RedirectURI:  cfg.IAMCoreCallbackURL,
+				Audience:     cfg.IAMCoreAudience,
+				Scopes:       iamCoreClient.Scopes(),
+			}
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Cache-Control", "no-store")
+		if err := json.NewEncoder(w).Encode(out); err != nil {
+			logging.FromContext(req.Context()).Error("encode /api/config failed", "err", err)
+		}
+	}
+
+	// ssoOnlyAuthHandler replaces the built-in password login/signup
+	// handlers when iam-core is the identity provider, so a client that
+	// still POSTs credentials gets a clear, machine-readable signal to
+	// switch to the SSO flow rather than a confusing 404.
+	ssoOnlyAuthHandler := func(w http.ResponseWriter, _ *http.Request) {
+		middleware.RespondError(w, http.StatusConflict, middleware.ErrCodeUnsupportedOp,
+			"password authentication is disabled; this deployment authenticates via SSO (see GET /api/config)")
+	}
+
 	r.Route("/api", func(r chi.Router) {
 		// Guided setup wizard (WS8 8.2). status + test-storage are
 		// public because the wizard runs before the first admin
@@ -1166,7 +1256,22 @@ func run() error {
 			})
 		})
 
+		r.Get("/config", configHandler)
 		r.Route("/auth", func(r chi.Router) {
+			if iamCoreClient != nil {
+				// iam-core is the identity provider: the built-in
+				// password, OAuth-link, refresh/logout and TOTP
+				// endpoints are all disabled. A single wildcard catches
+				// every method and sub-path under /api/auth so any such
+				// call — /login, /logout, /refresh, /oauth/*, /totp/* —
+				// gets a clear 409 with an SSO-only hint rather than a
+				// bare 404, telling stale clients to discover the
+				// Universal Login via GET /api/config and present the
+				// resulting iam-core access token as a bearer credential
+				// on the data plane.
+				r.Handle("/*", http.HandlerFunc(ssoOnlyAuthHandler))
+				return
+			}
 			r.Post("/signup", authHandler.Signup)
 			r.Post("/login", authHandler.Login)
 			r.Route("/oauth", func(r chi.Router) {
@@ -1232,7 +1337,7 @@ func run() error {
 		// frame, and TenantGuard's HTTP-method assumptions trip on
 		// the upgrade handshake.
 		r.Group(func(r chi.Router) {
-			r.Use(middleware.AuthMiddlewareWithKeys(jwtKeyManager, sessionChecker))
+			r.Use(dataPlaneAuth)
 			// Suspension enforcement applies to the WS upgrade too: a
 			// suspended workspace must not be able to keep realtime sync
 			// or collaborative editing alive when every REST call is
@@ -1269,7 +1374,7 @@ func run() error {
 		})
 
 		r.Group(func(r chi.Router) {
-			r.Use(middleware.AuthMiddlewareWithKeys(jwtKeyManager, sessionChecker))
+			r.Use(dataPlaneAuth)
 			r.Use(middleware.TenantGuard())
 			r.Use(middleware.SuspensionGuard(platformSvc, cfg.SuspensionFailClosed))
 			// IP allowlist enforcement runs after the tenant guard
@@ -1281,6 +1386,11 @@ func run() error {
 			// lock themselves out of their own workspace.
 			r.Use(middleware.IPAllowlist(ipAllowSvc, cfg.TrustedProxyDepth))
 			r.Use(rateLimiter())
+
+			// Resolved identity of the authenticated caller. Auth-mode
+			// agnostic; the iam-core SPA calls it after token exchange
+			// to learn its zk-drive user/workspace/role.
+			r.Get("/me", driveHandler.Me)
 
 			r.Get("/workspaces", driveHandler.ListWorkspaces)
 			r.Post("/workspaces", driveHandler.CreateWorkspace)
@@ -1367,7 +1477,7 @@ func run() error {
 		})
 
 		r.Route("/admin", func(r chi.Router) {
-			r.Use(middleware.AuthMiddlewareWithKeys(jwtKeyManager, sessionChecker))
+			r.Use(dataPlaneAuth)
 			r.Use(middleware.TenantGuard())
 			r.Use(middleware.SuspensionGuard(platformSvc, cfg.SuspensionFailClosed))
 			r.Use(middleware.AdminOnly())
@@ -1383,7 +1493,7 @@ func run() error {
 		})
 
 		r.Route("/kchat", func(r chi.Router) {
-			r.Use(middleware.AuthMiddlewareWithKeys(jwtKeyManager, sessionChecker))
+			r.Use(dataPlaneAuth)
 			r.Use(middleware.TenantGuard())
 			r.Use(middleware.SuspensionGuard(platformSvc, cfg.SuspensionFailClosed))
 			// kchat is a data-plane feature (attachment uploads, room
