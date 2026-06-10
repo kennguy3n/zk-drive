@@ -9,7 +9,8 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/kennguy3n/zk-drive/internal/database"
 )
 
 // ErrNotFound is returned when the requested file (or version) does not
@@ -89,13 +90,22 @@ type Repository interface {
 }
 
 // PostgresRepository implements Repository against Postgres.
+//
+// pool is a database.Querier so the repository can be wired against a
+// read/write splitter: SELECT-family reads (file listings, version
+// lookups, tag queries) fan out to a Postgres read replica while writes
+// and multi-statement transactions stay on the primary. A plain
+// *pgxpool.Pool also satisfies database.Querier, so single-pool
+// deployments are unaffected.
 type PostgresRepository struct {
-	pool *pgxpool.Pool
+	pool database.Querier
 }
 
-// NewPostgresRepository returns a PostgresRepository using the supplied pool.
-func NewPostgresRepository(pool *pgxpool.Pool) *PostgresRepository {
-	return &PostgresRepository{pool: pool}
+// NewPostgresRepository returns a PostgresRepository using the supplied
+// querier. Pass a *pgxpool.Pool for single-pool deployments or a
+// *database.ReadWriteSplitter to fan reads out to a replica.
+func NewPostgresRepository(db database.Querier) *PostgresRepository {
+	return &PostgresRepository{pool: db}
 }
 
 const fileColumns = "id, workspace_id, folder_id, name, current_version_id, size_bytes, mime_type, created_by, created_at, updated_at, deleted_at"

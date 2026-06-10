@@ -174,5 +174,5 @@ func init() {
 		"video/ogg",
 		"video/x-flv",
 	}
-	Register(RendererFunc(renderVideoFrame), mimes...)
+	RegisterWeighted(WeightHeavy, RendererFunc(renderVideoFrame), mimes...)
 }

@@ -30,6 +30,7 @@ import (
 	"github.com/kennguy3n/zk-drive/internal/billing"
 	cryptopkg "github.com/kennguy3n/zk-drive/internal/crypto"
 	"github.com/kennguy3n/zk-drive/internal/fabric"
+	"github.com/kennguy3n/zk-drive/internal/responsecache"
 	"github.com/kennguy3n/zk-drive/internal/retention"
 	"github.com/kennguy3n/zk-drive/internal/storage"
 	"github.com/kennguy3n/zk-drive/internal/user"
@@ -67,6 +68,7 @@ type Handler struct {
 	storeFactory *storage.ClientFactory
 	webhooks     MemberEventPublisher
 	ipAllow      *workspace.IPAllowService
+	respCache    *responsecache.Cache
 }
 
 // NewHandler constructs a Handler. Pass nil for services that are
@@ -128,6 +130,15 @@ func (h *Handler) WithFabric(c FabricClient, p *fabric.Provisioner, sf *storage.
 	h.fabric = c
 	h.provisioner = p
 	h.storeFactory = sf
+	return h
+}
+
+// WithResponseCache wires the workspace-scoped response cache used to
+// memoise the expensive storage-usage aggregation (a full-table SUM/COUNT
+// over files, grouped per user). Optional: a nil cache leaves the
+// endpoint computing on every request, exactly as before.
+func (h *Handler) WithResponseCache(c *responsecache.Cache) *Handler {
+	h.respCache = c
 	return h
 }
 
@@ -889,9 +900,36 @@ type userUsageEntry struct {
 	FileCount  int64     `json:"file_count"`
 }
 
-// StorageUsage aggregates files.size_bytes by created_by.
+// storageUsageCacheTTL bounds how stale the storage-usage numbers may
+// be. 60s matches the spec and the existing reconciler cadence: the
+// aggregate is advisory (a dashboard figure, not a quota gate — quotas
+// are enforced synchronously in the billing service on write), so a
+// minute of staleness is invisible to users while collapsing a burst of
+// dashboard refreshes onto a single full-table SUM/COUNT.
+const storageUsageCacheTTL = 60 * time.Second
+
+// StorageUsage aggregates files.size_bytes by created_by. The result is
+// memoised per workspace for storageUsageCacheTTL (see
+// computeStorageUsage); the cache is nil-safe so without Redis the query
+// runs on every request.
 func (h *Handler) StorageUsage(w http.ResponseWriter, r *http.Request) {
 	workspaceID, _ := middleware.WorkspaceIDFromContext(r.Context())
+	resp, err := responsecache.GetOrCompute(r.Context(), h.respCache, workspaceID,
+		"usage", "by-user", storageUsageCacheTTL,
+		func(ctx context.Context) (storageUsageResponse, error) {
+			return h.computeStorageUsage(ctx, workspaceID)
+		})
+	if err != nil {
+		middleware.RespondInternalError(w, r, "query usage", err)
+		return
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+// computeStorageUsage runs the per-user SUM/COUNT aggregation. Split out
+// of the handler so it can be the cache's compute function (and unit
+// tested without an HTTP round-trip).
+func (h *Handler) computeStorageUsage(ctx context.Context, workspaceID uuid.UUID) (storageUsageResponse, error) {
 	const q = `
 SELECT u.id, u.email, COALESCE(SUM(f.size_bytes), 0)::bigint, COUNT(f.id)::bigint
 FROM users u
@@ -899,23 +937,24 @@ LEFT JOIN files f ON f.created_by = u.id AND f.workspace_id = u.workspace_id AND
 WHERE u.workspace_id = $1
 GROUP BY u.id, u.email
 ORDER BY u.email`
-	rows, err := h.pool.Query(r.Context(), q, workspaceID)
+	rows, err := h.pool.Query(ctx, q, workspaceID)
 	if err != nil {
-		middleware.RespondInternalError(w, r, "query usage", err)
-		return
+		return storageUsageResponse{}, err
 	}
 	defer rows.Close()
 	resp := storageUsageResponse{PerUser: []userUsageEntry{}}
 	for rows.Next() {
 		var entry userUsageEntry
 		if err := rows.Scan(&entry.UserID, &entry.Email, &entry.TotalBytes, &entry.FileCount); err != nil {
-			middleware.RespondInternalError(w, r, "scan usage", err)
-			return
+			return storageUsageResponse{}, err
 		}
 		resp.TotalBytes += entry.TotalBytes
 		resp.PerUser = append(resp.PerUser, entry)
 	}
-	writeJSON(w, http.StatusOK, resp)
+	if err := rows.Err(); err != nil {
+		return storageUsageResponse{}, err
+	}
+	return resp, nil
 }
 
 // Retention --------------------------------------------------------

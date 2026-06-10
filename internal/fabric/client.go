@@ -32,11 +32,55 @@ type ClientConfig struct {
 	HTTPClient *http.Client
 }
 
-// NewClient builds a fabric console Client.
+// DefaultMaxIdleConnsPerHost is the size of the per-host idle keep-alive
+// pool the default fabric transport maintains to zk-object-fabric. The
+// stdlib default (2) is far too small for a service-to-service hot path:
+// at 5000-tenant scale the console/metadata calls (placement reads, CMK
+// updates, and — once enabled — presigned-URL/permission RPCs) burst
+// well past two concurrent requests, and a transport capped at two idle
+// conns tears down and re-dials TLS for every request beyond the second,
+// adding a full handshake RTT to each. Sizing the idle pool to the
+// expected concurrency lets HTTP/2 multiplex many in-flight requests
+// over a small set of warm connections instead.
+const DefaultMaxIdleConnsPerHost = 64
+
+// newDefaultTransport builds the HTTP transport used when ClientConfig
+// does not supply its own *http.Client. It clones http.DefaultTransport
+// (so proxy/dialer/timeout defaults are inherited) and then:
+//
+//   - ForceAttemptHTTP2 = true: negotiate HTTP/2 over TLS (h2) when the
+//     gateway advertises it via ALPN, so calls to zk-object-fabric
+//     multiplex over a single connection per host rather than opening a
+//     fresh HTTP/1.1 connection per concurrent request.
+//   - MaxIdleConnsPerHost / MaxConnsPerHost raised so the keep-alive
+//     pool actually retains enough warm connections to serve the
+//     service-to-service burst rate without per-request re-dials.
+func newDefaultTransport() *http.Transport {
+	base, ok := http.DefaultTransport.(*http.Transport)
+	if !ok {
+		// http.DefaultTransport is always *http.Transport in the
+		// stdlib; the assertion is defensive. Fall back to a fresh
+		// transport so a future stdlib change can never nil-panic here.
+		base = &http.Transport{}
+	}
+	t := base.Clone()
+	t.ForceAttemptHTTP2 = true
+	t.MaxIdleConns = 256
+	t.MaxIdleConnsPerHost = DefaultMaxIdleConnsPerHost
+	t.IdleConnTimeout = 90 * time.Second
+	return t
+}
+
+// NewClient builds a fabric console Client. When cfg.HTTPClient is nil a
+// client with an HTTP/2-capable, connection-pooled transport (see
+// newDefaultTransport) and a 10s request timeout is used.
 func NewClient(cfg ClientConfig) *Client {
 	httpc := cfg.HTTPClient
 	if httpc == nil {
-		httpc = &http.Client{Timeout: 10 * time.Second}
+		httpc = &http.Client{
+			Timeout:   10 * time.Second,
+			Transport: newDefaultTransport(),
+		}
 	}
 	return &Client{
 		baseURL:    strings.TrimRight(cfg.BaseURL, "/"),
