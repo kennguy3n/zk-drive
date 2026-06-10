@@ -43,6 +43,14 @@ resource "aws_service_discovery_private_dns_namespace" "internal" {
 locals {
   namespace = aws_service_discovery_private_dns_namespace.internal.name
 
+  # Resolved image references. The server task runs the slim API image
+  # (Dockerfile.server); the worker task and all CronJobs run the heavy
+  # image (Dockerfile.worker). Each falls back to the shared combined
+  # app_image[:app_version] when its split-image override is empty, so
+  # the default single-image deployment is unchanged.
+  server_image = "${coalesce(var.server_image, var.app_image)}:${coalesce(var.server_image_version, var.app_version)}"
+  worker_image = "${coalesce(var.worker_image, var.app_image)}:${coalesce(var.worker_image_version, var.app_version)}"
+
   nats_url       = "nats://nats.${local.namespace}:4222"
   clamav_address = "clamav.${local.namespace}:3310"
   redis_scheme   = var.redis_transit_encryption ? "rediss" : "redis"
@@ -249,7 +257,7 @@ resource "aws_ecs_task_definition" "server" {
   container_definitions = jsonencode([
     {
       name        = "server"
-      image       = "${var.app_image}:${var.app_version}"
+      image       = local.server_image
       essential   = true
       entryPoint  = ["/app/server"]
       environment = local.app_environment
@@ -260,8 +268,14 @@ resource "aws_ecs_task_definition" "server" {
       dependsOn = [
         { containerName = "pgbouncer", condition = "START" },
       ]
+      # The server image (slim distroless or combined debian-slim) ships
+      # no shell, wget, or curl, so the probe runs the bundled
+      # /app/healthcheck binary directly (CMD, not CMD-SHELL). It GETs
+      # /healthz on the loopback interface and maps the result to an exit
+      # code. This is the container-level liveness check; ALB target-group
+      # health is configured separately on the listener/target group.
       healthCheck = {
-        command     = ["CMD-SHELL", "wget -qO- http://localhost:8080/healthz || exit 1"]
+        command     = ["CMD", "/app/healthcheck"]
         interval    = 30
         timeout     = 5
         retries     = 3
@@ -296,7 +310,7 @@ resource "aws_ecs_task_definition" "worker" {
   container_definitions = jsonencode([
     {
       name        = "worker"
-      image       = "${var.app_image}:${var.app_version}"
+      image       = local.worker_image
       essential   = true
       entryPoint  = ["/app/worker"]
       environment = local.app_environment

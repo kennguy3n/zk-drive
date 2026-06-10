@@ -33,10 +33,13 @@ import (
 	"go.opentelemetry.io/otel/trace"
 )
 
-// StreamName is the JetStream stream that backs every drive.* subject.
-// Declared here (rather than only in cmd/worker) so the publisher can
-// inspect consumer depth for heavy-preview backpressure without the
-// worker and publisher drifting on the stream name.
+// StreamName is the JetStream WorkQueue stream that backs every
+// drive.* job subject. The worker (cmd/worker) is the single creator
+// of this stream (ensureStream); other components — the publisher
+// (which inspects consumer depth for heavy-preview backpressure), the
+// compact supervisor's readiness barrier, and operator tooling —
+// reference this constant so the name has one source of truth and the
+// worker and publisher cannot drift on it.
 const StreamName = "DRIVE_JOBS"
 
 // ErrPreviewDeferred is returned by PublishPreviewWeighted when the

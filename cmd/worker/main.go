@@ -61,7 +61,11 @@ import (
 )
 
 const (
-	streamName  = "DRIVE_JOBS"
+	// streamName is the JetStream WorkQueue stream the worker creates
+	// (ensureStream) and binds its consumers to. Sourced from the jobs
+	// package so the publisher, the compact supervisor's readiness
+	// barrier, and the worker all agree on one name.
+	streamName  = jobs.StreamName
 	defaultNATS = "nats://localhost:4222"
 	ackWait     = 5 * time.Minute
 )
