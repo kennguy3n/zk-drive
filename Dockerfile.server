@@ -1,0 +1,47 @@
+# syntax=docker/dockerfile:1.7
+
+# ---- Slim API-server image ----
+#
+# The server never shells out to a preview tool (LibreOffice, FFmpeg,
+# ImageMagick, poppler, rsvg) — that work happens exclusively in the
+# worker. So the server runtime needs nothing beyond the static Go
+# binary and the migration files, which lets it ship on
+# distroless/static (~2MB base, no shell, no package manager, runs as
+# an unprivileged user by default). The result is a ~30MB image versus
+# the ~800MB combined image, which slashes pull time, cold-start
+# latency, and the CVE surface across a fleet of 5000 SME tenants.
+#
+# Contents: /app/server, /app/migrate, /app/migrations/. The migrate
+# binary rides along so the same image can run the schema Job (or the
+# server's own --auto-migrate path) without a second tag.
+FROM golang:1.25-alpine AS builder
+WORKDIR /src
+
+RUN apk add --no-cache git
+
+COPY go.mod go.sum ./
+RUN go mod download
+
+COPY . .
+
+ARG APP_VERSION=dev
+RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w -X github.com/kennguy3n/zk-drive/internal/version.Version=${APP_VERSION}" -o /out/server ./cmd/server
+RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w -X github.com/kennguy3n/zk-drive/internal/version.Version=${APP_VERSION}" -o /out/migrate ./cmd/migrate
+
+# ---- Runtime stage ----
+# distroless/static-debian12: no libc beyond what a CGO_ENABLED=0 Go
+# binary needs, no shell, no package manager. ca-certificates are
+# bundled so outbound TLS (Postgres sslmode=require, S3, OIDC) works.
+# The `nonroot` tag runs as uid/gid 65532 — matching the combined
+# image's nonroot user — so volume permissions and PodSecurity
+# policies stay identical across image variants.
+FROM gcr.io/distroless/static-debian12:nonroot AS runtime
+WORKDIR /app
+
+COPY --from=builder /out/server /app/server
+COPY --from=builder /out/migrate /app/migrate
+COPY --from=builder /src/migrations /app/migrations
+
+EXPOSE 8080
+
+ENTRYPOINT ["/app/server"]

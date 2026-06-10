@@ -1,0 +1,119 @@
+# zk-drive — SME compact deployment (single command).
+#
+#   docker compose -f deploy/docker-compose.compact.yml up
+#
+# This is the NoOps shape for a small/medium business running zk-drive
+# on a single node. It brings up exactly two containers:
+#
+#   * app       — the combined image running the /app/compact supervisor.
+#                 ONE container hosts the API server + async worker (as
+#                 supervised child processes) AND an embedded NATS
+#                 JetStream broker (in-process). It auto-migrates the
+#                 schema on startup under the advisory lock.
+#   * postgres  — a low-memory-tuned Postgres 16.
+#
+# There is deliberately NO separate NATS, Redis, ClamAV, or migrate
+# container:
+#   * NATS is embedded in the app process (ZKDRIVE_PROFILE=compact).
+#   * Redis is not used — the rate limiter and session store run
+#     in-memory (single node, so cross-replica coordination is moot).
+#   * ClamAV is optional — virus scanning is skipped when CLAMAV_ADDRESS
+#     is unset. Point it at a ClamAV daemon to enable scanning.
+#   * Migrations run in-process at startup (no migrate Job/binary).
+#
+# Memory: the app container is capped at 384MB and Postgres at 128MB, so
+# the whole stack targets <512MB RAM. Tune `deploy.resources` for your
+# box.
+#
+# Configuration is reduced to ~5 site-specific variables — set them in a
+# .env file next to this compose file (or export them) and everything
+# else is inherited from the compact profile:
+#
+#   JWT_SECRET=<32+ byte secret>
+#   S3_ENDPOINT=https://<your zk-object-fabric or S3 endpoint>
+#   S3_BUCKET=<bucket>
+#   S3_ACCESS_KEY=<key>
+#   S3_SECRET_KEY=<secret>
+#
+# DATABASE_URL defaults to the bundled Postgres below, so it is not
+# required unless you point at an external database.
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: zkdrive
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-zkdrive}
+      POSTGRES_DB: zkdrive
+    # Low-memory tuning for a single-node SME box. shared_buffers and
+    # the connection cap are sized to live within the 128MB container
+    # limit below while comfortably serving the compact pool
+    # (DB_MAX_CONNS=10 from the compact profile, plus headroom).
+    command:
+      - "postgres"
+      - "-c"
+      - "shared_buffers=32MB"
+      - "-c"
+      - "max_connections=30"
+      - "-c"
+      - "effective_cache_size=96MB"
+      - "-c"
+      - "work_mem=2MB"
+      - "-c"
+      - "maintenance_work_mem=16MB"
+    volumes:
+      - zkdrive_pg:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U zkdrive -d zkdrive"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 128M
+
+  app:
+    build:
+      context: ..
+      # The COMBINED image — it ships every entrypoint including
+      # /app/compact, /app/server, and /app/worker. The compact
+      # supervisor execs the latter two as children.
+      dockerfile: Dockerfile
+    # Run the supervisor instead of the image's default /app/server.
+    entrypoint: ["/app/compact"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      # --- The compact profile: collapses 50+ knobs to the few below. -
+      ZKDRIVE_PROFILE: compact
+      # --- Bundled Postgres (override to use a managed database). ------
+      DATABASE_URL: ${DATABASE_URL:-postgres://zkdrive:${POSTGRES_PASSWORD:-zkdrive}@postgres:5432/zkdrive?sslmode=disable}
+      MIGRATIONS_DIR: /app/migrations
+      # --- Embedded NATS JetStream store (persisted on the volume so
+      #     durable consumers survive a restart). --------------------
+      ZKDRIVE_NATS_STORE_DIR: /var/lib/zk-drive/nats
+      # --- The ~5 site-specific secrets. ------------------------------
+      JWT_SECRET: ${JWT_SECRET:?set JWT_SECRET (32+ bytes) in your .env}
+      S3_ENDPOINT: ${S3_ENDPOINT:-}
+      S3_BUCKET: ${S3_BUCKET:-}
+      S3_ACCESS_KEY: ${S3_ACCESS_KEY:-}
+      S3_SECRET_KEY: ${S3_SECRET_KEY:-}
+      # --- Optional: enable virus scanning by pointing at a ClamAV
+      #     daemon. Left unset → scanning is skipped. -----------------
+      CLAMAV_ADDRESS: ${CLAMAV_ADDRESS:-}
+    volumes:
+      - zkdrive_nats:/var/lib/zk-drive/nats
+    ports:
+      - "8080:8080"
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 384M
+
+volumes:
+  zkdrive_pg:
+  zkdrive_nats:

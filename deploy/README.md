@@ -2,8 +2,13 @@
 
 **License**: Proprietary — All Rights Reserved.
 
-Three deployment paths ship in this directory:
+Four deployment paths ship in this directory:
 
+- **Compact single-command** at `docker-compose.compact.yml` — the
+  NoOps path for an SME running on one node: `docker compose -f
+  deploy/docker-compose.compact.yml up`. One app container (server +
+  worker + embedded NATS) plus Postgres, targeting <512MB RAM. See
+  [Compact single-command deployment (SME)](#compact-single-command-deployment-sme).
 - **Helm chart** under `helm/` — parameterized, production-oriented
   install with HPA, PodDisruptionBudgets, NetworkPolicies, and a
   migration pre-upgrade hook. **Preferred for production.** See
@@ -15,6 +20,78 @@ Three deployment paths ship in this directory:
 - **Docker Compose** at `docker-compose.prod.yml` — single-host
   deployment with resource limits, health checks, and volumes for
   durability.
+
+## Container images
+
+zk-drive builds in three image shapes from the repo root. The first two
+are the **split** images (recommended for production — pull only the
+runtime each tier needs); the third is the **combined** image (every
+entrypoint in one tag) used by the compact deployment and for backward
+compatibility.
+
+| Dockerfile          | Base                              | Size    | Ships                                                                                  |
+| ------------------- | --------------------------------- | ------- | -------------------------------------------------------------------------------------- |
+| `Dockerfile.server` | `gcr.io/distroless/static-debian12` | ~30MB   | `/app/server`, `/app/migrate`, `/app/migrations/`. No preview tooling.                 |
+| `Dockerfile.worker` | `debian:bookworm-slim`            | ~800MB  | `/app/worker`, `/app/reconciler`, `/app/orphan-gc`, `/app/audit-archiver`, `/app/audit-restore` + LibreOffice / FFmpeg / ImageMagick. |
+| `Dockerfile`        | `debian:bookworm-slim`            | ~800MB  | **Combined** — all of the above plus `/app/compact` (the compact supervisor).          |
+
+```bash
+# Build the split images:
+docker build -f Dockerfile.server -t zk-drive-server:dev .
+docker build -f Dockerfile.worker -t zk-drive-worker:dev .
+
+# Or the combined image (used by the compact deployment):
+docker build -t zk-drive:dev .
+```
+
+The Helm chart and Terraform both default to the combined image and let
+you opt into the split images (see
+[Split server/worker images](#split-serverworker-images)).
+
+## Compact single-command deployment (SME)
+
+`docker-compose.compact.yml` is the lowest-friction way to run a full
+zk-drive instance on a single node — built for non-technical SME admins
+who want one command and no moving parts to operate.
+
+```bash
+# 1. Provide the ~5 site-specific secrets (a .env next to the compose
+#    file is the easiest; export them if you prefer):
+cat > deploy/.env <<'EOF'
+JWT_SECRET=replace-with-a-32+-byte-secret
+S3_ENDPOINT=https://your-zk-object-fabric-endpoint
+S3_BUCKET=zk-drive
+S3_ACCESS_KEY=...
+S3_SECRET_KEY=...
+EOF
+
+# 2. Bring it up:
+docker compose -f deploy/docker-compose.compact.yml up
+```
+
+What you get in two containers (<512MB RAM total):
+
+- **app** — the combined image running `/app/compact`, a supervisor that
+  starts the API server and async worker as child processes and runs an
+  **embedded NATS JetStream** broker in-process. It auto-migrates the
+  schema on startup under the advisory lock. The API is published on
+  `:8080`.
+- **postgres** — a low-memory-tuned Postgres 16 (capped at 128MB).
+
+There is deliberately **no** separate NATS, Redis, ClamAV, or migrate
+container (`ZKDRIVE_PROFILE=compact` — see
+[Deployment profiles](../docs/CONFIGURATION.md#deployment-profiles-zkdrive_profile)):
+
+- NATS is embedded in the app process; JetStream state persists on the
+  `zkdrive_nats` volume (`ZKDRIVE_NATS_STORE_DIR`) so it survives restarts.
+- Redis is not used — the rate limiter and session store run in-memory
+  (single node, so cross-replica coordination is moot).
+- ClamAV is optional — set `CLAMAV_ADDRESS=host:3310` in your `.env` to
+  enable virus scanning; left unset, scanning is skipped.
+
+To point at a managed database instead of the bundled Postgres, set
+`DATABASE_URL` in the `.env`. Everything else is defaulted by the compact
+profile.
 
 ## Kubernetes
 
@@ -117,6 +194,34 @@ All tunables live in `helm/values.yaml` (replica counts, resource
 requests/limits, image tag, env vars, ingress class, TLS secret name,
 StorageClass, HPA/PDB/NetworkPolicy toggles, and per-dependency enable
 flags).
+
+### Split server/worker images
+
+By default every workload (server, worker, migrate Job, CronJobs) runs
+the single combined `image`. To use the split images, set the
+component-specific overrides — the server Deployment and migrate Job
+then pull the slim server image, while the worker Deployment and all
+CronJobs (which need the preview tooling) pull the heavy worker image:
+
+```bash
+helm upgrade zk-drive deploy/helm -n zk-drive \
+  --set server.image.repository=ghcr.io/kennguy3n/zk-drive-server \
+  --set server.image.tag=0.1.0 \
+  --set worker.image.repository=ghcr.io/kennguy3n/zk-drive-worker \
+  --set worker.image.tag=0.1.0
+```
+
+Each override's tag falls back to `image.tag` (then the chart
+`appVersion`) when left empty, and leaving `*.image.repository` empty
+falls back entirely to the combined `image`. Recommended resources are
+**server 256Mi / 0.5 CPU** and **worker 2Gi / 1 CPU** (the worker
+shells out to LibreOffice / FFmpeg / ImageMagick, which can transiently
+use hundreds of MB per conversion); these are the chart defaults.
+
+The same split is available in Terraform via the `server_image` /
+`server_image_version` and `worker_image` / `worker_image_version`
+variables in both `terraform/aws` and `terraform/gcp` (each falls back
+to `app_image` / `app_version` when empty).
 
 ### Uninstall and cleanup
 

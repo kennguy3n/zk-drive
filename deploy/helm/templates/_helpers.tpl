@@ -18,9 +18,40 @@ app.kubernetes.io/version: {{ .Chart.AppVersion | quote }}
 {{- end }}
 {{- end -}}
 
-{{/* Fully-qualified image reference. */}}
+{{/* Fully-qualified shared/combined image reference. */}}
 {{- define "zk-drive.image" -}}
 {{- printf "%s:%s" .Values.image.repository (.Values.image.tag | default .Chart.AppVersion) -}}
+{{- end -}}
+
+{{/*
+Slim API-server image. Uses server.image.repository when set (the split
+Dockerfile.server build), otherwise falls back to the shared combined
+image. server.image.tag falls back to image.tag then Chart.AppVersion.
+Used by the server Deployment and the migrate Job (the migrate binary
+ships in the slim image too).
+*/}}
+{{- define "zk-drive.serverImage" -}}
+{{- if .Values.server.image.repository -}}
+{{- printf "%s:%s" .Values.server.image.repository (.Values.server.image.tag | default .Values.image.tag | default .Chart.AppVersion) -}}
+{{- else -}}
+{{- include "zk-drive.image" . -}}
+{{- end -}}
+{{- end -}}
+
+{{/*
+Heavy worker image. Uses worker.image.repository when set (the split
+Dockerfile.worker build, which carries the preview tooling), otherwise
+falls back to the shared combined image. worker.image.tag falls back to
+image.tag then Chart.AppVersion. Used by the worker Deployment and every
+CronJob (reconciler / orphan-gc / audit-archiver all need the heavy
+runtime).
+*/}}
+{{- define "zk-drive.workerImage" -}}
+{{- if .Values.worker.image.repository -}}
+{{- printf "%s:%s" .Values.worker.image.repository (.Values.worker.image.tag | default .Values.image.tag | default .Chart.AppVersion) -}}
+{{- else -}}
+{{- include "zk-drive.image" . -}}
+{{- end -}}
 {{- end -}}
 
 {{/*

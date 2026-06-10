@@ -42,7 +42,8 @@ resource "google_cloud_run_v2_job" "audit_archiver" {
       }
 
       containers {
-        image   = "${var.app_image}:${var.app_version}"
+        # CronJobs share the heavy preview-tool runtime → worker image.
+        image   = local.worker_image
         command = ["/app/audit-archiver"]
 
         # The archiver is opt-in: it exits zero as a no-op unless this is truthy

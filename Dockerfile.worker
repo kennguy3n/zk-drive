@@ -1,6 +1,18 @@
 # syntax=docker/dockerfile:1.7
 
-# ---- Builder stage ----
+# ---- Heavy worker image ----
+#
+# The worker is the only process that shells out to external preview /
+# scan tooling, so it carries the full Debian runtime with LibreOffice,
+# FFmpeg, ImageMagick, poppler-utils, and rsvg baked in. This is the
+# ~800MB half of the old combined image; isolating it here keeps the
+# API-server image (Dockerfile.server) at ~30MB.
+#
+# Contents: /app/worker plus the CronJob / ad-hoc binaries that share
+# the same preview-tool runtime — /app/reconciler, /app/orphan-gc,
+# /app/audit-archiver, /app/audit-restore. (audit-restore only needs
+# S3, but it ships here rather than in the slim image so operators have
+# a single "ops" image carrying every batch/maintenance entrypoint.)
 FROM golang:1.25-alpine AS builder
 WORKDIR /src
 
@@ -12,43 +24,11 @@ RUN go mod download
 COPY . .
 
 ARG APP_VERSION=dev
-RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w -X github.com/kennguy3n/zk-drive/internal/version.Version=${APP_VERSION}" -o /out/server ./cmd/server
 RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w -X github.com/kennguy3n/zk-drive/internal/version.Version=${APP_VERSION}" -o /out/worker ./cmd/worker
-# Standalone migrate binary, shipped in the same image so deploys
-# can run a K8s Job (or Compose service) that does `entrypoint:
-# ["/app/migrate"]` before the server / worker pods come up. Keeping
-# every entrypoint in one image avoids a separate image tag / build
-# pipeline.
-RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w -X github.com/kennguy3n/zk-drive/internal/version.Version=${APP_VERSION}" -o /out/migrate ./cmd/migrate
-# Standalone reconciler binary, shipped in the same image so
-# deploys can run a K8s CronJob (or Compose service) that does
-# `entrypoint: ["/app/reconciler"]` to refresh the denormalized
-# storage_used_bytes counter on the workspaces table. Same
-# one-image-many-entrypoints pattern as the migrate binary above.
 RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w -X github.com/kennguy3n/zk-drive/internal/version.Version=${APP_VERSION}" -o /out/reconciler ./cmd/reconciler
-# Standalone orphan-object GC binary, same pattern as the
-# reconciler. Deploys that prefer a dedicated K8s CronJob (over the
-# in-process loop the worker runs by default) schedule
-# `entrypoint: ["/app/orphan-gc"]` and set GC_INTERVAL_MINUTES=0 on
-# the worker to avoid duplicate runs.
 RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w -X github.com/kennguy3n/zk-drive/internal/version.Version=${APP_VERSION}" -o /out/orphan-gc ./cmd/orphan-gc
-# Audit-log archiver binary. Same one-image-many-entrypoints
-# pattern as the other CronJob binaries. Deployed as a nightly K8s
-# CronJob that exports audit_log rows older than retention to S3
-# cold archive and then deletes them from the hot table.
 RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w -X github.com/kennguy3n/zk-drive/internal/version.Version=${APP_VERSION}" -o /out/audit-archiver ./cmd/audit-archiver
-# Audit-log restore CLI. Read-only counterpart that reads
-# archived rows back from S3 for incident investigation /
-# compliance "produce all admin actions in workspace X between
-# two dates" requests. Operators run it ad-hoc, not on a schedule.
 RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w -X github.com/kennguy3n/zk-drive/internal/version.Version=${APP_VERSION}" -o /out/audit-restore ./cmd/audit-restore
-# Compact supervisor binary. Used ONLY by the combined image (the
-# split server/worker images never run it) to drive the single-command
-# SME deployment (deploy/docker-compose.compact.yml): it embeds a NATS
-# JetStream server in-process, auto-migrates the schema, and supervises
-# the /app/server and /app/worker child processes that this same image
-# already ships — keeping every all-in-one entrypoint in one tag.
-RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w -X github.com/kennguy3n/zk-drive/internal/version.Version=${APP_VERSION}" -o /out/compact ./cmd/compact
 
 # ---- Runtime stage ----
 # debian:bookworm-slim (instead of distroless static) so the worker
@@ -96,28 +76,13 @@ RUN apt-get update \
     && sed -i 's@<policy domain="coder" rights="none" pattern="EPS"/>@<policy domain="coder" rights="read" pattern="EPS"/>@' /etc/ImageMagick-6/policy.xml \
     && sed -i 's@<policy domain="coder" rights="none" pattern="PDF"/>@<policy domain="coder" rights="read" pattern="PDF"/>@' /etc/ImageMagick-6/policy.xml
 
-COPY --from=builder /out/server /app/server
 COPY --from=builder /out/worker /app/worker
-COPY --from=builder /out/migrate /app/migrate
 COPY --from=builder /out/reconciler /app/reconciler
 COPY --from=builder /out/orphan-gc /app/orphan-gc
 COPY --from=builder /out/audit-archiver /app/audit-archiver
 COPY --from=builder /out/audit-restore /app/audit-restore
-COPY --from=builder /out/compact /app/compact
 COPY --from=builder /src/migrations /app/migrations
 
-# Writable JetStream store for the embedded NATS broker the /app/compact
-# supervisor runs (deploy/docker-compose.compact.yml sets
-# ZKDRIVE_NATS_STORE_DIR here and mounts a volume on it). It must be owned
-# by the nonroot runtime user: Docker initialises a fresh empty named
-# volume with the ownership/permissions of this directory in the image, so
-# creating it nonroot-owned here is what makes the mounted volume writable
-# without an init container or running as root. Unused by the server-only
-# default entrypoint; harmless when no volume is mounted.
-RUN mkdir -p /var/lib/zk-drive/nats \
-    && chown -R 65532:65532 /var/lib/zk-drive
-
 USER nonroot:nonroot
-EXPOSE 8080
 
-ENTRYPOINT ["/app/server"]
+ENTRYPOINT ["/app/worker"]

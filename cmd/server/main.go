@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"flag"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -79,10 +80,25 @@ func run() error {
 	logging.Init("server")
 	slog.Info("zk-drive server starting", "version", version.Version)
 
+	// --auto-migrate applies pending migrations under the schema
+	// advisory lock before the HTTP listener comes up. It ORs with
+	// ZKDRIVE_AUTO_MIGRATE (which the compact profile defaults to
+	// true) so either the flag or the env var enables it. Production
+	// K8s leaves both off and runs the separate migrate Job so schema
+	// changes stay decoupled from pod rollout. A dedicated FlagSet
+	// (rather than the global flag.CommandLine) keeps server flag
+	// parsing self-contained and testable.
+	fs := flag.NewFlagSet("server", flag.ContinueOnError)
+	autoMigrateFlag := fs.Bool("auto-migrate", false, "apply pending database migrations on startup before serving (advisory-locked; safe with multiple replicas)")
+	if err := fs.Parse(os.Args[1:]); err != nil {
+		return err
+	}
+
 	cfg, err := config.Load()
 	if err != nil {
 		return err
 	}
+	autoMigrate := cfg.AutoMigrate || *autoMigrateFlag
 
 	ctx, cancel := context.WithCancel(context.Background())
 
@@ -167,6 +183,26 @@ func run() error {
 	}()
 	defer bgGoroutines.Wait()
 	defer cancel()
+
+	// When --auto-migrate (or ZKDRIVE_AUTO_MIGRATE / the compact
+	// profile) is set, apply pending migrations before the readiness
+	// check. database.Migrate serialises on a session-scoped Postgres
+	// advisory lock, so even if several server replicas start with
+	// auto-migrate enabled they race safely: the first holder applies
+	// the schema and the rest block, then observe an up-to-date
+	// database and no-op. Default (off) preserves the production
+	// contract below — migrations run out-of-band via the migrate
+	// Job and the server only verifies the schema is current.
+	if autoMigrate {
+		start := time.Now()
+		if err := database.Migrate(ctx, pool, cfg.MigrationsDir); err != nil {
+			return fmt.Errorf("auto-migrate: %w", err)
+		}
+		slog.Info("auto-migrate completed",
+			"duration", time.Since(start).Round(time.Millisecond).String(),
+			"migrations_dir", cfg.MigrationsDir,
+		)
+	}
 
 	// Migrations are applied out-of-band by the `migrate` binary (a
 	// Kubernetes Job, a Compose service, or an operator command) so

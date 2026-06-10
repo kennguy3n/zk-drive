@@ -447,6 +447,21 @@ type Config struct {
 	// instead. Applies to both SuspensionGuard (REST/WS) and the
 	// ONLYOFFICE save-callback write boundary.
 	SuspensionFailClosed bool
+
+	// Profile is the resolved ZKDRIVE_PROFILE deployment shape
+	// ("compact", "production", "development", or "" for none). It is
+	// applied BEFORE the other fields are read so its env-var defaults
+	// (see internal/config/profiles.go) feed into the parsing below;
+	// the value recorded here is purely for logging / validateProfile.
+	Profile string
+
+	// AutoMigrate makes the server apply pending migrations under the
+	// schema advisory lock at startup, before it begins serving. It is
+	// sourced from ZKDRIVE_AUTO_MIGRATE (default false) and the compact
+	// profile defaults it to true. The cmd/server --auto-migrate flag
+	// ORs with this. Production K8s leaves it off and runs the separate
+	// migrate Job so schema changes are decoupled from pod rollout.
+	AutoMigrate bool
 }
 
 // OnlyOfficeMaxConcurrentSaves derives how many save callbacks may
@@ -481,6 +496,14 @@ func (c *Config) WebPushEnabled() bool {
 // bucket, access key, and secret key must also be set — a half-configured
 // storage client would only fail at request time.
 func Load() (*Config, error) {
+	// Resolve ZKDRIVE_PROFILE first so its env-var defaults are in
+	// place (only-if-unset) before buildConfigFromEnv reads them. An
+	// unknown profile name fails closed here rather than silently
+	// running with zero presets.
+	if _, err := applyProfileDefaults(); err != nil {
+		return nil, err
+	}
+
 	cfg := buildConfigFromEnv()
 
 	var missing []string
@@ -498,6 +521,9 @@ func Load() (*Config, error) {
 		return nil, err
 	}
 	if err := validateOnlyOfficeGroup(cfg); err != nil {
+		return nil, err
+	}
+	if err := validateProfile(cfg); err != nil {
 		return nil, err
 	}
 	return cfg, nil
@@ -610,6 +636,9 @@ func buildConfigFromEnv() *Config {
 		OnlyOfficeSaveMemoryBudgetBytes: onlyOfficeBytesFromEnv("ONLYOFFICE_SAVE_MEMORY_BUDGET_MB", defaultOnlyOfficeSaveMemoryBudgetMB),
 
 		SuspensionFailClosed: parseBoolDefault(os.Getenv("SUSPENSION_FAIL_CLOSED"), false),
+
+		Profile:     string(normaliseProfile(os.Getenv("ZKDRIVE_PROFILE"))),
+		AutoMigrate: parseBoolDefault(os.Getenv("ZKDRIVE_AUTO_MIGRATE"), false),
 	}
 }
 

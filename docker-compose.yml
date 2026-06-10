@@ -60,7 +60,8 @@ services:
   server:
     build:
       context: .
-      dockerfile: Dockerfile
+      # Slim distroless API image (~30MB): no preview tooling.
+      dockerfile: Dockerfile.server
     depends_on:
       postgres:
         condition: service_healthy
@@ -81,13 +82,14 @@ services:
     profiles:
       - server
 
-  # Async worker consumes drive.* subjects. Shares the same image as
-  # the server but overrides the entrypoint to run the worker binary.
+  # Async worker consumes drive.* subjects. Built from the heavy
+  # Dockerfile.worker image which bakes in the preview/scan tooling
+  # (LibreOffice, FFmpeg, ImageMagick, ...); its ENTRYPOINT is already
+  # /app/worker so no override is needed.
   worker:
     build:
       context: .
-      dockerfile: Dockerfile
-    entrypoint: ["/app/worker"]
+      dockerfile: Dockerfile.worker
     depends_on:
       postgres:
         condition: service_healthy
