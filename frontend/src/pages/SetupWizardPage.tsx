@@ -393,6 +393,7 @@ function StorageStep({ status }: { status: SetupStatus | null }) {
       <Field label={t("setup.storage.region")}>
         <input style={inputStyle} value={form.region} onChange={(e) => setForm({ ...form, region: e.target.value })} />
       </Field>
+      <p style={{ color: "#9ca3af", fontSize: 12, marginTop: 0, marginBottom: 12 }}>{t("setup.storage.testHint")}</p>
       <button onClick={runTest} disabled={!canTest || testing}>
         {testing ? t("setup.storage.testing") : t("setup.storage.test")}
       </button>

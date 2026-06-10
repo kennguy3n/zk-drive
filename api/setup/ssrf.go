@@ -31,10 +31,20 @@ import (
 // literal, so a name that passes the check cannot be re-resolved to a
 // blocked address between the check and the connect (DNS-rebinding
 // TOCTOU). Re-validation also runs on every redirect-driven dial.
+//
+// Proxy is deliberately nil (NOT http.ProxyFromEnvironment): with a
+// proxy the transport would open the connection to the proxy and hand
+// it the attacker-typed target host, so the proxy — not our dialer —
+// would resolve and connect to it, and blockedDialAddr would only ever
+// see the (allowed, private-LAN) proxy IP. That silently defeats the
+// whole guard whenever HTTP_PROXY/HTTPS_PROXY is set. Forcing a direct
+// dial keeps guardedDialContext authoritative over the real endpoint
+// IP. This probe only ever targets an S3/Fabric endpoint reachable on
+// the operator's own network, so it never needs an egress proxy.
 func guardedHTTPClient(timeout time.Duration) *http.Client {
 	dialer := &net.Dialer{Timeout: 5 * time.Second, KeepAlive: 30 * time.Second}
 	transport := &http.Transport{
-		Proxy:                 http.ProxyFromEnvironment,
+		Proxy:                 nil,
 		ForceAttemptHTTP2:     true,
 		MaxIdleConns:          10,
 		IdleConnTimeout:       30 * time.Second,
@@ -94,10 +104,9 @@ func blockedDialAddr(ip net.IP) string {
 		return "unspecified address"
 	case ip.IsLinkLocalUnicast():
 		return "link-local / instance-metadata range"
-	case ip.IsLinkLocalMulticast(), ip.IsMulticast():
+	case ip.IsMulticast():
+		// Covers global, link-local and interface-local multicast.
 		return "multicast address"
-	case ip.IsInterfaceLocalMulticast():
-		return "interface-local multicast"
 	default:
 		return ""
 	}
