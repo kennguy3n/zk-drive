@@ -1524,13 +1524,14 @@ func run() error {
 // safe when STATIC_DIR is a sibling of sensitive files.
 func spaHandler(dir string) http.HandlerFunc {
 	indexPath := filepath.Join(dir, "index.html")
-	// Pre-read index.html and split it around the nonce placeholder
-	// so each navigation request only pays a two-write concat to
-	// inject its per-request CSP nonce (6.5). The bundle assets are
-	// still streamed verbatim via http.ServeFile; only the HTML
-	// document is templated. If the file is unreadable or carries no
-	// placeholder we fall back to serving it verbatim.
-	idxPrefix, idxSuffix, templated := loadIndexTemplate(indexPath)
+	// Pre-read index.html and split it on the nonce placeholder so
+	// each navigation request only pays a handful of plain writes to
+	// inject its per-request CSP nonce (6.5) — no per-request scan of
+	// the document. The bundle assets are still streamed verbatim via
+	// http.ServeFile; only the HTML document is templated. If the file
+	// is unreadable or carries no placeholder we fall back to serving
+	// it verbatim.
+	idxSegments, templated := loadIndexTemplate(indexPath)
 
 	serveIndex := func(w http.ResponseWriter, r *http.Request) {
 		if !templated {
@@ -1545,9 +1546,17 @@ func spaHandler(dir string) http.HandlerFunc {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
 		w.WriteHeader(http.StatusOK)
-		_, _ = io.WriteString(w, idxPrefix)
-		_, _ = io.WriteString(w, nonce)
-		_, _ = io.WriteString(w, idxSuffix)
+		// Write the pre-split segments interleaved with the nonce:
+		// seg[0], nonce, seg[1], nonce, ..., seg[n]. This substitutes
+		// EVERY placeholder occurrence, so a future inline
+		// <script nonce="__CSP_NONCE__"> is handled correctly rather
+		// than leaking the literal token past the first one.
+		for i, seg := range idxSegments {
+			if i > 0 {
+				_, _ = io.WriteString(w, nonce)
+			}
+			_, _ = io.WriteString(w, seg)
+		}
 	}
 
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -1574,21 +1583,23 @@ func spaHandler(dir string) http.HandlerFunc {
 // the per-request CSP nonce. Kept in sync with frontend/index.html.
 const indexNoncePlaceholder = "__CSP_NONCE__"
 
-// loadIndexTemplate reads index.html once and splits it around the
-// nonce placeholder. Returns templated=false (and empty halves) when
-// the file can't be read or carries no placeholder, in which case the
-// caller serves it verbatim with http.ServeFile.
-func loadIndexTemplate(indexPath string) (prefix, suffix string, templated bool) {
+// loadIndexTemplate reads index.html once and splits it on every nonce
+// placeholder occurrence. The returned segments are the literal text
+// between placeholders, so there are len(segments)-1 placeholders and
+// the caller writes the segments interleaved with the per-request
+// nonce. Returns templated=false (and nil segments) when the file can't
+// be read or carries no placeholder, in which case the caller serves it
+// verbatim with http.ServeFile.
+func loadIndexTemplate(indexPath string) (segments []string, templated bool) {
 	raw, err := os.ReadFile(indexPath)
 	if err != nil {
-		return "", "", false
+		return nil, false
 	}
 	html := string(raw)
-	idx := strings.Index(html, indexNoncePlaceholder)
-	if idx < 0 {
-		return "", "", false
+	if !strings.Contains(html, indexNoncePlaceholder) {
+		return nil, false
 	}
-	return html[:idx], html[idx+len(indexNoncePlaceholder):], true
+	return strings.Split(html, indexNoncePlaceholder), true
 }
 
 // folderCreatorAdapter bridges *folder.Service to

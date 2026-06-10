@@ -99,6 +99,51 @@ func TestSPAHandlerNonceDisabledClearsPlaceholder(t *testing.T) {
 	}
 }
 
+// TestSPAHandlerInjectsNonceAtEveryPlaceholder pins that the handler
+// substitutes EVERY __CSP_NONCE__ occurrence, not just the first — so a
+// future index.html that also stamps the nonce onto an inline
+// <script nonce="__CSP_NONCE__"> (the natural next use of the nonce)
+// gets a working script-src match instead of a literal token that the
+// browser would reject. Guards the segment-split in loadIndexTemplate.
+func TestSPAHandlerInjectsNonceAtEveryPlaceholder(t *testing.T) {
+	dir := writeIndex(t, `<meta name="csp-nonce" content="__CSP_NONCE__" /><script nonce="__CSP_NONCE__">/*inline*/</script>`)
+	srv := newSPARouter(dir, true)
+
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/drive", nil))
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	body := rec.Body.String()
+	if strings.Contains(body, "__CSP_NONCE__") {
+		t.Fatalf("a placeholder occurrence was left unreplaced: %s", body)
+	}
+
+	csp := rec.Header().Get("Content-Security-Policy")
+	const marker = "'nonce-"
+	i := strings.Index(csp, marker)
+	if i < 0 {
+		t.Fatalf("no nonce in CSP: %s", csp)
+	}
+	rest := csp[i+len(marker):]
+	j := strings.Index(rest, "'")
+	if j < 0 {
+		t.Fatalf("unterminated nonce in CSP: %s", csp)
+	}
+	nonce := rest[:j]
+	// Both the meta tag and the inline <script> must carry the live nonce.
+	if !strings.Contains(body, `content="`+nonce+`"`) {
+		t.Errorf("meta nonce not substituted with %q; body: %s", nonce, body)
+	}
+	if !strings.Contains(body, `<script nonce="`+nonce+`">`) {
+		t.Errorf("inline script nonce not substituted with %q; body: %s", nonce, body)
+	}
+	if got := strings.Count(body, nonce); got != 2 {
+		t.Errorf("expected nonce substituted at 2 placeholders, found %d; body: %s", got, body)
+	}
+}
+
 // TestSPAHandlerServesAssetsVerbatim pins that concrete asset files are
 // streamed as-is (not templated) — only the HTML document is rewritten.
 func TestSPAHandlerServesAssetsVerbatim(t *testing.T) {
