@@ -182,15 +182,20 @@ const migrateAdvisoryLockKey int64 = 0x5a4b44524956534D // 'ZKDRIVSM' ASCII
 // 027 would block deploys that don't enable the archiver.
 //
 // This baseline tracks the highest migration whose table the server
-// unconditionally reads at boot. As of migration 034 the server
-// constructs a JWT KeyManager that SELECTs from jwt_signing_keys
-// during startup, so the baseline is 034: an operator who deploys
-// against a stale schema fails fast with a clear "migrations out of
-// date" error rather than hitting a raw "relation jwt_signing_keys
-// does not exist" from deep in boot. The worker gates on the same
-// constant; since server and worker ship together in a release that
-// includes 034, advancing the shared baseline is safe.
-const MinRequiredMigrationVersion = "034_jwt_asymmetric_keys"
+// unconditionally reads/writes at boot or on the request hot path. As
+// of migration 040 every audit_log write extends the tamper-evident
+// HMAC hash chain (6.6), which transactionally reads and advances the
+// audit_log_chain_head table and writes the seq/prev_hash/entry_hash
+// columns — all introduced by migration 040. Deploying server/worker
+// against an older schema would fail every audited operation with a
+// raw "relation audit_log_chain_head does not exist", so the baseline
+// is 040 to fail fast with a clear "migrations out of date" error
+// instead. (Migration 034 added the jwt_signing_keys table the JWT
+// KeyManager SELECTs at startup, which 040 supersedes as the
+// baseline.) The worker gates on the same constant; since server and
+// worker ship together in a release that includes 040, advancing the
+// shared baseline is safe.
+const MinRequiredMigrationVersion = "040_audit_log_hash_chain"
 
 // MinRequiredMigrationVersionAuditArchiver is the minimum schema
 // version that the cmd/audit-archiver binary requires — it inserts

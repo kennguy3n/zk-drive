@@ -1,0 +1,126 @@
+name: Security
+
+# Supply-chain and secret-hygiene gates (Workstream 6.7). Kept in a
+# dedicated workflow rather than folded into ci.yml so the security
+# jobs evolve independently of the build/test pipeline and stay easy
+# to read as a single "what protects us" surface.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  gitleaks:
+    name: Secret scan (gitleaks)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Full history so `gitleaks detect` scans every commit on the
+          # branch, not just the tip — a secret committed and then
+          # "removed" in a later commit is still a leak.
+          fetch-depth: 0
+
+      # Install the pinned gitleaks binary directly rather than via the
+      # marketplace action so the run needs no license env var and the
+      # version can't float. Bumping this is an explicit commit.
+      - name: Install gitleaks
+        env:
+          GITLEAKS_VERSION: 8.28.0
+        run: |
+          curl -sSfL "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz" \
+            | sudo tar -xz -C /usr/local/bin gitleaks
+          gitleaks version
+
+      - name: Run gitleaks
+        run: gitleaks detect --no-banner --redact --config .gitleaks.toml
+
+  govulncheck:
+    name: Go vulnerability scan (govulncheck)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: 'go.mod'
+          check-latest: true
+          cache: true
+
+      # govulncheck only reports vulnerabilities whose vulnerable
+      # symbols are actually reachable from this module's code, so a
+      # finding here is real and call-graph-confirmed, not a transitive
+      # dependency advisory we don't trigger.
+      - name: Install govulncheck
+        run: go install golang.org/x/vuln/cmd/govulncheck@latest
+
+      - name: Run govulncheck
+        run: govulncheck ./...
+
+  npm-audit:
+    name: Frontend dependency audit (npm audit)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      # Gate on the production dependency tree — the code that actually
+      # ships to users' browsers — at high severity. A high/critical
+      # advisory in a shipped package fails the build and must be
+      # resolved (bump or remove), not suppressed.
+      - name: Audit production dependencies
+        run: npm audit --omit=dev --audit-level=high
+
+      # Dev/build-tooling advisories (e.g. the vite dev-server) don't
+      # reach production, so they're reported for visibility but don't
+      # block: forcing a breaking major bump of the toolchain to clear
+      # a dev-only finding is its own risk. Reviewed manually.
+      - name: Audit all dependencies (informational)
+        run: npm audit || true
+
+  sbom:
+    name: SBOM (SPDX) generation
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # Build only the Dockerfile's `sbom` stage and export its
+      # filesystem, then lift the SPDX document out. This exercises the
+      # exact SBOM the release image ships at
+      # /usr/share/sbom/zk-drive.spdx.json (see Dockerfile) rather than
+      # generating a separate, possibly-divergent one.
+      - name: Build SBOM stage
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          target: sbom
+          outputs: type=local,dest=./sbom-out
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Upload SBOM artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: zk-drive-sbom-spdx
+          path: ./sbom-out/sbom.spdx.json
+          if-no-files-found: error

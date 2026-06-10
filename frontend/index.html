@@ -4,6 +4,17 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="theme-color" content="#2563eb" />
+    <!--
+      Per-request CSP nonce (6.5). The server (cmd/server spaHandler)
+      replaces __CSP_NONCE__ with a fresh base64 nonce on every
+      navigation request; that same nonce is added to `script-src` in
+      the Content-Security-Policy header. Read it from JS via
+      document.querySelector('meta[name=csp-nonce]').content to stamp
+      any dynamically-injected <script>/<style> so it satisfies CSP
+      without reopening 'unsafe-inline'. When the server runs with
+      nonces disabled the token is replaced with an empty string.
+    -->
+    <meta name="csp-nonce" content="__CSP_NONCE__" />
     <title>zk-drive</title>
   </head>
   <body>

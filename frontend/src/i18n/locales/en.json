@@ -255,7 +255,15 @@
     "cmkSaved": "CMK saved.",
     "cmkSchemesHint": "Accepted schemes: arn:aws:kms:..., kms://, vault://, transit://. Leave empty for the gateway default key.",
     "modesHeading": "Managed-encrypted vs strict zero-knowledge:",
-    "modesExplanation": "A CMK enables managed-encrypted folders where the gateway wraps per-object DEKs with the customer key — the server can still stream plaintext for preview, virus scan, and search. Strict-zero-knowledge folders remain end-to-end encrypted regardless of this setting; the server never sees plaintext there and all server-side processing is disabled."
+    "modesExplanation": "A CMK enables managed-encrypted folders where the gateway wraps per-object DEKs with the customer key — the server can still stream plaintext for preview, virus scan, and search. Strict-zero-knowledge folders remain end-to-end encrypted regardless of this setting; the server never sees plaintext there and all server-side processing is disabled.",
+    "defaultModeHeading": "Default encryption mode for new folders",
+    "defaultModeDescription": "Choose the encryption mode applied to new top-level folders by default. Members can still pick a mode per folder; this only sets the starting point. Existing folders are unaffected.",
+    "defaultModeManagedLabel": "Managed-encrypted (recommended for most teams)",
+    "defaultModeManagedHint": "New folders allow previews, full-text search, and virus scanning. Encrypted at rest; the server can read plaintext while handling requests.",
+    "defaultModeStrictLabel": "Strict zero-knowledge (Secure Business)",
+    "defaultModeStrictHint": "New folders are end-to-end encrypted by default — the server can never decrypt them, so previews, search, and scanning are disabled. Maximum privacy for sensitive workspaces.",
+    "defaultModeSaved": "Default encryption mode updated.",
+    "defaultModeSecureBusinessBadge": "Secure Business"
   },
   "privacy": {
     "pageTitle": "How your data is protected",
@@ -546,6 +554,8 @@
     "AUTH_MFA_INVALID": "Invalid verification code.",
     "MFA_ENROLL_REQUIRED": "You must enable two-factor authentication.",
     "RATE_LIMIT_EXCEEDED": "You're doing that too often. Please try again later.",
+    "AUTH_TOO_MANY_ATTEMPTS": "Too many failed sign-in attempts from your network. Please wait a moment and try again.",
+    "AUTH_SESSION_ANOMALY": "We noticed a change in your device or network. Please sign in again to keep your account secure.",
     "FORBIDDEN": "You don't have permission to do that.",
     "ADMIN_ACCESS_REQUIRED": "This action requires admin privileges.",
     "READ_ONLY_ROLE": "Your account has read-only access.",

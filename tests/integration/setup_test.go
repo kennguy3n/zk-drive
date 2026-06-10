@@ -163,6 +163,13 @@ func (c *webhookCapture) memberEventsByType(t webhooks.EventType) []capturedMemb
 	return out
 }
 
+// integrationAuditHMACKey is a fixed 32-byte key for the audit-log
+// hash chain (6.6) in integration tests. Production derives this from
+// an env secret (config.AuditHMACKey); the tests only need a stable,
+// non-empty key so chained inserts and VerifyChain exercise the real
+// HMAC path.
+var integrationAuditHMACKey = []byte("zk-drive-integration-audit-hmac-32b!")
+
 // setupEnv connects to Postgres, runs migrations, wires the API, and starts
 // an httptest server. The function calls t.Skip if TEST_DATABASE_URL is not
 // set so unit-test runs on machines without a database pass cleanly.
@@ -189,7 +196,11 @@ func setupEnv(t *testing.T) *testEnv {
 
 	userSvc := user.NewService(user.NewPostgresRepository(pool))
 	wsSvc := workspace.NewService(workspace.NewPostgresRepository(pool))
-	folderSvc := folder.NewService(folder.NewPostgresRepository(pool))
+	// Mirror production wiring (cmd/server/main.go): new root folders
+	// inherit the workspace's default_encryption_mode (6.4). Without
+	// this the harness would silently diverge from production and mask
+	// the Strict-ZK-as-default behaviour.
+	folderSvc := folder.NewService(folder.NewPostgresRepository(pool), folder.WithWorkspaceDefaults(wsSvc))
 	fileSvc := file.NewService(file.NewPostgresRepository(pool))
 
 	storageClient := buildTestStorageClient(t)
@@ -206,7 +217,11 @@ func setupEnv(t *testing.T) *testEnv {
 	)
 	notificationSvc := notification.NewService(notification.NewPostgresRepository(pool))
 	previewRepo := preview.NewPostgresRepository(pool)
-	auditSvc := audit.NewService(audit.NewPostgresRepository(pool))
+	auditRepo, err := audit.NewPostgresRepository(pool, integrationAuditHMACKey)
+	if err != nil {
+		t.Fatalf("build audit repository: %v", err)
+	}
+	auditSvc := audit.NewService(auditRepo)
 	retentionSvc := retention.NewService(retention.NewPostgresRepository(pool), pool)
 	billingRepo := billing.NewPostgresRepository(pool)
 	billingSvc := billing.NewService(billingRepo)
@@ -249,6 +264,18 @@ func setupEnv(t *testing.T) *testEnv {
 		WithAudit(auditSvc).
 		WithTOTP(totpSvc).
 		WithSessionRevoker(sessionStore)
+
+	// Brute-force reputation guard (6.3) on /login, backed by the
+	// harness miniredis so integration tests exercise the real
+	// escalation. A low threshold + sub-second first delay keeps the
+	// dedicated test fast and deterministic without held connections.
+	authReputation := middleware.NewAuthReputation(redisClient, middleware.AuthReputationConfig{
+		FailureThreshold: 3,
+		Delays:           []time.Duration{200 * time.Millisecond, 500 * time.Millisecond},
+		BlockDuration:    time.Second,
+		Retention:        time.Hour,
+	}, 0)
+	authReputationGuard := middleware.AuthReputationGuard(authReputation)
 	webhookCap := &webhookCapture{}
 	// Wire the AI tag-suggestion + query-expansion services so the
 	// integration harness exercises the same code paths that
@@ -405,7 +432,7 @@ func setupEnv(t *testing.T) *testEnv {
 	r.Route("/api", func(r chi.Router) {
 		r.Route("/auth", func(r chi.Router) {
 			r.Post("/signup", authHandler.Signup)
-			r.Post("/login", authHandler.Login)
+			r.With(authReputationGuard).Post("/login", authHandler.Login)
 			// /logout sits inside the AuthMiddleware group so the
 			// handler can read claims from the bearer token and
 			// record a per-user revocation cutoff. Without the
@@ -415,6 +442,11 @@ func setupEnv(t *testing.T) *testEnv {
 				r.Use(middleware.AuthMiddleware(testJWTSecret, sessionStore))
 				r.Post("/logout", authHandler.Logout)
 				r.Post("/refresh", authHandler.Refresh)
+				// Device-session management (6.2) — mirror
+				// cmd/server/main.go so integration tests exercise
+				// the real list/revoke handlers.
+				r.Get("/sessions", authHandler.ListSessions)
+				r.Delete("/sessions/{id}", authHandler.RevokeSession)
 			})
 
 			// TOTP routes mirror cmd/server/main.go wiring so
@@ -691,6 +723,14 @@ func findMigrationsDir(t *testing.T) string {
 // the response status plus body bytes. It closes the response body.
 func (e *testEnv) httpRequest(method, path, token string, payload any) (int, []byte) {
 	e.t.Helper()
+	return e.httpRequestWithHeaders(method, path, token, payload, nil)
+}
+
+// httpRequestWithHeaders is httpRequest with caller-supplied extra
+// headers, used by the session-security tests to vary the User-Agent
+// and exercise device-anomaly detection through the real HTTP stack.
+func (e *testEnv) httpRequestWithHeaders(method, path, token string, payload any, headers map[string]string) (int, []byte) {
+	e.t.Helper()
 	var body io.Reader
 	if payload != nil {
 		buf, err := json.Marshal(payload)
@@ -708,6 +748,9 @@ func (e *testEnv) httpRequest(method, path, token string, payload any) (int, []b
 	}
 	if token != "" {
 		req.Header.Set("Authorization", "Bearer "+token)
+	}
+	for k, v := range headers {
+		req.Header.Set(k, v)
 	}
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {

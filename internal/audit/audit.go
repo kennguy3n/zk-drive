@@ -19,6 +19,12 @@ import (
 const (
 	ActionLogin              = "auth.login"
 	ActionLogout             = "auth.logout"
+	// ActionSessionRevoke records a user revoking one of their own
+	// device sessions via DELETE /api/auth/sessions/:id (6.2). The
+	// metadata blob carries the revoked session id so operators can
+	// correlate a "signed out a device" action with later access
+	// attempts from that device fingerprint.
+	ActionSessionRevoke      = "auth.session_revoke"
 	ActionPasswordChange     = "auth.password_change"
 	ActionSSOLink            = "auth.sso_link"
 	ActionSSOLogin           = "auth.sso_login"
@@ -39,6 +45,11 @@ const (
 	ActionWorkspaceCreate          = "workspace.create"
 	ActionWorkspaceUpdate          = "workspace.update"
 	ActionWorkspaceSearchLanguage  = "workspace.search_language_change"
+	// ActionWorkspaceDefaultEncryptionMode records a change to the
+	// workspace-level default_encryption_mode (managed_encrypted ↔
+	// strict_zk). A privacy-relevant policy change, so it carries the
+	// previous and current modes in the metadata blob.
+	ActionWorkspaceDefaultEncryptionMode = "workspace.default_encryption_mode_change"
 	ActionRetentionPolicyUpsert = "retention.policy_upsert"
 	ActionRetentionPolicyDelete = "retention.policy_delete"
 	ActionAdminBillingUpdate    = "admin.billing_update"
@@ -83,4 +94,15 @@ type Entry struct {
 	UserAgent    *string         `json:"user_agent,omitempty"`
 	Metadata     json.RawMessage `json:"metadata,omitempty"`
 	CreatedAt    time.Time       `json:"created_at"`
+
+	// Hash-chain fields (6.6). Populated by the repository at insert
+	// time and read back on List / archive fetch so the cold tier
+	// stays verifiable. Seq is the 1-based per-workspace position;
+	// PrevHash is the preceding row's EntryHash (the workspace
+	// genesis hash for Seq==1); EntryHash is this row's HMAC over
+	// (Seq, PrevHash, immutable fields). They are omitempty so the
+	// SIEM JSON shape for callers that never set them is unchanged.
+	Seq       int64  `json:"seq,omitempty"`
+	PrevHash  []byte `json:"prev_hash,omitempty"`
+	EntryHash []byte `json:"entry_hash,omitempty"`
 }
