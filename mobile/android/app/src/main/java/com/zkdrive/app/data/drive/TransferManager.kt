@@ -66,7 +66,7 @@ class TransferManager @Inject constructor(
         val target = session.apiClient.uploadUrl(folderId, input.displayName, input.mimeType)
 
         val payload = if (encryptionMode == EncryptionMode.ZeroKnowledge) {
-            sealForUpload(session.workspaceId, target.objectKey, target.fileId, input.bytes)
+            sealForUpload(session.workspaceId, target.objectKey, input.bytes)
         } else {
             input.bytes
         }
@@ -117,23 +117,29 @@ class TransferManager @Inject constructor(
             ).use { it.decrypt(raw) }
         } ?: raw
 
-        writeToShareCache(file.name, plaintext)
+        writeToShareCache(file.id, file.name, plaintext)
     }
 
     private fun sealForUpload(
         workspaceId: String,
         objectKey: String,
-        fileId: String,
         plaintext: ByteArray,
     ): ByteArray {
         val dek = crypto.newDataKey()
         val objectKeyHashHex = sha256Hex(objectKey.toByteArray())
+        // The canonical AAD's version component must be known before we encrypt,
+        // but the server's version id is only minted by confirmUpload() AFTER the
+        // PUT. The presigned objectKey is the unique-per-version storage identity
+        // the gateway mints up front (a re-upload of the same fileId yields a new
+        // objectKey), so binding to it pins the ciphertext to this specific
+        // version — unlike fileId, which is stable across versions and would let
+        // an old version's envelope collide with a new one.
         val envelope = EnvelopeKey.of(
             dek = dek,
             tenantId = workspaceId,
             bucket = STORAGE_BUCKET,
             objectKeyHashHex = objectKeyHashHex,
-            versionId = fileId,
+            versionId = objectKey,
             convergentNonce = false,
         )
         val ciphertext = crypto.engineForObject(
@@ -171,8 +177,12 @@ class TransferManager @Inject constructor(
         }
     }
 
-    private fun writeToShareCache(name: String, bytes: ByteArray): Uri {
-        val dir = File(context.cacheDir, "shared").apply { mkdirs() }
+    private fun writeToShareCache(fileId: String, name: String, bytes: ByteArray): Uri {
+        // Namespace by the immutable file id so two files whose names collapse to
+        // the same sanitized form (e.g. "report (1).pdf" and "report_1_.pdf") land
+        // in distinct directories instead of silently overwriting one another,
+        // while the user-facing share sheet still sees the original display name.
+        val dir = File(File(context.cacheDir, "shared"), sanitize(fileId)).apply { mkdirs() }
         val outFile = File(dir, sanitize(name))
         outFile.writeBytes(bytes)
         return FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", outFile)

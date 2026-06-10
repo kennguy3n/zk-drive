@@ -305,7 +305,7 @@ private fun FileNode.typeIcon(): ImageVector = when {
 }
 
 private fun newCameraUri(context: android.content.Context): Uri {
-    val dir = File(context.cacheDir, "camera").apply { mkdirs() }
+    val dir = File(context.cacheDir, "captures").apply { mkdirs() }
     val file = File(dir, "capture_${System.currentTimeMillis()}.jpg")
     return FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", file)
 }

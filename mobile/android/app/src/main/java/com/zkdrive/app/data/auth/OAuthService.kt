@@ -79,8 +79,16 @@ class OAuthService @Inject constructor(
         )
             .setScopes(appConfig.oidcScope.split(" ").filter { it.isNotBlank() })
             .build()
+        // The returned intent embeds the request and a self-contained Custom Tabs
+        // intent, so the AuthorizationService (which holds a CustomTabsClient
+        // binding) can be disposed immediately — otherwise every "Sign in" tap,
+        // including retries after a cancel, would leak a service connection.
         val service = AuthorizationService(context)
-        return service.getAuthorizationRequestIntent(request)
+        return try {
+            service.getAuthorizationRequestIntent(request)
+        } finally {
+            service.dispose()
+        }
     }
 
     /**
