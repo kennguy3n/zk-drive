@@ -24,6 +24,7 @@ type Repository interface {
 	GetByEmail(ctx context.Context, workspaceID uuid.UUID, email string) (*User, error)
 	GetByEmailAnyWorkspace(ctx context.Context, email string) (*User, error)
 	GetByAuthProvider(ctx context.Context, provider, providerID string) (*User, error)
+	GetByWorkspaceAndAuthProvider(ctx context.Context, workspaceID uuid.UUID, provider, providerID string) (*User, error)
 	List(ctx context.Context, workspaceID uuid.UUID) ([]*User, error)
 	UpdateLastLogin(ctx context.Context, userID uuid.UUID, at time.Time) error
 	Deactivate(ctx context.Context, workspaceID, userID uuid.UUID, at time.Time) error
@@ -142,12 +143,32 @@ func (r *PostgresRepository) GetByEmailAnyWorkspace(ctx context.Context, email s
 }
 
 // GetByAuthProvider returns a user row matched on (auth_provider,
-// auth_provider_id). Used by the SSO callback to resolve the caller to
-// an existing account without requiring the email to be stable (some
-// identity providers let users change emails).
+// auth_provider_id). Used by the built-in OAuth callback to resolve the
+// caller to an existing account without requiring the email to be
+// stable (some identity providers let users change emails). It is NOT
+// workspace-scoped: the same subject may have a row in several
+// workspaces (the unique index is per (workspace_id, auth_provider,
+// auth_provider_id)), and this returns an arbitrary one. Callers that
+// must resolve a specific workspace's row — e.g. the iam-core
+// middleware, whose token carries the authoritative tenant/org — MUST
+// use GetByWorkspaceAndAuthProvider instead.
 func (r *PostgresRepository) GetByAuthProvider(ctx context.Context, provider, providerID string) (*User, error) {
 	q := "SELECT " + userColumns + " FROM users WHERE auth_provider = $1 AND auth_provider_id = $2"
 	return scanUser(r.pool.QueryRow(ctx, q, provider, providerID))
+}
+
+// GetByWorkspaceAndAuthProvider returns the user row for a federated
+// subject within a specific workspace, matching the
+// (workspace_id, auth_provider, auth_provider_id) unique index exactly.
+// This is the correct lookup when the caller already knows the
+// authoritative workspace (e.g. the iam-core middleware resolves it
+// from the token's tenant/org claims): a subject who belongs to several
+// orgs has one row per workspace, and only the workspace-scoped lookup
+// returns the right one rather than whichever row the database happens
+// to order first.
+func (r *PostgresRepository) GetByWorkspaceAndAuthProvider(ctx context.Context, workspaceID uuid.UUID, provider, providerID string) (*User, error) {
+	q := "SELECT " + userColumns + " FROM users WHERE workspace_id = $1 AND auth_provider = $2 AND auth_provider_id = $3"
+	return scanUser(r.pool.QueryRow(ctx, q, workspaceID, provider, providerID))
 }
 
 // List returns every user belonging to a workspace.

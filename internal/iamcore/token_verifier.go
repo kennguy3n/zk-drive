@@ -104,6 +104,10 @@ func NewVerifier(issuer, audience, jwksURI string, httpClient *http.Client) *Ver
 	if audience != "" {
 		opts = append(opts, jwt.WithAudience(audience))
 	}
+	// When audience is empty, aud is intentionally NOT validated (dev/demo
+	// convenience). This widens the trust boundary to any token the issuer
+	// minted, so cmd/server logs a startup warning in that mode; production
+	// deployments must set IAM_CORE_AUDIENCE to pin the relying party.
 	return &Verifier{
 		issuer:   issuer,
 		audience: audience,

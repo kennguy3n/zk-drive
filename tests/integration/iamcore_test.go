@@ -436,6 +436,92 @@ func TestIAMCoreSecondLoginReusesWorkspace(t *testing.T) {
 	}
 }
 
+// TestIAMCoreMultiOrgSubjectIsolatedPerWorkspace is the regression test
+// for the principal-cache cross-tenant misrouting bug. A single
+// iam-core subject can belong to several organizations; each org's
+// token carries a distinct (tenant_id, org_id) that maps to a distinct
+// zk-drive workspace. We log in as the SAME subject twice, back to back
+// (so the second request hits the cache populated by the first), with
+// tokens for two different orgs, and assert each resolves to its own
+// workspace and its own federated user row. A subject-only cache key or
+// an unscoped user lookup would serve org-1's workspace/user to org-2's
+// token and leak data across tenants.
+func TestIAMCoreMultiOrgSubjectIsolatedPerWorkspace(t *testing.T) {
+	env := setupIAMCoreEnv(t)
+
+	const sub = "multi-org-sub"
+	tokOrg1 := env.idp.mint(t, mockClaims{
+		Subject: sub, Email: "user@org1.example", Name: "Multi Org User",
+		OrgID: "org-1", TenantID: "tenant-1", Roles: []string{"member"}, TTL: time.Hour,
+	})
+	tokOrg2 := env.idp.mint(t, mockClaims{
+		Subject: sub, Email: "user@org2.example", Name: "Multi Org User",
+		OrgID: "org-2", TenantID: "tenant-2", Roles: []string{"admin"}, TTL: time.Hour,
+	})
+
+	var me1, me2 meResponse
+	status, body := env.httpRequest(http.MethodGet, "/api/me", tokOrg1, nil)
+	if status != http.StatusOK {
+		t.Fatalf("org-1 login: status=%d body=%s", status, body)
+	}
+	env.decodeJSON(body, &me1)
+	// Immediately reuse the same subject with the other org's token:
+	// this is the request that a subject-keyed cache would misroute.
+	status, body = env.httpRequest(http.MethodGet, "/api/me", tokOrg2, nil)
+	if status != http.StatusOK {
+		t.Fatalf("org-2 login: status=%d body=%s", status, body)
+	}
+	env.decodeJSON(body, &me2)
+
+	if me1.WorkspaceID == me2.WorkspaceID {
+		t.Fatalf("multi-org subject must resolve distinct workspaces, both got %s", me1.WorkspaceID)
+	}
+	if me1.UserID == me2.UserID {
+		t.Fatalf("multi-org subject must have a distinct user row per workspace, both got %s", me1.UserID)
+	}
+	// Each token's claims must win in its own org: role and email come
+	// from the presented token, not a stale cache entry.
+	if me1.Role != user.RoleMember {
+		t.Fatalf("org-1 expected role %q, got %q", user.RoleMember, me1.Role)
+	}
+	if me2.Role != user.RoleAdmin {
+		t.Fatalf("org-2 expected role %q, got %q", user.RoleAdmin, me2.Role)
+	}
+	if me1.Email != "user@org1.example" || me2.Email != "user@org2.example" {
+		t.Fatalf("per-org email mismatch: org1=%q org2=%q", me1.Email, me2.Email)
+	}
+
+	// The data layer must show each org mapped to its own workspace and
+	// each user row scoped to the right workspace.
+	ctx := context.Background()
+	for _, tc := range []struct {
+		tenant, org, wantWS, wantUser string
+	}{
+		{"tenant-1", "org-1", me1.WorkspaceID, me1.UserID},
+		{"tenant-2", "org-2", me2.WorkspaceID, me2.UserID},
+	} {
+		var mappedWS string
+		if err := env.pool.QueryRow(ctx,
+			`SELECT workspace_id::text FROM iam_core_tenant_workspaces WHERE iam_tenant_id=$1 AND iam_org_id=$2`,
+			tc.tenant, tc.org,
+		).Scan(&mappedWS); err != nil {
+			t.Fatalf("query mapping for %s/%s: %v", tc.tenant, tc.org, err)
+		}
+		if mappedWS != tc.wantWS {
+			t.Fatalf("%s/%s mapped to %s, want %s", tc.tenant, tc.org, mappedWS, tc.wantWS)
+		}
+		var userWS string
+		if err := env.pool.QueryRow(ctx,
+			`SELECT workspace_id::text FROM users WHERE id=$1`, tc.wantUser,
+		).Scan(&userWS); err != nil {
+			t.Fatalf("query user %s: %v", tc.wantUser, err)
+		}
+		if userWS != tc.wantWS {
+			t.Fatalf("user %s lives in workspace %s, want %s", tc.wantUser, userWS, tc.wantWS)
+		}
+	}
+}
+
 // TestIAMCoreExpiredTokenRejected confirms an expired access token is
 // rejected with 401 and provisions nothing.
 func TestIAMCoreExpiredTokenRejected(t *testing.T) {

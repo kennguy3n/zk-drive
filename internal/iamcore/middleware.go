@@ -36,6 +36,22 @@ const principalCacheTTL = 60 * time.Second
 // been deactivated in zk-drive; the handler maps it to 403.
 var errAccountDeactivated = errors.New("iamcore: account deactivated")
 
+// principalKey identifies a cached principal. It is NOT just the
+// subject: a single iam-core subject can belong to several
+// organizations and present tokens carrying different tenant/org
+// claims, each of which maps to a DIFFERENT zk-drive workspace (and a
+// different local user row, since the users unique index is per
+// workspace). Keying only by subject would let the first request's
+// workspace/user be served to every other org's token for the whole
+// TTL — a cross-tenant data-exposure bug. Keying by the full tuple that
+// determines the (workspace, user) pair keeps each org's session
+// isolated.
+type principalKey struct {
+	subject  string
+	tenantID string
+	orgID    string
+}
+
 // principal is the resolved local identity for an iam-core subject,
 // cached for principalCacheTTL.
 type principal struct {
@@ -61,7 +77,7 @@ type Middleware struct {
 	users    *user.Service
 	audit    *audit.Service
 
-	cache sync.Map // subject -> *principal
+	cache sync.Map // principalKey -> *principal
 }
 
 // NewMiddleware constructs the iam-core authentication middleware.
@@ -144,7 +160,8 @@ func (m *Middleware) Handler(next http.Handler) http.Handler {
 // longer matches the cached role.
 func (m *Middleware) resolve(ctx context.Context, r *http.Request, id Identity) (*principal, error) {
 	role := id.MappedRole()
-	if cached, ok := m.cache.Load(id.Subject); ok {
+	key := principalKey{subject: id.Subject, tenantID: id.TenantID, orgID: id.OrgID}
+	if cached, ok := m.cache.Load(key); ok {
 		p := cached.(*principal)
 		if time.Now().Before(p.expiresAt) && p.role == role {
 			return p, nil
@@ -186,7 +203,7 @@ func (m *Middleware) resolve(ctx context.Context, r *http.Request, id Identity) 
 		role:        role,
 		expiresAt:   time.Now().Add(principalCacheTTL),
 	}
-	m.cache.Store(id.Subject, p)
+	m.cache.Store(key, p)
 	return p, nil
 }
 
@@ -195,7 +212,11 @@ func (m *Middleware) resolve(ctx context.Context, r *http.Request, id Identity) 
 // violation from two concurrent first-logins for the same subject is
 // resolved by re-reading the row the winning request inserted.
 func (m *Middleware) ensureUser(ctx context.Context, r *http.Request, workspaceID uuid.UUID, id Identity, role string) (*user.User, error) {
-	u, err := m.users.GetByAuthProvider(ctx, Provider, id.Subject)
+	// Scope the lookup to the resolved workspace. The same subject may
+	// have rows in several workspaces (one per org it belongs to); an
+	// unscoped lookup would return an arbitrary one and bind the caller
+	// to the wrong tenant's user/workspace.
+	u, err := m.users.GetByWorkspaceAndAuthProvider(ctx, workspaceID, Provider, id.Subject)
 	if err == nil {
 		return u, nil
 	}
@@ -206,8 +227,9 @@ func (m *Middleware) ensureUser(ctx context.Context, r *http.Request, workspaceI
 	created, err := m.users.CreateFederated(ctx, workspaceID, id.emailOrFallback(), id.Name, role, Provider, id.Subject)
 	if err != nil {
 		// Lost the race: another request created the row between our
-		// lookup and insert. Re-read it.
-		if existing, lookupErr := m.users.GetByAuthProvider(ctx, Provider, id.Subject); lookupErr == nil {
+		// lookup and insert. Re-read it (workspace-scoped, matching the
+		// (workspace_id, auth_provider, auth_provider_id) unique index).
+		if existing, lookupErr := m.users.GetByWorkspaceAndAuthProvider(ctx, workspaceID, Provider, id.Subject); lookupErr == nil {
 			return existing, nil
 		}
 		return nil, err

@@ -57,6 +57,9 @@ func (f *fakeRepo) GetByEmailAnyWorkspace(context.Context, string) (*User, error
 func (f *fakeRepo) GetByAuthProvider(context.Context, string, string) (*User, error) {
 	panic("unused")
 }
+func (f *fakeRepo) GetByWorkspaceAndAuthProvider(context.Context, uuid.UUID, string, string) (*User, error) {
+	panic("unused")
+}
 func (f *fakeRepo) List(context.Context, uuid.UUID) ([]*User, error) { panic("unused") }
 func (f *fakeRepo) UpdateLastLogin(context.Context, uuid.UUID, time.Time) error {
 	panic("unused")

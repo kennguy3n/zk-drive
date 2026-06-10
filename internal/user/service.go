@@ -165,9 +165,18 @@ func (s *Service) List(ctx context.Context, workspaceID uuid.UUID) ([]*User, err
 }
 
 // GetByAuthProvider returns the user matched on (auth_provider,
-// auth_provider_id). Used by the SSO callback.
+// auth_provider_id) across all workspaces. Used by the built-in OAuth
+// callback. Not workspace-scoped — see the repository docstring.
 func (s *Service) GetByAuthProvider(ctx context.Context, provider, providerID string) (*User, error) {
 	return s.repo.GetByAuthProvider(ctx, provider, providerID)
+}
+
+// GetByWorkspaceAndAuthProvider returns the federated user row for a
+// subject within a specific workspace. Used by the iam-core middleware,
+// which resolves the authoritative workspace from the token's tenant/org
+// claims before looking up the user.
+func (s *Service) GetByWorkspaceAndAuthProvider(ctx context.Context, workspaceID uuid.UUID, provider, providerID string) (*User, error) {
+	return s.repo.GetByWorkspaceAndAuthProvider(ctx, workspaceID, provider, providerID)
 }
 
 // UpdateLastLogin stamps the user's last_login_at column. Call after a

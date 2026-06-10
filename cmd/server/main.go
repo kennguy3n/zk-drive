@@ -708,6 +708,11 @@ func run() error {
 			WithAudit(auditSvc)
 		dataPlaneAuth = iamCoreMW.Handler
 		slog.Info("auth provider: iam-core OIDC", "issuer", client.Discovery().Issuer, "client_id", cfg.IAMCoreClientID)
+		if cfg.IAMCoreAudience != "" {
+			slog.Info("iam-core access-token audience validation enabled", "audience", cfg.IAMCoreAudience)
+		} else {
+			slog.Warn("iam-core IAM_CORE_AUDIENCE not set: access-token audience validation is DISABLED — a token minted for another relying party in the same iam-core tenant could be replayed against zk-drive; set IAM_CORE_AUDIENCE in production")
+		}
 	} else {
 		slog.Info("auth provider: built-in (password + optional Google/Microsoft SSO)")
 	}
