@@ -61,6 +61,31 @@ func (s *Service) CreateTx(ctx context.Context, tx pgx.Tx, workspaceID uuid.UUID
 	return u, nil
 }
 
+// CreateFederated persists a user authenticated by an external identity
+// provider (iam-core). No password is hashed; the row is stamped with
+// (provider, providerID) so subsequent logins resolve by the upstream
+// subject id via GetByAuthProvider, and a non-bcrypt password sentinel
+// is stored so the local password-login path can never match. The
+// returned User has its ID and timestamps populated.
+func (s *Service) CreateFederated(ctx context.Context, workspaceID uuid.UUID, email, name, role, provider, providerID string) (*User, error) {
+	if provider == "" || providerID == "" {
+		return nil, fmt.Errorf("user: federated create requires provider and provider id")
+	}
+	u := &User{
+		WorkspaceID:    workspaceID,
+		Email:          email,
+		Name:           name,
+		PasswordHash:   FederatedPasswordSentinel,
+		Role:           role,
+		AuthProvider:   &provider,
+		AuthProviderID: &providerID,
+	}
+	if err := s.repo.CreateFederated(ctx, u); err != nil {
+		return nil, err
+	}
+	return u, nil
+}
+
 func buildUser(workspaceID uuid.UUID, email, name, password, role string) (*User, error) {
 	hash, err := appcrypto.HashPassword(password)
 	if err != nil {
@@ -140,9 +165,18 @@ func (s *Service) List(ctx context.Context, workspaceID uuid.UUID) ([]*User, err
 }
 
 // GetByAuthProvider returns the user matched on (auth_provider,
-// auth_provider_id). Used by the SSO callback.
+// auth_provider_id) across all workspaces. Used by the built-in OAuth
+// callback. Not workspace-scoped — see the repository docstring.
 func (s *Service) GetByAuthProvider(ctx context.Context, provider, providerID string) (*User, error) {
 	return s.repo.GetByAuthProvider(ctx, provider, providerID)
+}
+
+// GetByWorkspaceAndAuthProvider returns the federated user row for a
+// subject within a specific workspace. Used by the iam-core middleware,
+// which resolves the authoritative workspace from the token's tenant/org
+// claims before looking up the user.
+func (s *Service) GetByWorkspaceAndAuthProvider(ctx context.Context, workspaceID uuid.UUID, provider, providerID string) (*User, error) {
+	return s.repo.GetByWorkspaceAndAuthProvider(ctx, workspaceID, provider, providerID)
 }
 
 // UpdateLastLogin stamps the user's last_login_at column. Call after a

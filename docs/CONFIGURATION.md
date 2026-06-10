@@ -291,6 +291,46 @@ hidden from the login screen.
 | `MICROSOFT_CLIENT_SECRET`   | OAuth2 client secret.                                                                 |
 | `MICROSOFT_REDIRECT_URL`    | Callback URL registered with Azure AD.                                                |
 
+## IAM-Core OIDC identity provider (optional)
+
+When `IAM_CORE_ISSUER_URL` is set, zk-drive stops issuing its own
+session JWTs and becomes a standard OAuth2 client of
+[iam-core](https://github.com/uneycom/iam-core): the browser runs an
+Authorization Code + PKCE flow against iam-core's Universal Login, and
+every `/api/*` request carries an iam-core-issued access token that the
+server verifies against iam-core's JWKS. MFA (TOTP, passkeys) is handled
+by iam-core during the authorize flow, so zk-drive's built-in MFA pages
+are skipped in this mode.
+
+When `IAM_CORE_ISSUER_URL` is **empty** the server falls back to the
+built-in auth stack (password + optional Google/Microsoft SSO), so
+dev/demo deployments keep working with no external identity provider.
+This is the default. See [`docs/IAM_CORE.md`](IAM_CORE.md) for the full
+integration guide.
+
+| Variable                | Default                    | Purpose                                                                                                   |
+| ----------------------- | -------------------------- | --------------------------------------------------------------------------------------------------------- |
+| `IAM_CORE_ISSUER_URL`   | _empty_                    | iam-core OIDC issuer (e.g. `https://id.example.com`). Setting it enables iam-core auth; empty = built-in. |
+| `IAM_CORE_CLIENT_ID`    | _empty_                    | OAuth2 client ID registered with iam-core for this zk-drive deployment. Required when the issuer is set.   |
+| `IAM_CORE_CLIENT_SECRET`| _empty_                    | Optional confidential-client secret. Leave empty for a public SPA client (PKCE only); never exposed to the browser. |
+| `IAM_CORE_AUDIENCE`     | _empty_                    | Expected `aud` claim on access tokens. Verified on every request so a token minted for another relying party cannot be replayed. |
+| `IAM_CORE_SCOPES`       | `openid email profile offline_access` | Space- or comma-separated scopes requested on the authorize redirect. `openid` is always included. |
+| `IAM_CORE_CALLBACK_URL` | _empty_                    | OAuth2 `redirect_uri` — the SPA route that receives the authorization code (e.g. `https://drive.example.com/auth/callback`). Required when the issuer is set. |
+
+The server validates these at startup and **fails fast** if the issuer
+is set but `IAM_CORE_CLIENT_ID` or `IAM_CORE_CALLBACK_URL` is missing,
+so a half-configured auth state never boots.
+
+### Auth-mode discovery endpoints
+
+Two endpoints let the SPA and integrators work in either mode through a
+single code path:
+
+| Method & path  | Auth       | Purpose                                                                                                              |
+| -------------- | ---------- | -------------------------------------------------------------------------------------------------------------------- |
+| `GET /api/config` | public  | Returns `{ auth_mode: "iam-core" \| "builtin", ... }`. In iam-core mode it also returns `issuer`, `client_id`, `authorize_url`, `token_url`, `redirect_uri`, `audience`, and `scopes` so the SPA can build the PKCE authorize redirect. Never exposes the client secret; sent `Cache-Control: no-store`. |
+| `GET /api/me`     | bearer  | Returns the caller's resolved zk-drive identity (`user_id`, `workspace_id`, `role`, and profile fields). Auth-mode agnostic: it echoes the session claims in built-in mode and the tenant-mapped identity in iam-core mode. |
+
 ## Storage gateway integration (zk-object-fabric console)
 
 The admin surface (workspace placement, CMK validation, tenant

@@ -19,10 +19,12 @@ var ErrNotFound = errors.New("user not found")
 type Repository interface {
 	Create(ctx context.Context, u *User) error
 	CreateTx(ctx context.Context, tx pgx.Tx, u *User) error
+	CreateFederated(ctx context.Context, u *User) error
 	GetByID(ctx context.Context, workspaceID, userID uuid.UUID) (*User, error)
 	GetByEmail(ctx context.Context, workspaceID uuid.UUID, email string) (*User, error)
 	GetByEmailAnyWorkspace(ctx context.Context, email string) (*User, error)
 	GetByAuthProvider(ctx context.Context, provider, providerID string) (*User, error)
+	GetByWorkspaceAndAuthProvider(ctx context.Context, workspaceID uuid.UUID, provider, providerID string) (*User, error)
 	List(ctx context.Context, workspaceID uuid.UUID) ([]*User, error)
 	UpdateLastLogin(ctx context.Context, userID uuid.UUID, at time.Time) error
 	Deactivate(ctx context.Context, workspaceID, userID uuid.UUID, at time.Time) error
@@ -91,6 +93,34 @@ RETURNING created_at, updated_at`
 	return nil
 }
 
+// CreateFederated inserts a user authenticated by an external identity
+// provider (e.g. iam-core). Unlike Create/CreateTx it persists the
+// auth_provider + auth_provider_id columns and stores a non-bcrypt
+// password sentinel so the local password-login path can never match
+// — these users authenticate exclusively through the upstream IdP. The
+// user's ID, created_at and updated_at are populated in-place.
+func (r *PostgresRepository) CreateFederated(ctx context.Context, u *User) error {
+	if u.ID == uuid.Nil {
+		u.ID = uuid.New()
+	}
+	if u.Role == "" {
+		u.Role = RoleMember
+	}
+	if u.PasswordHash == "" {
+		u.PasswordHash = FederatedPasswordSentinel
+	}
+	const stmt = `
+INSERT INTO users (id, workspace_id, email, name, password_hash, role, auth_provider, auth_provider_id)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+RETURNING created_at, updated_at`
+	if err := r.pool.QueryRow(ctx, stmt,
+		u.ID, u.WorkspaceID, u.Email, u.Name, u.PasswordHash, u.Role, u.AuthProvider, u.AuthProviderID,
+	).Scan(&u.CreatedAt, &u.UpdatedAt); err != nil {
+		return fmt.Errorf("insert federated user: %w", err)
+	}
+	return nil
+}
+
 // GetByID fetches a user by id, scoped to a workspace.
 func (r *PostgresRepository) GetByID(ctx context.Context, workspaceID, userID uuid.UUID) (*User, error) {
 	q := "SELECT " + userColumns + " FROM users WHERE workspace_id = $1 AND id = $2"
@@ -113,12 +143,32 @@ func (r *PostgresRepository) GetByEmailAnyWorkspace(ctx context.Context, email s
 }
 
 // GetByAuthProvider returns a user row matched on (auth_provider,
-// auth_provider_id). Used by the SSO callback to resolve the caller to
-// an existing account without requiring the email to be stable (some
-// identity providers let users change emails).
+// auth_provider_id). Used by the built-in OAuth callback to resolve the
+// caller to an existing account without requiring the email to be
+// stable (some identity providers let users change emails). It is NOT
+// workspace-scoped: the same subject may have a row in several
+// workspaces (the unique index is per (workspace_id, auth_provider,
+// auth_provider_id)), and this returns an arbitrary one. Callers that
+// must resolve a specific workspace's row — e.g. the iam-core
+// middleware, whose token carries the authoritative tenant/org — MUST
+// use GetByWorkspaceAndAuthProvider instead.
 func (r *PostgresRepository) GetByAuthProvider(ctx context.Context, provider, providerID string) (*User, error) {
 	q := "SELECT " + userColumns + " FROM users WHERE auth_provider = $1 AND auth_provider_id = $2"
 	return scanUser(r.pool.QueryRow(ctx, q, provider, providerID))
+}
+
+// GetByWorkspaceAndAuthProvider returns the user row for a federated
+// subject within a specific workspace, matching the
+// (workspace_id, auth_provider, auth_provider_id) unique index exactly.
+// This is the correct lookup when the caller already knows the
+// authoritative workspace (e.g. the iam-core middleware resolves it
+// from the token's tenant/org claims): a subject who belongs to several
+// orgs has one row per workspace, and only the workspace-scoped lookup
+// returns the right one rather than whichever row the database happens
+// to order first.
+func (r *PostgresRepository) GetByWorkspaceAndAuthProvider(ctx context.Context, workspaceID uuid.UUID, provider, providerID string) (*User, error) {
+	q := "SELECT " + userColumns + " FROM users WHERE workspace_id = $1 AND auth_provider = $2 AND auth_provider_id = $3"
+	return scanUser(r.pool.QueryRow(ctx, q, workspaceID, provider, providerID))
 }
 
 // List returns every user belonging to a workspace.

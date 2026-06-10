@@ -4,11 +4,47 @@ import { useTranslation } from "react-i18next";
 import AuthForm from "../components/AuthForm";
 import { login } from "../api/client";
 import { translateApiError } from "../api/errors";
+import { useAppConfig } from "../hooks/useAppConfig";
+import { beginLogin } from "../api/oidc";
 
 export default function LoginPage() {
   const nav = useNavigate();
   const { t } = useTranslation();
   const [error, setError] = useState<string | null>(null);
+  const { config, loading } = useAppConfig();
+
+  // While the auth mode is unknown, render nothing rather than briefly
+  // flashing the password form when the deployment actually uses SSO.
+  if (loading) {
+    return null;
+  }
+
+  // iam-core mode: replace the password form with a single "Sign in with
+  // SSO" action that kicks off the Authorization Code + PKCE redirect to
+  // iam-core's Universal Login. MFA (TOTP, passkeys) is handled entirely
+  // by iam-core during that flow, so there is no MFA UI here.
+  if (config && config.auth_mode === "iam-core") {
+    return (
+      <div className="auth-form" style={{ maxWidth: 360, margin: "4rem auto", textAlign: "center" }}>
+        <h1>{t("auth.loginPageTitle")}</h1>
+        <p>{t("auth.ssoPrompt", "Your organization uses single sign-on.")}</p>
+        {error && <p style={{ color: "var(--color-danger, #b00020)" }}>{error}</p>}
+        <button
+          type="button"
+          onClick={async () => {
+            try {
+              setError(null);
+              await beginLogin(config);
+            } catch (e) {
+              setError(e instanceof Error ? e.message : String(e));
+            }
+          }}
+        >
+          {t("auth.signInWithSso", "Sign in with SSO")}
+        </button>
+      </div>
+    );
+  }
 
   return (
     <AuthForm
