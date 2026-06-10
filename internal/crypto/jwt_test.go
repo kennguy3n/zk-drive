@@ -284,6 +284,44 @@ func TestKeyManager_ForceES256ErrorsWithoutActiveKey(t *testing.T) {
 	}
 }
 
+func TestKeyManager_HMACVerificationDisabledRejectsHS256(t *testing.T) {
+	ctx := context.Background()
+	// Production profile: signing is ES256-only (AlgES256) and HS256
+	// verification is disabled. A token forged with a leaked
+	// JWT_SECRET must NOT verify, while ES256 tokens still do.
+	store := &memKeyStore{}
+	km, err := NewKeyManager(ctx, store, testCodec(t), "hs-secret", AlgES256, WithHMACVerificationDisabled())
+	if err != nil {
+		t.Fatalf("new key manager: %v", err)
+	}
+	if _, err := km.RotateKey(ctx); err != nil {
+		t.Fatalf("rotate: %v", err)
+	}
+
+	// A token forged with the (leaked) HS256 secret must be rejected.
+	forged := jwt.NewWithClaims(jwt.SigningMethodHS256, makeClaims(time.Hour))
+	forgedStr, err := forged.SignedString([]byte("hs-secret"))
+	if err != nil {
+		t.Fatalf("forge HS256: %v", err)
+	}
+	if _, err := km.Parse(forgedStr, &jwt.RegisteredClaims{}); err == nil {
+		t.Fatal("expected HS256 token to be rejected in asymmetric-only mode, got nil error")
+	}
+
+	// A legitimately ES256-signed token must still verify.
+	signed, err := km.Sign(makeClaims(time.Hour))
+	if err != nil {
+		t.Fatalf("sign: %v", err)
+	}
+	tok, err := km.Parse(signed, &jwt.RegisteredClaims{})
+	if err != nil {
+		t.Fatalf("parse ES256: %v", err)
+	}
+	if tok.Method.Alg() != "ES256" {
+		t.Fatalf("alg = %q, want ES256", tok.Method.Alg())
+	}
+}
+
 func TestKeyManager_AutoFallsBackToHS256WithoutActiveKey(t *testing.T) {
 	ctx := context.Background()
 	// AlgAuto (the default) must keep the backward-compatible HS256

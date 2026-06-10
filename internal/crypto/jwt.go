@@ -76,6 +76,17 @@ type KeyManager struct {
 	codec      *Codec
 	hmacSecret string
 	algoPref   string
+	// hmacVerifyDisabled, when true, makes Parse reject HS256 tokens
+	// outright (returning an error from the keyfunc). It is set by the
+	// production profile so that a leaked JWT_SECRET cannot be used to
+	// forge a token the server would accept: with HMAC verification
+	// disabled, every accepted token must carry a valid ES256
+	// signature whose private half never leaves the encrypted
+	// jwt_signing_keys table. Signing is independently constrained by
+	// algoPref == AlgES256, so the two together give true
+	// asymmetric-only behaviour. Defaults false to preserve the
+	// historical "verify both" behaviour for compact/dev profiles.
+	hmacVerifyDisabled bool
 
 	// reloadMu serializes the whole reload sequence (store read → build
 	// → swap) so two concurrent reloaders (e.g. RotateKey and the
@@ -96,12 +107,30 @@ type KeyManager struct {
 	verifyKeys map[string]*ecdsa.PublicKey
 }
 
+// KeyManagerOption customises a KeyManager at construction. Options
+// are applied before the initial key-set load so they can influence
+// reload behaviour. The variadic tail keeps NewKeyManager backwards
+// compatible with the many existing call sites that pass none.
+type KeyManagerOption func(*KeyManager)
+
+// WithHMACVerificationDisabled makes the KeyManager reject HS256
+// tokens on Parse. Combined with algoPref == AlgES256 (which already
+// refuses to mint HS256 tokens), this yields asymmetric-only
+// behaviour: a leaked JWT_SECRET can neither forge a token the server
+// will accept nor sign a new session. The production profile wires
+// this on.
+func WithHMACVerificationDisabled() KeyManagerOption {
+	return func(km *KeyManager) { km.hmacVerifyDisabled = true }
+}
+
 // NewKeyManager builds a KeyManager and loads the current key set.
 // store may be nil (e.g. in tests or deployments with no key table),
 // in which case the manager is HS256-only. hmacSecret is the HS256
 // fallback secret (JWT_SECRET). algoPref is one of AlgAuto, AlgES256,
-// or AlgHS256; an empty value is treated as AlgAuto.
-func NewKeyManager(ctx context.Context, store SigningKeyStore, codec *Codec, hmacSecret, algoPref string) (*KeyManager, error) {
+// or AlgHS256; an empty value is treated as AlgAuto. Optional
+// KeyManagerOptions tune verification policy (see
+// WithHMACVerificationDisabled).
+func NewKeyManager(ctx context.Context, store SigningKeyStore, codec *Codec, hmacSecret, algoPref string, opts ...KeyManagerOption) (*KeyManager, error) {
 	if algoPref == "" {
 		algoPref = AlgAuto
 	}
@@ -111,6 +140,11 @@ func NewKeyManager(ctx context.Context, store SigningKeyStore, codec *Codec, hma
 		hmacSecret: hmacSecret,
 		algoPref:   algoPref,
 		verifyKeys: map[string]*ecdsa.PublicKey{},
+	}
+	for _, opt := range opts {
+		if opt != nil {
+			opt(km)
+		}
 	}
 	if err := km.reload(ctx); err != nil {
 		return nil, err
@@ -270,6 +304,13 @@ func (km *KeyManager) Parse(raw string, into jwt.Claims) (*jwt.Token, error) {
 			}
 			return pub, nil
 		case *jwt.SigningMethodHMAC:
+			if km.hmacVerifyDisabled {
+				// Production profile: HS256 is not an accepted
+				// signature class. Reject before consulting the
+				// secret so a leaked JWT_SECRET cannot forge a
+				// token the server would honour.
+				return nil, errors.New("crypto: HS256 tokens rejected (asymmetric-only mode)")
+			}
 			if km.hmacSecret == "" {
 				return nil, errors.New("crypto: HS256 token but no secret configured")
 			}

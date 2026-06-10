@@ -469,6 +469,34 @@ export async function updateWorkspaceMFAPolicy(
   return data;
 }
 
+// --- Admin: workspace default encryption mode ----------------------------
+
+// DefaultEncryptionModeResponse mirrors the server's
+// defaultEncryptionModeResponse: the current default applied to new
+// root folders plus the supported set (so the picker never ships a
+// duplicate constant that could drift from the backend).
+export interface DefaultEncryptionModeResponse {
+  mode: EncryptionMode;
+  supported: EncryptionMode[];
+}
+
+export async function getDefaultEncryptionMode(): Promise<DefaultEncryptionModeResponse> {
+  const { data } = await client.get<DefaultEncryptionModeResponse>(
+    "/admin/workspace/default-encryption-mode",
+  );
+  return data;
+}
+
+export async function updateDefaultEncryptionMode(
+  mode: EncryptionMode,
+): Promise<DefaultEncryptionModeResponse> {
+  const { data } = await client.put<DefaultEncryptionModeResponse>(
+    "/admin/workspace/default-encryption-mode",
+    { mode },
+  );
+  return data;
+}
+
 export function currentToken(): string | null {
   return localStorage.getItem(TOKEN_STORAGE_KEY);
 }

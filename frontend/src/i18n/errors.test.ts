@@ -20,6 +20,7 @@ const backendCodes = [
   "AUTH_BAD_PURPOSE",
   "AUTH_MISSING_IAT",
   "AUTH_REVOCATION_CHECK_FAILED",
+  "AUTH_SESSION_ANOMALY",
   "AUTH_INVALID_CREDENTIALS",
   "AUTH_PASSWORD_REVERIFY_FAILED",
   "AUTH_MFA_REQUIRED",
@@ -35,6 +36,9 @@ const backendCodes = [
   "MISSING_WORKSPACE_CONTEXT",
   // Rate limiting (429).
   "RATE_LIMIT_EXCEEDED",
+  // Auth-attempt throttling (429) — IP-reputation brute-force guard,
+  // distinct from the generic request rate limit.
+  "AUTH_TOO_MANY_ATTEMPTS",
   // Validation (400 / 422).
   "VALIDATION_FAILED",
   "BAD_REQUEST",

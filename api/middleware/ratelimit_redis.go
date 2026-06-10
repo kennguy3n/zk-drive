@@ -104,9 +104,10 @@ func RedisRateLimiter(client redis.UniversalClient, cfg RedisRateLimiterConfig) 
 				return
 			}
 			workspaceID, _ := WorkspaceIDFromContext(r.Context())
-			wait := limiter.reserve(r.Context(), workspaceID, userID, time.Now())
-			if wait > 0 {
-				retry := int(math.Ceil(wait.Seconds()))
+			res := limiter.reserve(r.Context(), workspaceID, userID, time.Now())
+			setRateLimitHeaders(w, limiter.userRate, res.remaining, res.reset)
+			if res.wait > 0 {
+				retry := int(math.Ceil(res.wait.Seconds()))
 				if retry < 1 {
 					retry = 1
 				}
@@ -126,10 +127,19 @@ type redisRateLimiter struct {
 	window   time.Duration
 }
 
+// reservation is the outcome of a limiter check: the wait the caller
+// must respect (0 = allowed) plus the rate-limit telemetry surfaced to
+// clients via the X-RateLimit-* headers.
+type reservation struct {
+	wait      time.Duration
+	remaining int   // requests left in the current window for this user
+	reset     int64 // unix second the current window resets at
+}
+
 // reserve runs rateLimitScript to atomically check and increment the
-// per-user and per-workspace counters. Returns the wait interval the
-// caller must respect before retrying; 0 means the request is
-// allowed.
+// per-user and per-workspace counters. Returns a reservation whose
+// wait is 0 when the request is allowed, plus the per-user remaining
+// budget and window reset for the X-RateLimit-* headers.
 //
 // The script's two-phase logic is what guarantees that a denied
 // per-user request does not pollute the workspace counter, so a
@@ -142,8 +152,13 @@ type redisRateLimiter struct {
 // accumulate stale values from the previous window. Doing it inside
 // the script also means there's a single network round-trip rather
 // than the two-step pipeline the previous implementation used.
-func (l *redisRateLimiter) reserve(ctx context.Context, workspaceID, userID uuid.UUID, now time.Time) time.Duration {
+func (l *redisRateLimiter) reserve(ctx context.Context, workspaceID, userID uuid.UUID, now time.Time) reservation {
 	bucket := now.Truncate(l.window).Unix()
+	bucketEnd := time.Unix(bucket, 0).Add(l.window)
+	// Fail-open default: report a full budget so a Redis outage never
+	// makes a client think it is being throttled.
+	open := reservation{wait: 0, remaining: l.userRate, reset: bucketEnd.Unix()}
+
 	userKey := rateLimitKey(workspaceID, userID, bucket)
 	wsKey := workspaceLimitKey(workspaceID, bucket)
 	ttlSeconds := int64((2 * l.window).Seconds())
@@ -164,23 +179,27 @@ func (l *redisRateLimiter) reserve(ctx context.Context, workspaceID, userID uuid
 		// Fail open. Logging here is intentional — a quiet drop
 		// would mask Redis outages from operators.
 		logging.FromContext(ctx).Error("ratelimit_redis script failed, allowing request", "err", err)
-		return 0
+		return open
 	}
-	if len(res) < 1 {
-		logging.FromContext(ctx).Warn("ratelimit_redis script returned no values, allowing request")
-		return 0
+	if len(res) < 2 {
+		logging.FromContext(ctx).Warn("ratelimit_redis script returned too few values, allowing request")
+		return open
 	}
 	status, _ := res[0].(int64)
+	userCount, _ := res[1].(int64)
+	remaining := l.userRate - int(userCount)
+	if remaining < 0 {
+		remaining = 0
+	}
 	if status == 0 {
-		return 0
+		return reservation{wait: 0, remaining: remaining, reset: bucketEnd.Unix()}
 	}
 
-	bucketEnd := time.Unix(bucket, 0).Add(l.window)
 	wait := time.Until(bucketEnd)
 	if wait < 0 {
 		wait = 0
 	}
-	return wait + time.Millisecond
+	return reservation{wait: wait + time.Millisecond, remaining: remaining, reset: bucketEnd.Unix()}
 }
 
 // rateLimitKey returns the per-user counter key. The (empty)

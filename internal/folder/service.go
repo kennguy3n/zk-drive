@@ -27,15 +27,51 @@ var ErrInvalidEncryptionMode = errors.New("invalid encryption mode")
 // objects live under different keying / placement regimes.
 var ErrEncryptionModeMismatch = errors.New("encryption mode mismatch")
 
+// WorkspaceDefaultModeResolver resolves a workspace's configured
+// default encryption mode for new root folders. workspace.Service
+// satisfies it via GetDefaultEncryptionMode. It is an interface (not a
+// direct workspace.Service dependency) so the folder package stays
+// decoupled from workspace and can be unit-tested with a fake.
+type WorkspaceDefaultModeResolver interface {
+	GetDefaultEncryptionMode(ctx context.Context, workspaceID uuid.UUID) (string, error)
+}
+
 // Service wraps the folder repository with path-computation and move
 // validation.
 type Service struct {
 	repo Repository
+	// wsDefaults resolves the per-workspace default encryption mode
+	// applied to new ROOT folders when the caller does not specify
+	// one. nil keeps the historical behaviour (root folders default
+	// to EncryptionManagedEncrypted).
+	wsDefaults WorkspaceDefaultModeResolver
 }
 
-// NewService returns a Service backed by the given repository.
-func NewService(repo Repository) *Service {
-	return &Service{repo: repo}
+// Option customises a Service at construction.
+type Option func(*Service)
+
+// WithWorkspaceDefaults wires a resolver so new root folders created
+// without an explicit mode inherit the workspace's
+// default_encryption_mode (Strict ZK as a default option, 6.4). A nil
+// resolver is ignored, preserving the managed-encrypted default.
+func WithWorkspaceDefaults(r WorkspaceDefaultModeResolver) Option {
+	return func(s *Service) {
+		if r != nil {
+			s.wsDefaults = r
+		}
+	}
+}
+
+// NewService returns a Service backed by the given repository. Optional
+// Options tune behaviour (see WithWorkspaceDefaults).
+func NewService(repo Repository, opts ...Option) *Service {
+	s := &Service{repo: repo}
+	for _, opt := range opts {
+		if opt != nil {
+			opt(s)
+		}
+	}
+	return s
 }
 
 // Create inserts a new folder. If parentID is non-nil, it must reference a
@@ -64,7 +100,20 @@ func (s *Service) CreateWithMode(ctx context.Context, workspaceID uuid.UUID, par
 	if parentID == nil {
 		path = "/" + name + "/"
 		if mode == "" {
-			mode = EncryptionManagedEncrypted
+			// Root folder with no explicit mode: adopt the workspace
+			// default (Strict ZK as a default option, 6.4). This
+			// resolution is fail-CLOSED: if a resolver is wired but
+			// the workspace lookup fails we propagate the error rather
+			// than silently falling back to managed-encrypted, because
+			// a Secure Business workspace that opted into strict_zk
+			// must never get a less-private folder due to a transient
+			// read error. When no resolver is wired (dev/test) the
+			// historical managed-encrypted default applies.
+			resolved, err := s.resolveRootDefaultMode(ctx, workspaceID)
+			if err != nil {
+				return nil, err
+			}
+			mode = resolved
 		}
 	} else {
 		parent, err := s.repo.GetByID(ctx, workspaceID, *parentID)
@@ -96,6 +145,28 @@ func (s *Service) CreateWithMode(ctx context.Context, workspaceID uuid.UUID, par
 		return nil, err
 	}
 	return f, nil
+}
+
+// resolveRootDefaultMode returns the encryption mode a new root folder
+// should adopt when the caller supplies none. With no resolver wired
+// it returns the historical managed-encrypted default. With a resolver
+// it returns the workspace's configured default_encryption_mode,
+// propagating any lookup error (fail-closed — see CreateWithMode). A
+// resolver that yields an unrecognised mode is also rejected, so a
+// corrupt column can't produce a folder whose mode the layer would
+// otherwise treat as invalid.
+func (s *Service) resolveRootDefaultMode(ctx context.Context, workspaceID uuid.UUID) (string, error) {
+	if s.wsDefaults == nil {
+		return EncryptionManagedEncrypted, nil
+	}
+	mode, err := s.wsDefaults.GetDefaultEncryptionMode(ctx, workspaceID)
+	if err != nil {
+		return "", err
+	}
+	if !IsValidEncryptionMode(mode) {
+		return "", ErrInvalidEncryptionMode
+	}
+	return mode, nil
 }
 
 // GetByID fetches a folder.

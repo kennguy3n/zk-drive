@@ -79,6 +79,16 @@ because in-memory rate limiting / session revocation and an embedded
 broker are not safe across replicas. Migrations run out-of-band via the
 `migrate` Job, so `ZKDRIVE_AUTO_MIGRATE` stays off. All workers enabled.
 
+JWT signing is **asymmetric-only** under this profile (6.1): the default
+`JWT_ALGORITHM` becomes `ES256`, the server **auto-generates an ES256
+signing key at startup** if none exists yet (so first login works with
+no manual rotation step), and HS256 tokens are **rejected on
+verification** — a leaked `JWT_SECRET` can neither sign nor forge a
+session the server will accept. `Expect-CT` is emitted for TLS
+deployments. An explicit `JWT_ALGORITHM` always overrides this default;
+`compact`/`development` keep the HS256 `auto` fallback for
+single-binary and local-dev simplicity.
+
 ### `development` — local laptop
 
 The same dependency-free in-memory behaviour as `compact` but without
@@ -296,7 +306,7 @@ topology, example configs, and HPA sizing math.
 
 | Variable                   | Default | Purpose                                                                                                                                            |
 | -------------------------- | ------- | -------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `JWT_ALGORITHM`            | `auto`  | Session-token signing algorithm. `auto` signs with ES256 when an active asymmetric key exists in `jwt_signing_keys`, else HS256 (`JWT_SECRET`). `ES256` forces asymmetric signing — if no active key has been rotated in yet, token signing **fails** rather than silently downgrading to HS256 (run `POST /api/platform/jwt/rotate` first). `HS256` forces legacy symmetric signing. Verification always accepts both, so rotating to ES256 never invalidates existing HS256 sessions. |
+| `JWT_ALGORITHM`            | `auto` (`ES256` under the `production` profile)  | Session-token signing algorithm. `auto` signs with ES256 when an active asymmetric key exists in `jwt_signing_keys`, else HS256 (`JWT_SECRET`). `ES256` forces asymmetric signing — if no active key has been rotated in yet, token signing **fails** rather than silently downgrading to HS256 (run `POST /api/platform/jwt/rotate` first, or use the `production` profile which auto-generates one at startup). `HS256` forces legacy symmetric signing. Under non-production profiles verification accepts both, so rotating to ES256 never invalidates existing HS256 sessions; under the `production` profile HS256 tokens are **rejected** on verification (asymmetric-only). The default is profile-dependent — see [Deployment profile](#deployment-profile). |
 | `JWT_KEY_REFRESH_INTERVAL` | `60s`   | How often each replica re-reads `jwt_signing_keys` so a key rotation performed on one replica propagates to all others without a restart. Go duration string, clamped to `[10s, 1h]`. A non-positive value (e.g. `0`) disables the background refresh — appropriate for single-replica deployments. |
 | `PLATFORM_ADMIN_USER_IDS`  | _(empty)_ | **Legacy / no longer used.** Earlier releases gated a per-workspace admin JWT-rotation endpoint behind this allowlist. Rotation has since moved to the platform control plane (`POST /api/platform/jwt/rotate`, gated by the `keys:manage` platform-API-key capability) and the admin endpoint was removed, so this var no longer gates anything. The server logs a startup warning if it is still set; drop it from your config. |
 
@@ -366,6 +376,43 @@ re-encryption runbook.
 | ------------------------- | ------- | ---------------------------------------------------------------------------------------------------------------------- |
 | `RATE_LIMIT_PER_USER`     | `0`     | Requests per user per minute. `0` disables. When `REDIS_URL` is set the limiter is Redis-backed and survives restarts.  |
 | `RATE_LIMIT_PER_WORKSPACE`| `0`     | Requests per workspace per minute. Same semantics as the per-user limiter, just a different scope.                      |
+
+Every rate-limited response (allowed **and** throttled) carries the
+standard telemetry headers so clients can self-pace:
+
+- `X-RateLimit-Limit` — the per-window request budget.
+- `X-RateLimit-Remaining` — requests left in the current window (`0` on a 429).
+- `X-RateLimit-Reset` — unix second at which the window resets.
+
+A `429` additionally carries `Retry-After` (seconds).
+
+### Auth brute-force reputation
+
+Independent of the per-user/-workspace limiter, `POST /api/auth/login`
+is protected by a **per-client-IP** brute-force guard. It tracks failed
+sign-ins per IP and, once the failure threshold is crossed, escalates a
+cooldown the IP must wait out before its next attempt is accepted: `1s`,
+then `5s`, then `30s`, then a hard block. Attempts made inside a cooldown
+are rejected with `429 AUTH_TOO_MANY_ATTEMPTS` + `Retry-After` **before**
+the password is checked, and a *successful* sign-in clears the IP's
+reputation so a legitimate user is never punished for earlier typos.
+
+The escalation is a cooldown, **not** a connection tarpit, so it adds no
+held goroutines/sockets (which an attacker could weaponise). The client
+IP is resolved with `TRUSTED_PROXY_DEPTH`, so a spoofed `X-Forwarded-For`
+cannot dodge the guard. With `REDIS_URL` set the reputation is shared
+across replicas (and retained for the window below); otherwise a
+per-replica in-memory fallback still provides best-effort protection.
+
+Because the key is the client IP, a large NAT (a whole office behind one
+egress IP) shares one reputation — which is why the hard block defaults
+to a short 15 minutes rather than the full retention window.
+
+| Variable                   | Default | Purpose                                                                                                                                            |
+| -------------------------- | ------- | -------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `AUTH_FAILURE_THRESHOLD`   | `5`     | Failed sign-ins tolerated per client IP before cooldowns begin. The first `threshold-1` failures are free (human typos); the threshold-th arms the first cooldown. `<= 0` falls back to the default. |
+| `AUTH_BLOCK_DURATION`      | `15m`   | Hard-block cooldown applied once the progressive `1s/5s/30s` delays are exhausted. Kept short so a shared-NAT office is not locked out for hours. Accepts a Go duration (e.g. `30m`). `<= 0` falls back to the default. |
+| `AUTH_REPUTATION_RETENTION`| `24h`   | How long an IP's failure counter survives with no further failures (the Redis TTL). Accepts a Go duration. `<= 0` falls back to the default.        |
 
 ## Preview pipeline
 
@@ -691,6 +738,29 @@ rollouts.
 | `SECURITY_HEADERS_CSP_REPORT_ONLY`    | `false` | When `true`, the policy emits under `Content-Security-Policy-Report-Only` instead of enforcing — browsers report violations but do not block. Use during the first rollout, then flip to `false`. |
 | `SECURITY_HEADERS_CSP_REPORT_URI`     | _empty_ | When set, appended as `report-uri <value>` to the CSP value. Browsers POST violation reports there.                                                                      |
 | `SECURITY_HEADERS_DISABLE_HSTS`       | `false` | When `true`, skips `Strict-Transport-Security`. Use for local HTTP development only; keep `false` in production.                                                          |
+| `SECURITY_HEADERS_CSP_NONCE`          | `true`  | When `true`, a fresh per-request `'nonce-<base64>'` source is added to CSP `script-src` and the same nonce is injected into the `<meta name="csp-nonce">` tag of the served `index.html`. The policy already ships nonce-clean (no inline scripts), so this is purely additive: a future inline script can be allow-listed by nonce without reopening `'unsafe-inline'`. Read it in the SPA via `document.querySelector('meta[name=csp-nonce]').content`. |
+| `SECURITY_HEADERS_EXPECT_CT`          | _profile_ | Emits `Expect-CT: max-age=86400, enforce`. Defaults to **on** under the `production` profile and **off** otherwise; an explicit value wins. Suppressed automatically when HSTS is disabled (Expect-CT is HTTPS-only). Superseded by browsers enforcing Certificate Transparency by default, but still honoured by deployed clients. |
+
+### CSP nonce & inline scripts (6.5)
+
+`script-src` is nonce-clean: it carries **no** `'unsafe-inline'` and
+**no** `'unsafe-eval'`. Vite emits external, content-hashed bundles
+that load under `'self'`, so the SPA needs neither. When
+`SECURITY_HEADERS_CSP_NONCE` is on, the server stamps a cryptographically
+random 128-bit nonce into both the `script-src` directive and the
+`index.html` meta tag on **every navigation request** (the document is
+served `no-store` precisely so the nonce is never cached / reused). A
+component or dependency that must inject an inline `<script>`/`<style>`
+should copy that nonce onto the element so it satisfies the policy —
+this keeps the door to `'unsafe-inline'` permanently shut.
+
+`style-src` retains `'unsafe-inline'` because React's `style={}` prop
+compiles to inline `style=` attributes (governed by `style-src-attr`,
+which inherits `style-src`); removing it is a separate frontend
+workstream (refactor every inline style to a class). Camera, microphone
+and geolocation are denied outright via `Permissions-Policy`
+(`camera=()`, `microphone=()`, `geolocation=()`) — stricter than the
+"restrict to self" baseline, since the drive app uses none of them.
 
 ## Transactional email (guest-invite delivery)
 
@@ -767,6 +837,52 @@ Typical compliance windows:
 
 The full archive design and restore workflow are in
 [`OPERATIONS.md`](OPERATIONS.md#audit-log-cold-archival).
+
+## Audit-log tamper-evidence (hash chain)
+
+Every `audit_log` row carries an HMAC-SHA256 over the previous row's
+hash (a per-workspace hash chain). Any out-of-band insert, delete, or
+mutation — **including by a database administrator** — breaks the chain
+and is detected by recomputing it. The chain head (`seq`, `head_hash`)
+is stored separately in `audit_log_chain_head` so verification has an
+authenticated terminus that a tamperer would also have to forge.
+
+The HMAC key is **never stored in the database**; it is derived in
+process at startup from an environment-held secret, so a DB-only
+compromise cannot forge history.
+
+| Variable         | Default                | Purpose                                                                                                                                                                                                 |
+| ---------------- | ---------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `AUDIT_HMAC_KEY` | _(derive from `JWT_SECRET`)_ | Input keying material for the audit-chain HMAC key. Any length; HKDF-SHA256 expands it to 32 bytes. When unset, the key is HKDF-derived from `JWT_SECRET` under a distinct info label so a fresh install is self-operating (NoOps). |
+
+**Production recommendation:** set a dedicated `AUDIT_HMAC_KEY` (ideally
+from a KMS / sealed secret). This keeps the audit chain verifiable
+across a `JWT_SECRET` rotation and ensures a leaked `JWT_SECRET` cannot
+be used to forge audit history. When running on the derived fallback
+under `ZKDRIVE_PROFILE=production`, the server logs a one-line
+recommendation at startup.
+
+Verification is exposed to admins at
+`GET /api/admin/audit-log/verify` (see [`ARCHITECTURE.md`](ARCHITECTURE.md)). It
+returns `200` with a JSON body `{valid, rows_checked, head_seq,
+first_invalid_seq, detail}`; `valid:false` means the request succeeded
+but the log is compromised. A scheduled job can poll this endpoint with
+an admin token for the "periodic external verification" control.
+Verification tolerates cold-archived rows: it trusts the oldest
+surviving row's `prev_hash` as the boundary and still requires the live
+tail to terminate at the stored chain head.
+
+**Monitoring:** the live-endpoint verification is one half of the
+control; the other half is the periodic *external* snapshot of
+`(head_seq, head_hash)`. The endpoint reports `valid:true` for an empty
+live set (`rows_checked == 0`) because that is the legitimate shape after
+full cold-tier archival, and the endpoint alone cannot re-derive a head
+from no rows. To close that gap, alert when the response shows
+`head_seq > 0 && rows_checked == 0` *without* a corresponding archival
+run — that shape is also what a privileged DB operator would leave behind
+after deleting every live row and resetting the head, and only the
+retained external snapshot (a non-zero `head_seq`/`head_hash` that no
+longer matches a reset head) distinguishes tampering from archival.
 
 ## Worker runtime
 

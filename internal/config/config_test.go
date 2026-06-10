@@ -1,6 +1,7 @@
 package config
 
 import (
+	"bytes"
 	"os"
 	"strings"
 	"testing"
@@ -116,7 +117,7 @@ func requireEnv(t *testing.T, envs map[string]string) {
 		// Same convention as the blocks above: buildConfigFromEnv reads
 		// each of these (dbMaxConnsFromEnv / dbMinConnsFromEnv /
 		// parseDurationDefault(DB_MAX_CONN_IDLE_TIME) /
-		// normaliseJWTAlgorithm / jwtKeyRefreshIntervalFromEnv), and all
+		// jwtAlgorithmFromEnv / jwtKeyRefreshIntervalFromEnv), and all
 		// of them treat an empty value identically to unset (fall back to
 		// the clamped default), so a CI runner that exports e.g.
 		// DB_MAX_CONNS=2 or JWT_ALGORITHM=ES256 would otherwise bleed into
@@ -157,16 +158,28 @@ func requireEnv(t *testing.T, envs map[string]string) {
 		"TRUSTED_PROXY_DEPTH",
 		"VAPID_PUBLIC_KEY", "VAPID_PRIVATE_KEY", "VAPID_SUBSCRIBER",
 		"WS_PROXY_MODE",
-		// Deployment-profile selector + auto-migrate toggle (WS2). Same
-		// convention as the blocks above: Load applies the profile's
-		// env-var defaults (applyProfileDefaults) and buildConfigFromEnv
-		// reads both, so a CI runner that exports ZKDRIVE_PROFILE=production
-		// would otherwise make every test here fail validateProfile (it
-		// requires Redis + NATS). Baseline-clearing to "" yields the
-		// no-profile state (normaliseProfile("") == ""), preserving the
-		// pre-profile behaviour. Profile-specific tests live in
+		// ZKDRIVE_PROFILE selects the deployment profile and shifts
+		// env-var defaults. On this branch it shifts the JWT_ALGORITHM
+		// default (ES256 under production); for WS2 it also drives
+		// applyProfileDefaults + validateProfile (production requires
+		// Redis + NATS). Baseline-clear it so a runner exporting
+		// ZKDRIVE_PROFILE=production cannot bleed an ES256 default into
+		// tests exercising the "auto" fallback, nor force the
+		// profile-validation path on every test here. ZKDRIVE_AUTO_MIGRATE
+		// is the WS2 auto-migrate toggle read by buildConfigFromEnv;
+		// cleared for the same reason. Profile-specific tests live in
 		// profiles_test.go and manage these vars themselves.
 		"ZKDRIVE_PROFILE", "ZKDRIVE_AUTO_MIGRATE",
+		// Security-header knobs whose defaults are profile- or
+		// constant-derived. Baseline-clear them so a runner exporting
+		// e.g. SECURITY_HEADERS_EXPECT_CT=true can't bleed into tests
+		// asserting the profile default.
+		"SECURITY_HEADERS_CSP_NONCE", "SECURITY_HEADERS_EXPECT_CT",
+		// AUDIT_HMAC_KEY selects the audit-chain HMAC key source
+		// (6.6). Baseline-clear it so a runner exporting an explicit
+		// key cannot change the derived-from-JWT_SECRET default that
+		// TestDeriveAuditHMACKeyDefaultsToJWTSecret asserts.
+		"AUDIT_HMAC_KEY",
 	}
 	// WORKER_METRICS_ADDR is intentionally NOT included in the keys
 	// list above. t.Setenv(k, "") makes os.LookupEnv return
@@ -781,6 +794,101 @@ func TestJWTKeyRefreshIntervalFromEnv(t *testing.T) {
 	}
 }
 
+// TestSecurityHeaderDefaults pins the 6.5 config contract:
+//   - CSP nonce defaults ON (additive hardening) regardless of profile.
+//   - Expect-CT defaults ON under production, OFF otherwise.
+//   - Explicit env values override the profile default either way.
+func TestSecurityHeaderDefaults(t *testing.T) {
+	t.Run("development defaults", func(t *testing.T) {
+		requireEnv(t, map[string]string{
+			"DATABASE_URL": "postgres://x/y",
+			"JWT_SECRET":   "secret",
+		})
+		cfg, err := Load()
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		if !cfg.SecurityHeadersCSPNonce {
+			t.Errorf("CSP nonce should default on")
+		}
+		if cfg.SecurityHeadersExpectCT {
+			t.Errorf("Expect-CT should default off outside production")
+		}
+	})
+	t.Run("production defaults Expect-CT on", func(t *testing.T) {
+		requireEnv(t, map[string]string{
+			"DATABASE_URL":    "postgres://x/y",
+			"JWT_SECRET":      "secret",
+			"ZKDRIVE_PROFILE": "production",
+			// production fails closed without Redis + NATS
+			// (validateProfile); supply them so Load succeeds and the
+			// security-header defaults are what's under test here.
+			"REDIS_URL": "redis://127.0.0.1:6379",
+			"NATS_URL":  "nats://127.0.0.1:4222",
+		})
+		cfg, err := Load()
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		if !cfg.SecurityHeadersExpectCT {
+			t.Errorf("Expect-CT should default on under production")
+		}
+		if !cfg.SecurityHeadersCSPNonce {
+			t.Errorf("CSP nonce should default on under production")
+		}
+	})
+	t.Run("explicit env overrides profile", func(t *testing.T) {
+		requireEnv(t, map[string]string{
+			"DATABASE_URL":               "postgres://x/y",
+			"JWT_SECRET":                 "secret",
+			"ZKDRIVE_PROFILE":            "production",
+			"REDIS_URL":                  "redis://127.0.0.1:6379",
+			"NATS_URL":                   "nats://127.0.0.1:4222",
+			"SECURITY_HEADERS_EXPECT_CT": "false",
+			"SECURITY_HEADERS_CSP_NONCE": "false",
+		})
+		cfg, err := Load()
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		if cfg.SecurityHeadersExpectCT {
+			t.Errorf("explicit SECURITY_HEADERS_EXPECT_CT=false ignored")
+		}
+		if cfg.SecurityHeadersCSPNonce {
+			t.Errorf("explicit SECURITY_HEADERS_CSP_NONCE=false ignored")
+		}
+	})
+}
+
+// TestJWTAlgorithmFromEnv pins the profile-aware default: an explicit,
+// recognised JWT_ALGORITHM always wins; when unset/unrecognised the
+// default is ES256 under production and auto otherwise.
+func TestJWTAlgorithmFromEnv(t *testing.T) {
+	tests := []struct {
+		name    string
+		raw     string
+		profile Profile
+		want    string
+	}{
+		{"explicit_es256_dev", "ES256", ProfileDevelopment, "ES256"},
+		{"explicit_hs256_prod_wins", "HS256", ProfileProduction, "HS256"},
+		{"explicit_auto_prod_wins", "auto", ProfileProduction, "auto"},
+		{"case_insensitive", "es256", ProfileDevelopment, "ES256"},
+		{"unset_prod_defaults_es256", "", ProfileProduction, "ES256"},
+		{"unset_dev_defaults_auto", "", ProfileDevelopment, "auto"},
+		{"unset_compact_defaults_auto", "", ProfileCompact, "auto"},
+		{"unrecognised_prod_defaults_es256", "garbage", ProfileProduction, "ES256"},
+		{"unrecognised_dev_defaults_auto", "garbage", ProfileDevelopment, "auto"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := jwtAlgorithmFromEnv(tc.raw, tc.profile); got != tc.want {
+				t.Errorf("jwtAlgorithmFromEnv(%q, %q) = %q, want %q", tc.raw, tc.profile, got, tc.want)
+			}
+		})
+	}
+}
+
 // TestDBReadMaxConnsFromEnv pins the read-pool MaxConns contract:
 // unset inherits the primary's resolved max verbatim (both pools sized
 // alike, the pre-knob behaviour); a set value clamps to the same
@@ -1063,6 +1171,63 @@ func TestLoadAuditArchiveDefaults(t *testing.T) {
 	}
 	if cfg.AuditArchiveMaxRowsPerBatch != 50000 {
 		t.Errorf("AuditArchiveMaxRowsPerBatch = %d, want 50000", cfg.AuditArchiveMaxRowsPerBatch)
+	}
+}
+
+// TestDeriveAuditHMACKeyDefaultsToJWTSecret: with no AUDIT_HMAC_KEY the
+// key must be derived from JWT_SECRET (32 bytes, source "derived") so a
+// fresh install is self-operating without extra config, while keeping
+// the key out of the database.
+func TestDeriveAuditHMACKeyDefaultsToJWTSecret(t *testing.T) {
+	requireEnv(t, map[string]string{
+		"DATABASE_URL": "postgres://localhost/zkdrive",
+		"JWT_SECRET":   "test-secret",
+	})
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.AuditHMACKeySource != AuditHMACKeySourceDerived {
+		t.Errorf("AuditHMACKeySource = %q, want %q", cfg.AuditHMACKeySource, AuditHMACKeySourceDerived)
+	}
+	if len(cfg.AuditHMACKey) != 32 {
+		t.Fatalf("AuditHMACKey len = %d, want 32", len(cfg.AuditHMACKey))
+	}
+	// Deriving twice from the same secret is stable, and a different
+	// JWT_SECRET yields a different key.
+	again, _ := deriveAuditHMACKey("", "test-secret")
+	if !bytes.Equal(again, cfg.AuditHMACKey) {
+		t.Error("derived key not stable for the same JWT_SECRET")
+	}
+	other, _ := deriveAuditHMACKey("", "different-secret")
+	if bytes.Equal(other, cfg.AuditHMACKey) {
+		t.Error("derived key did not change with JWT_SECRET")
+	}
+}
+
+// TestDeriveAuditHMACKeyExplicitWins: an explicit AUDIT_HMAC_KEY must be
+// used (source "explicit") and must differ from the JWT_SECRET-derived
+// key even when the same secret material is reused, thanks to distinct
+// HKDF info labels (domain separation).
+func TestDeriveAuditHMACKeyExplicitWins(t *testing.T) {
+	requireEnv(t, map[string]string{
+		"DATABASE_URL":   "postgres://localhost/zkdrive",
+		"JWT_SECRET":     "shared-secret",
+		"AUDIT_HMAC_KEY": "shared-secret",
+	})
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.AuditHMACKeySource != AuditHMACKeySourceExplicit {
+		t.Errorf("AuditHMACKeySource = %q, want %q", cfg.AuditHMACKeySource, AuditHMACKeySourceExplicit)
+	}
+	if len(cfg.AuditHMACKey) != 32 {
+		t.Fatalf("AuditHMACKey len = %d, want 32", len(cfg.AuditHMACKey))
+	}
+	derived, _ := deriveAuditHMACKey("", "shared-secret")
+	if bytes.Equal(cfg.AuditHMACKey, derived) {
+		t.Error("explicit and derived keys collide despite distinct HKDF info labels")
 	}
 }
 
