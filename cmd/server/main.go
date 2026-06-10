@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -240,15 +241,23 @@ func run() error {
 	// unreachable rather than silently serving every read off the
 	// primary.
 	if rd := strings.TrimSpace(cfg.DatabaseReadURL); rd != "" && rd != strings.TrimSpace(cfg.DatabaseURL) {
+		// Read pool sizes via the DB_READ_* knobs, which inherit the
+		// primary's values when unset (so an un-tuned deployment opens
+		// an identically-sized pool, as before). Idle reaping reuses the
+		// shared DBMaxConnIdleTime.
 		readPool, err = database.ConnectWithPool(ctx, rd, database.PoolConfig{
-			MaxConns:        cfg.DBMaxConns,
-			MinConns:        cfg.DBMinConns,
+			MaxConns:        cfg.DBReadMaxConns,
+			MinConns:        cfg.DBReadMinConns,
 			MaxConnIdleTime: cfg.DBMaxConnIdleTime,
 		})
 		if err != nil {
 			return fmt.Errorf("connect read replica: %w", err)
 		}
-		slog.Info("postgres read replica connected; SELECT traffic routed to replica", "read_url_set", true)
+		slog.Info("postgres read replica connected; SELECT traffic routed to replica",
+			"read_url_set", true,
+			"read_max_conns", cfg.DBReadMaxConns,
+			"read_min_conns", cfg.DBReadMinConns,
+		)
 	}
 	// dbRouter is a Querier: a *ReadWriteSplitter when a replica is
 	// configured, otherwise a thin wrapper that routes every read back to
@@ -932,12 +941,20 @@ func run() error {
 		WithBilling(billingSvc).
 		WithWebhooks(webhookPublisher).
 		WithOnlyOffice(cfg.OnlyOfficeURL, cfg.OnlyOfficeSecret, cfg.PublicURL).
-		WithOnlyOfficeSaveLimits(cfg.OnlyOfficeSaveMemoryBudgetBytes, cfg.OnlyOfficeMaxDocumentBytes)
+		WithOnlyOfficeSaveLimits(cfg.OnlyOfficeSaveMemoryBudgetBytes, cfg.OnlyOfficeMaxDocumentBytes).
+		WithOnlyOfficeStreamSaveConcurrency(cfg.OnlyOfficeStreamSaveMaxConcurrent)
 	if cfg.OnlyOfficeURL != "" {
+		// 0 == unlimited: the constant-memory streaming path is
+		// intentionally unbounded unless an operator opts into a cap.
+		streamCap := "unlimited"
+		if cfg.OnlyOfficeStreamSaveMaxConcurrent > 0 {
+			streamCap = strconv.Itoa(cfg.OnlyOfficeStreamSaveMaxConcurrent)
+		}
 		slog.Info("onlyoffice save concurrency cap derived from memory budget",
 			"max_concurrent_saves", cfg.OnlyOfficeMaxConcurrentSaves(),
 			"save_memory_budget_mb", cfg.OnlyOfficeSaveMemoryBudgetBytes>>20,
-			"max_document_mb", cfg.OnlyOfficeMaxDocumentBytes>>20)
+			"max_document_mb", cfg.OnlyOfficeMaxDocumentBytes>>20,
+			"stream_save_max_concurrent", streamCap)
 		if cfg.OnlyOfficeSecret != "" {
 			slog.Info("onlyoffice integration enabled with callback JWT verification")
 		} else {
