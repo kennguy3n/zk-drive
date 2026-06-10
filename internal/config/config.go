@@ -291,6 +291,21 @@ type Config struct {
 	// initialised but no traces exported).
 	OTELSamplerRatio float64
 
+	// Profile selects the deployment posture, sourced from
+	// ZKDRIVE_PROFILE (lower-cased, trimmed). The only recognised
+	// non-empty value is "compact" (logging.CompactProfile): the
+	// single-node, NoOps SME posture where the operator wants
+	// nothing but clean structured logs to stdout. In compact mode
+	// the OpenTelemetry OTLP exporter and the Prometheus /metrics
+	// endpoint are both forced off regardless of any OTEL_* env
+	// vars, so a non-technical admin can't accidentally half-wire
+	// an observability stack they have no collector for. Any other
+	// value (including empty) is the full posture: OTLP exports
+	// when OTEL_EXPORTER_OTLP_ENDPOINT is set, /metrics is always
+	// mounted. Consume via IsCompactProfile / TracingEnabled /
+	// MetricsEnabled rather than comparing the string directly.
+	Profile string
+
 	// Audit-log cold archival. When AuditArchiveEnabled
 	// is false (the default), the audit-archiver binary refuses
 	// to run — operators must explicitly opt in so a fresh
@@ -589,6 +604,8 @@ func buildConfigFromEnv() *Config {
 		OTELServiceName:             getEnvDefault("OTEL_SERVICE_NAME", "zk-drive"),
 		OTELDeploymentEnvironment:   os.Getenv("OTEL_DEPLOYMENT_ENVIRONMENT"),
 		OTELSamplerRatio:            parseFloatDefault(os.Getenv("OTEL_TRACES_SAMPLER_ARG"), 0.1),
+
+		Profile: normaliseProfile(os.Getenv("ZKDRIVE_PROFILE")),
 
 		AuditArchiveEnabled:         parseBoolDefault(os.Getenv("AUDIT_LOG_ARCHIVE_ENABLED"), false),
 		AuditLogRetentionDays:       clampAuditRetentionDays(parseIntDefault(os.Getenv("AUDIT_LOG_RETENTION_DAYS"), 90)),
@@ -1166,6 +1183,50 @@ func parseFloatDefault(s string, def float64) float64 {
 		return def
 	}
 	return v
+}
+
+// compactProfile is the single recognised non-empty ZKDRIVE_PROFILE
+// value. Kept as a package-local const (rather than importing
+// internal/logging) so the low-level config package stays free of
+// the logging package's heavy transitive dependencies; logging
+// exports the same token as logging.CompactProfile and a test
+// asserts the two stay in sync.
+const compactProfile = "compact"
+
+// normaliseProfile lower-cases and trims the raw ZKDRIVE_PROFILE
+// value. An unrecognised value is preserved as-is (lower-cased) so
+// a future profile is not silently coerced to compact; only an
+// exact "compact" match flips the compact posture via
+// IsCompactProfile.
+func normaliseProfile(raw string) string {
+	return strings.ToLower(strings.TrimSpace(raw))
+}
+
+// IsCompactProfile reports whether the compact single-node SME
+// posture is active (ZKDRIVE_PROFILE=compact).
+func (c *Config) IsCompactProfile() bool {
+	return c.Profile == compactProfile
+}
+
+// TracingEnabled reports whether the OpenTelemetry OTLP exporter
+// should be wired. False in the compact profile (NoOps single-node
+// deployments ship no collector) regardless of OTEL_* env vars;
+// otherwise true so tracing.Init can decide based on the endpoint.
+// Gating here — rather than only in tracing.Init — means main.go
+// can emit a single clear "tracing disabled by compact profile"
+// startup line instead of silently installing a no-op tracer while
+// the operator's OTEL_EXPORTER_OTLP_ENDPOINT sits ignored.
+func (c *Config) TracingEnabled() bool {
+	return !c.IsCompactProfile()
+}
+
+// MetricsEnabled reports whether the Prometheus /metrics scrape
+// surface should be mounted (server) or served (worker). False in
+// the compact profile: an SME single-node box has no Prometheus to
+// scrape it, and exposing the endpoint only widens the attack
+// surface. True in every other posture.
+func (c *Config) MetricsEnabled() bool {
+	return !c.IsCompactProfile()
 }
 
 // parseOTELHeaders parses a W3C-style comma-separated list of

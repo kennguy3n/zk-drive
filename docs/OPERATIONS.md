@@ -276,6 +276,78 @@ Network Policy or ingress allow-list. Splitting metrics onto a
 separate port (the worker's default at `:9091` is the model) is the
 simplest posture.
 
+## NoOps: health dashboard, setup wizard & auto-healing
+
+Prometheus and OpenTelemetry are the right tools for a team with an
+observability stack. The NoOps surface below is for the SME operator
+who has neither: it answers "is my deployment healthy?" and "how do I
+configure it?" from the product itself, with no external tooling.
+
+### Health dashboard (`GET /api/admin/health-dashboard`)
+
+Requires the `admin` role. Returns a single JSON document with an
+overall traffic-light `status` (`green` / `yellow` / `red` / `unknown`)
+plus one entry per subsystem, each with its own colour and a short
+human-readable detail. Subsystems probed:
+
+| Subsystem    | Green                                              | Yellow                                                       | Red                                  |
+| ------------ | -------------------------------------------------- | ------------------------------------------------------------ | ------------------------------------ |
+| `postgres`   | pool reachable; live pool stats reported           | pool near exhaustion                                         | unreachable                          |
+| `redis`      | connected; memory usage reported                   | not configured (in-memory fallback active)                  | configured but unreachable           |
+| `nats`       | connected; per-subject stream depth reported       | reconnecting (exponential backoff in progress)              | disconnected                         |
+| `clamav`     | connected; definition date reported                | not configured / auto-disabled (scanning skipped)          | configured but unreachable           |
+| `onlyoffice` | connected                                          | not configured (collaborative editing off)                  | configured but unreachable           |
+| `fabric` / S3| connected; recent error rate low                   | elevated recent error rate                                  | unreachable                          |
+| `workers`    | every worker type beat within `StaleAfter` (45s)   | a worker type is stale or reports `degraded`                | a worker type silent past `DeadAfter` (120s) |
+
+Each probe runs under a bounded timeout and recovers from panics, so a
+single wedged dependency degrades only its own row — the endpoint
+always returns. The frontend renders this at **Admin → Health** as a
+traffic-light grid that auto-refreshes every 15s.
+
+Worker liveness is **pull-based**: the worker fleet upserts a row per
+logical worker type into `worker_heartbeats` (migration 039) every 15s,
+and the dashboard reads the freshest row per type. This deliberately
+does not use a NATS request/reply so the dashboard can still report
+"no workers have checked in" when the message bus itself is the outage.
+
+### Guided setup wizard (`/api/setup/*`)
+
+A fresh box (no workspaces) routes anonymous visitors to a five-step
+wizard: admin account → storage (with a **Test Connection** button) →
+optional services → first workspace → first invite.
+
+| Method | Path                      | Auth          | Purpose                                                                                 |
+| ------ | ------------------------- | ------------- | --------------------------------------------------------------------------------------- |
+| `GET`  | `/api/setup/status`       | none          | What is configured and what is missing. Returns full step detail only while incomplete; once complete it returns just `setup_completed` + `completed_at` so a provisioned (possibly internet-exposed) box does not leak its deployment shape to anonymous callers. |
+| `POST` | `/api/setup/test-storage` | none, gated   | Validates an S3 endpoint/bucket/key set with a bounded (8s) probe. **Refuses with `403` once setup is complete** so it cannot be abused as an SSRF primitive on a live box. |
+| `POST` | `/api/setup/complete`     | `admin`       | Flips the `setup_state` singleton (migration 041) to completed; idempotent and preserves the original `completed_at`. |
+
+`setup_state` is a single-row table (`id BOOLEAN PRIMARY KEY` pinned
+`TRUE` with a `CHECK` constraint) so completion is atomic and there can
+never be two conflicting rows.
+
+### Auto-healing
+
+The system self-recovers from dependency outages without operator
+intervention; each transition is logged once at `warn` (degrade) and
+`info` (recover) so the event is visible without flooding the log:
+
+- **ClamAV down (worker):** virus scanning auto-disables, the scan
+  worker flips its heartbeat to `degraded`, in-flight scans are skipped
+  and ACKed (no Nak-loop), and a 60s health loop re-enables scanning the
+  moment clamd answers again.
+- **NATS down (worker):** reconnect uses exponential backoff with jitter
+  (1s → 2s → … → 30s cap) so a fleet does not reconnect in lockstep.
+- **Poison preview job:** after `PreviewMaxAttempts` (3) consecutive
+  failures the version is marked `preview_failed` (migration 040) and the
+  message is ACKed, instead of redelivering until the stream's MaxAge.
+- **Redis down (server):** the session store and rate limiter fall back
+  seamlessly to a per-replica in-memory store and recover automatically
+  when Redis returns. While degraded, revocation is per-replica — the
+  correct availability-over-consistency trade for a transient outage,
+  and identical to healthy behaviour on the single-node SME profile.
+
 ## Distributed tracing
 
 Both `/app/server` and `/app/worker` emit OpenTelemetry spans over

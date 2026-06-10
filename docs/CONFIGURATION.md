@@ -435,9 +435,29 @@ Optional:
 
 Provider-specific guidance is in [`OPERATIONS.md`](OPERATIONS.md#smtp-provider-notes).
 
+## Logging
+
+Both the server and the worker emit structured logs to stdout via Go's
+`log/slog`. Two environment variables control the output, and a third
+(`ZKDRIVE_PROFILE`) shifts their defaults for the single-node SME
+posture. Explicit `LOG_FORMAT` / `LOG_LEVEL` values always win over the
+profile default.
+
+| Variable          | Default                              | Purpose                                                                                                                              |
+| ----------------- | ------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------ |
+| `LOG_LEVEL`       | `info`                               | Minimum level emitted: `debug`, `info`, `warn`, `error`. Unrecognised values fall back to `info`.                                     |
+| `LOG_FORMAT`      | `json` (`text` under compact profile)| `json` for machine-ingestible production logs; `text` for human-readable development/compact output.                                  |
+| `ZKDRIVE_PROFILE` | _empty_                              | Set to `compact` for the NoOps single-node SME posture: `LOG_FORMAT` defaults to `text`, and OpenTelemetry **and** Prometheus are disabled (just clean structured logs to stdout). Any other value behaves like the default full-observability posture. |
+
+Under `ZKDRIVE_PROFILE=compact` the box emits a single startup line
+noting tracing and metrics are disabled by the profile, so an operator
+who later wants them knows exactly which switch turned them off. The
+same three variables and defaults apply to the zk-object-fabric gateway.
+
 ## OpenTelemetry tracing
 
-Tracing is disabled by default. Setting `OTEL_EXPORTER_OTLP_ENDPOINT`
+Tracing is disabled by default (and force-disabled under
+`ZKDRIVE_PROFILE=compact`). Setting `OTEL_EXPORTER_OTLP_ENDPOINT`
 to any collector URL turns it on; the propagator is installed either
 way so distributed correlation IDs continue to flow through your
 deployment even with the local exporter disabled.

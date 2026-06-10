@@ -39,6 +39,26 @@ import (
 	"github.com/google/uuid"
 )
 
+// Preview status values mirror migration 040's CHECK constraint on
+// file_versions.preview_status. Exposing them as typed constants keeps
+// the string set discoverable from Go and prevents the worker and
+// repository from drifting on literal strings.
+const (
+	StatusPending     = "pending"
+	StatusDone        = "done"
+	StatusUnsupported = "unsupported"
+	StatusFailed      = "failed"
+)
+
+// PreviewMaxAttempts is the number of consecutive failed deliveries
+// after which the worker marks a preview job preview_failed in the DB
+// and acks it (skips) rather than Nak-looping until JetStream's
+// QueueMaxDeliver cap. WS8 8.4 specifies three attempts: enough for a
+// transient storage/renderer blip to recover, few enough that a
+// genuinely poison payload terminates within a couple of AckWait
+// cycles instead of producing minutes of redelivery churn.
+const PreviewMaxAttempts = 3
+
 // Preview is the metadata row for a server-rendered thumbnail.
 type Preview struct {
 	ID        uuid.UUID `json:"id"`

@@ -28,6 +28,19 @@
 //   - LOG_FORMAT: json | text (default: json). Text is useful for
 //     local dev tail-following; production should always be json.
 //
+// Deployment profile
+//
+// ZKDRIVE_PROFILE=compact selects the single-node SME posture
+// (NoOps: "just give me clean logs"). When set, the LOG_FORMAT
+// default flips from json to text and the LOG_LEVEL default stays
+// info — so a small-business admin who sets one env var gets
+// human-readable, info-level logs to stdout without learning the
+// OpenTelemetry / Prometheus surface. Explicit LOG_FORMAT /
+// LOG_LEVEL values always win over the profile default, so an
+// operator can still force json+debug on a compact node. The same
+// profile is read by internal/config to disable the OTLP exporter
+// and the Prometheus scrape endpoint; see config.Config.Profile.
+//
 // Request-scoped logging
 //
 // HTTP handlers should call logging.FromContext(r.Context()) to
@@ -114,8 +127,9 @@ func (s *requestLoggerSlot) set(l *slog.Logger) {
 // deployment can distinguish server vs worker vs reconciler
 // without parsing the message string.
 func Init(component string) *slog.Logger {
+	compact := isCompactProfile(os.Getenv("ZKDRIVE_PROFILE"))
 	level := parseLevel(os.Getenv("LOG_LEVEL"))
-	handler := newHandler(os.Stderr, level)
+	handler := newHandler(os.Stderr, level, compact)
 	logger := slog.New(handler).With("component", component)
 	slog.SetDefault(logger)
 
@@ -166,16 +180,43 @@ func parseLevel(raw string) slog.Level {
 	}
 }
 
+// CompactProfile is the ZKDRIVE_PROFILE value that selects the
+// single-node SME deployment posture: text logs, no OTLP exporter,
+// no Prometheus endpoint. Exported so internal/config can reuse the
+// exact token without importing this package's env-read path.
+const CompactProfile = "compact"
+
+// isCompactProfile reports whether the raw ZKDRIVE_PROFILE value
+// selects the compact posture. Compared case-insensitively after
+// trimming so " Compact " and "compact" both match.
+func isCompactProfile(raw string) bool {
+	return strings.EqualFold(strings.TrimSpace(raw), CompactProfile)
+}
+
 // newHandler picks JSON vs text based on LOG_FORMAT. JSON is the
 // default because every production log shipper indexes JSON for
 // free; text is only useful when a developer is tailing the log
-// from their terminal.
-func newHandler(w io.Writer, level slog.Level) slog.Handler {
+// from their terminal — or when the compact single-node profile is
+// active, where stdout is read by a human, not a shipper.
+//
+// `compact` only changes the DEFAULT when LOG_FORMAT is unset: an
+// explicit LOG_FORMAT=json on a compact node still wins, so an
+// operator who wires a shipper into a compact deployment is never
+// silently downgraded to text.
+func newHandler(w io.Writer, level slog.Level, compact bool) slog.Handler {
 	opts := &slog.HandlerOptions{Level: level}
 	switch strings.ToLower(strings.TrimSpace(os.Getenv("LOG_FORMAT"))) {
 	case "text":
 		return slog.NewTextHandler(w, opts)
+	case "json":
+		return slog.NewJSONHandler(w, opts)
 	default:
+		// Unset: the compact profile defaults to human-readable
+		// text; every other profile defaults to shipper-friendly
+		// json.
+		if compact {
+			return slog.NewTextHandler(w, opts)
+		}
 		return slog.NewJSONHandler(w, opts)
 	}
 }

@@ -9,6 +9,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/kennguy3n/zk-drive/internal/audit"
+	"github.com/kennguy3n/zk-drive/internal/logging"
 )
 
 // requireEnv installs envs for the duration of t and restores the
@@ -104,6 +105,12 @@ func requireEnv(t *testing.T, envs map[string]string) {
 		// e.g. PREVIEW_PRIORITY_WORKERS=1 must not bleed into tests that
 		// exercise the preview-default paths.
 		"PREVIEW_BUDGET_PER_WORKSPACE_HOUR", "PREVIEW_PRIORITY_WORKERS", "PREVIEW_STANDARD_WORKERS",
+		// Deployment profile (WS8 observability/NoOps). buildConfigFromEnv
+		// reads ZKDRIVE_PROFILE via normaliseProfile; it must be
+		// baseline-cleared so a CI runner that exports ZKDRIVE_PROFILE=compact
+		// doesn't bleed the compact posture (tracing/metrics off) into tests
+		// that assert the default full-posture state.
+		"ZKDRIVE_PROFILE",
 		// Platform-admin allowlist (JWT key-rotation gate). Same
 		// convention as the blocks above: buildConfigFromEnv reads
 		// PLATFORM_ADMIN_USER_IDS via platformAdminUserIDsFromEnv, so
@@ -217,6 +224,61 @@ func TestLoadMinimumViable(t *testing.T) {
 	}
 	if cfg.FabricDefaultPlacementRef != "b2c_pooled_default" {
 		t.Fatalf("FabricDefaultPlacementRef default drift: %q", cfg.FabricDefaultPlacementRef)
+	}
+}
+
+// TestProfileDefaultsToFullPosture asserts that an unset
+// ZKDRIVE_PROFILE leaves tracing + metrics enabled — the existing
+// production behaviour must be unchanged by the new compact profile.
+func TestProfileDefaultsToFullPosture(t *testing.T) {
+	requireEnv(t, map[string]string{
+		"DATABASE_URL": "postgres://x/y",
+		"JWT_SECRET":   "secret",
+	})
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load failed: %v", err)
+	}
+	if cfg.IsCompactProfile() {
+		t.Fatal("unset ZKDRIVE_PROFILE must not be compact")
+	}
+	if !cfg.TracingEnabled() || !cfg.MetricsEnabled() {
+		t.Fatalf("full posture must enable tracing+metrics: tracing=%v metrics=%v", cfg.TracingEnabled(), cfg.MetricsEnabled())
+	}
+}
+
+// TestProfileCompactDisablesObservability pins the compact-profile
+// contract: ZKDRIVE_PROFILE=compact (case-insensitive) flips the
+// posture and forces both the OTLP exporter and the Prometheus
+// surface off, regardless of any OTEL_* env var the operator set.
+func TestProfileCompactDisablesObservability(t *testing.T) {
+	requireEnv(t, map[string]string{
+		"DATABASE_URL":                "postgres://x/y",
+		"JWT_SECRET":                  "secret",
+		"ZKDRIVE_PROFILE":             "Compact",
+		"OTEL_EXPORTER_OTLP_ENDPOINT": "https://otlp.example.com:4318",
+	})
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load failed: %v", err)
+	}
+	if !cfg.IsCompactProfile() {
+		t.Fatalf("ZKDRIVE_PROFILE=Compact must normalise to compact, got %q", cfg.Profile)
+	}
+	if cfg.TracingEnabled() {
+		t.Fatal("compact profile must disable tracing even with OTEL endpoint set")
+	}
+	if cfg.MetricsEnabled() {
+		t.Fatal("compact profile must disable the Prometheus /metrics surface")
+	}
+}
+
+// TestCompactProfileTokenMatchesLoggingPackage guards against the
+// config-local compactProfile const drifting from the exported
+// logging.CompactProfile token the two packages must agree on.
+func TestCompactProfileTokenMatchesLoggingPackage(t *testing.T) {
+	if compactProfile != logging.CompactProfile {
+		t.Fatalf("compactProfile %q != logging.CompactProfile %q", compactProfile, logging.CompactProfile)
 	}
 }
 

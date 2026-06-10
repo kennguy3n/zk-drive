@@ -60,6 +60,9 @@ func (*nilPreviewRepo) GetByVersion(ctx context.Context, fileID, versionID uuid.
 func (*nilPreviewRepo) GetLatestByFile(ctx context.Context, fileID uuid.UUID) (*preview.Preview, error) {
 	return nil, nil
 }
+func (*nilPreviewRepo) SetStatus(ctx context.Context, versionID uuid.UUID, status, detail string) error {
+	return nil
+}
 
 // nilWebhookPublisher is the WithWebhooks analogue — pinning the
 // refactor from the old `p.(*webhooks.Publisher)` type-assertion

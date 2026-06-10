@@ -203,6 +203,16 @@ func TestScanBytesEmitsClamdErrorVerdict(t *testing.T) {
 		address: "test:3310",
 		dialer:  func(_ context.Context, _ string) (net.Conn, error) { return nil, dialErr },
 	}
+	// A configured scanner starts "available" (NewService does this);
+	// the struct literal here bypasses that constructor, so set it
+	// explicitly. This exercises the WS8 8.4 path where clamd is
+	// believed up but the dial fails at scan time: scanBytes must
+	// still propagate the error and leave the row Pending so the
+	// worker Naks once and the health loop subsequently marks the
+	// scanner down. (When the loop has already marked it down,
+	// available is false and scanBytes deliberately skips instead —
+	// covered by TestScanBytesSkipsWhenUnavailable below.)
+	s.available.Store(true)
 	v, err := s.scanBytes(context.Background(), []byte("payload"))
 	if err == nil {
 		t.Fatalf("expected error to propagate from dial failure")
@@ -212,6 +222,66 @@ func TestScanBytesEmitsClamdErrorVerdict(t *testing.T) {
 	}
 	if !strings.Contains(v.Detail, "clamd error") {
 		t.Fatalf("expected Detail to mention clamd, got %q", v.Detail)
+	}
+}
+
+// TestScanBytesSkipsWhenUnavailable pins the WS8 8.4 auto-healing
+// degrade path: once the worker's health loop has marked clamd
+// unreachable (available=false), scanBytes must NOT dial clamd at all
+// — it returns a clean verdict with a skip note and a nil error so the
+// worker ACKs the job instead of Nak-looping it forever while the
+// scanner is down. The dialer below fails the test if it is ever
+// called, proving the skip happens before any network attempt.
+func TestScanBytesSkipsWhenUnavailable(t *testing.T) {
+	s := &Service{
+		address: "test:3310",
+		dialer: func(_ context.Context, _ string) (net.Conn, error) {
+			t.Fatal("dialer must not be called when clamd is marked unavailable")
+			return nil, nil
+		},
+	}
+	// Simulate the health loop having observed clamd down.
+	s.available.Store(false)
+
+	v, err := s.scanBytes(context.Background(), []byte("payload"))
+	if err != nil {
+		t.Fatalf("expected nil error (job should ACK) when scanner unavailable, got %v", err)
+	}
+	if v.Status != StatusClean {
+		t.Fatalf("expected StatusClean skip verdict, got %q", v.Status)
+	}
+	if !strings.Contains(v.Detail, "unavailable") {
+		t.Fatalf("expected Detail to note the skip, got %q", v.Detail)
+	}
+}
+
+// TestAvailabilityToggles checks the Available/SetAvailable contract
+// the worker's self-healing loop relies on: a permissive (unconfigured)
+// service is always available and immune to SetAvailable, while a
+// configured service tracks the flag and starts available.
+func TestAvailabilityToggles(t *testing.T) {
+	// Permissive service: always available, SetAvailable is a no-op.
+	perm := NewService(nil, nil, "")
+	if !perm.Available() {
+		t.Fatal("permissive service must always be available")
+	}
+	perm.SetAvailable(false)
+	if !perm.Available() {
+		t.Fatal("SetAvailable must be a no-op for a permissive service")
+	}
+
+	// Configured service: starts available, then tracks the flag.
+	cfg := NewService(nil, nil, "clamd:3310")
+	if !cfg.Available() {
+		t.Fatal("configured service must start available so the first job attempts a real scan")
+	}
+	cfg.SetAvailable(false)
+	if cfg.Available() {
+		t.Fatal("configured service must reflect SetAvailable(false)")
+	}
+	cfg.SetAvailable(true)
+	if !cfg.Available() {
+		t.Fatal("configured service must reflect recovery via SetAvailable(true)")
 	}
 }
 

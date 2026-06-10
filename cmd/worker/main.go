@@ -42,6 +42,7 @@ import (
 	driveFile "github.com/kennguy3n/zk-drive/internal/file"
 	"github.com/kennguy3n/zk-drive/internal/folder"
 	"github.com/kennguy3n/zk-drive/internal/gc"
+	"github.com/kennguy3n/zk-drive/internal/heartbeat"
 	"github.com/kennguy3n/zk-drive/internal/index"
 	"github.com/kennguy3n/zk-drive/internal/jobs"
 	"github.com/kennguy3n/zk-drive/internal/logging"
@@ -60,11 +61,51 @@ import (
 	"github.com/kennguy3n/zk-drive/internal/wiring"
 )
 
+// streamName aliases the single source of truth in internal/jobs so
+// the worker's stream declaration and the server's health-dashboard
+// stream-depth probe cannot drift.
+const streamName = jobs.StreamName
+
 const (
-	streamName  = "DRIVE_JOBS"
 	defaultNATS = "nats://localhost:4222"
 	ackWait     = 5 * time.Minute
+	// clamAVHealthInterval is the cadence of the worker's ClamAV
+	// self-healing probe (WS8 8.4 specifies a 60s re-check).
+	clamAVHealthInterval = 60 * time.Second
+	// clamAVPingTimeout bounds a single clamd PING round-trip so a
+	// hung clamd socket cannot stall the health loop for a full
+	// interval.
+	clamAVPingTimeout = 5 * time.Second
+	// natsReconnectBaseDelay / natsReconnectMaxDelay bound the
+	// exponential reconnect backoff (WS8 8.4): the delay doubles each
+	// attempt from the base up to the cap, so a brief blip recovers
+	// in ~1s while a prolonged outage settles into a low-frequency
+	// 30s retry instead of a hot loop.
+	natsReconnectBaseDelay = 1 * time.Second
+	natsReconnectMaxDelay  = 30 * time.Second
+	// natsReconnectJitter is the +/- randomisation applied to each
+	// reconnect delay so a fleet of workers does not reconnect in
+	// lockstep (thundering herd) after a shared NATS outage.
+	natsReconnectJitter = 1 * time.Second
 )
+
+// natsReconnectDelay is the nats.CustomReconnectDelay backoff:
+// exponential from natsReconnectBaseDelay, doubling each attempt, and
+// clamped at natsReconnectMaxDelay. nats.go adds the configured jitter
+// on top, so the returned value is the pre-jitter base delay.
+func natsReconnectDelay(attempts int) time.Duration {
+	if attempts < 1 {
+		attempts = 1
+	}
+	delay := natsReconnectBaseDelay
+	for i := 1; i < attempts; i++ {
+		delay *= 2
+		if delay >= natsReconnectMaxDelay {
+			return natsReconnectMaxDelay
+		}
+	}
+	return delay
+}
 
 func main() {
 	if err := run(); err != nil {
@@ -92,8 +133,18 @@ func run() error {
 	// at boot. Service name is the same "zk-drive" so the worker
 	// and server land under one logical service; service.instance.id
 	// distinguishes the two processes.
+	// Compact single-node profile forces the OTLP exporter off (see
+	// cmd/server/main.go for the rationale); blank the endpoint so
+	// tracing.Init installs a no-op provider.
+	otelEndpoint := cfg.OTELExporterOTLPEndpoint
+	if !cfg.TracingEnabled() {
+		if otelEndpoint != "" {
+			slog.Info("compact profile active: ignoring OTEL_EXPORTER_OTLP_ENDPOINT, tracing disabled", "endpoint", otelEndpoint)
+		}
+		otelEndpoint = ""
+	}
 	traceProvider, err := tracing.Init(ctx, tracing.BuildFromOperatorConfig(tracing.OperatorConfig{
-		Endpoint:              cfg.OTELExporterOTLPEndpoint,
+		Endpoint:              otelEndpoint,
 		Headers:               cfg.OTELExporterOTLPHeaders,
 		Insecure:              cfg.OTELExporterOTLPInsecure,
 		Compression:           cfg.OTELExporterOTLPCompression,
@@ -346,7 +397,19 @@ func run() error {
 	// even during the (typically sub-second) NATS connect step.
 	// The returned shutdown closure runs after sigCh fires so
 	// in-flight scrape requests can drain cleanly.
-	shutdownMetrics, err := startMetricsServer(ctx, cfg.WorkerMetricsAddr, metricsSurface, &bgGoroutines)
+	//
+	// The compact single-node profile forces the metrics surface
+	// off by passing an empty listen address (the documented
+	// "disabled" sentinel), matching the server binary's unmounted
+	// /metrics route. /healthz is hosted on the same listener, so a
+	// compact worker simply has no scrape port — appropriate for an
+	// SME box with no Prometheus.
+	metricsAddr := cfg.WorkerMetricsAddr
+	if !cfg.MetricsEnabled() {
+		slog.Info("compact profile active: worker metrics server not started")
+		metricsAddr = ""
+	}
+	shutdownMetrics, err := startMetricsServer(ctx, metricsAddr, metricsSurface, &bgGoroutines)
 	if err != nil {
 		return fmt.Errorf("metrics server: %w", err)
 	}
@@ -360,7 +423,22 @@ func run() error {
 	nc, err := nats.Connect(natsURL,
 		nats.Name("zk-drive-worker"),
 		nats.MaxReconnects(-1),
-		nats.ReconnectWait(2*time.Second),
+		// CustomReconnectDelay supersedes ReconnectWait with an
+		// exponential backoff + jitter (WS8 8.4): a NATS outage no
+		// longer hammers the broker with a fixed 2s retry storm from
+		// every worker, and the jitter de-syncs the fleet so they
+		// don't reconnect in a thundering herd. Disconnect/reconnect
+		// handlers surface the status in the log so an operator sees
+		// the outage and the automatic recovery without inspecting
+		// NATS itself.
+		nats.ReconnectJitter(natsReconnectJitter, natsReconnectJitter),
+		nats.CustomReconnectDelay(natsReconnectDelay),
+		nats.DisconnectErrHandler(func(_ *nats.Conn, derr error) {
+			slog.Warn("nats disconnected, reconnecting with backoff", "err", derr)
+		}),
+		nats.ReconnectHandler(func(c *nats.Conn) {
+			slog.Info("nats reconnected", "url", c.ConnectedUrl())
+		}),
 	)
 	if err != nil {
 		return fmt.Errorf("connect nats %s: %w", natsURL, err)
@@ -396,6 +474,39 @@ func run() error {
 		}
 	}()
 	defer unsubscribeAll(subs)
+
+	// ClamAV self-healing loop (WS8 8.4). Only runs when a clamd
+	// address is configured; a permissive (scanning-disabled) worker
+	// has nothing to heal. The loop probes clamd every 60s and flips
+	// the scan service's availability flag, so a clamd outage degrades
+	// to "skip + mark clean" (instead of Nak-looping every scan job)
+	// and recovers automatically when clamd returns — no operator
+	// intervention. The current state is surfaced on the admin health
+	// dashboard via the scan worker heartbeat below.
+	if scanSvc != nil && scanSvc.Configured() {
+		bgGoroutines.Add(1)
+		go func() {
+			defer bgGoroutines.Done()
+			runClamAVHealthLoop(ctx, scanSvc, clamAVHealthInterval)
+		}()
+		slog.Info("worker clamav self-healing loop enabled", "interval", clamAVHealthInterval.String())
+	}
+
+	// Worker heartbeat (WS8 8.1). Every worker process writes a
+	// liveness row per logical worker type it runs to the
+	// worker_heartbeats table; the admin health dashboard aggregates
+	// these into a per-type traffic light. This is a pull-based signal
+	// over Postgres (not NATS), so it keeps reporting even if JetStream
+	// is the thing that's down — exactly when an operator most needs to
+	// see the fleet's state.
+	hbStore := heartbeat.NewStore(pool)
+	hbRecorder := heartbeat.NewRecorder(hbStore, heartbeat.InstanceID(), heartbeat.DefaultInterval,
+		workerBeatProvider(previewSvc, scanSvc, indexSvc, archiveSvc, classifySvc), slog.Default())
+	bgGoroutines.Add(1)
+	go func() {
+		defer bgGoroutines.Done()
+		hbRecorder.Run(ctx)
+	}()
 
 	slog.Info("zk-drive worker listening", "nats_url", natsURL, "stream", streamName)
 
@@ -807,6 +918,12 @@ func previewHandler(pool *pgxpool.Pool, svc *preview.Service) metrics.JobHandler
 		if err != nil {
 			if errors.Is(err, preview.ErrUnsupportedMime) {
 				slog.Info("worker preview unsupported mime", "file_id", job.FileID, "version_id", job.VersionID)
+				// Terminal: record so the row isn't perpetually
+				// 'pending' and an operator can tell "no renderer for
+				// this type" from "render failed". Best-effort.
+				if merr := svc.MarkStatus(ctx, job.VersionID, preview.StatusUnsupported, "unsupported mime type"); merr != nil {
+					slog.Warn("worker preview mark unsupported failed", "version_id", job.VersionID, "err", merr)
+				}
 				_ = msg.Ack()
 				return metrics.JobResultSkip
 			}
@@ -825,7 +942,27 @@ func previewHandler(pool *pgxpool.Pool, svc *preview.Service) metrics.JobHandler
 				_ = msg.NakWithDelay(delay)
 				return metrics.JobResultError
 			}
-			slog.Error("worker preview failed", "file_id", job.FileID, "version_id", job.VersionID, "err", err)
+			// Genuine render / IO failure. Self-healing (WS8 8.4): give
+			// transient faults (storage blip, brief decode contention)
+			// a few cycles to recover, but once a job has failed
+			// PreviewMaxAttempts times treat it as a poison payload —
+			// mark it preview_failed in the DB and ACK so it stops
+			// consuming a redelivery slot instead of Nak-looping up to
+			// QueueMaxDeliver (50). deliveryAttempt is the 1-based
+			// delivery count, so attempt >= PreviewMaxAttempts means
+			// this is the 3rd (or, after a consumer-config change, a
+			// later) delivery.
+			attempt := deliveryAttempt(msg)
+			if attempt >= preview.PreviewMaxAttempts {
+				slog.Error("worker preview failed permanently, marking preview_failed",
+					"file_id", job.FileID, "version_id", job.VersionID, "attempt", attempt, "err", err)
+				if merr := svc.MarkStatus(ctx, job.VersionID, preview.StatusFailed, err.Error()); merr != nil {
+					slog.Warn("worker preview mark failed failed", "version_id", job.VersionID, "err", merr)
+				}
+				_ = msg.Ack()
+				return metrics.JobResultDropped
+			}
+			slog.Error("worker preview failed, will retry", "file_id", job.FileID, "version_id", job.VersionID, "attempt", attempt, "err", err)
 			_ = msg.Nak()
 			return metrics.JobResultError
 		}
@@ -846,6 +983,76 @@ func deliveryAttempt(msg *nats.Msg) int {
 		return 1
 	}
 	return int(md.NumDelivered)
+}
+
+// runClamAVHealthLoop is the worker's ClamAV self-healing loop (WS8
+// 8.4). It probes clamd on a fixed cadence and toggles the scan
+// service's availability flag, logging only on state transitions so a
+// prolonged outage does not spam the log every interval. While clamd
+// is down the scan handler degrades to "skip + mark clean" rather than
+// Nak-looping; when clamd returns, real scanning resumes automatically
+// with no operator action. Runs an immediate probe on entry so the
+// service's optimistic startup default is corrected within
+// milliseconds rather than after the first full interval.
+func runClamAVHealthLoop(ctx context.Context, svc *scan.Service, interval time.Duration) {
+	probe := func() {
+		pctx, cancel := context.WithTimeout(ctx, clamAVPingTimeout)
+		defer cancel()
+		err := svc.Ping(pctx)
+		was := svc.Available()
+		now := err == nil
+		svc.SetAvailable(now)
+		switch {
+		case was && !now:
+			slog.Warn("clamav unreachable, virus scanning degraded to skip-and-pass until it recovers", "err", err)
+		case !was && now:
+			slog.Info("clamav recovered, virus scanning re-enabled")
+		}
+	}
+	probe()
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			probe()
+		}
+	}
+}
+
+// workerBeatProvider builds the heartbeat.BeatProvider that reports one
+// liveness beat per logical worker type this process runs. Only types
+// whose backing service is wired are reported (e.g. preview/scan/index/
+// archive require a storage client). The scan beat carries a degraded
+// status while clamd is unreachable so the admin dashboard's worker
+// traffic light reflects the auto-healing state, not just liveness.
+func workerBeatProvider(previewSvc *preview.Service, scanSvc *scan.Service, indexSvc *index.Service, archiveSvc *retention.ArchiveService, classifySvc *classify.Service) heartbeat.BeatProvider {
+	return func() []heartbeat.Beat {
+		beats := make([]heartbeat.Beat, 0, 5)
+		if previewSvc != nil {
+			beats = append(beats, heartbeat.Beat{WorkerType: "preview", Status: heartbeat.StatusOK})
+		}
+		if scanSvc != nil {
+			b := heartbeat.Beat{WorkerType: "scan", Status: heartbeat.StatusOK}
+			if scanSvc.Configured() && !scanSvc.Available() {
+				b.Status = heartbeat.StatusDegraded
+				b.Detail = map[string]any{"reason": "clamav unreachable; scanning temporarily skipped"}
+			}
+			beats = append(beats, b)
+		}
+		if indexSvc != nil {
+			beats = append(beats, heartbeat.Beat{WorkerType: "index", Status: heartbeat.StatusOK})
+		}
+		if archiveSvc != nil {
+			beats = append(beats, heartbeat.Beat{WorkerType: "archive", Status: heartbeat.StatusOK})
+		}
+		if classifySvc != nil {
+			beats = append(beats, heartbeat.Beat{WorkerType: "classify", Status: heartbeat.StatusOK})
+		}
+		return beats
+	}
 }
 
 // scanHandler decodes the FileJob envelope and runs the scan service.

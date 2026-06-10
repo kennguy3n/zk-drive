@@ -52,6 +52,12 @@ type Client struct {
 	bucket  string
 	s3      *s3.Client
 	presign *s3.PresignClient
+	// opRate tracks a rolling-window error rate over the client's
+	// server-side direct operations (HealthCheck / Put / Get / Delete
+	// / List) for the admin health dashboard. Presign calls are NOT
+	// recorded: they never touch the gateway, so they carry no
+	// reachability signal. Always non-nil after NewClient.
+	rate *opRate
 }
 
 // staticEndpointResolver forces every S3 operation to target the configured
@@ -100,7 +106,31 @@ func NewClient(cfg Config) (*Client, error) {
 		bucket:  cfg.Bucket,
 		s3:      s3Client,
 		presign: s3.NewPresignClient(s3Client),
+		rate:    newOpRate(),
 	}, nil
+}
+
+// recordOp feeds the result of a server-side direct operation into the
+// rolling error-rate window. Nil-safe on the receiver's rate field so
+// a Client constructed outside NewClient (none today, but defensive)
+// never panics.
+func (c *Client) recordOp(err error) {
+	if c == nil || c.rate == nil {
+		return
+	}
+	c.rate.record(err != nil)
+}
+
+// RecentErrorStats returns the trailing-window summary of server-side
+// direct operations for the admin health dashboard. A client that has
+// performed no operations (or was not constructed via NewClient)
+// returns a zero-Total summary, which the dashboard renders as "no
+// recent activity" rather than an error.
+func (c *Client) RecentErrorStats() OpStats {
+	if c == nil || c.rate == nil {
+		return OpStats{Window: opRateWindow}
+	}
+	return c.rate.stats()
 }
 
 // HealthCheck verifies the storage backend is reachable and the
@@ -130,6 +160,7 @@ func (c *Client) HealthCheck(ctx context.Context) error {
 	_, err := c.s3.HeadBucket(ctx, &s3.HeadBucketInput{
 		Bucket: aws.String(c.bucket),
 	})
+	c.recordOp(err)
 	if err != nil {
 		return fmt.Errorf("storage health check: %w", err)
 	}
@@ -207,6 +238,7 @@ func (c *Client) DeleteObject(ctx context.Context, objectKey string) error {
 		Bucket: aws.String(c.bucket),
 		Key:    aws.String(objectKey),
 	})
+	c.recordOp(err)
 	if err != nil {
 		return fmt.Errorf("delete object: %w", err)
 	}
@@ -241,7 +273,9 @@ func (c *Client) PutObject(ctx context.Context, objectKey, contentType string, b
 	if strings.TrimSpace(contentType) != "" {
 		in.ContentType = aws.String(contentType)
 	}
-	if _, err := c.s3.PutObject(ctx, in); err != nil {
+	_, err := c.s3.PutObject(ctx, in)
+	c.recordOp(err)
+	if err != nil {
 		return fmt.Errorf("put object: %w", err)
 	}
 	return nil
@@ -265,6 +299,7 @@ func (c *Client) GetObject(ctx context.Context, objectKey string) ([]byte, error
 		Bucket: aws.String(c.bucket),
 		Key:    aws.String(objectKey),
 	})
+	c.recordOp(err)
 	if err != nil {
 		return nil, fmt.Errorf("get object %q: %w", objectKey, err)
 	}
@@ -296,6 +331,7 @@ func (c *Client) ListObjects(ctx context.Context, prefix string, fn func(key str
 	})
 	for paginator.HasMorePages() {
 		page, err := paginator.NextPage(ctx)
+		c.recordOp(err)
 		if err != nil {
 			return fmt.Errorf("list objects: %w", err)
 		}

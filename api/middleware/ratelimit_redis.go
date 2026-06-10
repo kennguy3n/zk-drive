@@ -90,11 +90,24 @@ func RedisRateLimiter(client redis.UniversalClient, cfg RedisRateLimiterConfig) 
 	if wsRate <= 0 {
 		wsRate = DefaultWorkspaceRate
 	}
+	// In-memory fallback enforced when Redis is unreachable (WS8 8.4
+	// server self-healing). Previously a Redis outage failed fully
+	// open — every request was allowed — which left the node with no
+	// flood protection at exactly the moment a dependency was already
+	// struggling. The fallback is the same per-replica token bucket
+	// the Redis-less deployment uses, so during an outage each replica
+	// still enforces a local budget (the cross-replica sharing Redis
+	// provides is the only thing lost). It self-heals: as soon as the
+	// Redis script succeeds again the limiter resumes using the shared
+	// counters.
+	fallback := newRateLimiter(float64(userRate), float64(wsRate))
+	go fallback.runJanitor(5 * time.Minute)
 	limiter := &redisRateLimiter{
 		client:   client,
 		userRate: userRate,
 		wsRate:   wsRate,
 		window:   redisRateLimitWindow,
+		fallback: fallback,
 	}
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -124,6 +137,9 @@ type redisRateLimiter struct {
 	userRate int
 	wsRate   int
 	window   time.Duration
+	// fallback is the per-replica in-memory limiter used when the
+	// Redis script fails (connectivity loss). Never nil.
+	fallback *rateLimiter
 }
 
 // reserve runs rateLimitScript to atomically check and increment the
@@ -161,14 +177,18 @@ func (l *redisRateLimiter) reserve(ctx context.Context, workspaceID, userID uuid
 		l.userRate, l.wsRate, ttlSeconds, hasWS,
 	).Slice()
 	if err != nil {
-		// Fail open. Logging here is intentional — a quiet drop
-		// would mask Redis outages from operators.
-		logging.FromContext(ctx).Error("ratelimit_redis script failed, allowing request", "err", err)
-		return 0
+		// Redis is unreachable. Rather than failing fully open (which
+		// would leave the node with zero flood protection during the
+		// outage), degrade to the per-replica in-memory limiter so a
+		// local budget is still enforced. Logged at error so the
+		// outage is visible to operators; the fallback self-heals when
+		// Redis recovers and this branch stops firing.
+		logging.FromContext(ctx).Error("ratelimit_redis script failed, falling back to in-memory limiter", "err", err)
+		return l.fallback.reserve(workspaceID, userID)
 	}
 	if len(res) < 1 {
-		logging.FromContext(ctx).Warn("ratelimit_redis script returned no values, allowing request")
-		return 0
+		logging.FromContext(ctx).Warn("ratelimit_redis script returned no values, falling back to in-memory limiter")
+		return l.fallback.reserve(workspaceID, userID)
 	}
 	status, _ := res[0].(int64)
 	if status == 0 {

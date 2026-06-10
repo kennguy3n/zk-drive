@@ -46,6 +46,11 @@ import (
 // client knows to re-authenticate.
 var ErrSessionNotFound = errors.New("session not found")
 
+// errSessionIDRequired is returned by Set when called with an empty
+// session ID. Shared by the Redis and memory stores so both backends
+// reject the same invalid input identically.
+var errSessionIDRequired = errors.New("session id required")
+
 // RedisSessionStore persists session metadata in Redis so revocation
 // works across multiple replicas of the API server.
 type RedisSessionStore struct {
@@ -123,7 +128,7 @@ return 0
 // dangling references.
 func (s *RedisSessionStore) Set(ctx context.Context, sessionID string, userID, workspaceID uuid.UUID, ttl time.Duration) error {
 	if sessionID == "" {
-		return errors.New("session id required")
+		return errSessionIDRequired
 	}
 	skey := sessionKey(workspaceID, sessionID)
 	ukey := userSessionsKey(workspaceID, userID)

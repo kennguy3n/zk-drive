@@ -134,3 +134,46 @@ func TestStartJobPool_DrainIdempotent(t *testing.T) {
 	drain()
 	bg.Wait()
 }
+
+// TestNatsReconnectDelay pins the WS8 8.4 exponential-backoff schedule:
+// the pre-jitter base delay doubles each attempt from natsReconnectBaseDelay
+// and clamps at natsReconnectMaxDelay, so a brief blip recovers fast while
+// a prolonged outage settles into a low-frequency retry.
+func TestNatsReconnectDelay(t *testing.T) {
+	cases := []struct {
+		attempts int
+		want     time.Duration
+	}{
+		{-1, natsReconnectBaseDelay}, // defensive: <1 treated as 1
+		{0, natsReconnectBaseDelay},
+		{1, 1 * time.Second},
+		{2, 2 * time.Second},
+		{3, 4 * time.Second},
+		{4, 8 * time.Second},
+		{5, 16 * time.Second},
+		{6, natsReconnectMaxDelay}, // 32s would exceed the 30s cap
+		{7, natsReconnectMaxDelay},
+		{100, natsReconnectMaxDelay},
+	}
+	for _, c := range cases {
+		if got := natsReconnectDelay(c.attempts); got != c.want {
+			t.Errorf("natsReconnectDelay(%d) = %v, want %v", c.attempts, got, c.want)
+		}
+	}
+}
+
+// TestNatsReconnectDelayMonotonic guards the invariant that the backoff
+// never decreases and never exceeds the cap, regardless of attempt count.
+func TestNatsReconnectDelayMonotonic(t *testing.T) {
+	prev := time.Duration(0)
+	for a := 1; a <= 50; a++ {
+		d := natsReconnectDelay(a)
+		if d < prev {
+			t.Fatalf("backoff decreased at attempt %d: %v < %v", a, d, prev)
+		}
+		if d > natsReconnectMaxDelay {
+			t.Fatalf("backoff exceeded cap at attempt %d: %v", a, d)
+		}
+		prev = d
+	}
+}

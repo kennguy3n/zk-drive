@@ -420,7 +420,22 @@
       "users": "Users",
       "audit": "Audit",
       "retention": "Retention",
-      "storage": "Storage"
+      "storage": "Storage",
+      "health": "Health"
+    },
+    "health": {
+      "title": "System health",
+      "subtitle": "Live status of every subsystem. Green is healthy, yellow is degraded, red needs attention, grey is not configured.",
+      "refresh": "Refresh",
+      "lastUpdated": "Last updated {{time}}",
+      "overall": "Overall",
+      "loadError": "Couldn't load the health dashboard",
+      "noSubsystems": "No subsystems reported.",
+      "statusGreen": "Healthy",
+      "statusYellow": "Degraded",
+      "statusRed": "Unhealthy",
+      "statusUnknown": "Not configured",
+      "autoRefresh": "Auto-refresh"
     },
     "emailPlaceholder": "email",
     "namePlaceholder": "name",
@@ -525,6 +540,78 @@
     "install": "Install",
     "dismissAria": "Dismiss install prompt",
     "notNow": "Not now"
+  },
+  "setup": {
+    "title": "Welcome to ZK Drive",
+    "subtitle": "Let's get your workspace set up. This takes a couple of minutes.",
+    "stepLabel": "Step {{current}} of {{total}}",
+    "next": "Continue",
+    "back": "Back",
+    "skip": "Skip for now",
+    "finish": "Finish setup",
+    "finishing": "Finishing…",
+    "done": "Setup complete",
+    "doneBody": "Your workspace is ready. Taking you to your drive…",
+    "goToDrive": "Go to drive",
+    "step": {
+      "admin": "Admin account",
+      "storage": "Storage",
+      "services": "Optional services",
+      "workspace": "Workspace",
+      "invite": "Invite a teammate"
+    },
+    "admin": {
+      "title": "Create your admin account",
+      "body": "This is the first administrator for your deployment.",
+      "email": "Email",
+      "name": "Your name",
+      "password": "Password",
+      "passwordHint": "Use at least 12 characters."
+    },
+    "storage": {
+      "title": "Connect object storage",
+      "body": "ZK Drive stores encrypted objects in an S3-compatible bucket (your zk-object-fabric gateway or any S3 provider). Enter the credentials your deployment uses and test the connection. Values are configured via your deployment's environment/secrets; this step verifies they work.",
+      "configured": "Storage is configured and reachable.",
+      "notConfigured": "Storage is not fully configured yet.",
+      "endpoint": "S3 endpoint URL",
+      "bucket": "Bucket",
+      "accessKey": "Access key",
+      "secretKey": "Secret key",
+      "region": "Region (optional)",
+      "test": "Test connection",
+      "testing": "Testing…",
+      "testOk": "Connection succeeded.",
+      "testFailed": "Connection failed: {{error}}"
+    },
+    "services": {
+      "title": "Optional services",
+      "body": "These features are enabled through your deployment configuration. You can run ZK Drive without any of them and turn them on later.",
+      "email": "Email (transactional)",
+      "virus_scanning": "Virus scanning",
+      "ai": "AI features",
+      "collaborative_editing": "Collaborative editing",
+      "enabled": "Enabled",
+      "disabled": "Not configured"
+    },
+    "workspace": {
+      "title": "Name your workspace",
+      "body": "Your workspace is created together with your admin account. Pick a name your team will recognize.",
+      "name": "Workspace name",
+      "creating": "Creating workspace…"
+    },
+    "invite": {
+      "title": "Invite your first teammate",
+      "body": "Optionally add a team member now. You can always invite more people later from the admin console.",
+      "email": "Teammate email",
+      "name": "Teammate name",
+      "password": "Temporary password",
+      "role": "Role",
+      "roleMember": "Member",
+      "roleAdmin": "Admin",
+      "send": "Send invite",
+      "sending": "Sending…",
+      "sent": "Invite sent to {{email}}."
+    }
   },
   "notifications": {
     "enable": "Enable notifications",

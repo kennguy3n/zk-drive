@@ -5,6 +5,7 @@ import {
   deactivateUser,
   deleteRetentionPolicy,
   fetchAuditLog,
+  fetchHealthDashboard,
   fetchRetentionPolicies,
   fetchStorageUsage,
   fetchUsers,
@@ -13,13 +14,16 @@ import {
   upsertRetentionPolicy,
   type AdminUser,
   type AuditEntry,
+  type HealthColor,
+  type HealthReport,
+  type HealthSubsystem,
   type RetentionPolicy,
   type StorageUsage,
 } from "../api/client";
 import { translateApiError } from "../api/errors";
 import { useAuth } from "../hooks/useAuth";
 
-type Tab = "users" | "audit" | "retention" | "storage";
+type Tab = "users" | "audit" | "retention" | "storage" | "health";
 
 // AdminPage is the single-page admin console. Sub-views are tab-switched
 // inline (rather than separate routes) because the underlying data sets
@@ -80,7 +84,7 @@ export default function AdminPage() {
           marginBottom: 16,
         }}
       >
-        {(["users", "audit", "retention", "storage"] as Tab[]).map((id) => (
+        {(["users", "audit", "retention", "storage", "health"] as Tab[]).map((id) => (
           <button
             key={id}
             onClick={() => setTab(id)}
@@ -100,7 +104,186 @@ export default function AdminPage() {
       {tab === "audit" && <AuditTab />}
       {tab === "retention" && <RetentionTab />}
       {tab === "storage" && <StorageTab />}
+      {tab === "health" && <HealthTab />}
     </div>
+  );
+}
+
+// healthColors maps each traffic-light status to its pill colours.
+// Kept module-level so it isn't reallocated per render.
+const healthColors: Record<HealthColor, { bg: string; fg: string; dot: string }> = {
+  green: { bg: "#dcfce7", fg: "#166534", dot: "#22c55e" },
+  yellow: { bg: "#fef9c3", fg: "#854d0e", dot: "#eab308" },
+  red: { bg: "#fee2e2", fg: "#991b1b", dot: "#ef4444" },
+  unknown: { bg: "#f1f5f9", fg: "#475569", dot: "#94a3b8" },
+};
+
+function HealthPill({ status }: { status: HealthColor }) {
+  const { t } = useTranslation();
+  const c = healthColors[status] ?? healthColors.unknown;
+  const labelKey = `admin.health.status${status.charAt(0).toUpperCase()}${status.slice(1)}`;
+  return (
+    <span
+      style={{
+        display: "inline-flex",
+        alignItems: "center",
+        gap: 6,
+        padding: "2px 10px",
+        borderRadius: 999,
+        background: c.bg,
+        color: c.fg,
+        fontSize: 13,
+        fontWeight: 600,
+      }}
+    >
+      <span
+        style={{
+          width: 8,
+          height: 8,
+          borderRadius: "50%",
+          background: c.dot,
+          display: "inline-block",
+        }}
+      />
+      {t(labelKey)}
+    </span>
+  );
+}
+
+// formatDetailValue renders a single opaque detail value. Objects and
+// arrays are JSON-stringified compactly; primitives pass through. This
+// keeps the renderer robust against the per-subsystem detail bags
+// evolving server-side without a frontend change.
+function formatDetailValue(value: unknown): string {
+  if (value === null || value === undefined) return "—";
+  if (typeof value === "object") {
+    try {
+      return JSON.stringify(value);
+    } catch {
+      return String(value);
+    }
+  }
+  return String(value);
+}
+
+function SubsystemCard({ sub }: { sub: HealthSubsystem }) {
+  const details = sub.detail ? Object.entries(sub.detail) : [];
+  return (
+    <div
+      style={{
+        border: "1px solid #e5e7eb",
+        borderRadius: 8,
+        padding: 16,
+        background: "#fff",
+        display: "flex",
+        flexDirection: "column",
+        gap: 10,
+      }}
+    >
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8 }}>
+        <span style={{ fontWeight: 600, textTransform: "capitalize" }}>{sub.name}</span>
+        <HealthPill status={sub.status} />
+      </div>
+      {sub.error && <div style={{ color: "#b91c1c", fontSize: 13 }}>{sub.error}</div>}
+      {details.length > 0 && (
+        <dl style={{ margin: 0, display: "grid", gridTemplateColumns: "auto 1fr", gap: "2px 12px", fontSize: 13 }}>
+          {details.map(([k, v]) => (
+            <div key={k} style={{ display: "contents" }}>
+              <dt style={{ color: "#6b7280" }}>{k}</dt>
+              <dd style={{ margin: 0, fontFamily: "monospace", wordBreak: "break-word" }}>{formatDetailValue(v)}</dd>
+            </div>
+          ))}
+        </dl>
+      )}
+    </div>
+  );
+}
+
+// HealthTab renders the traffic-light health dashboard (WS8 8.1). It
+// polls GET /api/admin/health-dashboard on mount and on a 15s interval
+// (auto-refresh, toggleable) so an operator watching the page sees a
+// subsystem recover/degrade without manual reloads. The endpoint always
+// returns 200 with the report in the body, so a degraded subsystem is
+// rendered, not surfaced as a request error.
+function HealthTab() {
+  const { t } = useTranslation();
+  const [report, setReport] = useState<HealthReport | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [auto, setAuto] = useState(true);
+
+  const refresh = useCallback(async () => {
+    setLoading(true);
+    try {
+      setReport(await fetchHealthDashboard());
+      setError(null);
+    } catch (e) {
+      setError(translateApiError(e, t));
+    } finally {
+      setLoading(false);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  useEffect(() => {
+    refresh();
+  }, [refresh]);
+
+  useEffect(() => {
+    if (!auto) return;
+    const id = window.setInterval(refresh, 15000);
+    return () => window.clearInterval(id);
+  }, [auto, refresh]);
+
+  return (
+    <section>
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, flexWrap: "wrap" }}>
+        <div>
+          <h2 style={{ marginBottom: 4 }}>{t("admin.health.title")}</h2>
+          <p style={{ margin: 0, color: "#6b7280", fontSize: 14, maxWidth: 640 }}>{t("admin.health.subtitle")}</p>
+        </div>
+        <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+          {report && (
+            <span style={{ display: "flex", alignItems: "center", gap: 8 }}>
+              <span style={{ color: "#6b7280", fontSize: 13 }}>{t("admin.health.overall")}</span>
+              <HealthPill status={report.status} />
+            </span>
+          )}
+          <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 13, color: "#374151" }}>
+            <input type="checkbox" checked={auto} onChange={(e) => setAuto(e.target.checked)} />
+            {t("admin.health.autoRefresh")}
+          </label>
+          <button onClick={refresh} disabled={loading}>
+            {t("admin.health.refresh")}
+          </button>
+        </div>
+      </div>
+
+      {error && <p style={{ color: "#b91c1c" }}>{error}</p>}
+
+      {report && report.subsystems.length === 0 && <p>{t("admin.health.noSubsystems")}</p>}
+
+      {report && report.subsystems.length > 0 && (
+        <div
+          style={{
+            display: "grid",
+            gridTemplateColumns: "repeat(auto-fill, minmax(280px, 1fr))",
+            gap: 12,
+            marginTop: 16,
+          }}
+        >
+          {report.subsystems.map((sub) => (
+            <SubsystemCard key={sub.name} sub={sub} />
+          ))}
+        </div>
+      )}
+
+      {report && (
+        <p style={{ color: "#9ca3af", fontSize: 12, marginTop: 16 }}>
+          {t("admin.health.lastUpdated", { time: new Date(report.generated_at).toLocaleTimeString() })}
+        </p>
+      )}
+    </section>
   );
 }
 

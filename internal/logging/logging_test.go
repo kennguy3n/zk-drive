@@ -48,6 +48,59 @@ func TestParseLevelMapsAllSupportedAliases(t *testing.T) {
 	}
 }
 
+// TestIsCompactProfile pins the ZKDRIVE_PROFILE=compact matcher:
+// case-insensitive, whitespace-trimmed, and only the exact
+// "compact" token flips the posture.
+func TestIsCompactProfile(t *testing.T) {
+	cases := []struct {
+		in   string
+		want bool
+	}{
+		{"compact", true},
+		{"Compact", true},
+		{"  COMPACT  ", true},
+		{"", false},
+		{"full", false},
+		{"compact-ish", false},
+	}
+	for _, tc := range cases {
+		if got := isCompactProfile(tc.in); got != tc.want {
+			t.Fatalf("isCompactProfile(%q) = %v, want %v", tc.in, got, tc.want)
+		}
+	}
+}
+
+// TestNewHandlerFormatSelection pins the LOG_FORMAT / compact-profile
+// interaction: an explicit LOG_FORMAT always wins, and when it is
+// unset the compact profile defaults to text while every other
+// profile defaults to json. We assert on the concrete handler type
+// because that is the observable contract (JSON shipper vs human
+// text on stdout).
+func TestNewHandlerFormatSelection(t *testing.T) {
+	cases := []struct {
+		name      string
+		logFormat string
+		compact   bool
+		wantText  bool
+	}{
+		{"unset/full→json", "", false, false},
+		{"unset/compact→text", "", true, true},
+		{"explicit text/full", "text", false, true},
+		{"explicit json/compact wins over profile", "json", true, false},
+		{"explicit TEXT case-insensitive", "TEXT", false, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("LOG_FORMAT", tc.logFormat)
+			h := newHandler(&bytes.Buffer{}, slog.LevelInfo, tc.compact)
+			_, isText := h.(*slog.TextHandler)
+			if isText != tc.wantText {
+				t.Fatalf("newHandler(LOG_FORMAT=%q, compact=%v): text=%v, want text=%v", tc.logFormat, tc.compact, isText, tc.wantText)
+			}
+		})
+	}
+}
+
 // TestFromContextReturnsDefaultWhenUnset covers the fallback path
 // that internal services rely on: if nobody attached a logger to
 // ctx (background workers, tests, init code), FromContext must
