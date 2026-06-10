@@ -12,6 +12,11 @@ object Routes {
     const val SEARCH = "search"
     const val SETTINGS = "settings"
 
+    const val ARG_FOLDER_ID = "folderId"
+    const val ARG_FOLDER_NAME = "folderName"
+    const val BROWSER_PATTERN =
+        "$BROWSER?$ARG_FOLDER_ID={$ARG_FOLDER_ID}&$ARG_FOLDER_NAME={$ARG_FOLDER_NAME}"
+
     const val PREVIEW = "preview"
     const val ARG_FILE_ID = "fileId"
     const val ARG_FILE_NAME = "name"
@@ -24,14 +29,22 @@ object Routes {
     const val ARG_RESOURCE_NAME = "resourceName"
     const val SHARE_PATTERN = "$SHARE/{$ARG_RESOURCE_TYPE}/{$ARG_RESOURCE_ID}?$ARG_RESOURCE_NAME={$ARG_RESOURCE_NAME}"
 
+    fun browser(folderId: String, folderName: String): String =
+        "$BROWSER?$ARG_FOLDER_ID=${encode(folderId)}&$ARG_FOLDER_NAME=${encode(folderName)}"
+
     fun preview(fileId: String, name: String, mime: String): String =
         "$PREVIEW/$fileId?$ARG_FILE_NAME=${encode(name)}&$ARG_FILE_MIME=${encode(mime)}"
 
     fun share(resourceType: String, resourceId: String, name: String): String =
         "$SHARE/$resourceType/$resourceId?$ARG_RESOURCE_NAME=${encode(name)}"
 
-    private fun encode(value: String): String =
-        java.net.URLEncoder.encode(value, Charsets.UTF_8.name())
+    /**
+     * Percent-encode a navigation argument. Uses [android.net.Uri.encode] (which
+     * emits %20 for spaces, never '+') so it round-trips exactly through Navigation
+     * Compose's built-in [android.net.Uri.decode] of string args — no second manual
+     * decode is needed (or correct) on the receiving side.
+     */
+    private fun encode(value: String): String = android.net.Uri.encode(value)
 }
 
 /** Resource discriminators shared across sharing + permission routes. */

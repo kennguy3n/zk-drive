@@ -14,7 +14,6 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
-import java.net.URLDecoder
 import java.time.Instant
 import java.time.temporal.ChronoUnit
 import javax.inject.Inject
@@ -48,10 +47,10 @@ class ShareViewModel @Inject constructor(
         savedStateHandle.get<String>(Routes.ARG_RESOURCE_TYPE) ?: ResourceTypes.FILE
     private val resourceId: String =
         savedStateHandle.get<String>(Routes.ARG_RESOURCE_ID).orEmpty()
+    // Navigation Compose already URL-decodes string args, so we read as-is; a
+    // second manual decode would mangle names containing '+' or '%'.
     private val resourceName: String =
-        savedStateHandle.get<String>(Routes.ARG_RESOURCE_NAME)
-            ?.let { runCatching { URLDecoder.decode(it, Charsets.UTF_8.name()) }.getOrDefault(it) }
-            ?: "Item"
+        savedStateHandle.get<String>(Routes.ARG_RESOURCE_NAME)?.takeIf { it.isNotEmpty() } ?: "Item"
 
     private val _uiState = MutableStateFlow(
         ShareUiState(

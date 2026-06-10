@@ -64,60 +64,63 @@ class TransferManager @Inject constructor(
         displayName: String,
         mimeType: String,
     ): UploadResult = withContext(io) {
-        val session = bridgeHolder.require()
-        val target = session.apiClient.uploadUrl(folderId, displayName, mimeType)
+        // Lease the session for the whole transfer so a concurrent logout can't
+        // dispose the native ApiClient / SyncEngine mid-upload (use-after-close).
+        bridgeHolder.withSession { session ->
+            val target = session.apiClient.uploadUrl(folderId, displayName, mimeType)
 
-        val checksum: String
-        val sizeBytes: Long
-        val pendingEnvelope: EnvelopeKey?
+            val checksum: String
+            val sizeBytes: Long
+            val pendingEnvelope: EnvelopeKey?
 
-        if (encryptionMode == EncryptionMode.ZeroKnowledge) {
-            val plaintext = file.readBytes()
-            coroutineContext.ensureActive()
-            val sealed = sealForUpload(session.workspaceId, target.objectKey, plaintext)
-            coroutineContext.ensureActive()
-            // The PUT Content-Type MUST equal the mime type the presigned URL was
-            // signed with (the server signs with the same value it stores as the
-            // file's catalog type); sending application/octet-stream here would
-            // fail the S3 signature. The stored object's declared type is
-            // irrelevant to ZK clients, which always decrypt the raw bytes.
-            putBytes(target.uploadUrl, mimeType, sealed.ciphertext)
-            checksum = sha256Hex(sealed.ciphertext)
-            sizeBytes = sealed.ciphertext.size.toLong()
-            pendingEnvelope = sealed.envelope
-        } else {
-            checksum = sha256OfFile(file)
-            sizeBytes = file.length()
-            coroutineContext.ensureActive()
-            putFile(target.uploadUrl, mimeType, file)
-            pendingEnvelope = null
+            if (encryptionMode == EncryptionMode.ZeroKnowledge) {
+                val plaintext = file.readBytes()
+                coroutineContext.ensureActive()
+                val sealed = sealForUpload(session.workspaceId, target.objectKey, plaintext)
+                coroutineContext.ensureActive()
+                // The PUT Content-Type MUST equal the mime type the presigned URL was
+                // signed with (the server signs with the same value it stores as the
+                // file's catalog type); sending application/octet-stream here would
+                // fail the S3 signature. The stored object's declared type is
+                // irrelevant to ZK clients, which always decrypt the raw bytes.
+                putBytes(target.uploadUrl, mimeType, sealed.ciphertext)
+                checksum = sha256Hex(sealed.ciphertext)
+                sizeBytes = sealed.ciphertext.size.toLong()
+                pendingEnvelope = sealed.envelope
+            } else {
+                checksum = sha256OfFile(file)
+                sizeBytes = file.length()
+                coroutineContext.ensureActive()
+                putFile(target.uploadUrl, mimeType, file)
+                pendingEnvelope = null
+            }
+
+            val versionId = session.apiClient.confirmUpload(
+                fileId = target.fileId,
+                objectKey = target.objectKey,
+                sizeBytes = sizeBytes,
+                checksum = checksum,
+            )
+
+            // Persist the DEK only AFTER the version is confirmed. If the PUT or the
+            // confirm fails (or the worker is retried) we never wrote a key, so a
+            // failed upload can't leave an orphaned DEK that no version references.
+            pendingEnvelope?.let { keyStore.put(target.objectKey, it) }
+
+            session.syncEngine.upsert(
+                FileEntry(
+                    remoteFileId = target.fileId,
+                    remoteVersionId = versionId,
+                    localPath = displayName,
+                    sizeBytes = sizeBytes.toULong(),
+                    contentHashHex = checksum,
+                    status = SyncStatus.UP_TO_DATE,
+                    pinned = false,
+                    updatedAtUnixMs = System.currentTimeMillis(),
+                ),
+            )
+            UploadResult(target.fileId, versionId, target.objectKey)
         }
-
-        val versionId = session.apiClient.confirmUpload(
-            fileId = target.fileId,
-            objectKey = target.objectKey,
-            sizeBytes = sizeBytes,
-            checksum = checksum,
-        )
-
-        // Persist the DEK only AFTER the version is confirmed. If the PUT or the
-        // confirm fails (or the worker is retried) we never wrote a key, so a
-        // failed upload can't leave an orphaned DEK that no version references.
-        pendingEnvelope?.let { keyStore.put(target.objectKey, it) }
-
-        session.syncEngine.upsert(
-            FileEntry(
-                remoteFileId = target.fileId,
-                remoteVersionId = versionId,
-                localPath = displayName,
-                sizeBytes = sizeBytes.toULong(),
-                contentHashHex = checksum,
-                status = SyncStatus.UP_TO_DATE,
-                pinned = false,
-                updatedAtUnixMs = System.currentTimeMillis(),
-            ),
-        )
-        UploadResult(target.fileId, versionId, target.objectKey)
     }
 
     /**
@@ -125,8 +128,9 @@ class TransferManager @Inject constructor(
      * the app cache. Returns a content:// Uri sharable with other apps.
      */
     suspend fun downloadToCache(file: FileNode): Uri = withContext(io) {
-        val session = bridgeHolder.require()
-        val target = session.apiClient.downloadUrl(file.id)
+        // Lease the session so a concurrent logout can't dispose the native
+        // ApiClient while we mint the presigned URL (use-after-close).
+        val target = bridgeHolder.withSession { session -> session.apiClient.downloadUrl(file.id) }
         val raw = getObject(target.downloadUrl)
         coroutineContext.ensureActive()
 

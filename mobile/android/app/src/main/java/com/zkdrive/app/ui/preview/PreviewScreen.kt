@@ -6,7 +6,6 @@ import android.graphics.Bitmap
 import android.graphics.Color
 import android.graphics.pdf.PdfRenderer
 import android.net.Uri
-import android.os.ParcelFileDescriptor
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import androidx.compose.foundation.Image
@@ -209,7 +208,6 @@ private fun UnsupportedView(onOpen: () -> Unit, onShare: () -> Unit) {
  * is not thread-safe, so access is serialised through [mutex].
  */
 private class PdfDocument(
-    private val pfd: ParcelFileDescriptor,
     private val renderer: PdfRenderer,
 ) : Closeable {
     val pageCount: Int = renderer.pageCount
@@ -234,15 +232,18 @@ private class PdfDocument(
     }
 
     override fun close() {
+        // PdfRenderer takes ownership of the ParcelFileDescriptor passed to its
+        // constructor and closes it in close(); closing the fd again here would be
+        // a double-close, so we only close the renderer.
         runCatching { renderer.close() }
-        runCatching { pfd.close() }
     }
 }
 
 private fun openPdf(context: Context, uri: Uri): PdfDocument? {
     val pfd = context.contentResolver.openFileDescriptor(uri, "r") ?: return null
-    return runCatching { PdfDocument(pfd, PdfRenderer(pfd)) }
+    return runCatching { PdfDocument(PdfRenderer(pfd)) }
         .getOrElse {
+            // Constructor failed before taking ownership of the fd — close it ourselves.
             runCatching { pfd.close() }
             null
         }

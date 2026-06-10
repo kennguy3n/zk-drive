@@ -16,7 +16,6 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import java.net.URLDecoder
 import javax.inject.Inject
 
 /** What kind of inline preview a downloaded file supports. */
@@ -49,9 +48,12 @@ class PreviewViewModel @Inject constructor(
     @IoDispatcher private val io: CoroutineDispatcher,
 ) : ViewModel() {
 
+    // Navigation Compose already URL-decodes string args before they land in the
+    // SavedStateHandle, so we read them as-is (a second manual decode would mangle
+    // names containing '+' or '%').
     private val fileId: String = savedStateHandle.get<String>(Routes.ARG_FILE_ID).orEmpty()
-    private val fileName: String = savedStateHandle.decode(Routes.ARG_FILE_NAME) ?: "File"
-    private val mimeType: String = savedStateHandle.decode(Routes.ARG_FILE_MIME) ?: "application/octet-stream"
+    private val fileName: String = savedStateHandle.get<String>(Routes.ARG_FILE_NAME)?.takeIf { it.isNotEmpty() } ?: "File"
+    private val mimeType: String = savedStateHandle.get<String>(Routes.ARG_FILE_MIME)?.takeIf { it.isNotEmpty() } ?: "application/octet-stream"
 
     private val node = FileNode(
         id = fileId,
@@ -110,6 +112,3 @@ class PreviewViewModel @Inject constructor(
         const val MAX_TEXT_CHARS = 500_000
     }
 }
-
-private fun SavedStateHandle.decode(key: String): String? =
-    get<String>(key)?.let { runCatching { URLDecoder.decode(it, Charsets.UTF_8.name()) }.getOrDefault(it) }

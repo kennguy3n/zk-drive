@@ -3,6 +3,7 @@ package com.zkdrive.app.data.auth
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
+import android.util.Log
 import com.zkdrive.app.config.AppConfig
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.suspendCancellableCoroutine
@@ -56,7 +57,13 @@ class OAuthService @Inject constructor(
             AuthorizationServiceConfiguration.fetchFromIssuer(Uri.parse(appConfig.issuer)) { config, ex ->
                 when {
                     config != null -> cont.resume(config)
-                    else -> cont.resume(manualConfiguration())
+                    else -> {
+                        // Discovery failed (offline, misconfigured issuer, etc.).
+                        // Log the cause for field diagnostics, then fall back to
+                        // iam-core's documented endpoints so sign-in still works.
+                        Log.w(TAG, "OIDC discovery failed for ${appConfig.issuer}; using documented endpoints", ex)
+                        cont.resume(manualConfiguration())
+                    }
                 }
             }
         }
@@ -153,5 +160,9 @@ class OAuthService @Inject constructor(
         } catch (e: Exception) {
             UserProfile("", null, null)
         }
+    }
+
+    private companion object {
+        const val TAG = "OAuthService"
     }
 }

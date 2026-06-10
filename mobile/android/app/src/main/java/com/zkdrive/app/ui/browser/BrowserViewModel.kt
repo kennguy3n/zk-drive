@@ -2,6 +2,7 @@ package com.zkdrive.app.ui.browser
 
 import android.content.Context
 import android.net.Uri
+import androidx.lifecycle.SavedStateHandle
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import androidx.work.WorkInfo
@@ -14,6 +15,7 @@ import com.zkdrive.app.domain.EncryptionMode
 import com.zkdrive.app.domain.FileNode
 import com.zkdrive.app.domain.FolderContents
 import com.zkdrive.app.domain.FolderNode
+import com.zkdrive.app.ui.navigation.Routes
 import dagger.hilt.android.lifecycle.HiltViewModel
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -48,6 +50,7 @@ data class BrowserUiState(
 @HiltViewModel
 class BrowserViewModel @Inject constructor(
     @ApplicationContext private val context: Context,
+    savedStateHandle: SavedStateHandle,
     private val driveRepository: DriveRepository,
     private val uploadEnqueuer: UploadEnqueuer,
     private val syncCoordinator: SyncCoordinator,
@@ -58,9 +61,31 @@ class BrowserViewModel @Inject constructor(
 
     private var lastSucceededUploads = 0
 
+    // Optional deep-link target (e.g. a folder tapped in search): open it
+    // directly instead of the workspace root on first load.
+    private val initialFolderId: String? = savedStateHandle.get<String>(Routes.ARG_FOLDER_ID)
+    private val initialFolderName: String? = savedStateHandle.get<String>(Routes.ARG_FOLDER_NAME)
+
     init {
-        loadRoot()
+        val folderId = initialFolderId
+        if (folderId.isNullOrEmpty()) {
+            loadRoot()
+        } else {
+            openFolderById(folderId, initialFolderName?.takeIf { it.isNotEmpty() } ?: "Folder")
+        }
         observeUploads()
+    }
+
+    /** Open a folder by id directly (deep link), seeding a root → folder trail. */
+    private fun openFolderById(folderId: String, folderName: String) {
+        _uiState.update {
+            it.copy(
+                loading = true,
+                error = null,
+                breadcrumbs = listOf(Breadcrumb(null, "My Drive"), Breadcrumb(folderId, folderName)),
+            )
+        }
+        viewModelScope.launch { loadFolder(folderId, EncryptionMode.Unknown) }
     }
 
     private fun loadRoot() {

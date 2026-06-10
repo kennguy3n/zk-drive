@@ -42,6 +42,25 @@ class BridgeHolder @Inject constructor() {
     fun require(): BridgeSession =
         _session.value ?: throw IllegalStateException("No active ZK Drive session")
 
+    /**
+     * Run [block] against the active session while holding a lease, so a
+     * concurrent logout / session swap cannot dispose the native handles until
+     * the block completes. This closes the use-after-close window between
+     * resolving the session and using its Rust handles.
+     *
+     * Throws [IllegalStateException] if there is no active session, or if the
+     * session was retired before a lease could be taken.
+     */
+    suspend fun <T> withSession(block: suspend (BridgeSession) -> T): T {
+        val session = _session.value ?: throw IllegalStateException("No active ZK Drive session")
+        if (!session.acquire()) throw IllegalStateException("ZK Drive session was closed")
+        try {
+            return block(session)
+        } finally {
+            session.release()
+        }
+    }
+
     /** Dispose and clear the session (logout). */
     fun clear() {
         _session.getAndUpdate { null }?.close()

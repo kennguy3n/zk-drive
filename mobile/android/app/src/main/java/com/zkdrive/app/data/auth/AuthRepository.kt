@@ -7,6 +7,7 @@ import com.zkdrive.app.bridge.BridgeSession
 import com.zkdrive.app.config.AppConfig
 import com.zkdrive.app.data.remote.dto.WorkspacesEnvelope
 import com.zkdrive.app.data.settings.SettingsRepository
+import com.zkdrive.app.data.sync.SyncScheduler
 import com.zkdrive.app.di.IoDispatcher
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -52,6 +53,7 @@ class AuthRepository @Inject constructor(
     private val oauth: OAuthService,
     private val bridgeHolder: BridgeHolder,
     private val settings: SettingsRepository,
+    private val syncScheduler: SyncScheduler,
     private val json: Json,
     @Named("plain") private val httpClient: OkHttpClient,
     @IoDispatcher private val io: CoroutineDispatcher,
@@ -84,9 +86,19 @@ class AuthRepository @Inject constructor(
     suspend fun completeLogin(data: Intent) {
         val result = oauth.exchange(data)
         val (api, tokenManager) = buildAuthedClients(result.tokens, result.tokenEndpoint)
-        val workspaceId = fetchPrimaryWorkspaceId(result.tokens.accessToken)
-        val engine = buildSyncEngine(workspaceId, api)
-        bridgeHolder.install(BridgeSession(tokenManager, api, engine, workspaceId))
+        val workspaceId: String
+        try {
+            workspaceId = fetchPrimaryWorkspaceId(result.tokens.accessToken)
+            val engine = buildSyncEngine(workspaceId, api)
+            // install() takes ownership of the native handles from here on.
+            bridgeHolder.install(BridgeSession(tokenManager, api, engine, workspaceId))
+        } catch (t: Throwable) {
+            // The session was never installed, so nothing else will dispose these
+            // native handles — close them here to avoid leaking Rust-side objects
+            // (UniFFI's JVM Cleaner can't see handles we drop on the floor).
+            closeQuietly(api, tokenManager)
+            throw t
+        }
 
         tokenStore.save(
             PersistedSession(
@@ -112,8 +124,14 @@ class AuthRepository @Inject constructor(
     /** Re-establish a session from encrypted storage (no network round-trip). */
     private suspend fun establishFromPersisted(persisted: PersistedSession) {
         val (api, tokenManager) = buildAuthedClients(persisted.tokens, persisted.tokenEndpoint)
-        val engine = buildSyncEngine(persisted.workspaceId, api)
-        bridgeHolder.install(BridgeSession(tokenManager, api, engine, persisted.workspaceId))
+        try {
+            val engine = buildSyncEngine(persisted.workspaceId, api)
+            bridgeHolder.install(BridgeSession(tokenManager, api, engine, persisted.workspaceId))
+        } catch (t: Throwable) {
+            // Never installed — release the native handles to avoid a leak.
+            closeQuietly(api, tokenManager)
+            throw t
+        }
         _state.value = AuthState.Authenticated(persisted.profile, persisted.workspaceId)
     }
 
@@ -125,9 +143,18 @@ class AuthRepository @Inject constructor(
 
     /** Tear everything down and return to the login screen. */
     suspend fun logout() = withContext(io) {
+        // Cancel periodic background sync first so no worker wakes up against a
+        // torn-down session after the user has signed out.
+        syncScheduler.cancel()
         bridgeHolder.clear()
         tokenStore.clear()
         _state.value = AuthState.SignedOut
+    }
+
+    /** Close native bridge handles, swallowing teardown errors. */
+    private fun closeQuietly(api: ApiClient, tokenManager: TokenManager) {
+        runCatching { api.close() }
+        runCatching { tokenManager.close() }
     }
 
     private fun buildAuthedClients(

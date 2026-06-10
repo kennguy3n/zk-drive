@@ -73,7 +73,13 @@ fun ZkApp(
             startDestination = Routes.BROWSER,
             modifier = Modifier.padding(padding),
         ) {
-            composable(Routes.BROWSER) {
+            composable(
+                route = Routes.BROWSER_PATTERN,
+                arguments = listOf(
+                    navArgument(Routes.ARG_FOLDER_ID) { type = NavType.StringType; nullable = true; defaultValue = null },
+                    navArgument(Routes.ARG_FOLDER_NAME) { type = NavType.StringType; nullable = true; defaultValue = null },
+                ),
+            ) {
                 BrowserScreen(
                     onOpenFile = { file ->
                         navController.navigate(Routes.preview(file.id, file.name, file.mimeType))
@@ -89,7 +95,9 @@ fun ZkApp(
                 SearchScreen(
                     onOpenResult = { hit ->
                         if (hit.isFolder) {
-                            navController.navigate(Routes.BROWSER) {
+                            // Deep-link straight into the tapped folder so search
+                            // actually navigates into it (not just to the root).
+                            navController.navigate(Routes.browser(hit.id, hit.name)) {
                                 popUpTo(navController.graph.findStartDestination().id) { saveState = true }
                                 launchSingleTop = true
                             }

@@ -26,17 +26,25 @@ class AuthInterceptor @Inject constructor(
         val session = bridgeHolder.current()
             ?: return chain.proceed(request) // unauthenticated bootstrap calls
 
+        // Hold a lease only around the native token read so a concurrent logout
+        // can't dispose the TokenManager mid-call (use-after-close); the network
+        // round-trip below runs without the lease.
+        if (!session.acquire()) return chain.proceed(request)
         val token = try {
             session.tokenManager.accessToken()
         } catch (e: BridgeException.Auth) {
             // No valid/refreshable token — let the request go out unauthenticated;
             // the server answers 401 and the UI routes back to login.
-            return chain.proceed(request)
+            null
+        } finally {
+            session.release()
         }
 
-        val authed = request.newBuilder()
-            .header("Authorization", "Bearer $token")
-            .build()
-        return chain.proceed(authed)
+        val outgoing = if (token != null) {
+            request.newBuilder().header("Authorization", "Bearer $token").build()
+        } else {
+            request
+        }
+        return chain.proceed(outgoing)
     }
 }

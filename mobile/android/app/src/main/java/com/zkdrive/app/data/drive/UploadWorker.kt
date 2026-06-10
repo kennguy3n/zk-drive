@@ -60,7 +60,9 @@ class UploadWorker @AssistedInject constructor(
             // file so the rescheduled run can resume, then propagate.
             throw e
         } catch (e: Exception) {
-            if (runAttemptCount < MAX_ATTEMPTS) {
+            // runAttemptCount is 0 on the first run, so this allows the initial
+            // attempt plus MAX_RETRIES reattempts before giving up.
+            if (runAttemptCount < MAX_RETRIES) {
                 // Retry later — keep the staged file, since the next attempt is
                 // handed the same cache path and would otherwise find it gone
                 // and fail permanently (silent data loss).
@@ -98,6 +100,6 @@ class UploadWorker @AssistedInject constructor(
         const val KEY_MODE = "encryption_mode"
 
         private const val NOTIFICATION_ID_BASE = 0x2001
-        private const val MAX_ATTEMPTS = 3
+        private const val MAX_RETRIES = 3
     }
 }

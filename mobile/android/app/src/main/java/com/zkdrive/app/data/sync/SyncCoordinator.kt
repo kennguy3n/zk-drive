@@ -35,17 +35,25 @@ class SyncCoordinator @Inject constructor(
 ) {
     /** Run sync ticks until the feed is drained. Returns total mutations applied. */
     suspend fun syncNow(maxPages: Int = MAX_PAGES_PER_RUN): Int = withContext(io) {
-        val session = bridgeHolder.current() ?: return@withContext 0
-        var applied = 0
-        var pages = 0
-        do {
-            val page: ChangePage = session.syncEngine.pollOnce(PAGE_LIMIT)
-            page.mutations.forEach { record ->
-                applyMutation(session.syncEngine, record)
-                applied++
+        if (bridgeHolder.current() == null) return@withContext 0
+        // Lease the session so a concurrent logout defers disposal of the native
+        // SyncEngine until this tick finishes (no use-after-close); returns 0 if
+        // the session was already retired.
+        val applied = runCatching {
+            bridgeHolder.withSession { session ->
+                var count = 0
+                var pages = 0
+                do {
+                    val page: ChangePage = session.syncEngine.pollOnce(PAGE_LIMIT)
+                    page.mutations.forEach { record ->
+                        applyMutation(session.syncEngine, record)
+                        count++
+                    }
+                    pages++
+                } while (page.hasMore && pages < maxPages)
+                count
             }
-            pages++
-        } while (page.hasMore && pages < maxPages)
+        }.getOrDefault(0)
         authRepository.persistTokenSnapshot()
         applied
     }
