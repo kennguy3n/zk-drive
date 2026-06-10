@@ -25,6 +25,13 @@ const TOKEN_STORAGE_KEY = "zkdrive.token";
 const WORKSPACE_STORAGE_KEY = "zkdrive.workspace_id";
 const ROLE_STORAGE_KEY = "zkdrive.role";
 const USER_STORAGE_KEY = "zkdrive.user_id";
+// iam-core (OIDC) session material. The access token is stored under
+// the SAME zkdrive.token key as the built-in session JWT so the request
+// interceptor and RequireAuth gate work unchanged across both auth
+// modes; only the refresh token and the access-token expiry instant
+// (epoch ms) need their own keys to drive silent refresh.
+const REFRESH_TOKEN_STORAGE_KEY = "zkdrive.refresh_token";
+const TOKEN_EXPIRES_AT_STORAGE_KEY = "zkdrive.token_expires_at";
 
 // AUTH_CHANGE_EVENT is dispatched on `window` whenever auth state is
 // mutated in THIS tab (login / signup / MFA verify / logout). The
@@ -38,6 +45,42 @@ export const AUTH_CHANGE_EVENT = "zkdrive:auth-change";
 function emitAuthChange(): void {
   if (typeof window !== "undefined") {
     window.dispatchEvent(new Event(AUTH_CHANGE_EVENT));
+  }
+}
+
+// Session-teardown hooks run whenever local auth state is cleared —
+// both an explicit logout() and a hard 401. They let higher-level
+// modules dismantle session-scoped machinery (notably the iam-core
+// silent-refresh timer in oidc.ts) without client.ts importing them,
+// which would create a cycle since oidc.ts already imports client.ts.
+const sessionTeardownHooks = new Set<() => void>();
+
+// onSessionTeardown registers a callback invoked on every local auth
+// clear. Idempotent per callback (backed by a Set).
+export function onSessionTeardown(fn: () => void): void {
+  sessionTeardownHooks.add(fn);
+}
+
+// clearStoredAuth removes ALL persisted auth state — the built-in
+// session keys AND the iam-core refresh token + expiry — then runs the
+// teardown hooks. Centralizing this is what keeps logout() and the 401
+// interceptor in lockstep: a hard 401 must clear the refresh token and
+// cancel the silent-refresh timer, otherwise the still-armed timer
+// could mint a fresh access token from the leftover refresh token and
+// silently resurrect a session the server already rejected.
+function clearStoredAuth(): void {
+  localStorage.removeItem(TOKEN_STORAGE_KEY);
+  localStorage.removeItem(WORKSPACE_STORAGE_KEY);
+  localStorage.removeItem(ROLE_STORAGE_KEY);
+  localStorage.removeItem(USER_STORAGE_KEY);
+  localStorage.removeItem(REFRESH_TOKEN_STORAGE_KEY);
+  localStorage.removeItem(TOKEN_EXPIRES_AT_STORAGE_KEY);
+  for (const fn of sessionTeardownHooks) {
+    try {
+      fn();
+    } catch {
+      // A misbehaving hook must never block session teardown.
+    }
   }
 }
 
@@ -82,10 +125,12 @@ client.interceptors.response.use(
         // the next 410. Without this, only an explicit logout() cleaned
         // up; an idle-timeout / server-side revocation left the sub live.
         tearDownPushSubscription(currentToken());
-        localStorage.removeItem(TOKEN_STORAGE_KEY);
-        localStorage.removeItem(WORKSPACE_STORAGE_KEY);
-        localStorage.removeItem(ROLE_STORAGE_KEY);
-        localStorage.removeItem(USER_STORAGE_KEY);
+        // Clear ALL auth state (incl. the iam-core refresh token +
+        // expiry) and cancel the silent-refresh timer via the teardown
+        // hooks. Clearing only the session keys here would leave the
+        // refresh token behind for the armed timer to resurrect the
+        // session after the user was already bounced to /login.
+        clearStoredAuth();
         // Notify same-tab useAuth consumers that the session ended, for
         // consistency with logout()/storeAuth(). The redirect below
         // resets React state via full reload in the common case, but
@@ -207,11 +252,113 @@ export function logout(): void {
   // header and the token is removed synchronously just below.
   // Best-effort and fire-and-forget — never blocks logout.
   tearDownPushSubscription(currentToken());
-  localStorage.removeItem(TOKEN_STORAGE_KEY);
-  localStorage.removeItem(WORKSPACE_STORAGE_KEY);
-  localStorage.removeItem(ROLE_STORAGE_KEY);
-  localStorage.removeItem(USER_STORAGE_KEY);
+  clearStoredAuth();
   emitAuthChange();
+}
+
+// --- App config (auth mode discovery) ------------------------------------
+
+export type AuthMode = "builtin" | "iam-core";
+
+// AppConfig is the public bootstrap config served by GET /api/config.
+// In built-in mode only `auth_mode` is populated; in iam-core mode the
+// OIDC parameters the SPA needs to drive the Authorization Code + PKCE
+// flow are included. The client secret is NEVER exposed here.
+export interface AppConfig {
+  auth_mode: AuthMode;
+  issuer?: string;
+  authorize_url?: string;
+  token_url?: string;
+  client_id?: string;
+  redirect_uri?: string;
+  audience?: string;
+  scopes?: string[];
+}
+
+// getAppConfig fetches GET /api/config through a bare axios call (no
+// auth header, no 401 interceptor) since it is public and must work
+// before the user has any session.
+export async function getAppConfig(): Promise<AppConfig> {
+  const { data } = await axios.get<AppConfig>("/api/config");
+  return data;
+}
+
+// --- iam-core (OIDC) token storage ---------------------------------------
+
+// IamCoreTokens is the subset of the RFC 6749 token response the SPA
+// persists. expires_in is seconds-to-expiry of the access token.
+export interface IamCoreTokens {
+  access_token: string;
+  refresh_token?: string;
+  expires_in?: number;
+}
+
+// storeIamCoreTokens persists the access token (under the shared
+// zkdrive.token key), the refresh token, and the absolute expiry
+// instant derived from expires_in. It deliberately does NOT touch the
+// workspace/role/user keys — those are populated separately from
+// GET /api/me, since the iam-core access token does not carry the
+// zk-drive-internal identifiers.
+export function storeIamCoreTokens(tokens: IamCoreTokens): void {
+  localStorage.setItem(TOKEN_STORAGE_KEY, tokens.access_token);
+  if (tokens.refresh_token) {
+    localStorage.setItem(REFRESH_TOKEN_STORAGE_KEY, tokens.refresh_token);
+  }
+  if (typeof tokens.expires_in === "number" && tokens.expires_in > 0) {
+    const expiresAt = Date.now() + tokens.expires_in * 1000;
+    localStorage.setItem(TOKEN_EXPIRES_AT_STORAGE_KEY, String(expiresAt));
+  }
+  emitAuthChange();
+}
+
+// storeIdentity persists the zk-drive-internal identity resolved by
+// GET /api/me (iam-core mode) so UI gating (isAdmin) and collaboration
+// presence (user_id) work identically to the built-in flow.
+export function storeIdentity(identity: {
+  user_id: string;
+  workspace_id: string;
+  role: string;
+}): void {
+  if (identity.workspace_id) {
+    localStorage.setItem(WORKSPACE_STORAGE_KEY, identity.workspace_id);
+  }
+  if (identity.user_id) {
+    localStorage.setItem(USER_STORAGE_KEY, identity.user_id);
+  }
+  if (identity.role) {
+    localStorage.setItem(ROLE_STORAGE_KEY, identity.role);
+  }
+  emitAuthChange();
+}
+
+export function currentRefreshToken(): string | null {
+  return localStorage.getItem(REFRESH_TOKEN_STORAGE_KEY);
+}
+
+// tokenExpiresAt returns the access token's expiry as epoch ms, or null
+// when unknown (built-in mode, or a token response without expires_in).
+export function tokenExpiresAt(): number | null {
+  const raw = localStorage.getItem(TOKEN_EXPIRES_AT_STORAGE_KEY);
+  if (!raw) {
+    return null;
+  }
+  const v = Number(raw);
+  return Number.isFinite(v) ? v : null;
+}
+
+// MeResponse is the shape of GET /api/me — the caller's resolved
+// zk-drive identity, auth-mode agnostic.
+export interface MeResponse {
+  user_id: string;
+  workspace_id: string;
+  role: string;
+  email?: string;
+  name?: string;
+}
+
+export async function fetchMe(): Promise<MeResponse> {
+  const { data } = await client.get<MeResponse>("/me");
+  return data;
 }
 
 // --- TOTP / 2FA ----------------------------------------------------------

@@ -1,12 +1,15 @@
-import { lazy, Suspense } from "react";
+import { lazy, Suspense, useEffect } from "react";
 import { Navigate, Route, Routes } from "react-router-dom";
 import LoginPage from "./pages/LoginPage";
 import SignupPage from "./pages/SignupPage";
+import CallbackPage from "./pages/CallbackPage";
 import FileBrowserPage from "./pages/FileBrowserPage";
 import RequireAuth from "./components/RequireAuth";
 import InstallPrompt from "./components/InstallPrompt";
 import { PagePreviewSkeleton } from "./components/ui/Skeleton";
 import { useAuth } from "./hooks/useAuth";
+import { useAppConfig } from "./hooks/useAppConfig";
+import { scheduleSilentRefresh } from "./api/oidc";
 import { usePushNotifications } from "./hooks/usePushNotifications";
 
 // Admin-only pages are off the critical path — split them into their own
@@ -45,6 +48,29 @@ export default function App() {
   // lacks push support or the server has web push disabled.
   const { token } = useAuth();
   usePushNotifications(token);
+  const { config, loading } = useAppConfig();
+  const iamCoreMode = config?.auth_mode === "iam-core";
+
+  // In iam-core mode, arm the silent access-token refresh once config is
+  // known and a session exists (e.g. after a page reload mid-session).
+  // scheduleSilentRefresh is idempotent and a no-op in built-in mode.
+  useEffect(() => {
+    if (config) {
+      scheduleSilentRefresh(config);
+    }
+  }, [config, token]);
+
+  // Hold the initial render until the auth mode is known so the MFA
+  // routes below aren't briefly mounted in iam-core mode (where the IdP
+  // owns MFA) before config resolves.
+  if (loading) {
+    return (
+      <>
+        <InstallPrompt />
+        <div>Loading...</div>
+      </>
+    );
+  }
 
   return (
     <>
@@ -52,25 +78,36 @@ export default function App() {
       <Suspense fallback={<PagePreviewSkeleton />}>
         <Routes>
           <Route path="/login" element={<LoginPage />} />
-          <Route path="/signup" element={<SignupPage />} />
+          {/* iam-core OAuth2 redirect target. Present only in iam-core
+              mode; the SPA exchanges the authorization code for tokens
+              here via PKCE. */}
+          {iamCoreMode && <Route path="/auth/callback" element={<CallbackPage />} />}
+          {/* Built-in signup and the local MFA flow exist ONLY in
+              built-in mode. In iam-core mode account creation and MFA
+              (TOTP, passkeys) are owned by iam-core's Universal Login,
+              so these routes are not mounted and fall through to the
+              catch-all redirect. */}
+          {!iamCoreMode && <Route path="/signup" element={<SignupPage />} />}
           {/* MFA pages are unauthenticated routes: they accept the
               short-lived mfa_challenge / mfa_enroll token passed via
               react-router navigation state, NOT a stored session
               token. The user explicitly does not have a session
               token at this point — that's the whole point of the
               two-factor flow. */}
-          <Route path="/mfa-challenge" element={<MfaChallengePage />} />
-          <Route path="/mfa-enroll" element={<TwoFactorEnrollPage />} />
+          {!iamCoreMode && <Route path="/mfa-challenge" element={<MfaChallengePage />} />}
+          {!iamCoreMode && <Route path="/mfa-enroll" element={<TwoFactorEnrollPage />} />}
           {/* Authenticated re-enrollment / disable flow from account
               settings. RequireAuth gives us the session token. */}
-          <Route
-            path="/account/2fa"
-            element={
-              <RequireAuth>
-                <TwoFactorEnrollPage />
-              </RequireAuth>
-            }
-          />
+          {!iamCoreMode && (
+            <Route
+              path="/account/2fa"
+              element={
+                <RequireAuth>
+                  <TwoFactorEnrollPage />
+                </RequireAuth>
+              }
+            />
+          )}
           <Route
             path="/drive"
             element={

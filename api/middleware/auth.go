@@ -257,7 +257,7 @@ func AuthMiddleware(secret string, checker SessionChecker) func(http.Handler) ht
 func AuthMiddlewareWithKeys(signer Signer, checker SessionChecker) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			raw, ok := extractBearerToken(r)
+			raw, ok := ExtractBearerToken(r)
 			if !ok {
 				RespondError(w, http.StatusUnauthorized, ErrCodeAuthMissingToken, "missing bearer token")
 				return
@@ -353,6 +353,35 @@ func withClaims(ctx context.Context, c *Claims) context.Context {
 	return ctx
 }
 
+// WithIdentity binds an authenticated principal onto ctx exactly the
+// way AuthMiddleware does for a verified session JWT: it populates the
+// claims, user id, workspace id and role context values so every
+// downstream handler, the tenant guard, and the row-level-security GUC
+// hook behave identically regardless of which auth front-end resolved
+// the request.
+//
+// It is the public entry point for alternative authenticators — namely
+// the iam-core OAuth2/OIDC middleware (internal/iamcore) — that resolve
+// identity from an externally-issued token rather than a zk-drive
+// session JWT. The synthesized Claims carry an empty Purpose so they
+// are indistinguishable from an ordinary session token to downstream
+// purpose checks.
+//
+// IssuedAt is stamped to now so the synthesized Claims are shaped like
+// a real session token: any handler that reads ClaimsFromContext and
+// dereferences IssuedAt (e.g. logout/refresh) behaves identically in
+// either auth mode and cannot nil-panic.
+func WithIdentity(ctx context.Context, userID, workspaceID uuid.UUID, role string) context.Context {
+	return withClaims(ctx, &Claims{
+		UserID:      userID,
+		WorkspaceID: workspaceID,
+		Role:        role,
+		RegisteredClaims: jwt.RegisteredClaims{
+			IssuedAt: jwt.NewNumericDate(time.Now()),
+		},
+	})
+}
+
 // ClaimsFromContext returns the parsed JWT claims, if any.
 func ClaimsFromContext(ctx context.Context) (*Claims, bool) {
 	c, ok := ctx.Value(claimsContextKey).(*Claims)
@@ -424,7 +453,7 @@ func WithRole(ctx context.Context, role string) context.Context {
 // not negotiate a subprotocol and Upgrade would fail.
 const WebSocketBearerSubprotocol = "bearer"
 
-// extractBearerToken returns the JWT carried by an authenticated
+// ExtractBearerToken returns the JWT carried by an authenticated
 // request. The Authorization header is the canonical transport,
 // but on WebSocket upgrade requests browsers cannot set custom
 // headers — for those, we fall back to the Sec-WebSocket-Protocol
@@ -432,7 +461,14 @@ const WebSocketBearerSubprotocol = "bearer"
 // a real WS upgrade (Upgrade: websocket + Connection contains
 // upgrade) so a normal HTTP request cannot smuggle a token via a
 // subprotocol header.
-func extractBearerToken(r *http.Request) (string, bool) {
+//
+// It is exported so alternative authenticators (the iam-core
+// OAuth2/OIDC middleware in internal/iamcore) extract the bearer
+// token identically to the built-in auth path — in particular so
+// browser WebSocket connections, which carry the token in the
+// Sec-WebSocket-Protocol list rather than a header, authenticate in
+// both auth modes.
+func ExtractBearerToken(r *http.Request) (string, bool) {
 	if header := r.Header.Get("Authorization"); strings.HasPrefix(header, "Bearer ") {
 		return strings.TrimPrefix(header, "Bearer "), true
 	}
