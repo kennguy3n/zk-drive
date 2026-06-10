@@ -236,8 +236,8 @@ func (h *Handler) WithOnlyOfficeSaveLimits(memoryBudgetBytes, maxDocumentBytes i
 // UNLIMITED — the streaming path uses a fixed copy buffer regardless of
 // document size, so it needs no memory-derived gate and concurrent
 // saves are intentionally unbounded. A positive n installs a semaphore
-// of that size; a save beyond it is shed with errOnlyOfficeSaveBusy (a
-// retryable 503) so the Document Server keeps the bytes and retries,
+// of that size; a save beyond it is shed with errOnlyOfficeStreamSaveBusy
+// (a retryable 503) so the Document Server keeps the bytes and retries,
 // rather than blocking a callback goroutine. Wired from
 // config.OnlyOfficeStreamSaveMaxConcurrent.
 func (h *Handler) WithOnlyOfficeStreamSaveConcurrency(n int) *Handler {
