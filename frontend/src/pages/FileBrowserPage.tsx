@@ -35,6 +35,7 @@ import { Feature } from "../features/featureKeys";
 import { ThemeToggle } from "../components/ThemeToggle";
 import { useCommandPalette } from "../components/CommandPalette";
 import { OnboardingEmptyState } from "../components/OnboardingEmptyState";
+import { FileListSkeleton } from "../components/ui/Skeleton";
 
 // shareTarget is the resource currently being shared via ShareDialog.
 // Kept discriminated-union so the dialog can render the right noun
@@ -62,11 +63,13 @@ export default function FileBrowserPage() {
   const [subfolders, setSubfolders] = useState<Folder[]>([]);
   const [files, setFiles] = useState<FileItem[]>([]);
   const [error, setError] = useState<string | null>(null);
-  // True until the first listing for the current view resolves. Gates the
-  // onboarding empty state so returning users don't see a flash of the
-  // "upload your first file" cards before their real content loads (the
-  // folder/file arrays start empty, which would otherwise read as "empty
-  // workspace" on the very first render).
+  // True while the listing for the current view is loading (initial mount
+  // and folder navigation). Gates the onboarding cards and the file/folder
+  // sections so neither flashes before real data arrives: the arrays start
+  // empty, which would otherwise read as "empty workspace" on the first
+  // render. Only the navigation effect toggles this — in-place refetches
+  // after a mutation (rename/delete/move) keep the current list visible
+  // rather than blinking it back to a skeleton.
   const [loading, setLoading] = useState(true);
   const [shareTarget, setShareTarget] = useState<ShareTarget | null>(null);
   const [selectedFiles, setSelectedFiles] = useState<Set<string>>(new Set());
@@ -88,7 +91,6 @@ export default function FileBrowserPage() {
 
   const refresh = useCallback(async () => {
     setError(null);
-    setLoading(true);
     try {
       if (currentFolderID) {
         const { folder: f, children, files: f2 } = await getFolderContents(currentFolderID);
@@ -105,13 +107,20 @@ export default function FileBrowserPage() {
       }
     } catch (err) {
       setError(translateApiError(err, t));
-    } finally {
-      setLoading(false);
     }
   }, [currentFolderID, t]);
 
+  // Initial load + folder navigation: drive the loading flag here (not in
+  // refresh) so post-mutation refetches don't toggle it and blink the list.
   useEffect(() => {
-    refresh();
+    let cancelled = false;
+    setLoading(true);
+    refresh().finally(() => {
+      if (!cancelled) setLoading(false);
+    });
+    return () => {
+      cancelled = true;
+    };
   }, [refresh]);
 
   // Probe the office-editing feature flag once on mount. A failure
@@ -236,7 +245,17 @@ export default function FileBrowserPage() {
           <div style={{ color: "#b91c1c", marginBottom: 16, fontSize: 13 }}>{error}</div>
         ) : null}
 
-        {showOnboarding ? (
+        {/*
+          First listing in flight: show a skeleton instead of any content
+          branch. Without this, the !loading guard on showOnboarding means
+          the files section would briefly render FileList's "No files"
+          empty state before the onboarding cards (or real rows) take its
+          place — trading one flash for another. The skeleton also keeps
+          layout stable (CLS 0) on slower connections.
+        */}
+        {loading && !error ? <FileListSkeleton /> : null}
+
+        {!loading && showOnboarding ? (
           <OnboardingEmptyState
             onUpload={() => uploadOpenRef.current?.()}
             onCreateFolder={handleCreateFolder}
@@ -244,7 +263,7 @@ export default function FileBrowserPage() {
           />
         ) : null}
 
-        {!showOnboarding && subfolders.length > 0 ? (
+        {!loading && !showOnboarding && subfolders.length > 0 ? (
           <section style={{ marginBottom: 24 }}>
             <h2 style={{ fontSize: 14, color: "#6b7280", textTransform: "uppercase", margin: "8px 0" }}>
               {t("drive.folders")}
@@ -328,7 +347,7 @@ export default function FileBrowserPage() {
           </section>
         ) : null}
 
-        {!showOnboarding ? (
+        {!loading && !showOnboarding ? (
         <section>
           <h2 style={{ fontSize: 14, color: "#6b7280", textTransform: "uppercase", margin: "8px 0" }}>
             {t("drive.files")}
