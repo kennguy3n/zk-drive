@@ -786,6 +786,18 @@ Verification tolerates cold-archived rows: it trusts the oldest
 surviving row's `prev_hash` as the boundary and still requires the live
 tail to terminate at the stored chain head.
 
+**Monitoring:** the live-endpoint verification is one half of the
+control; the other half is the periodic *external* snapshot of
+`(head_seq, head_hash)`. The endpoint reports `valid:true` for an empty
+live set (`rows_checked == 0`) because that is the legitimate shape after
+full cold-tier archival, and the endpoint alone cannot re-derive a head
+from no rows. To close that gap, alert when the response shows
+`head_seq > 0 && rows_checked == 0` *without* a corresponding archival
+run — that shape is also what a privileged DB operator would leave behind
+after deleting every live row and resetting the head, and only the
+retained external snapshot (a non-zero `head_seq`/`head_hash` that no
+longer matches a reset head) distinguishes tampering from archival.
+
 ## Worker runtime
 
 The worker binary runs the JetStream consumer plus in-process
