@@ -127,7 +127,16 @@ class OAuthService @Inject constructor(
 
             val access = tokenResponse.accessToken
                 ?: throw IllegalStateException("Token response missing access_token")
-            val expiresAtSeconds = tokenResponse.accessTokenExpirationTime?.let { it / 1000 } ?: 0L
+            // accessTokenExpirationTime is null when the IdP omits expires_in.
+            // Falling back to 0 would stamp the bundle as expiring at the Unix
+            // epoch, so the bridge's is_expired() returns true on first use and
+            // forces an immediate refresh — which fails outright when the IdP
+            // also returned no refresh token, breaking a perfectly valid access
+            // token. Assume the OAuth2-conventional 1h lifetime instead so the
+            // token is usable; the bridge still refreshes once it lapses.
+            val expiresAtSeconds = tokenResponse.accessTokenExpirationTime
+                ?.let { it / 1000 }
+                ?: (System.currentTimeMillis() / 1000 + DEFAULT_TOKEN_TTL_SECONDS)
             val idToken = tokenResponse.idToken
 
             return AuthResult(
@@ -164,5 +173,7 @@ class OAuthService @Inject constructor(
 
     private companion object {
         const val TAG = "OAuthService"
+        /** Assumed access-token lifetime when the IdP omits `expires_in`. */
+        const val DEFAULT_TOKEN_TTL_SECONDS = 3600L
     }
 }

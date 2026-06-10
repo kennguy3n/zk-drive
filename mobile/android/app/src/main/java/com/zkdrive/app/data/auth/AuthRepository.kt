@@ -168,7 +168,21 @@ class AuthRepository @Inject constructor(
         // Wipe device-local DEKs so the next account on this device can't reach
         // the previous user's strict-ZK keys (multi-tenant privacy).
         fileKeyStore.clear()
+        // Purge plaintext residue from the cache: decrypted downloads
+        // (cache/shared), staged upload bodies (cache/uploads), camera captures
+        // (cache/captures), and any thumbnails derived from ZK content. The
+        // cache is disposable by definition, so clearing all of it on sign-out
+        // guarantees no decrypted bytes survive a logout under the ZK threat
+        // model — without coupling to each producer's directory name.
+        purgeCache()
         _state.value = AuthState.SignedOut
+    }
+
+    /** Recursively delete the contents of the app cache directory. */
+    private fun purgeCache() {
+        runCatching {
+            context.cacheDir.listFiles()?.forEach { it.deleteRecursively() }
+        }
     }
 
     /** Close native bridge handles, swallowing teardown errors. */

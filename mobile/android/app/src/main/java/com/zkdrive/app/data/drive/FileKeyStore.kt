@@ -126,8 +126,13 @@ class FileKeyStore @Inject constructor(
         } ?: emptySet()
 
     fun clear() {
-        prefs.edit().clear().apply()
-        fileIndex.edit().clear().apply()
+        // Hold indexLock for the same reason put()/removeForFile() do: a
+        // concurrent put() must not interleave its DEK write and index write
+        // around the wipe and leave an index entry pointing at a cleared DEK.
+        synchronized(indexLock) {
+            prefs.edit().clear().apply()
+            fileIndex.edit().clear().apply()
+        }
     }
 
     private companion object {
