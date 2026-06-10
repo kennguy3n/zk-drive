@@ -1,4 +1,4 @@
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { uploadFile, type FileItem } from "../api/client";
 import { translateApiError } from "../api/errors";
@@ -6,16 +6,30 @@ import { translateApiError } from "../api/errors";
 export interface UploadButtonProps {
   folderID: string | null;
   onUploaded: (file: FileItem) => void;
+  // openRef lets a parent trigger the hidden file picker imperatively
+  // (e.g. the onboarding "Upload your first file" card). Optional so
+  // existing callers are unaffected.
+  openRef?: React.MutableRefObject<(() => void) | null>;
 }
 
 // UploadButton hides the file input behind a styled button and runs the
 // three-step presigned-URL flow defined in api/client.ts. Errors bubble
 // up through an inline message so the user isn't left guessing.
-export default function UploadButton({ folderID, onUploaded }: UploadButtonProps) {
+export default function UploadButton({ folderID, onUploaded, openRef }: UploadButtonProps) {
   const { t } = useTranslation();
   const inputRef = useRef<HTMLInputElement>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  // Expose an imperative open() to the parent via openRef so the
+  // onboarding "Upload your first file" card can trigger the picker.
+  useEffect(() => {
+    if (!openRef) return;
+    openRef.current = () => inputRef.current?.click();
+    return () => {
+      openRef.current = null;
+    };
+  }, [openRef]);
 
   const handleChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];

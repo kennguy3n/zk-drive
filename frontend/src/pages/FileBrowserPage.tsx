@@ -1,5 +1,6 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
+import { Search as SearchIcon } from "lucide-react";
 import { Trans, useTranslation } from "react-i18next";
 import FolderTree from "../components/FolderTree";
 import FileList from "../components/FileList";
@@ -29,6 +30,11 @@ import {
   type Folder,
 } from "../api/client";
 import { useAuth } from "../hooks/useAuth";
+import { useFeatures } from "../hooks/useFeatures";
+import { Feature } from "../features/featureKeys";
+import { ThemeToggle } from "../components/ThemeToggle";
+import { useCommandPalette } from "../components/CommandPalette";
+import { OnboardingEmptyState } from "../components/OnboardingEmptyState";
 
 // shareTarget is the resource currently being shared via ShareDialog.
 // Kept discriminated-union so the dialog can render the right noun
@@ -46,6 +52,11 @@ export default function FileBrowserPage() {
   const nav = useNavigate();
   const { t } = useTranslation();
   const { logout, isAdmin } = useAuth();
+  const { isEnabled } = useFeatures();
+  const palette = useCommandPalette();
+  // openRef lets the onboarding "Upload your first file" card trigger the
+  // UploadButton's hidden file picker without duplicating upload logic.
+  const uploadOpenRef = useRef<(() => void) | null>(null);
 
   const [folder, setFolder] = useState<Folder | null>(null);
   const [subfolders, setSubfolders] = useState<Folder[]>([]);
@@ -127,6 +138,10 @@ export default function FileBrowserPage() {
     refresh();
   };
 
+  // First-run experience: at the workspace root with no folders yet, show
+  // the onboarding action cards instead of empty folder/file sections.
+  const showOnboarding = !currentFolderID && subfolders.length === 0 && !error;
+
   return (
     <div style={{ display: "flex", minHeight: "100vh" }}>
       <FolderTree currentFolderID={currentFolderID} />
@@ -142,14 +157,25 @@ export default function FileBrowserPage() {
           <Breadcrumb folder={folder} />
           <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
             <SearchBar />
+            <button
+              type="button"
+              onClick={() => palette.open()}
+              aria-label={t("search.commandPaletteAria", { defaultValue: "Search (Ctrl+K)" })}
+              title="Ctrl+K"
+              className="inline-flex h-9 items-center gap-2 rounded-lg border border-border bg-surface px-3 text-sm text-muted hover:bg-surface-2"
+            >
+              <SearchIcon className="h-4 w-4" aria-hidden="true" />
+              <kbd className="hidden rounded border border-border px-1.5 text-xs sm:inline">⌘K</kbd>
+            </button>
+            <ThemeToggle />
             <EnableNotificationsButton style={btn} />
             <button onClick={handleCreateFolder} style={btn}>{t("drive.newFolder")}</button>
-            {isAdmin ? (
+            {isAdmin && isEnabled(Feature.ClientRooms) ? (
               <button onClick={() => setTemplateDialogOpen(true)} style={btn}>
                 {t("drive.createFromTemplate")}
               </button>
             ) : null}
-            <UploadButton folderID={currentFolderID} onUploaded={() => refresh()} />
+            <UploadButton folderID={currentFolderID} onUploaded={() => refresh()} openRef={uploadOpenRef} />
             {currentFolderID ? (
               <Link
                 to={`/drive/folder/${currentFolderID}/documents`}
@@ -192,7 +218,16 @@ export default function FileBrowserPage() {
           <div style={{ color: "#b91c1c", marginBottom: 16, fontSize: 13 }}>{error}</div>
         ) : null}
 
-        {subfolders.length > 0 ? (
+        {showOnboarding ? (
+          <OnboardingEmptyState
+            workspaceName={folder?.name}
+            onUpload={() => uploadOpenRef.current?.()}
+            onCreateFolder={handleCreateFolder}
+            onInvite={isAdmin ? () => nav("/admin") : undefined}
+          />
+        ) : null}
+
+        {!showOnboarding && subfolders.length > 0 ? (
           <section style={{ marginBottom: 24 }}>
             <h2 style={{ fontSize: 14, color: "#6b7280", textTransform: "uppercase", margin: "8px 0" }}>
               {t("drive.folders")}
@@ -276,6 +311,7 @@ export default function FileBrowserPage() {
           </section>
         ) : null}
 
+        {!showOnboarding ? (
         <section>
           <h2 style={{ fontSize: 14, color: "#6b7280", textTransform: "uppercase", margin: "8px 0" }}>
             {t("drive.files")}
@@ -358,11 +394,16 @@ export default function FileBrowserPage() {
               refresh();
             }}
             onShare={(f) => setShareTarget({ type: "file", value: f })}
-            onEdit={onlyOfficeEnabled ? (f) => setEditorFile(f) : undefined}
+            onEdit={
+              onlyOfficeEnabled && isEnabled(Feature.OnlyOffice)
+                ? (f) => setEditorFile(f)
+                : undefined
+            }
             selectedIDs={selectedFiles}
             onToggleSelect={toggleSelect}
           />
         </section>
+        ) : null}
       </main>
       {shareTarget ? (
         <ShareDialog resource={shareTarget} onClose={() => setShareTarget(null)} />

@@ -5,6 +5,7 @@ import SignupPage from "./pages/SignupPage";
 import FileBrowserPage from "./pages/FileBrowserPage";
 import RequireAuth from "./components/RequireAuth";
 import InstallPrompt from "./components/InstallPrompt";
+import { PagePreviewSkeleton } from "./components/ui/Skeleton";
 import { useAuth } from "./hooks/useAuth";
 import { usePushNotifications } from "./hooks/usePushNotifications";
 
@@ -48,7 +49,7 @@ export default function App() {
   return (
     <>
       <InstallPrompt />
-      <Suspense fallback={<div>Loading...</div>}>
+      <Suspense fallback={<PagePreviewSkeleton />}>
         <Routes>
           <Route path="/login" element={<LoginPage />} />
           <Route path="/signup" element={<SignupPage />} />
