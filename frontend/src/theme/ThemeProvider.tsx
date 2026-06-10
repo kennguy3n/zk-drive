@@ -97,17 +97,11 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const toggle = useCallback(() => {
-    setThemeState((prev) => {
-      const next: Theme =
-        prev === "light" ? "dark" : prev === "dark" ? "system" : "light";
-      try {
-        localStorage.setItem(STORAGE_KEY, next);
-      } catch {
-        /* non-fatal */
-      }
-      return next;
-    });
-  }, []);
+    // Delegate to setTheme so the localStorage write stays outside the
+    // setState updater (which React may invoke twice in Strict Mode). theme
+    // is in the dep list so the closure always sees the current value.
+    setTheme(theme === "light" ? "dark" : theme === "dark" ? "system" : "light");
+  }, [theme, setTheme]);
 
   const value = useMemo<ThemeContextValue>(
     () => ({ theme, resolvedTheme, setTheme, toggle }),

@@ -80,6 +80,11 @@ export default function CommandPaletteDialog({
   useEffect(() => {
     const q = query.trim();
     if (!q) {
+      // Invalidate any request that already passed the debounce and is
+      // awaiting searchFiles: bumping reqSeq makes its staleness guard fail
+      // so a late response can't repopulate the now-empty (cleared/reopened)
+      // palette.
+      ++reqSeq.current;
       setHits([]);
       setLoading(false);
       return;
