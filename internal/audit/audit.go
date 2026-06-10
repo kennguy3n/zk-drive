@@ -94,4 +94,15 @@ type Entry struct {
 	UserAgent    *string         `json:"user_agent,omitempty"`
 	Metadata     json.RawMessage `json:"metadata,omitempty"`
 	CreatedAt    time.Time       `json:"created_at"`
+
+	// Hash-chain fields (6.6). Populated by the repository at insert
+	// time and read back on List / archive fetch so the cold tier
+	// stays verifiable. Seq is the 1-based per-workspace position;
+	// PrevHash is the preceding row's EntryHash (the workspace
+	// genesis hash for Seq==1); EntryHash is this row's HMAC over
+	// (Seq, PrevHash, immutable fields). They are omitempty so the
+	// SIEM JSON shape for callers that never set them is unchanged.
+	Seq       int64  `json:"seq,omitempty"`
+	PrevHash  []byte `json:"prev_hash,omitempty"`
+	EntryHash []byte `json:"entry_hash,omitempty"`
 }

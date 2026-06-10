@@ -136,6 +136,7 @@ func (h *Handler) WithFabric(c FabricClient, p *fabric.Provisioner, sf *storage.
 // route group.
 func (h *Handler) RegisterRoutes(r chi.Router) {
 	r.Get("/audit-log", h.GetAuditLog)
+	r.Get("/audit-log/verify", h.VerifyAuditChain)
 	r.Get("/users", h.ListUsers)
 	r.Post("/users", h.InviteUser)
 	r.Delete("/users/{id}", h.DeactivateUser)
@@ -642,6 +643,34 @@ func (h *Handler) GetAuditLog(w http.ResponseWriter, r *http.Request) {
 		"limit":   limit,
 		"offset":  offset,
 	})
+}
+
+// VerifyAuditChain recomputes the tamper-evident HMAC hash chain (6.6)
+// over the current workspace's live audit_log rows and reports whether
+// it is intact and terminates at the separately-stored chain head.
+// This is the in-product surface for the "periodic external
+// verification" requirement: an admin (or a scheduled job hitting this
+// endpoint with an admin token) can confirm no audit row has been
+// inserted, deleted, or mutated out of band. A failed verification
+// returns HTTP 200 with valid=false and a machine-readable detail —
+// the request succeeded; it is the audit log that is compromised, so a
+// non-2xx would wrongly read as "verification could not run".
+func (h *Handler) VerifyAuditChain(w http.ResponseWriter, r *http.Request) {
+	if h.audit == nil {
+		middleware.RespondError(w, http.StatusNotImplemented, middleware.ErrCodeUnsupportedOp, "audit not configured")
+		return
+	}
+	workspaceID, ok := middleware.WorkspaceIDFromContext(r.Context())
+	if !ok {
+		middleware.RespondError(w, http.StatusUnauthorized, middleware.ErrCodeAuthMissingToken, "unauthenticated")
+		return
+	}
+	result, err := h.audit.VerifyChain(r.Context(), workspaceID)
+	if err != nil {
+		middleware.RespondInternalError(w, r, "verify audit chain", err)
+		return
+	}
+	writeJSON(w, http.StatusOK, result)
 }
 
 // User management ----------------------------------------------------

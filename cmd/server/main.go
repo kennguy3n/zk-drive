@@ -690,8 +690,22 @@ func run() error {
 	emailSvc.LogStartup(ctx)
 
 	previewRepo := preview.NewPostgresRepository(pool)
-	auditSvc := audit.NewService(audit.NewPostgresRepository(pool))
+	auditRepo, err := audit.NewPostgresRepository(pool, cfg.AuditHMACKey)
+	if err != nil {
+		return fmt.Errorf("build audit repository: %w", err)
+	}
+	auditSvc := audit.NewService(auditRepo)
 	defer auditSvc.Close()
+	// The audit-log hash chain (6.6) is keyed by an env-derived
+	// secret that never touches the DB. Under production, recommend a
+	// dedicated AUDIT_HMAC_KEY so the chain stays verifiable across a
+	// JWT_SECRET rotation; the derived fallback keeps a fresh install
+	// self-operating with no extra config.
+	if cfg.IsProduction() && cfg.AuditHMACKeySource == config.AuditHMACKeySourceDerived {
+		slog.Warn("audit-log HMAC chain key derived from JWT_SECRET; set AUDIT_HMAC_KEY to a dedicated secret so the audit chain survives a JWT_SECRET rotation")
+	} else {
+		slog.Info("audit-log HMAC chain enabled", "key_source", cfg.AuditHMACKeySource)
+	}
 	retentionSvc := retention.NewService(retention.NewPostgresRepository(pool), pool)
 
 	totpRepo := totp.NewPostgresRepository(pool)

@@ -163,6 +163,13 @@ func (c *webhookCapture) memberEventsByType(t webhooks.EventType) []capturedMemb
 	return out
 }
 
+// integrationAuditHMACKey is a fixed 32-byte key for the audit-log
+// hash chain (6.6) in integration tests. Production derives this from
+// an env secret (config.AuditHMACKey); the tests only need a stable,
+// non-empty key so chained inserts and VerifyChain exercise the real
+// HMAC path.
+var integrationAuditHMACKey = []byte("zk-drive-integration-audit-hmac-32b!")
+
 // setupEnv connects to Postgres, runs migrations, wires the API, and starts
 // an httptest server. The function calls t.Skip if TEST_DATABASE_URL is not
 // set so unit-test runs on machines without a database pass cleanly.
@@ -210,7 +217,11 @@ func setupEnv(t *testing.T) *testEnv {
 	)
 	notificationSvc := notification.NewService(notification.NewPostgresRepository(pool))
 	previewRepo := preview.NewPostgresRepository(pool)
-	auditSvc := audit.NewService(audit.NewPostgresRepository(pool))
+	auditRepo, err := audit.NewPostgresRepository(pool, integrationAuditHMACKey)
+	if err != nil {
+		t.Fatalf("build audit repository: %v", err)
+	}
+	auditSvc := audit.NewService(auditRepo)
 	retentionSvc := retention.NewService(retention.NewPostgresRepository(pool), pool)
 	billingRepo := billing.NewPostgresRepository(pool)
 	billingSvc := billing.NewService(billingRepo)

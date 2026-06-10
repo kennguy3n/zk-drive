@@ -562,6 +562,40 @@ Typical compliance windows:
 The full archive design and restore workflow are in
 [`OPERATIONS.md`](OPERATIONS.md#audit-log-cold-archival).
 
+## Audit-log tamper-evidence (hash chain)
+
+Every `audit_log` row carries an HMAC-SHA256 over the previous row's
+hash (a per-workspace hash chain). Any out-of-band insert, delete, or
+mutation — **including by a database administrator** — breaks the chain
+and is detected by recomputing it. The chain head (`seq`, `head_hash`)
+is stored separately in `audit_log_chain_head` so verification has an
+authenticated terminus that a tamperer would also have to forge.
+
+The HMAC key is **never stored in the database**; it is derived in
+process at startup from an environment-held secret, so a DB-only
+compromise cannot forge history.
+
+| Variable         | Default                | Purpose                                                                                                                                                                                                 |
+| ---------------- | ---------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `AUDIT_HMAC_KEY` | _(derive from `JWT_SECRET`)_ | Input keying material for the audit-chain HMAC key. Any length; HKDF-SHA256 expands it to 32 bytes. When unset, the key is HKDF-derived from `JWT_SECRET` under a distinct info label so a fresh install is self-operating (NoOps). |
+
+**Production recommendation:** set a dedicated `AUDIT_HMAC_KEY` (ideally
+from a KMS / sealed secret). This keeps the audit chain verifiable
+across a `JWT_SECRET` rotation and ensures a leaked `JWT_SECRET` cannot
+be used to forge audit history. When running on the derived fallback
+under `ZKDRIVE_PROFILE=production`, the server logs a one-line
+recommendation at startup.
+
+Verification is exposed to admins at
+`GET /api/admin/audit-log/verify` (see [`ARCHITECTURE.md`](ARCHITECTURE.md)). It
+returns `200` with a JSON body `{valid, rows_checked, head_seq,
+first_invalid_seq, detail}`; `valid:false` means the request succeeded
+but the log is compromised. A scheduled job can poll this endpoint with
+an admin token for the "periodic external verification" control.
+Verification tolerates cold-archived rows: it trusts the oldest
+surviving row's `prev_hash` as the boundary and still requires the live
+tail to terminate at the stored chain head.
+
 ## Worker runtime
 
 The worker binary runs the JetStream consumer plus in-process

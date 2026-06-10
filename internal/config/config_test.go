@@ -1,6 +1,7 @@
 package config
 
 import (
+	"bytes"
 	"os"
 	"strings"
 	"testing"
@@ -135,6 +136,11 @@ func requireEnv(t *testing.T, envs map[string]string) {
 		// e.g. SECURITY_HEADERS_EXPECT_CT=true can't bleed into tests
 		// asserting the profile default.
 		"SECURITY_HEADERS_CSP_NONCE", "SECURITY_HEADERS_EXPECT_CT",
+		// AUDIT_HMAC_KEY selects the audit-chain HMAC key source
+		// (6.6). Baseline-clear it so a runner exporting an explicit
+		// key cannot change the derived-from-JWT_SECRET default that
+		// TestDeriveAuditHMACKeyDefaultsToJWTSecret asserts.
+		"AUDIT_HMAC_KEY",
 	}
 	// WORKER_METRICS_ADDR is intentionally NOT included in the keys
 	// list above. t.Setenv(k, "") makes os.LookupEnv return
@@ -1073,6 +1079,63 @@ func TestLoadAuditArchiveDefaults(t *testing.T) {
 	}
 	if cfg.AuditArchiveMaxRowsPerBatch != 50000 {
 		t.Errorf("AuditArchiveMaxRowsPerBatch = %d, want 50000", cfg.AuditArchiveMaxRowsPerBatch)
+	}
+}
+
+// TestDeriveAuditHMACKeyDefaultsToJWTSecret: with no AUDIT_HMAC_KEY the
+// key must be derived from JWT_SECRET (32 bytes, source "derived") so a
+// fresh install is self-operating without extra config, while keeping
+// the key out of the database.
+func TestDeriveAuditHMACKeyDefaultsToJWTSecret(t *testing.T) {
+	requireEnv(t, map[string]string{
+		"DATABASE_URL": "postgres://localhost/zkdrive",
+		"JWT_SECRET":   "test-secret",
+	})
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.AuditHMACKeySource != AuditHMACKeySourceDerived {
+		t.Errorf("AuditHMACKeySource = %q, want %q", cfg.AuditHMACKeySource, AuditHMACKeySourceDerived)
+	}
+	if len(cfg.AuditHMACKey) != 32 {
+		t.Fatalf("AuditHMACKey len = %d, want 32", len(cfg.AuditHMACKey))
+	}
+	// Deriving twice from the same secret is stable, and a different
+	// JWT_SECRET yields a different key.
+	again, _ := deriveAuditHMACKey("", "test-secret")
+	if !bytes.Equal(again, cfg.AuditHMACKey) {
+		t.Error("derived key not stable for the same JWT_SECRET")
+	}
+	other, _ := deriveAuditHMACKey("", "different-secret")
+	if bytes.Equal(other, cfg.AuditHMACKey) {
+		t.Error("derived key did not change with JWT_SECRET")
+	}
+}
+
+// TestDeriveAuditHMACKeyExplicitWins: an explicit AUDIT_HMAC_KEY must be
+// used (source "explicit") and must differ from the JWT_SECRET-derived
+// key even when the same secret material is reused, thanks to distinct
+// HKDF info labels (domain separation).
+func TestDeriveAuditHMACKeyExplicitWins(t *testing.T) {
+	requireEnv(t, map[string]string{
+		"DATABASE_URL":   "postgres://localhost/zkdrive",
+		"JWT_SECRET":     "shared-secret",
+		"AUDIT_HMAC_KEY": "shared-secret",
+	})
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.AuditHMACKeySource != AuditHMACKeySourceExplicit {
+		t.Errorf("AuditHMACKeySource = %q, want %q", cfg.AuditHMACKeySource, AuditHMACKeySourceExplicit)
+	}
+	if len(cfg.AuditHMACKey) != 32 {
+		t.Fatalf("AuditHMACKey len = %d, want 32", len(cfg.AuditHMACKey))
+	}
+	derived, _ := deriveAuditHMACKey("", "shared-secret")
+	if bytes.Equal(cfg.AuditHMACKey, derived) {
+		t.Error("explicit and derived keys collide despite distinct HKDF info labels")
 	}
 }
 

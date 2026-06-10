@@ -119,6 +119,13 @@ func (s *Service) List(ctx context.Context, workspaceID uuid.UUID, action string
 	return s.repo.List(ctx, workspaceID, action, limit, offset)
 }
 
+// VerifyChain proxies to the repository's tamper-evident hash-chain
+// verification (6.6). Synchronous: the caller (admin endpoint /
+// periodic verifier) is asking for the result directly.
+func (s *Service) VerifyChain(ctx context.Context, workspaceID uuid.UUID) (*ChainVerification, error) {
+	return s.repo.VerifyChain(ctx, workspaceID)
+}
+
 // Close drains pending entries and stops the worker. Safe to call
 // more than once.
 func (s *Service) Close() {

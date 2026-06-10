@@ -1,6 +1,8 @@
 package config
 
 import (
+	"crypto/hkdf"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"os"
@@ -121,8 +123,8 @@ type Config struct {
 	// (declared alongside the middleware) when unset or <= 0. Sourced
 	// from AUTH_FAILURE_THRESHOLD, AUTH_BLOCK_DURATION,
 	// AUTH_REPUTATION_RETENTION.
-	AuthFailureThreshold   int
-	AuthBlockDuration      time.Duration
+	AuthFailureThreshold    int
+	AuthBlockDuration       time.Duration
 	AuthReputationRetention time.Duration
 
 	// TrustedProxyDepth is the number of trusted reverse proxies in
@@ -390,6 +392,27 @@ type Config struct {
 	// writes multiple JSONL.gz objects with distinct UUID
 	// suffixes — the restore tool joins them transparently.
 	AuditArchiveMaxRowsPerBatch int
+	// AuditHMACKey is the 32-byte key used to HMAC the audit-log
+	// hash chain (6.6): each audit_log row carries an HMAC over the
+	// previous row's hash, so any insertion / deletion / mutation
+	// is detectable by recomputing the chain — even by a DB admin,
+	// because the key never lives in the database. It is derived at
+	// load time, NEVER read from the DB:
+	//   - When AUDIT_HMAC_KEY is set, it is HKDF-expanded to 32
+	//     bytes (the raw env value is treated as input keying
+	//     material; any length is accepted). Operators SHOULD set a
+	//     dedicated key (ideally from a KMS / sealed secret) so the
+	//     audit chain stays verifiable across a JWT_SECRET rotation
+	//     and so a leaked JWT_SECRET cannot forge audit history.
+	//   - When unset, the key is HKDF-derived from JWT_SECRET (a
+	//     required, env-held secret) under a distinct info label so
+	//     a fresh install is self-operating (NoOps) with no extra
+	//     configuration while keeping the key out of the database.
+	// AuditHMACKeySource records which of the two paths produced the
+	// key so the server can log a one-line recommendation at
+	// startup when running on the derived fallback under production.
+	AuditHMACKey       []byte
+	AuditHMACKeySource string
 
 	// PerformanceCacheEnabled toggles the Redis-backed read-through
 	// cache in front of permission resolution (and, in future
@@ -570,6 +593,7 @@ func buildConfigFromEnv() *Config {
 	dbMaxConns := dbMaxConnsFromEnv()
 	platformAdmins, invalidPlatformAdmins := platformAdminUserIDsFromEnv()
 	profile := normaliseProfile(os.Getenv("ZKDRIVE_PROFILE"))
+	auditKey, auditKeySource := deriveAuditHMACKey(os.Getenv("AUDIT_HMAC_KEY"), os.Getenv("JWT_SECRET"))
 	return &Config{
 		DatabaseURL:                   os.Getenv("DATABASE_URL"),
 		JWTSecret:                     os.Getenv("JWT_SECRET"),
@@ -658,6 +682,8 @@ func buildConfigFromEnv() *Config {
 		AuditArchivePrefix:          normaliseArchivePrefix(getEnvDefault("AUDIT_LOG_ARCHIVE_PREFIX", "audit-archive/")),
 		AuditArchiveBucket:          strings.TrimSpace(os.Getenv("AUDIT_LOG_ARCHIVE_BUCKET")),
 		AuditArchiveMaxRowsPerBatch: clampAuditMaxRowsPerBatch(parseIntDefault(os.Getenv("AUDIT_LOG_ARCHIVE_MAX_ROWS_PER_BATCH"), defaultAuditArchiveMaxRowsPerBatch)),
+		AuditHMACKey:                auditKey,
+		AuditHMACKeySource:          auditKeySource,
 
 		PerformanceCacheEnabled: parseBoolDefault(os.Getenv("PERFORMANCE_CACHE_ENABLED"), defaultPerformanceCacheEnabled),
 		PerformanceCacheTTL:     clampPerformanceCacheTTL(parseDurationDefault(os.Getenv("PERFORMANCE_CACHE_TTL"), defaultPerformanceCacheTTL)),
@@ -1066,6 +1092,44 @@ func normaliseProfile(s string) string {
 // hardened production profile.
 func (c *Config) IsProduction() bool {
 	return c.Profile == ProfileProduction
+}
+
+// Audit HMAC key derivation constants (6.6). The key length is the
+// SHA-256 output size; the info labels are domain separators so the
+// explicit-key and JWT_SECRET-derived keys are distinct even if an
+// operator (mis)uses the same secret material for both.
+const (
+	auditHMACKeyLen            = sha256.Size
+	auditHMACInfoExplicit      = "zk-drive/audit-log-hmac/explicit/v1"
+	auditHMACInfoDerived       = "zk-drive/audit-log-hmac/derived-from-jwt-secret/v1"
+	AuditHMACKeySourceExplicit = "explicit"
+	AuditHMACKeySourceDerived  = "derived"
+)
+
+// deriveAuditHMACKey produces the 32-byte audit-chain HMAC key and
+// reports its provenance. An explicit AUDIT_HMAC_KEY (any length) is
+// HKDF-expanded; otherwise the key is HKDF-derived from JWT_SECRET
+// under a distinct info label. The key is intentionally derived in
+// process from env-held material and never persisted, so a DB admin
+// cannot forge the chain. HKDF is keyed by SHA-256; the only error it
+// can return is for an absurd output length, which is impossible with
+// the fixed 32-byte constant — but we fall back to a plain SHA-256 of
+// (label || secret) defensively rather than returning a nil key.
+func deriveAuditHMACKey(explicit, jwtSecret string) (key []byte, source string) {
+	explicit = strings.TrimSpace(explicit)
+	if explicit != "" {
+		return hkdfExpand([]byte(explicit), auditHMACInfoExplicit), AuditHMACKeySourceExplicit
+	}
+	return hkdfExpand([]byte(jwtSecret), auditHMACInfoDerived), AuditHMACKeySourceDerived
+}
+
+func hkdfExpand(secret []byte, info string) []byte {
+	k, err := hkdf.Key(sha256.New, secret, nil, info, auditHMACKeyLen)
+	if err != nil {
+		sum := sha256.Sum256(append([]byte(info+"\x00"), secret...))
+		return sum[:]
+	}
+	return k
 }
 
 // jwtAlgorithmFromEnv resolves the effective JWT signing algorithm

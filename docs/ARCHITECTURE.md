@@ -249,6 +249,13 @@ per-request check stays effectively read-only on the hot path.
 - `POST /api/admin/users`
 - `DELETE /api/admin/users/:id`
 - `GET /api/admin/audit-log`
+- `GET /api/admin/audit-log/verify` — recomputes the per-workspace
+  audit-log HMAC hash chain and returns `{valid, rows_checked,
+  head_seq, first_invalid_seq, detail}`. `valid:false` means the
+  request succeeded but a row was inserted/deleted/mutated out of
+  band (detectable even against a DB admin, since the HMAC key is
+  env-derived and never stored). See
+  [`CONFIGURATION.md`](CONFIGURATION.md#audit-log-tamper-evidence-hash-chain).
 - `GET /api/admin/storage-usage`
 - `GET /api/admin/billing/plan` — current plan tier and limits.
 - `PUT /api/admin/billing/plan` — manual tier override (e.g. for
