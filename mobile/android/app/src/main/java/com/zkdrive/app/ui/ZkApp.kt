@@ -39,7 +39,10 @@ fun ZkApp(
     navController: NavHostController = rememberNavController(),
 ) {
     val backStackEntry by navController.currentBackStackEntryAsState()
-    val currentRoute = backStackEntry?.destination?.route
+    // Registered routes carry their argument template (e.g.
+    // "browser?folderId={folderId}&folderName={folderName}"); strip the query
+    // template so we match against the bare destination ids in TOP_LEVEL_ROUTES.
+    val currentRoute = backStackEntry?.destination?.route?.substringBefore('?')
     val showBottomBar = currentRoute in TOP_LEVEL_ROUTES
 
     Scaffold(
@@ -48,7 +51,9 @@ fun ZkApp(
                 NavigationBar {
                     val destination = backStackEntry?.destination
                     TopLevelDestination.entries.forEach { dest ->
-                        val selected = destination?.hierarchy?.any { it.route == dest.route } == true
+                        val selected = destination?.hierarchy?.any {
+                            it.route?.substringBefore('?') == dest.route
+                        } == true
                         NavigationBarItem(
                             selected = selected,
                             onClick = {

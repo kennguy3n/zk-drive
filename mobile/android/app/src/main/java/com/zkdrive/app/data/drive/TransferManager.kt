@@ -105,7 +105,7 @@ class TransferManager @Inject constructor(
             // Persist the DEK only AFTER the version is confirmed. If the PUT or the
             // confirm fails (or the worker is retried) we never wrote a key, so a
             // failed upload can't leave an orphaned DEK that no version references.
-            pendingEnvelope?.let { keyStore.put(target.objectKey, it) }
+            pendingEnvelope?.let { keyStore.put(target.fileId, target.objectKey, it) }
 
             session.syncEngine.upsert(
                 FileEntry(

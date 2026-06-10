@@ -16,6 +16,7 @@ import com.zkdrive.app.ui.MainActivity
 import dagger.hilt.android.AndroidEntryPoint
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.launch
+import java.util.concurrent.atomic.AtomicInteger
 import javax.inject.Inject
 
 /**
@@ -70,7 +71,15 @@ class ZkFirebaseMessagingService : FirebaseMessagingService() {
             .setAutoCancel(true)
             .setContentIntent(pending)
             .build()
+        // A monotonic id keeps each push as its own notification. body.hashCode()
+        // collided (distinct messages with the same hash silently replaced each
+        // other) and could even hit 0/negative ids.
         getSystemService(NotificationManager::class.java)
-            .notify(body.hashCode(), notification)
+            .notify(nextNotificationId.getAndIncrement(), notification)
+    }
+
+    companion object {
+        /** Process-wide counter so concurrent pushes get distinct notification ids. */
+        private val nextNotificationId = AtomicInteger(1)
     }
 }

@@ -25,13 +25,17 @@ import javax.inject.Singleton
 class DriveRepository @Inject constructor(
     private val api: ZkDriveApi,
     private val bridgeHolder: BridgeHolder,
+    private val keyStore: FileKeyStore,
     @IoDispatcher private val io: CoroutineDispatcher,
 ) {
     private val workspaceId: String get() = bridgeHolder.require().workspaceId
 
     /** Root listing: top-level folders for the active workspace. */
     suspend fun listRoot(): FolderContents = withContext(io) {
-        val folders = api.listFolders("root").folders.map { it.toNode() }
+        // null == root, the same convention createFolder uses for a root parent.
+        // Retrofit omits null @Query params, and the server maps an absent
+        // parent_folder_id to the workspace root (see ListFolders handler).
+        val folders = api.listFolders(parentFolderId = null).folders.map { it.toNode() }
         FolderContents(folder = null, folders = folders, files = emptyList())
     }
 
@@ -70,7 +74,12 @@ class DriveRepository @Inject constructor(
 
     suspend fun deleteFolder(folderId: String) = withContext(io) { api.deleteFolder(folderId) }
 
-    suspend fun deleteFile(fileId: String) = withContext(io) { api.deleteFile(fileId) }
+    suspend fun deleteFile(fileId: String) = withContext(io) {
+        api.deleteFile(fileId)
+        // Purge any device-local DEKs for this file's versions so deleting a
+        // strict-ZK file doesn't leave orphaned key envelopes behind.
+        keyStore.removeForFile(fileId)
+    }
 
     private fun FolderDto.toNode() = FolderNode(
         id = id,

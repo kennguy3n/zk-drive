@@ -5,6 +5,7 @@ import android.content.Intent
 import com.zkdrive.app.bridge.BridgeHolder
 import com.zkdrive.app.bridge.BridgeSession
 import com.zkdrive.app.config.AppConfig
+import com.zkdrive.app.data.drive.FileKeyStore
 import com.zkdrive.app.data.remote.dto.WorkspacesEnvelope
 import com.zkdrive.app.data.settings.SettingsRepository
 import com.zkdrive.app.data.sync.SyncScheduler
@@ -54,6 +55,7 @@ class AuthRepository @Inject constructor(
     private val bridgeHolder: BridgeHolder,
     private val settings: SettingsRepository,
     private val syncScheduler: SyncScheduler,
+    private val fileKeyStore: FileKeyStore,
     private val json: Json,
     @Named("plain") private val httpClient: OkHttpClient,
     @IoDispatcher private val io: CoroutineDispatcher,
@@ -87,16 +89,17 @@ class AuthRepository @Inject constructor(
         val result = oauth.exchange(data)
         val (api, tokenManager) = buildAuthedClients(result.tokens, result.tokenEndpoint)
         val workspaceId: String
+        var engine: SyncEngine? = null
         try {
             workspaceId = fetchPrimaryWorkspaceId(result.tokens.accessToken)
-            val engine = buildSyncEngine(workspaceId, api)
+            engine = buildSyncEngine(workspaceId, api)
             // install() takes ownership of the native handles from here on.
             bridgeHolder.install(BridgeSession(tokenManager, api, engine, workspaceId))
         } catch (t: Throwable) {
             // The session was never installed, so nothing else will dispose these
             // native handles — close them here to avoid leaking Rust-side objects
             // (UniFFI's JVM Cleaner can't see handles we drop on the floor).
-            closeQuietly(api, tokenManager)
+            closeQuietly(api, tokenManager, engine)
             throw t
         }
 
@@ -124,12 +127,13 @@ class AuthRepository @Inject constructor(
     /** Re-establish a session from encrypted storage (no network round-trip). */
     private suspend fun establishFromPersisted(persisted: PersistedSession) {
         val (api, tokenManager) = buildAuthedClients(persisted.tokens, persisted.tokenEndpoint)
+        var engine: SyncEngine? = null
         try {
-            val engine = buildSyncEngine(persisted.workspaceId, api)
+            engine = buildSyncEngine(persisted.workspaceId, api)
             bridgeHolder.install(BridgeSession(tokenManager, api, engine, persisted.workspaceId))
         } catch (t: Throwable) {
             // Never installed — release the native handles to avoid a leak.
-            closeQuietly(api, tokenManager)
+            closeQuietly(api, tokenManager, engine)
             throw t
         }
         _state.value = AuthState.Authenticated(persisted.profile, persisted.workspaceId)
@@ -138,7 +142,15 @@ class AuthRepository @Inject constructor(
     /** Persist the latest token snapshot (after a transparent refresh). */
     fun persistTokenSnapshot() {
         val session = bridgeHolder.current() ?: return
-        session.tokenManager.snapshot()?.let(tokenStore::updateTokens)
+        // Lease the session so a concurrent logout can't dispose the native
+        // TokenManager between the current() read and the snapshot() call
+        // (this runs on the main thread from MainActivity.onStop()).
+        if (!session.acquire()) return
+        try {
+            session.tokenManager.snapshot()?.let(tokenStore::updateTokens)
+        } finally {
+            session.release()
+        }
     }
 
     /** Tear everything down and return to the login screen. */
@@ -148,11 +160,16 @@ class AuthRepository @Inject constructor(
         syncScheduler.cancel()
         bridgeHolder.clear()
         tokenStore.clear()
+        // Wipe device-local DEKs so the next account on this device can't reach
+        // the previous user's strict-ZK keys (multi-tenant privacy).
+        fileKeyStore.clear()
         _state.value = AuthState.SignedOut
     }
 
     /** Close native bridge handles, swallowing teardown errors. */
-    private fun closeQuietly(api: ApiClient, tokenManager: TokenManager) {
+    private fun closeQuietly(api: ApiClient, tokenManager: TokenManager, engine: SyncEngine? = null) {
+        // Engine borrows the api client, so dispose it first (matches BridgeSession).
+        runCatching { engine?.close() }
         runCatching { api.close() }
         runCatching { tokenManager.close() }
     }
