@@ -1,0 +1,8 @@
+/target
+/build
+
+# The repo-root .gitignore has a broad `bin/` rule that would otherwise
+# swallow our UniFFI binding-generator binary. It is required by
+# build-android.sh / build-ios.sh and CI, so force it back in.
+!/src/bin/
+!/src/bin/uniffi-bindgen.rs

@@ -68,6 +68,7 @@ type Handler struct {
 	jobs           *jobs.Publisher
 	notifications  *notification.Service
 	webpush        *notification.WebPushService
+	mobilePush     *notification.MobilePushService
 	email          *email.Service
 	previews       preview.Repository
 	audit          *audit.Service
@@ -89,8 +90,17 @@ type Handler struct {
 	onlyOfficeSaveSem          chan struct{}
 	onlyOfficeMaxDocumentBytes int64
 	onlyOfficeSaveConcurrency  int
-	tagSuggest                 TagSuggester
-	queryExpand                QueryExpander
+	// onlyOfficeStreamSaveSem optionally bounds concurrency on the
+	// constant-memory streaming save path (distinct from
+	// onlyOfficeSaveSem, which guards the buffered fallback). nil means
+	// UNLIMITED — the default, preserving the streaming path's unbounded
+	// concurrency. Sized by WithOnlyOfficeStreamSaveConcurrency from
+	// config.OnlyOfficeStreamSaveMaxConcurrent. onlyOfficeStreamSaveLimit
+	// retains the capacity for startup logging (0 == unlimited).
+	onlyOfficeStreamSaveSem   chan struct{}
+	onlyOfficeStreamSaveLimit int
+	tagSuggest                TagSuggester
+	queryExpand               QueryExpander
 	// features resolves the active feature set for a workspace
 	// (progressive feature disclosure). A nil *feature.Service is a
 	// valid receiver that resolves every workspace to the Free-tier
@@ -361,6 +371,15 @@ func (h *Handler) WithNotifications(s *notification.Service) *Handler {
 // this handler.
 func (h *Handler) WithWebPush(s *notification.WebPushService) *Handler {
 	h.webpush = s
+	return h
+}
+
+// WithMobilePush wires the native-mobile push service so the
+// /api/push/register-device endpoint can persist APNs / FCM device
+// tokens. A nil service (no provider configured) leaves the endpoint
+// responding 501, mirroring WithWebPush.
+func (h *Handler) WithMobilePush(s *notification.MobilePushService) *Handler {
+	h.mobilePush = s
 	return h
 }
 
