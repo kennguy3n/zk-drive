@@ -188,7 +188,23 @@ env:
     value: postgres://zkdrive@pgbouncer-write:6432/zkdrive?sslmode=disable
   - name: DATABASE_READ_URL     # read pool → replica(s)
     value: postgres://zkdrive@pgbouncer-read:6432/zkdrive?sslmode=disable
+  # Optional: size the read pool independently of the primary. Unset →
+  # inherits DB_MAX_CONNS / DB_MIN_CONNS (both pools identical). Reads
+  # are offloaded asymmetrically, so a read-heavy fleet typically wants
+  # a larger read pool than write pool.
+  - name: DB_MAX_CONNS          # write pool size (per process)
+    value: "20"
+  - name: DB_READ_MAX_CONNS     # read pool size (per process)
+    value: "60"
 ```
+
+When sizing, apply the same per-process math to each pool separately:
+peak primary backends ≈ `replicas × DB_MAX_CONNS`, and peak replica
+backends ≈ `replicas × DB_READ_MAX_CONNS`. Size each PgBouncer's
+`default_pool_size` / `max_db_connections` against its own pool's
+worst case. `DB_READ_MAX_CONNS` is clamped to `[2, 200]` and
+`DB_READ_MIN_CONNS` to `[0, DB_READ_MAX_CONNS]`; the read pool reuses
+`DB_MAX_CONN_IDLE_TIME`.
 
 `sslmode=disable` is fine **inside** the cluster mesh when traffic to
 PgBouncer stays on a private network with mTLS at the mesh layer; use

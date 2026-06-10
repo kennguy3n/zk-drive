@@ -26,7 +26,9 @@ import (
 // loudly. The list mirrors migrations/024_row_level_security.up.sql
 // (direct + workspaces + version/preview chains) plus change_log,
 // which migration 033_partition_large_tables.up.sql brings under the
-// tenant_isolation policy when it hash-partitions the table.
+// tenant_isolation policy when it hash-partitions the table, plus the
+// push-subscription tables webpush_subscriptions (migration 038) and
+// device_push_tokens (migration 039), which carry the same policy.
 var rlsTenantTables = []string{
 	"workspaces",
 	"users",
@@ -48,6 +50,8 @@ var rlsTenantTables = []string{
 	"usage_events",
 	"workspace_storage_credentials",
 	"kchat_room_folders",
+	"webpush_subscriptions",
+	"device_push_tokens",
 }
 
 // ensureRLSTestRole creates rls_test_role idempotently and grants

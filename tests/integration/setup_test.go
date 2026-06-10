@@ -312,11 +312,20 @@ func setupEnv(t *testing.T) *testEnv {
 		tagSuggestSvc = tagSuggestSvc.WithLLM(ollamaClient)
 		queryExpandSvc = queryExpandSvc.WithLLM(ollamaClient)
 	}
+	// Mobile push service backed by the same notification repository, with
+	// a stub provider registered for each platform so the
+	// /api/push/register-device endpoint is enabled (delivery is not
+	// exercised here — registration only persists tokens).
+	mobilePushSvc := notification.NewMobilePushService(notification.NewPostgresRepository(pool)).
+		WithProvider(stubMobileProvider{platform: notification.PlatformIOS}).
+		WithProvider(stubMobileProvider{platform: notification.PlatformAndroid})
+
 	driveHandler := drive.NewHandler(pool, wsSvc, folderSvc, fileSvc, userSvc, storageClient, permissionSvc, activitySvc).
 		WithSharing(sharingSvc).
 		WithSearch(searchSvc).
 		WithClientRooms(clientRoomSvc).
 		WithNotifications(notificationSvc).
+		WithMobilePush(mobilePushSvc).
 		WithPreviews(previewRepo).
 		WithAudit(auditSvc).
 		WithBilling(billingSvc).
@@ -556,6 +565,9 @@ func setupEnv(t *testing.T) *testEnv {
 			r.Post("/notifications/read-all", driveHandler.MarkAllNotificationsRead)
 			r.Post("/notifications/{id}/read", driveHandler.MarkNotificationRead)
 
+			r.Post("/push/register-device", driveHandler.RegisterDevice)
+			r.Delete("/push/register-device", driveHandler.UnregisterDevice)
+
 			r.Get("/activity", driveHandler.ListActivity)
 		})
 
@@ -637,8 +649,11 @@ func (e *testEnv) ResetTables() {
 		// producing flaky "subscription already exists" / counter
 		// drift symptoms that are hard to diagnose. Same defensive
 		// reason kchat_room_folders is listed even though it
-		// cascades from client_rooms.
-		`TRUNCATE webhook_deliveries, webhook_subscriptions, kchat_room_folders, workspace_storage_credentials, workspace_plans, usage_events, file_tags, retention_policies, audit_log, notifications, file_previews, client_rooms, guest_invites, share_links, activity_log, permissions, file_versions, files, folders, users, workspaces RESTART IDENTITY CASCADE`,
+		// cascades from client_rooms, and device_push_tokens
+		// (mobile push, migration 039) / webpush_subscriptions
+		// (browser push, migration 038) even though both cascade
+		// from workspaces / users.
+		`TRUNCATE webhook_deliveries, webhook_subscriptions, kchat_room_folders, workspace_storage_credentials, workspace_plans, usage_events, file_tags, retention_policies, audit_log, notifications, device_push_tokens, webpush_subscriptions, file_previews, client_rooms, guest_invites, share_links, activity_log, permissions, file_versions, files, folders, users, workspaces RESTART IDENTITY CASCADE`,
 		`ALTER TABLE workspaces ADD CONSTRAINT fk_workspaces_owner FOREIGN KEY (owner_user_id) REFERENCES users(id)`,
 	}
 	for _, s := range stmts {
@@ -792,6 +807,20 @@ func (e *testEnv) login(email, password string) tokenPayload {
 	var tok tokenPayload
 	e.decodeJSON(body, &tok)
 	return tok
+}
+
+// stubMobileProvider satisfies notification.MobilePushProvider for the
+// integration harness. It enables the /api/push/register-device endpoint
+// (which only needs a provider to exist for the platform) without making
+// any network calls; Send is a delivered no-op.
+type stubMobileProvider struct {
+	platform notification.Platform
+}
+
+func (s stubMobileProvider) Platform() notification.Platform { return s.platform }
+
+func (s stubMobileProvider) Send(_ context.Context, _ string, _ notification.NotificationPayload) (bool, error) {
+	return false, nil
 }
 
 type tokenPayload struct {

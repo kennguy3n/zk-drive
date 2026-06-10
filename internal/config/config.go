@@ -40,6 +40,24 @@ type Config struct {
 	DBMinConns        int32
 	DBMaxConnIdleTime time.Duration
 
+	// Read-replica connection-pool sizing. These tune the SECOND
+	// pgxpool that cmd/server opens against DATABASE_READ_URL (the
+	// replica feeding the ReadWriteSplitter). Sourced from
+	// DB_READ_MAX_CONNS and DB_READ_MIN_CONNS, clamped with the same
+	// bounds as the primary ([2, 200] / [0, DBReadMaxConns]).
+	//
+	// When their env vars are unset, each INHERITS the primary's
+	// resolved value (DBReadMaxConns = DBMaxConns, DBReadMinConns =
+	// DBMinConns), so deployments that don't set them keep the prior
+	// behaviour exactly (both pools sized identically). They exist so an
+	// operator who offloads reads to the replica can size the read pool
+	// larger — or a small replica smaller — than the primary WITHOUT
+	// changing code. The replica idle timeout intentionally reuses
+	// DBMaxConnIdleTime (no separate knob) to keep the surface minimal;
+	// idle reaping is uniform across both pools.
+	DBReadMaxConns int32
+	DBReadMinConns int32
+
 	// JWTAlgorithm selects the session-token signing algorithm:
 	//   - "auto": sign with ES256 when an active asymmetric
 	//     signing key exists in jwt_signing_keys, otherwise fall back
@@ -529,6 +547,47 @@ type Config struct {
 	// reports reach them.
 	VAPIDSubscriber string
 
+	// Native mobile push (APNs for iOS, FCM for Android). Each provider is
+	// independently optional: when its credentials are unset that platform
+	// is simply disabled (the publisher skips it and
+	// /api/push/register-device responds 501 for that platform), so the
+	// rest of the notification path keeps working. Provider construction
+	// (reading the key files, parsing the keys) happens in
+	// cmd/server/main.go where IO errors are already logged; Config only
+	// carries the raw env inputs.
+
+	// FCMServiceAccountJSON is the inline Google service-account key JSON
+	// used to authenticate to the FCM HTTP v1 API. Set via
+	// FCM_SERVICE_ACCOUNT_JSON. Mutually exclusive with the file form;
+	// the inline form takes precedence when both are set.
+	FCMServiceAccountJSON string
+	// FCMServiceAccountFile is a path to the service-account key JSON,
+	// for deployments that mount the key as a file. Set via
+	// FCM_SERVICE_ACCOUNT_FILE.
+	FCMServiceAccountFile string
+
+	// APNsAuthKey is the inline contents of the APNs .p8 token-auth signing
+	// key (PEM). Set via APNS_AUTH_KEY. Mutually exclusive with the file
+	// form; inline takes precedence when both are set.
+	APNsAuthKey string
+	// APNsAuthKeyFile is a path to the .p8 key file. Set via
+	// APNS_AUTH_KEY_FILE.
+	APNsAuthKeyFile string
+	// APNsKeyID is the 10-char Key ID of the .p8 key (Apple Developer →
+	// Keys). Set via APNS_KEY_ID.
+	APNsKeyID string
+	// APNsTeamID is the 10-char Apple Developer Team ID. Set via
+	// APNS_TEAM_ID.
+	APNsTeamID string
+	// APNsTopic is the iOS app's bundle identifier (the APNs topic). Set
+	// via APNS_TOPIC.
+	APNsTopic string
+	// APNsProduction selects the production APNs host (api.push.apple.com)
+	// over the sandbox host (api.sandbox.push.apple.com). Set via
+	// APNS_PRODUCTION; defaults to false (sandbox) so a misconfiguration
+	// cannot accidentally target production devices.
+	APNsProduction bool
+
 	// OnlyOfficeURL is the base URL of the ONLYOFFICE Document Server
 	// (e.g. "https://onlyoffice.example.com"). When empty,
 	// collaborative office-document editing is disabled: the
@@ -567,6 +626,26 @@ type Config struct {
 	// cap or the server refuses to start (a budget below one document
 	// would shed every save).
 	OnlyOfficeSaveMemoryBudgetBytes int64
+
+	// OnlyOfficeStreamSaveMaxConcurrent optionally caps how many save
+	// callbacks may stream to object storage concurrently. The streaming
+	// save path uses constant memory (it relays the Document Server body
+	// straight into a presigned PUT), so it is intentionally NOT bounded
+	// by the memory-derived OnlyOfficeMaxConcurrentSaves gate that
+	// protects the buffered fallback. That makes concurrent streaming
+	// saves effectively unlimited — exactly the WS5 goal — but a burst of
+	// editors closing documents at once can still translate into many
+	// simultaneous PUTs to the storage gateway and GETs to the Document
+	// Server cache. This knob lets an operator put a high-watermark cap
+	// on that concurrency without reintroducing a memory budget: a save
+	// beyond the cap is shed with a retryable 503 (the Document Server
+	// keeps the bytes and retries), never blocked.
+	//
+	// Sourced from ONLYOFFICE_STREAM_SAVE_MAX_CONCURRENT. 0 (the default,
+	// also the value for an unset/negative/malformed var) means
+	// UNLIMITED — preserving the prior behaviour exactly. A positive
+	// value sizes the streaming-save semaphore.
+	OnlyOfficeStreamSaveMaxConcurrent int
 
 	// SuspensionFailClosed flips the workspace-suspension enforcement
 	// posture from fail-OPEN (default) to fail-CLOSED. Suspension is an
@@ -617,6 +696,23 @@ func (c *Config) OnlyOfficeMaxConcurrentSaves() int {
 // WebSocket notification path only.
 func (c *Config) WebPushEnabled() bool {
 	return c.VAPIDPublicKey != "" && c.VAPIDPrivateKey != ""
+}
+
+// FCMConfigured reports whether an FCM service-account key is supplied
+// (inline or file). The server attempts to build the FCM provider only
+// when true; a parse failure still disables FCM (logged) without
+// aborting startup.
+func (c *Config) FCMConfigured() bool {
+	return c.FCMServiceAccountJSON != "" || c.FCMServiceAccountFile != ""
+}
+
+// APNsConfigured reports whether the full APNs token-auth credential set
+// is supplied: a signing key (inline or file) plus key id, team id and
+// topic. A partial set is treated as unconfigured so APNs stays disabled
+// rather than starting with a guaranteed-to-fail provider.
+func (c *Config) APNsConfigured() bool {
+	hasKey := c.APNsAuthKey != "" || c.APNsAuthKeyFile != ""
+	return hasKey && c.APNsKeyID != "" && c.APNsTeamID != "" && c.APNsTopic != ""
 }
 
 // Load reads configuration from environment variables and returns a populated
@@ -672,6 +768,15 @@ func buildConfigFromEnv() *Config {
 	// Read DB_MAX_CONNS once: DBMinConns is clamped against the same
 	// resolved maximum, so re-reading the env var would be redundant.
 	dbMaxConns := dbMaxConnsFromEnv()
+	dbMinConns := dbMinConnsFromEnv(dbMaxConns)
+	// Read-replica pool sizing inherits the primary's resolved values
+	// when its env vars are unset (read max from primary max, read min
+	// from primary min), so an unconfigured deployment sizes both pools
+	// identically — exactly the prior behaviour. read-min is finally
+	// clamped against the RESOLVED read-max so an inherited primary min
+	// can never exceed a smaller, explicitly-set read max.
+	dbReadMaxConns := dbReadMaxConnsFromEnv(dbMaxConns)
+	dbReadMinConns := dbReadMinConnsFromEnv(dbMinConns, dbReadMaxConns)
 	platformAdmins, invalidPlatformAdmins := platformAdminUserIDsFromEnv()
 	profile := normaliseProfile(os.Getenv("ZKDRIVE_PROFILE"))
 	auditKey, auditKeySource := deriveAuditHMACKey(os.Getenv("AUDIT_HMAC_KEY"), os.Getenv("JWT_SECRET"))
@@ -681,8 +786,10 @@ func buildConfigFromEnv() *Config {
 		JWTSecret:                              os.Getenv("JWT_SECRET"),
 		Profile:                                string(profile),
 		DBMaxConns:                             dbMaxConns,
-		DBMinConns:                             dbMinConnsFromEnv(dbMaxConns),
+		DBMinConns:                             dbMinConns,
 		DBMaxConnIdleTime:                      parseDurationDefault(os.Getenv("DB_MAX_CONN_IDLE_TIME"), defaultDBMaxConnIdleTime),
+		DBReadMaxConns:                         dbReadMaxConns,
+		DBReadMinConns:                         dbReadMinConns,
 		JWTAlgorithm:                           jwtAlgorithmFromEnv(os.Getenv("JWT_ALGORITHM"), profile),
 		JWTKeyRefreshInterval:                  jwtKeyRefreshIntervalFromEnv(),
 		PlatformAdminUserIDs:                   platformAdmins,
@@ -785,11 +892,24 @@ func buildConfigFromEnv() *Config {
 		VAPIDPrivateKey: strings.TrimSpace(os.Getenv("VAPID_PRIVATE_KEY")),
 		VAPIDSubscriber: strings.TrimSpace(os.Getenv("VAPID_SUBSCRIBER")),
 
+		FCMServiceAccountJSON: os.Getenv("FCM_SERVICE_ACCOUNT_JSON"),
+		FCMServiceAccountFile: strings.TrimSpace(os.Getenv("FCM_SERVICE_ACCOUNT_FILE")),
+
+		APNsAuthKey:     os.Getenv("APNS_AUTH_KEY"),
+		APNsAuthKeyFile: strings.TrimSpace(os.Getenv("APNS_AUTH_KEY_FILE")),
+		APNsKeyID:       strings.TrimSpace(os.Getenv("APNS_KEY_ID")),
+		APNsTeamID:      strings.TrimSpace(os.Getenv("APNS_TEAM_ID")),
+		APNsTopic:       strings.TrimSpace(os.Getenv("APNS_TOPIC")),
+		APNsProduction:  parseBoolDefault(os.Getenv("APNS_PRODUCTION"), false),
+
 		OnlyOfficeURL:                   strings.TrimSpace(os.Getenv("ONLYOFFICE_URL")),
 		OnlyOfficeSecret:                os.Getenv("ONLYOFFICE_SECRET"),
 		OnlyOfficeAllowInsecure:         parseBoolDefault(os.Getenv("ONLYOFFICE_ALLOW_INSECURE"), false),
 		OnlyOfficeMaxDocumentBytes:      onlyOfficeBytesFromEnv("ONLYOFFICE_MAX_DOCUMENT_MB", defaultOnlyOfficeMaxDocumentMB),
 		OnlyOfficeSaveMemoryBudgetBytes: onlyOfficeBytesFromEnv("ONLYOFFICE_SAVE_MEMORY_BUDGET_MB", defaultOnlyOfficeSaveMemoryBudgetMB),
+		// Default 0 = unlimited (preserves the streaming path's
+		// unbounded-concurrency behaviour); negative/malformed also → 0.
+		OnlyOfficeStreamSaveMaxConcurrent: parseNonNegativeIntDefault(os.Getenv("ONLYOFFICE_STREAM_SAVE_MAX_CONCURRENT"), 0),
 
 		SuspensionFailClosed: parseBoolDefault(os.Getenv("SUSPENSION_FAIL_CLOSED"), false),
 
@@ -1201,6 +1321,51 @@ func hkdfExpand(secret []byte, info string) []byte {
 		return sum[:]
 	}
 	return k
+}
+
+// dbReadMaxConnsFromEnv resolves the read-replica pool's MaxConns.
+// DB_READ_MAX_CONNS is unset for the common case (one shared sizing),
+// so an empty value INHERITS primaryMax — keeping both pools identical
+// and preserving the pre-knob behaviour. A set value is clamped to the
+// same [minDBMaxConns, maxDBMaxConns] bounds as the primary so a typo
+// can neither starve the read pool nor exhaust the replica's
+// max_connections. Note the inherit branch returns primaryMax verbatim
+// (already clamped by dbMaxConnsFromEnv), not the raw default, so the
+// two pools stay in lockstep when only DB_MAX_CONNS is tuned.
+func dbReadMaxConnsFromEnv(primaryMax int32) int32 {
+	s := strings.TrimSpace(os.Getenv("DB_READ_MAX_CONNS"))
+	if s == "" {
+		return primaryMax
+	}
+	n := parseIntDefault(s, int(primaryMax))
+	if n < minDBMaxConns {
+		n = minDBMaxConns
+	}
+	if n > maxDBMaxConns {
+		n = maxDBMaxConns
+	}
+	return int32(n)
+}
+
+// dbReadMinConnsFromEnv resolves the read-replica pool's MinConns.
+// DB_READ_MIN_CONNS unset INHERITS primaryMin; a set value honours an
+// explicit 0 (lazy pool) and ignores a negative (default retained),
+// mirroring dbMinConnsFromEnv. The result is finally clamped to
+// readMax so MinConns can never exceed the read pool's MaxConns —
+// critical because an inherited primaryMin could otherwise exceed a
+// smaller, explicitly-set DB_READ_MAX_CONNS and make pgxpool reject the
+// config at NewWithConfig time.
+func dbReadMinConnsFromEnv(primaryMin, readMax int32) int32 {
+	n := primaryMin
+	if s := strings.TrimSpace(os.Getenv("DB_READ_MIN_CONNS")); s != "" {
+		if v, err := strconv.Atoi(s); err == nil && v >= 0 {
+			n = int32(v)
+		}
+	}
+	if n > readMax {
+		return readMax
+	}
+	return n
 }
 
 // jwtAlgorithmFromEnv resolves the effective JWT signing algorithm
