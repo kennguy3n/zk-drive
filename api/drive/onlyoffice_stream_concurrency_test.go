@@ -1,9 +1,23 @@
 package drive
 
 import (
+	"errors"
 	"sync"
 	"testing"
 )
+
+// TestStreamSaveBusySentinelDistinct pins that the streaming-save shed
+// sentinel is a DISTINCT error from the buffered-fallback one. The
+// callback handler keys its log line (and which limit it reports) off
+// errors.Is against each, so conflating them would resurface the
+// "streaming shed logs the buffered limit" bug.
+func TestStreamSaveBusySentinelDistinct(t *testing.T) {
+	t.Parallel()
+	if errors.Is(errOnlyOfficeStreamSaveBusy, errOnlyOfficeSaveBusy) ||
+		errors.Is(errOnlyOfficeSaveBusy, errOnlyOfficeStreamSaveBusy) {
+		t.Fatal("streaming and buffered save-busy sentinels must be distinct")
+	}
+}
 
 // TestWithOnlyOfficeStreamSaveConcurrency pins the builder contract:
 // n <= 0 leaves the streaming-save path UNLIMITED (nil semaphore, the

@@ -131,6 +131,32 @@ func requireEnv(t *testing.T, envs map[string]string) {
 		// DB_READ_MAX_CONNS=2 cannot bleed into the inherit-path tests.
 		"DB_READ_MAX_CONNS", "DB_READ_MIN_CONNS",
 		"JWT_ALGORITHM", "JWT_KEY_REFRESH_INTERVAL",
+		// Pre-existing env vars that buildConfigFromEnv reads but were
+		// never baseline-cleared (closing the gap the WS5-follow-up
+		// review flagged). Each is read via os.Getenv / strings.TrimSpace
+		// / parse{,NonNegative}IntDefault / parseBoolDefault, all of
+		// which treat an empty value identically to unset → the safe
+		// default (no replica / OIDC disabled / web-push disabled / proxy
+		// off / default worker counts), so clearing them to "" here just
+		// pins the production "unset" state and cannot bleed a CI runner's
+		// export into the default-path tests. WORKER_METRICS_ADDR is the
+		// sole intentional exception (handled via Unsetenv above, since
+		// for it empty != unset).
+		//   - DATABASE_READ_URL: read-replica DSN (empty → primary only).
+		//   - IAM_CORE_*: OIDC SSO config (all empty → SSO disabled).
+		//   - PREVIEW_LIGHTWEIGHT/HEAVY/WORKER_CONCURRENCY/HEAVY_QUEUE_*:
+		//     WS5 preview-fleet sizing (empty → clamped defaults).
+		//   - TRUSTED_PROXY_DEPTH: X-Forwarded-For trust depth.
+		//   - VAPID_*: Web Push keys (empty → push disabled).
+		//   - WS_PROXY_MODE: WS proxy-tier toggle (empty → in-process hub).
+		"DATABASE_READ_URL",
+		"IAM_CORE_ISSUER_URL", "IAM_CORE_CLIENT_ID", "IAM_CORE_CLIENT_SECRET",
+		"IAM_CORE_CALLBACK_URL", "IAM_CORE_AUDIENCE", "IAM_CORE_SCOPES",
+		"PREVIEW_LIGHTWEIGHT_WORKERS", "PREVIEW_HEAVY_WORKERS",
+		"PREVIEW_WORKER_CONCURRENCY", "PREVIEW_HEAVY_QUEUE_BACKPRESSURE_THRESHOLD",
+		"TRUSTED_PROXY_DEPTH",
+		"VAPID_PUBLIC_KEY", "VAPID_PRIVATE_KEY", "VAPID_SUBSCRIBER",
+		"WS_PROXY_MODE",
 		// Deployment-profile selector + auto-migrate toggle (WS2). Same
 		// convention as the blocks above: Load applies the profile's
 		// env-var defaults (applyProfileDefaults) and buildConfigFromEnv

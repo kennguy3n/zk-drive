@@ -138,10 +138,20 @@ func newOnlyOfficeTransport() *http.Transport {
 // errOnlyOfficeSaveBusy is returned by the save path's bounded buffered
 // fallback when its concurrency semaphore is full. It is mapped to a
 // retryable 503 ack so the Document Server keeps the edited bytes and
-// retries, rather than the generic 500 used for real failures. The
-// primary streaming path never returns this — only the rare
-// unknown-Content-Length fallback that still buffers in memory does.
+// retries, rather than the generic 500 used for real failures. Only the
+// rare unknown-Content-Length fallback that still buffers in memory
+// returns this — the primary streaming path uses
+// errOnlyOfficeStreamSaveBusy instead.
 var errOnlyOfficeSaveBusy = errors.New("onlyoffice: save concurrency limit reached")
+
+// errOnlyOfficeStreamSaveBusy is the streaming path's analogue of
+// errOnlyOfficeSaveBusy: returned when the OPTIONAL streaming-save
+// concurrency cap (ONLYOFFICE_STREAM_SAVE_MAX_CONCURRENT) is full. It is
+// a distinct sentinel — not the buffered one — so the callback handler
+// logs the correct limit (onlyOfficeStreamSaveLimit, not the
+// buffered-fallback onlyOfficeSaveConcurrency) and so metrics/alerting
+// can tell the two shed paths apart. Both map to the same retryable 503.
+var errOnlyOfficeStreamSaveBusy = errors.New("onlyoffice: streaming save concurrency limit reached")
 
 // ONLYOFFICE callback status codes (Document Server → ZK Drive).
 const (
@@ -249,6 +259,8 @@ func (h *Handler) WithOnlyOfficeStreamSaveConcurrency(n int) *Handler {
 // the channel receive being paired to this send) and ok=true; when the
 // semaphore is full it returns ok=false so the caller sheds the save
 // with a retryable error rather than blocking the callback goroutine.
+// The shed path also returns a no-op (non-nil) release, so a caller that
+// forgets the ok check and still defers release() cannot nil-panic.
 func (h *Handler) acquireStreamSaveSlot() (release func(), ok bool) {
 	if h.onlyOfficeStreamSaveSem == nil {
 		return func() {}, true
@@ -258,7 +270,7 @@ func (h *Handler) acquireStreamSaveSlot() (release func(), ok bool) {
 		var once sync.Once
 		return func() { once.Do(func() { <-h.onlyOfficeStreamSaveSem }) }, true
 	default:
-		return nil, false
+		return func() {}, false
 	}
 }
 
@@ -534,12 +546,22 @@ func (h *Handler) EditorCallback(w http.ResponseWriter, r *http.Request) {
 	// storage (see saveEditedVersion / writeEditedObject), so it no
 	// longer buffers whole documents in memory and needs no up-front
 	// concurrency gate. Memory bounding is now applied only on the rare
-	// unknown-Content-Length fallback, which shed-loads with
-	// errOnlyOfficeSaveBusy → a retryable 503.
+	// unknown-Content-Length fallback (errOnlyOfficeSaveBusy), while the
+	// streaming path has an OPTIONAL high-watermark cap
+	// (errOnlyOfficeStreamSaveBusy); both shed with a retryable 503.
 	if err := h.saveEditedVersion(ctx, workspaceID, fileID, cb); err != nil {
+		// Distinguish the two shed paths so the log reports the limit
+		// that was actually hit (the streaming cap and the buffered
+		// fallback cap are independent knobs).
+		if errors.Is(err, errOnlyOfficeStreamSaveBusy) {
+			logging.FromContext(ctx).Warn("onlyoffice streaming-save concurrency limit reached; asking document server to retry",
+				"file_id", fileID, "limit", h.onlyOfficeStreamSaveLimit, "path", "streaming")
+			writeOnlyOfficeAck(w, http.StatusServiceUnavailable, 1)
+			return
+		}
 		if errors.Is(err, errOnlyOfficeSaveBusy) {
 			logging.FromContext(ctx).Warn("onlyoffice save concurrency limit reached; asking document server to retry",
-				"file_id", fileID, "limit", h.onlyOfficeSaveConcurrency)
+				"file_id", fileID, "limit", h.onlyOfficeSaveConcurrency, "path", "buffered")
 			writeOnlyOfficeAck(w, http.StatusServiceUnavailable, 1)
 			return
 		}
@@ -702,7 +724,7 @@ func (h *Handler) writeEditedObject(ctx context.Context, store *storage.Client, 
 		// rather than blocking the goroutine.
 		release, ok := h.acquireStreamSaveSlot()
 		if !ok {
-			return 0, errOnlyOfficeSaveBusy
+			return 0, errOnlyOfficeStreamSaveBusy
 		}
 		defer release()
 		size := resp.ContentLength
