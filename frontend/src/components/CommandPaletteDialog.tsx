@@ -63,12 +63,15 @@ export default function CommandPaletteDialog({
   const [activeIndex, setActiveIndex] = useState(0);
   const reqSeq = useRef(0);
 
-  // Reset transient state each time the palette opens.
+  // Reset transient state each time the palette opens so every invocation is
+  // a clean slate — including the type filter, which would otherwise persist
+  // a previous "file"/"folder" selection and silently scope the next search.
   useEffect(() => {
     if (open) {
       setQuery("");
       setHits([]);
       setActiveIndex(0);
+      setFilter("all");
       setRecents(readRecents());
     }
   }, [open]);

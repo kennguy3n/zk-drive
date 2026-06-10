@@ -83,10 +83,20 @@ func (s *Service) ActiveFeatures(ctx context.Context, workspaceID uuid.UUID) (ma
 }
 
 // IsEnabled reports whether a single feature is active for a workspace.
-// Unknown features and lookup errors resolve to false (fail-closed): a
-// server-side gate that can't confirm a feature is on must treat it as
-// off. Use ActiveFeatures when you need several flags at once to avoid
-// repeated tier + override lookups.
+// Unknown features resolve to false (fail-closed): a server-side gate that
+// can't confirm a feature is on must treat it as off. Use ActiveFeatures
+// when you need several flags at once to avoid repeated tier + override
+// lookups.
+//
+// If the per-workspace override lookup fails we fall back to the resolved
+// tier default rather than false. The override is only a delta on top of
+// the tier default, so when it can't be read the tier baseline is the
+// correct answer: a transient workspace_features outage must not disable
+// baseline features (folders, files, …) for an entitled workspace, and the
+// fallback can never grant a feature above the tier because DefaultEnabled
+// already encodes the tier ceiling. The only state lost in that window is a
+// kill-switch override, which is an accepted trade-off for keeping core
+// functionality available.
 func (s *Service) IsEnabled(ctx context.Context, workspaceID uuid.UUID, feature string) bool {
 	if !IsKnownFeature(feature) {
 		return false
@@ -97,7 +107,7 @@ func (s *Service) IsEnabled(ctx context.Context, workspaceID uuid.UUID, feature 
 	if s != nil && s.repo != nil {
 		overrides, err := s.repo.GetOverrides(ctx, workspaceID)
 		if err != nil {
-			return false
+			return enabled
 		}
 		if v, ok := overrides[feature]; ok {
 			enabled = v

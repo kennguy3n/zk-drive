@@ -63,6 +63,11 @@ const (
 // JSON payload key order is not governed by this slice: encoding/json
 // always marshals map keys sorted alphabetically, which is deterministic
 // regardless.)
+//
+// Treat this as immutable: it is read on every /api/features request and by
+// DefaultsForTier / IsKnownFeature, so callers must NOT append to or reorder
+// it (doing so would corrupt feature resolution process-wide). Adding a
+// feature means editing this literal, not mutating the slice at runtime.
 var AllFeatures = []string{
 	FeatureFolders,
 	FeatureFiles,

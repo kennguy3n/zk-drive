@@ -200,11 +200,23 @@ func TestIsEnabled(t *testing.T) {
 	}
 }
 
-func TestIsEnabled_RepoErrorFailsClosed(t *testing.T) {
+func TestIsEnabled_RepoErrorFallsBackToTierDefault(t *testing.T) {
 	repo := &fakeRepo{getErr: errors.New("db down")}
-	svc := NewService(repo, fakeTier{tier: billing.TierSecureBusiness})
-	if svc.IsEnabled(context.Background(), uuid.New(), FeatureSSO) {
-		t.Errorf("IsEnabled must fail-closed to false when overrides can't be read")
+	svc := NewService(repo, fakeTier{tier: billing.TierBusiness})
+
+	// A feature enabled by the tier default must stay on when the override
+	// lookup fails — a transient workspace_features outage must not disable
+	// baseline/entitled features.
+	if !svc.IsEnabled(context.Background(), uuid.New(), FeatureSSO) {
+		t.Errorf("override-read error must fall back to the tier default (sso on for business)")
+	}
+	if !svc.IsEnabled(context.Background(), uuid.New(), FeatureFolders) {
+		t.Errorf("override-read error must keep baseline features (folders) enabled")
+	}
+	// A feature the tier does not grant stays off: the fallback can never
+	// escalate above the tier ceiling.
+	if svc.IsEnabled(context.Background(), uuid.New(), FeatureStrictZK) {
+		t.Errorf("override-read error must not enable a feature above the tier (strict_zk)")
 	}
 }
 

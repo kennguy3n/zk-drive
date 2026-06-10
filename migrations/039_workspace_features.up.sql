@@ -23,11 +23,15 @@
 --
 -- (workspace_id, feature) is the natural key — at most one override per
 -- feature per workspace — so it is the composite PRIMARY KEY. `enabled`
--- carries the override value. updated_by records the admin who set it (no
--- ON DELETE CASCADE on the user FK so removing a user doesn't silently
--- erase the override audit trail); updated_at is maintained explicitly by
--- the repository on every upsert, matching the rest of the schema (no
--- shared trigger function exists; see migrations 001, 002, 028).
+-- carries the override value. updated_by records the admin who set it; the
+-- user FK is ON DELETE SET NULL so deleting that user neither blocks the
+-- deletion (the default NO ACTION would raise a FK violation) nor erases
+-- the override itself — the row and its value/timestamp survive, only the
+-- actor attribution is cleared. This matches the audit-actor convention
+-- used elsewhere (change_log.actor_id, migration 029). updated_at is
+-- maintained explicitly by the repository on every upsert, matching the
+-- rest of the schema (no shared trigger function exists; see migrations
+-- 001, 002, 028).
 --
 -- feature is stored as TEXT (no CHECK / ENUM) so adding or retiring a
 -- feature key is a code-only change. The repository ignores rows whose
@@ -47,7 +51,7 @@ CREATE TABLE workspace_features (
     workspace_id UUID        NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
     feature      TEXT        NOT NULL CHECK (feature <> ''),
     enabled      BOOLEAN     NOT NULL,
-    updated_by   UUID        REFERENCES users(id),
+    updated_by   UUID        REFERENCES users(id) ON DELETE SET NULL,
     updated_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
     PRIMARY KEY (workspace_id, feature)
 );
