@@ -12,6 +12,14 @@ const (
 	RoleMember = "member"
 )
 
+// FederatedPasswordSentinel is stored in the NOT NULL password_hash
+// column for users provisioned via an external identity provider
+// (e.g. iam-core). It is intentionally NOT a valid bcrypt hash, so
+// bcrypt.CompareHashAndPassword always errors and the local password-
+// login path can never authenticate a federated user — they sign in
+// exclusively through the upstream IdP.
+const FederatedPasswordSentinel = "!iamcore-federated-no-password"
+
 // User represents a workspace-scoped account.
 type User struct {
 	ID             uuid.UUID  `json:"id"`

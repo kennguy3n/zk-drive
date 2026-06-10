@@ -61,6 +61,31 @@ func (s *Service) CreateTx(ctx context.Context, tx pgx.Tx, workspaceID uuid.UUID
 	return u, nil
 }
 
+// CreateFederated persists a user authenticated by an external identity
+// provider (iam-core). No password is hashed; the row is stamped with
+// (provider, providerID) so subsequent logins resolve by the upstream
+// subject id via GetByAuthProvider, and a non-bcrypt password sentinel
+// is stored so the local password-login path can never match. The
+// returned User has its ID and timestamps populated.
+func (s *Service) CreateFederated(ctx context.Context, workspaceID uuid.UUID, email, name, role, provider, providerID string) (*User, error) {
+	if provider == "" || providerID == "" {
+		return nil, fmt.Errorf("user: federated create requires provider and provider id")
+	}
+	u := &User{
+		WorkspaceID:    workspaceID,
+		Email:          email,
+		Name:           name,
+		PasswordHash:   FederatedPasswordSentinel,
+		Role:           role,
+		AuthProvider:   &provider,
+		AuthProviderID: &providerID,
+	}
+	if err := s.repo.CreateFederated(ctx, u); err != nil {
+		return nil, err
+	}
+	return u, nil
+}
+
 func buildUser(workspaceID uuid.UUID, email, name, password, role string) (*User, error) {
 	hash, err := appcrypto.HashPassword(password)
 	if err != nil {

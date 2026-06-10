@@ -42,8 +42,9 @@ func (f *fakeRepo) UpdatePasswordHash(_ context.Context, userID uuid.UUID, hash 
 // stubs so a stray call would crash the test loudly. We only need
 // UpdatePasswordHash for MaybeRehashPassword coverage.
 
-func (f *fakeRepo) Create(context.Context, *User) error             { panic("unused") }
-func (f *fakeRepo) CreateTx(context.Context, pgx.Tx, *User) error   { panic("unused") }
+func (f *fakeRepo) Create(context.Context, *User) error           { panic("unused") }
+func (f *fakeRepo) CreateTx(context.Context, pgx.Tx, *User) error { panic("unused") }
+func (f *fakeRepo) CreateFederated(context.Context, *User) error  { panic("unused") }
 func (f *fakeRepo) GetByID(context.Context, uuid.UUID, uuid.UUID) (*User, error) {
 	panic("unused")
 }

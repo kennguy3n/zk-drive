@@ -85,6 +85,21 @@ type Config struct {
 	MicrosoftClientSecret string
 	MicrosoftRedirectURL  string
 
+	// iam-core (uneycom/iam-core) OAuth2/OIDC identity provider.
+	// OPTIONAL: when IAMCoreIssuerURL is set the server delegates
+	// authentication to iam-core (the built-in auth stack — password
+	// login, internal sessions, internal TOTP — is bypassed); when it
+	// is empty the server falls back to the built-in auth stack so
+	// dev/demo deployments work without an external IdP. Parsed from
+	// the IAM_CORE_* env vars and surfaced to the frontend via
+	// GET /api/config. See internal/iamcore and docs/IAM_CORE.md.
+	IAMCoreIssuerURL    string
+	IAMCoreClientID     string
+	IAMCoreClientSecret string
+	IAMCoreAudience     string
+	IAMCoreScopes       []string
+	IAMCoreCallbackURL  string
+
 	// Rate limiting — applied per (workspace_id, user_id) via an
 	// in-memory token bucket. Values <= 0 fall back to the defaults
 	// declared alongside the middleware so misconfigured env vars do
@@ -539,6 +554,12 @@ func buildConfigFromEnv() *Config {
 		MicrosoftClientID:             os.Getenv("MICROSOFT_CLIENT_ID"),
 		MicrosoftClientSecret:         os.Getenv("MICROSOFT_CLIENT_SECRET"),
 		MicrosoftRedirectURL:          os.Getenv("MICROSOFT_REDIRECT_URL"),
+		IAMCoreIssuerURL:              strings.TrimSpace(os.Getenv("IAM_CORE_ISSUER_URL")),
+		IAMCoreClientID:               strings.TrimSpace(os.Getenv("IAM_CORE_CLIENT_ID")),
+		IAMCoreClientSecret:           os.Getenv("IAM_CORE_CLIENT_SECRET"),
+		IAMCoreAudience:               strings.TrimSpace(os.Getenv("IAM_CORE_AUDIENCE")),
+		IAMCoreScopes:                 parseScopeList(os.Getenv("IAM_CORE_SCOPES")),
+		IAMCoreCallbackURL:            strings.TrimSpace(os.Getenv("IAM_CORE_CALLBACK_URL")),
 		RateLimitPerUser:              parseIntDefault(os.Getenv("RATE_LIMIT_PER_USER"), 0),
 		RateLimitPerWorkspace:         parseIntDefault(os.Getenv("RATE_LIMIT_PER_WORKSPACE"), 0),
 		TrustedProxyDepth:             parseNonNegativeIntDefault(os.Getenv("TRUSTED_PROXY_DEPTH"), defaultTrustedProxyDepth),
@@ -1110,6 +1131,21 @@ func parseCSVList(s string) []string {
 		return nil
 	}
 	return out
+}
+
+// parseScopeList parses an OAuth2 scope list that may be delimited by
+// spaces (the canonical OAuth2 form, "openid email profile") or commas
+// ("openid,email,profile"), tolerating either so operators don't have
+// to remember which the deployment expects. Returns nil when empty so
+// internal/iamcore.Config falls back to its DefaultScopes.
+func parseScopeList(s string) []string {
+	fields := strings.FieldsFunc(s, func(r rune) bool {
+		return r == ',' || r == ' ' || r == '\t' || r == '\n'
+	})
+	if len(fields) == 0 {
+		return nil
+	}
+	return fields
 }
 
 func parseIntDefault(s string, def int) int {

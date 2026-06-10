@@ -353,6 +353,27 @@ func withClaims(ctx context.Context, c *Claims) context.Context {
 	return ctx
 }
 
+// WithIdentity binds an authenticated principal onto ctx exactly the
+// way AuthMiddleware does for a verified session JWT: it populates the
+// claims, user id, workspace id and role context values so every
+// downstream handler, the tenant guard, and the row-level-security GUC
+// hook behave identically regardless of which auth front-end resolved
+// the request.
+//
+// It is the public entry point for alternative authenticators — namely
+// the iam-core OAuth2/OIDC middleware (internal/iamcore) — that resolve
+// identity from an externally-issued token rather than a zk-drive
+// session JWT. The synthesized Claims carry an empty Purpose so they
+// are indistinguishable from an ordinary session token to downstream
+// purpose checks.
+func WithIdentity(ctx context.Context, userID, workspaceID uuid.UUID, role string) context.Context {
+	return withClaims(ctx, &Claims{
+		UserID:      userID,
+		WorkspaceID: workspaceID,
+		Role:        role,
+	})
+}
+
 // ClaimsFromContext returns the parsed JWT claims, if any.
 func ClaimsFromContext(ctx context.Context) (*Claims, bool) {
 	c, ok := ctx.Value(claimsContextKey).(*Claims)
