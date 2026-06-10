@@ -464,7 +464,7 @@ func run() error {
 				slog.Warn("nats jetstream context failed", "err", jerr)
 				nc.Close()
 			} else {
-				jobPublisher = jobs.NewPublisher(js)
+				jobPublisher = jobs.NewPublisher(js).WithHeavyBackpressure(cfg.PreviewHeavyQueueBackpressureThreshold)
 				webhookPublisher = webhooks.NewPublisher(js)
 				natsConn = nc
 				slog.Info("nats connected, post-upload jobs enabled", "url", natsURL)

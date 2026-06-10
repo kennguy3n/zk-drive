@@ -73,5 +73,5 @@ func renderPDFFirstPage(ctx context.Context, pdfBytes []byte) (image.Image, erro
 }
 
 func init() {
-	Register(RendererFunc(renderPDFFirstPage), "application/pdf")
+	RegisterWeighted(WeightHeavy, RendererFunc(renderPDFFirstPage), "application/pdf")
 }

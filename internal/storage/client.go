@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"net/url"
 	"strings"
 	"time"
@@ -243,6 +244,76 @@ func (c *Client) PutObject(ctx context.Context, objectKey, contentType string, b
 	}
 	if _, err := c.s3.PutObject(ctx, in); err != nil {
 		return fmt.Errorf("put object: %w", err)
+	}
+	return nil
+}
+
+// streamUploadClient performs the raw HTTP PUT for PutObjectStream. It
+// has no client-level timeout on purpose: a large document upload can
+// legitimately run longer than any fixed window, and the per-call
+// context (set by the caller) already bounds the request. Connections
+// are pooled and reused across uploads via the default transport.
+var streamUploadClient = &http.Client{}
+
+// PutObjectStream streams body (exactly size bytes) to objectKey
+// without buffering the whole payload in memory. It works by minting a
+// presigned PUT URL and issuing a single raw HTTP PUT whose request
+// body is the supplied reader: the AWS SDK presigns PUTs with an
+// UNSIGNED-PAYLOAD canonical hash, so the gateway accepts a streamed
+// body of any length without the SDK first reading it to compute a
+// signature (which is what makes the SDK's own PutObject buffer a
+// non-seekable reader).
+//
+// size MUST be the exact byte length of body; it is sent as
+// Content-Length so the gateway can store the object in one shot. The
+// contentType, when non-empty, is sent as the Content-Type header and
+// MUST match what was folded into the presigned URL (it is — both come
+// from the same argument here).
+//
+// This is the memory-flat write path for the ONLYOFFICE save callback:
+// it lets the server relay an edited document from the Document Server
+// straight to object storage with only a small fixed copy buffer in
+// flight, eliminating the per-save memory budget that the buffered
+// PutObject path needs.
+func (c *Client) PutObjectStream(ctx context.Context, objectKey, contentType string, body io.Reader, size int64) error {
+	if c == nil || c.presign == nil {
+		return errors.New("storage: client not initialised")
+	}
+	if strings.TrimSpace(objectKey) == "" {
+		return errors.New("storage: object key is required")
+	}
+	if body == nil {
+		return errors.New("storage: body is required")
+	}
+	if size < 0 {
+		return errors.New("storage: object size must not be negative")
+	}
+	urlStr, err := c.GenerateUploadURL(ctx, objectKey, contentType, DefaultPresignExpiry)
+	if err != nil {
+		return err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPut, urlStr, body)
+	if err != nil {
+		return fmt.Errorf("storage: build stream put request: %w", err)
+	}
+	// ContentLength drives a fixed-length (non-chunked) PUT, which S3 /
+	// zk-object-fabric require; with -1 Go would fall back to chunked
+	// transfer encoding that the gateway rejects.
+	req.ContentLength = size
+	if strings.TrimSpace(contentType) != "" {
+		req.Header.Set("Content-Type", contentType)
+	}
+	resp, err := streamUploadClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("storage: stream put: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
+		// Surface a bounded slice of the gateway's error body so an
+		// auth / quota / policy rejection is diagnosable without
+		// leaking an unbounded response into logs.
+		snippet, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+		return fmt.Errorf("storage: stream put unexpected status %s: %s", resp.Status, strings.TrimSpace(string(snippet)))
 	}
 	return nil
 }

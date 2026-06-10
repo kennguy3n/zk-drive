@@ -90,6 +90,14 @@ const _ = uint(defaultOnlyOfficeSaveMemoryBudget - defaultOnlyOfficeMaxConcurren
 // the save callback. Shared so connections are reused across callbacks.
 var onlyOfficeHTTPClient = &http.Client{Timeout: onlyOfficeFetchTimeout}
 
+// errOnlyOfficeSaveBusy is returned by the save path's bounded buffered
+// fallback when its concurrency semaphore is full. It is mapped to a
+// retryable 503 ack so the Document Server keeps the edited bytes and
+// retries, rather than the generic 500 used for real failures. The
+// primary streaming path never returns this — only the rare
+// unknown-Content-Length fallback that still buffers in memory does.
+var errOnlyOfficeSaveBusy = errors.New("onlyoffice: save concurrency limit reached")
+
 // ONLYOFFICE callback status codes (Document Server → ZK Drive).
 const (
 	onlyOfficeStatusReadyForSaving = 2 // editing finished, save now
@@ -436,21 +444,19 @@ func (h *Handler) EditorCallback(w http.ResponseWriter, r *http.Request) {
 	// saveEditedVersion once the file's fallback creator is known.
 	ctx := middleware.WithWorkspaceID(r.Context(), workspaceID)
 
-	// Bound concurrent in-memory document buffering (see
-	// onlyOfficeSaveConcurrency). At capacity, shed load with a
-	// retryable ack so the Document Server keeps the bytes and retries,
-	// rather than reading another document into memory now.
-	select {
-	case h.onlyOfficeSaveSem <- struct{}{}:
-		defer func() { <-h.onlyOfficeSaveSem }()
-	default:
-		logging.FromContext(ctx).Warn("onlyoffice save concurrency limit reached; asking document server to retry",
-			"file_id", fileID, "limit", h.onlyOfficeSaveConcurrency)
-		writeOnlyOfficeAck(w, http.StatusServiceUnavailable, 1)
-		return
-	}
-
+	// The save path streams the edited document straight to object
+	// storage (see saveEditedVersion / writeEditedObject), so it no
+	// longer buffers whole documents in memory and needs no up-front
+	// concurrency gate. Memory bounding is now applied only on the rare
+	// unknown-Content-Length fallback, which shed-loads with
+	// errOnlyOfficeSaveBusy → a retryable 503.
 	if err := h.saveEditedVersion(ctx, workspaceID, fileID, cb); err != nil {
+		if errors.Is(err, errOnlyOfficeSaveBusy) {
+			logging.FromContext(ctx).Warn("onlyoffice save concurrency limit reached; asking document server to retry",
+				"file_id", fileID, "limit", h.onlyOfficeSaveConcurrency)
+			writeOnlyOfficeAck(w, http.StatusServiceUnavailable, 1)
+			return
+		}
 		logging.FromContext(ctx).Error("onlyoffice save edited version failed", "file_id", fileID, "err", err)
 		// Non-zero error tells the Document Server to retry later;
 		// the edited bytes stay in its cache until then.
@@ -507,27 +513,20 @@ func (h *Handler) saveEditedVersion(ctx context.Context, workspaceID, fileID uui
 		return err
 	}
 
-	data, err := h.fetchEditedDocument(ctx, cb.URL)
-	if err != nil {
-		return err
-	}
-
-	// Enforce the storage quota before committing the new version, the
-	// same pre-flight every other write path runs (ConfirmUpload,
-	// BulkCopy). Returning the error makes the callback ack non-zero, so
-	// the Document Server keeps the edited bytes and retries rather than
-	// silently letting the workspace exceed its plan.
-	if err := h.billing.CheckStorageQuota(ctx, workspaceID, int64(len(data))); err != nil {
-		return err
-	}
-
 	versionID := uuid.New()
 	objectKey := storage.NewObjectKey(workspaceID, f.ID, versionID)
 	contentType := "application/octet-stream"
 	if f.MimeType != "" {
 		contentType = f.MimeType
 	}
-	if err := store.PutObject(ctx, objectKey, contentType, data); err != nil {
+
+	// Relay the edited bytes from the Document Server straight to object
+	// storage. The storage quota is enforced inside writeEditedObject —
+	// before any bytes are committed — exactly as the other write paths
+	// (ConfirmUpload, BulkCopy) do, so an over-quota save acks non-zero
+	// and the Document Server retains the bytes for retry.
+	size, err := h.writeEditedObject(ctx, store, workspaceID, objectKey, contentType, cb.URL)
+	if err != nil {
 		return err
 	}
 
@@ -535,7 +534,7 @@ func (h *Handler) saveEditedVersion(ctx context.Context, workspaceID, fileID uui
 		ID:        versionID,
 		FileID:    f.ID,
 		ObjectKey: objectKey,
-		SizeBytes: int64(len(data)),
+		SizeBytes: size,
 		CreatedBy: author,
 	}
 	fresh, err := h.files.ConfirmVersion(ctx, workspaceID, v)
@@ -558,30 +557,87 @@ func (h *Handler) saveEditedVersion(ctx context.Context, workspaceID, fileID uui
 		h.billing.RecordUpload(ctx, workspaceID, v.SizeBytes)
 		// Re-run preview / scan / index on the new bytes, mirroring
 		// the direct-upload confirm path.
-		h.publishPostUploadJobs(ctx, f.ID, v.ID)
+		h.publishPostUploadJobs(ctx, f.ID, v.ID, f.MimeType)
 		h.publishWebhookFileEvent(ctx, webhooks.EventFileUploadConfirmed, workspaceID, f, v.ID, v.SizeBytes)
 	}
 	return nil
 }
 
-// fetchEditedDocument GETs the edited file from the Document Server's
-// cache URL.
-func (h *Handler) fetchEditedDocument(ctx context.Context, url string) ([]byte, error) {
+// writeEditedObject GETs the edited document from the Document Server's
+// cache URL and relays it to object storage under objectKey, returning
+// the exact stored size. It enforces the per-document size cap and the
+// workspace storage quota before any bytes are committed.
+//
+// Primary path (Content-Length known): the response body is streamed
+// directly into a presigned PUT via store.PutObjectStream, so only a
+// small fixed copy buffer is ever in memory regardless of document
+// size — this is what lets concurrent saves run without a memory
+// budget. The reader is capped at the advertised length so a body that
+// over-reports cannot stream unbounded bytes.
+//
+// Fallback path (Content-Length absent, e.g. a chunked response the
+// Document Server's cache download does not normally use): the document
+// is buffered up to the per-document cap and written with PutObject.
+// This path is gated by the save-concurrency semaphore so worst-case
+// memory (concurrency × max-document) stays within budget; when the
+// semaphore is full it returns errOnlyOfficeSaveBusy for a retryable
+// 503.
+func (h *Handler) writeEditedObject(ctx context.Context, store *storage.Client, workspaceID uuid.UUID, objectKey, contentType, url string) (int64, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
-		return nil, err
+		return 0, err
 	}
 	resp, err := onlyOfficeHTTPClient.Do(req)
 	if err != nil {
-		return nil, err
+		return 0, err
 	}
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
-		return nil, errors.New("onlyoffice: unexpected status fetching edited document: " + resp.Status)
+		return 0, errors.New("onlyoffice: unexpected status fetching edited document: " + resp.Status)
 	}
-	// Cap the read so a hostile / runaway Document Server response cannot
-	// exhaust memory; office documents are far below this bound.
-	return readLimited(resp.Body, h.onlyOfficeMaxDocumentBytes)
+
+	maxBytes := h.onlyOfficeMaxDocumentBytes
+
+	// Primary streaming path: length is known up front.
+	if resp.ContentLength > 0 {
+		if resp.ContentLength > maxBytes {
+			return 0, errors.New("onlyoffice: edited document exceeds the maximum allowed size")
+		}
+		size := resp.ContentLength
+		if err := h.billing.CheckStorageQuota(ctx, workspaceID, size); err != nil {
+			return 0, err
+		}
+		// Cap the relayed reader at the advertised length so a body
+		// that lies (sends more than Content-Length) cannot stream
+		// unbounded bytes; PutObjectStream sends exactly size.
+		if err := store.PutObjectStream(ctx, objectKey, contentType, io.LimitReader(resp.Body, size), size); err != nil {
+			return 0, err
+		}
+		return size, nil
+	}
+
+	// Fallback: unknown length. Bound concurrent buffering with the save
+	// semaphore (shed load when full) and buffer up to the per-document
+	// cap.
+	if h.onlyOfficeSaveSem != nil {
+		select {
+		case h.onlyOfficeSaveSem <- struct{}{}:
+			defer func() { <-h.onlyOfficeSaveSem }()
+		default:
+			return 0, errOnlyOfficeSaveBusy
+		}
+	}
+	data, err := readLimited(resp.Body, maxBytes)
+	if err != nil {
+		return 0, err
+	}
+	if err := h.billing.CheckStorageQuota(ctx, workspaceID, int64(len(data))); err != nil {
+		return 0, err
+	}
+	if err := store.PutObject(ctx, objectKey, contentType, data); err != nil {
+		return 0, err
+	}
+	return int64(len(data)), nil
 }
 
 // readLimited reads up to max bytes from r and errors (rather than

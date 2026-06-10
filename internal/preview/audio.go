@@ -182,5 +182,5 @@ func init() {
 		"audio/webm",
 		"audio/amr",
 	}
-	Register(RendererFunc(renderAudioWaveform), mimes...)
+	RegisterWeighted(WeightHeavy, RendererFunc(renderAudioWaveform), mimes...)
 }
