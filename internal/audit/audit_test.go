@@ -15,8 +15,9 @@ import (
 // type that ships as a non-dotted string would skew the grouping.
 func TestActionConstantsAreDotted(t *testing.T) {
 	actions := []string{
-		ActionLogin, ActionLogout, ActionPasswordChange,
+		ActionLogin, ActionLogout, ActionSessionRevoke, ActionPasswordChange,
 		ActionSSOLink, ActionSSOLogin,
+		ActionMFAEnroll, ActionMFAVerify, ActionMFARecoveryUse, ActionMFADisable, ActionMFAPolicyChange,
 		ActionPermissionGrant, ActionPermissionRevoke,
 		ActionAdminUserInvite, ActionAdminUserDeactivate, ActionAdminUserRoleChange,
 		ActionWorkspaceCreate, ActionWorkspaceUpdate,
@@ -25,6 +26,7 @@ func TestActionConstantsAreDotted(t *testing.T) {
 		ActionAdminBillingUpdate, ActionAdminBillingCheckout, ActionAdminBillingPortal,
 		ActionGuestInviteEmailed,
 		ActionWebhookSubscriptionCreate, ActionWebhookSubscriptionDelete, ActionWebhookSubscriptionResume, ActionWebhookSubscriptionTest,
+		ActionIPAllowRuleAdd, ActionIPAllowRuleRemove, ActionIPAllowPolicyChange,
 	}
 	seen := make(map[string]bool, len(actions))
 	for _, a := range actions {

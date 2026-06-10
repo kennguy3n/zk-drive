@@ -49,6 +49,10 @@ const BACKEND_401_CODES = [
   "AUTH_BAD_PURPOSE",
   "AUTH_MISSING_IAT",
   "AUTH_REVOCATION_CHECK_FAILED",
+  // Session device-anomaly 401 from api/middleware/auth.go (6.2):
+  // a replayed token from a different device/network. JWT is dead
+  // for this session; user must re-auth.
+  "AUTH_SESSION_ANOMALY",
   // Login + step-up flows from api/auth/. JWT is fine (or absent
   // intentionally for login); the user just supplied wrong creds.
   "AUTH_INVALID_CREDENTIALS",
