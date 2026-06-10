@@ -14,6 +14,16 @@
 -- OS rotates it), so registration is an UPSERT that refreshes
 -- updated_at rather than inserting duplicates.
 --
+-- The number of rows per (workspace, user, platform) is capped in the
+-- application layer (notification.MaxDeviceTokensPerUserPlatform) by
+-- LRU eviction inside the same transaction as the upsert: registering a
+-- new device past the cap drops the least-recently-updated token rather
+-- than rejecting the registration. This bounds the per-notification
+-- fan-out cost (one APNs/FCM POST per token) so an authenticated client
+-- cannot grow its own delivery cost without bound by minting distinct
+-- tokens. The cap lives in Go rather than a DB trigger so it stays
+-- testable and colocated with the upsert it guards.
+--
 -- # Platform
 --
 -- `platform` selects the delivery provider downstream:

@@ -237,6 +237,14 @@ the mobile counterpart to the Web Push subscriptions used by the PWA.
 Re-registering the same token is an upsert (refreshes `updated_at`), so the app
 can register unconditionally on every cold start and OS token rotation.
 
+Each `(workspace, user, platform)` keeps at most **10** device tokens
+(`notification.MaxDeviceTokensPerUserPlatform`). Registering past the cap does
+not fail — the least-recently-updated token is evicted in the same transaction
+as the upsert. This bounds the per-notification fan-out cost (one APNs/FCM POST
+per token) so a client cannot inflate its own delivery cost by minting distinct
+tokens, while real multi-device users (phone, tablet, a few reinstalls) stay
+well under the limit.
+
 ### 3.2 `DELETE /api/push/register-device`
 
 Same body shape; removes the token (on sign-out / when the user disables

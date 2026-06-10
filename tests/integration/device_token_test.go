@@ -2,6 +2,7 @@ package integration
 
 import (
 	"context"
+	"fmt"
 	"testing"
 
 	"github.com/kennguy3n/zk-drive/internal/notification"
@@ -61,6 +62,69 @@ func TestDeviceTokenRepositoryCRUD(t *testing.T) {
 	}
 	if len(tokens) != 1 || tokens[0].Token != "fcm-token-1" {
 		t.Fatalf("expected only the android token to remain, got %+v", tokens)
+	}
+}
+
+// TestDeviceTokenCapEviction verifies SaveDeviceToken enforces the
+// per-(workspace, user, platform) cap by LRU eviction: registering more
+// than MaxDeviceTokensPerUserPlatform tokens keeps only the most
+// recently updated ones, never rejects a new registration, and the cap
+// is scoped per platform (an Android overflow does not evict iOS tokens).
+func TestDeviceTokenCapEviction(t *testing.T) {
+	env := setupEnv(t)
+	tok := env.signupAndLogin("CapCo", "admin@cap.test", "Cap", "password-cap")
+	workspaceID := uuid.MustParse(tok.WorkspaceID)
+	userID := uuid.MustParse(tok.UserID)
+
+	repo := notification.NewPostgresRepository(env.pool)
+	ctx := tenantctx.WithWorkspaceID(context.Background(), workspaceID)
+
+	limit := notification.MaxDeviceTokensPerUserPlatform
+	overflow := limit + 3
+
+	// Register one Android token up front; it must survive the iOS
+	// overflow because the cap is per platform.
+	android := notification.DeviceToken{Platform: notification.PlatformAndroid, Token: "fcm-keepme"}
+	if err := repo.SaveDeviceToken(ctx, workspaceID, userID, android); err != nil {
+		t.Fatalf("save android: %v", err)
+	}
+
+	tokenName := func(i int) string { return fmt.Sprintf("apns-%04d", i) }
+	for i := 0; i < overflow; i++ {
+		ios := notification.DeviceToken{Platform: notification.PlatformIOS, Token: tokenName(i)}
+		if err := repo.SaveDeviceToken(ctx, workspaceID, userID, ios); err != nil {
+			t.Fatalf("save ios %d (registration past the cap must not error): %v", i, err)
+		}
+	}
+
+	tokens, err := repo.ListDeviceTokens(ctx, workspaceID, userID)
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	present := make(map[string]bool, len(tokens))
+	iosCount := 0
+	for _, dt := range tokens {
+		present[dt.Token] = true
+		if dt.Platform == notification.PlatformIOS {
+			iosCount++
+		}
+	}
+
+	if iosCount != limit {
+		t.Fatalf("expected exactly %d iOS tokens after overflow, got %d", limit, iosCount)
+	}
+	if !present["fcm-keepme"] {
+		t.Fatalf("per-platform cap breached: Android token evicted by iOS overflow")
+	}
+	// The oldest iOS tokens (the first `overflow-limit`) must be evicted
+	// and the newest retained.
+	for i := 0; i < overflow-limit; i++ {
+		if present[tokenName(i)] {
+			t.Fatalf("expected oldest iOS token %s to be evicted", tokenName(i))
+		}
+	}
+	if !present[tokenName(overflow-1)] {
+		t.Fatalf("expected most recent iOS token %s to be retained", tokenName(overflow-1))
 	}
 }
 
