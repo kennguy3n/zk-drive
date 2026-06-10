@@ -90,6 +90,15 @@ const (
 	// Rate limiting (429 Too Many Requests).
 	ErrCodeRateLimit ErrorCode = "RATE_LIMIT_EXCEEDED"
 
+	// Auth-attempt throttling (429 Too Many Requests). Distinct from
+	// the generic request rate limit: this is the IP-reputation
+	// brute-force guard that escalates a per-IP cooldown after
+	// repeated failed sign-ins (api/middleware/ratelimit_reputation.go).
+	// A dedicated code lets the login UI show "too many failed
+	// attempts, try again in N seconds" rather than a generic
+	// throttling message, and lets clients honour the Retry-After.
+	ErrCodeAuthThrottled ErrorCode = "AUTH_TOO_MANY_ATTEMPTS"
+
 	// Validation (400 / 422 Bad Request / Unprocessable Entity).
 	ErrCodeValidation           ErrorCode = "VALIDATION_FAILED"
 	ErrCodeBadRequest           ErrorCode = "BAD_REQUEST"

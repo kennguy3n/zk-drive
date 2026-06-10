@@ -111,6 +111,20 @@ type Config struct {
 	RateLimitPerUser      int
 	RateLimitPerWorkspace int
 
+	// Auth brute-force reputation — per-IP failed-sign-in tracking
+	// that escalates a cooldown after repeated failures (6.3). After
+	// AuthFailureThreshold failed attempts from one client IP the
+	// guard applies progressively longer cooldowns (1s, 5s, 30s,
+	// then a hard block of AuthBlockDuration) before the next attempt
+	// is accepted, and the reputation counter is retained for
+	// AuthReputationRetention. All three fall back to their defaults
+	// (declared alongside the middleware) when unset or <= 0. Sourced
+	// from AUTH_FAILURE_THRESHOLD, AUTH_BLOCK_DURATION,
+	// AUTH_REPUTATION_RETENTION.
+	AuthFailureThreshold   int
+	AuthBlockDuration      time.Duration
+	AuthReputationRetention time.Duration
+
 	// TrustedProxyDepth is the number of trusted reverse proxies in
 	// front of the server. It governs how the IP-allowlist
 	// middleware resolves the client IP from X-Forwarded-For: the
@@ -562,6 +576,9 @@ func buildConfigFromEnv() *Config {
 		MicrosoftRedirectURL:          os.Getenv("MICROSOFT_REDIRECT_URL"),
 		RateLimitPerUser:              parseIntDefault(os.Getenv("RATE_LIMIT_PER_USER"), 0),
 		RateLimitPerWorkspace:         parseIntDefault(os.Getenv("RATE_LIMIT_PER_WORKSPACE"), 0),
+		AuthFailureThreshold:          parseIntDefault(os.Getenv("AUTH_FAILURE_THRESHOLD"), 0),
+		AuthBlockDuration:             parseDurationDefault(os.Getenv("AUTH_BLOCK_DURATION"), 0),
+		AuthReputationRetention:       parseDurationDefault(os.Getenv("AUTH_REPUTATION_RETENTION"), 0),
 		TrustedProxyDepth:             parseNonNegativeIntDefault(os.Getenv("TRUSTED_PROXY_DEPTH"), defaultTrustedProxyDepth),
 		PreviewBudgetPerWorkspaceHour: parseIntDefault(os.Getenv("PREVIEW_BUDGET_PER_WORKSPACE_HOUR"), 100),
 		PreviewPriorityWorkers:        parseIntDefault(os.Getenv("PREVIEW_PRIORITY_WORKERS"), 6),

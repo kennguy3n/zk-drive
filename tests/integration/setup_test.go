@@ -253,6 +253,18 @@ func setupEnv(t *testing.T) *testEnv {
 		WithAudit(auditSvc).
 		WithTOTP(totpSvc).
 		WithSessionRevoker(sessionStore)
+
+	// Brute-force reputation guard (6.3) on /login, backed by the
+	// harness miniredis so integration tests exercise the real
+	// escalation. A low threshold + sub-second first delay keeps the
+	// dedicated test fast and deterministic without held connections.
+	authReputation := middleware.NewAuthReputation(redisClient, middleware.AuthReputationConfig{
+		FailureThreshold: 3,
+		Delays:           []time.Duration{200 * time.Millisecond, 500 * time.Millisecond},
+		BlockDuration:    time.Second,
+		Retention:        time.Hour,
+	}, 0)
+	authReputationGuard := middleware.AuthReputationGuard(authReputation)
 	webhookCap := &webhookCapture{}
 	// Wire the AI tag-suggestion + query-expansion services so the
 	// integration harness exercises the same code paths that
@@ -400,7 +412,7 @@ func setupEnv(t *testing.T) *testEnv {
 	r.Route("/api", func(r chi.Router) {
 		r.Route("/auth", func(r chi.Router) {
 			r.Post("/signup", authHandler.Signup)
-			r.Post("/login", authHandler.Login)
+			r.With(authReputationGuard).Post("/login", authHandler.Login)
 			// /logout sits inside the AuthMiddleware group so the
 			// handler can read claims from the bearer token and
 			// record a per-user revocation cutoff. Without the

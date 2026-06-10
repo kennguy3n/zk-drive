@@ -224,6 +224,43 @@ re-encryption runbook.
 | `RATE_LIMIT_PER_USER`     | `0`     | Requests per user per minute. `0` disables. When `REDIS_URL` is set the limiter is Redis-backed and survives restarts.  |
 | `RATE_LIMIT_PER_WORKSPACE`| `0`     | Requests per workspace per minute. Same semantics as the per-user limiter, just a different scope.                      |
 
+Every rate-limited response (allowed **and** throttled) carries the
+standard telemetry headers so clients can self-pace:
+
+- `X-RateLimit-Limit` — the per-window request budget.
+- `X-RateLimit-Remaining` — requests left in the current window (`0` on a 429).
+- `X-RateLimit-Reset` — unix second at which the window resets.
+
+A `429` additionally carries `Retry-After` (seconds).
+
+### Auth brute-force reputation
+
+Independent of the per-user/-workspace limiter, `POST /api/auth/login`
+is protected by a **per-client-IP** brute-force guard. It tracks failed
+sign-ins per IP and, once the failure threshold is crossed, escalates a
+cooldown the IP must wait out before its next attempt is accepted: `1s`,
+then `5s`, then `30s`, then a hard block. Attempts made inside a cooldown
+are rejected with `429 AUTH_TOO_MANY_ATTEMPTS` + `Retry-After` **before**
+the password is checked, and a *successful* sign-in clears the IP's
+reputation so a legitimate user is never punished for earlier typos.
+
+The escalation is a cooldown, **not** a connection tarpit, so it adds no
+held goroutines/sockets (which an attacker could weaponise). The client
+IP is resolved with `TRUSTED_PROXY_DEPTH`, so a spoofed `X-Forwarded-For`
+cannot dodge the guard. With `REDIS_URL` set the reputation is shared
+across replicas (and retained for the window below); otherwise a
+per-replica in-memory fallback still provides best-effort protection.
+
+Because the key is the client IP, a large NAT (a whole office behind one
+egress IP) shares one reputation — which is why the hard block defaults
+to a short 15 minutes rather than the full retention window.
+
+| Variable                   | Default | Purpose                                                                                                                                            |
+| -------------------------- | ------- | -------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `AUTH_FAILURE_THRESHOLD`   | `5`     | Failed sign-ins tolerated per client IP before cooldowns begin. The first `threshold-1` failures are free (human typos); the threshold-th arms the first cooldown. `<= 0` falls back to the default. |
+| `AUTH_BLOCK_DURATION`      | `15m`   | Hard-block cooldown applied once the progressive `1s/5s/30s` delays are exhausted. Kept short so a shared-NAT office is not locked out for hours. Accepts a Go duration (e.g. `30m`). `<= 0` falls back to the default. |
+| `AUTH_REPUTATION_RETENTION`| `24h`   | How long an IP's failure counter survives with no further failures (the Redis TTL). Accepts a Go duration. `<= 0` falls back to the default.        |
+
 ## Preview pipeline
 
 Read by the `worker` binary. These tune the per-tenant preview

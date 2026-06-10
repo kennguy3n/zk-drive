@@ -550,6 +550,21 @@ func run() error {
 		})
 	}
 
+	// Brute-force reputation guard (6.3): tracks failed sign-ins per
+	// client IP and escalates a cooldown (1s → 5s → 30s → block) so an
+	// unauthenticated password-spray is slowed without a held-
+	// connection tarpit. Backed by Redis when configured (shared
+	// across replicas, 24h retention) and a per-replica in-memory
+	// fallback otherwise. Resolves the client IP with the same
+	// trusted-proxy depth as the auth middleware / session fingerprint
+	// so a spoofed X-Forwarded-For cannot dodge it.
+	authReputation := middleware.NewAuthReputation(redisClient, middleware.AuthReputationConfig{
+		FailureThreshold: cfg.AuthFailureThreshold,
+		BlockDuration:    cfg.AuthBlockDuration,
+		Retention:        cfg.AuthReputationRetention,
+	}, cfg.TrustedProxyDepth)
+	authReputationGuard := middleware.AuthReputationGuard(authReputation)
+
 	// WebSocket hub fans real-time notification events to connected
 	// clients. The hub itself is always in-process; when redisClient
 	// is non-nil we additionally subscribe to ws:* so notifications
@@ -1099,7 +1114,13 @@ func run() error {
 	r.Route("/api", func(r chi.Router) {
 		r.Route("/auth", func(r chi.Router) {
 			r.Post("/signup", authHandler.Signup)
-			r.Post("/login", authHandler.Login)
+			// /login carries the brute-force reputation guard (6.3):
+			// the only credential-verifying endpoint reachable without
+			// an existing session, so it is the password-spray target.
+			// The guard records a failure on a 401 (bad credentials)
+			// and resets the IP on a 2xx (success or MFA challenge —
+			// either way the password was correct).
+			r.With(authReputationGuard).Post("/login", authHandler.Login)
 			r.Route("/oauth", func(r chi.Router) {
 				oauthHandler.RegisterRoutes(r)
 			})
