@@ -549,6 +549,17 @@ func run() error {
 		})
 	}
 
+	// wsProxyMode is the EFFECTIVE proxy decision: the operator asked for
+	// it (WS_PROXY_MODE) AND Redis is wired (the API and the external
+	// proxy tier communicate through Redis pub/sub). If WS_PROXY_MODE is
+	// set without REDIS_URL we cannot reach a proxy, so we log and fall
+	// back to the in-process hub rather than silently dropping every
+	// real-time event.
+	wsProxyMode := cfg.WSProxyMode && redisClient != nil
+	if cfg.WSProxyMode && redisClient == nil {
+		slog.Warn("WS_PROXY_MODE set but REDIS_URL is empty; falling back to in-process WebSocket fan-out")
+	}
+
 	// WebSocket hub fans real-time notification events to connected
 	// clients. The hub itself is always in-process; when redisClient
 	// is non-nil we additionally subscribe to ws:* so notifications
@@ -556,6 +567,13 @@ func run() error {
 	// notification service receives the publisher and is nil-safe,
 	// so a misconfigured Redis still leaves the rest of the API
 	// working — we just log and fall back to local fan-out.
+	//
+	// In WS proxy mode the in-process hub holds no client connections
+	// (an external Centrifugo/Pusher tier does), so we still construct
+	// and Run it — it is the LocalBroadcaster the web-push wrapper and
+	// the IsConnected presence check expect — but we never subscribe it
+	// to Redis. Events flow API → Redis (ws:* channels) → external proxy
+	// → clients.
 	hub := ws.NewHub()
 	bgGoroutines.Add(1)
 	go func() {
@@ -568,13 +586,21 @@ func run() error {
 	if redisClient != nil {
 		rp := notification.NewRedisPublisher(redisClient)
 		notificationPublisher = rp
-		bgGoroutines.Add(1)
-		go func() {
-			defer bgGoroutines.Done()
-			if err := rp.Subscribe(ctx, hub); err != nil && !errors.Is(err, context.Canceled) {
-				slog.Error("redis ws subscribe loop exited", "err", err)
-			}
-		}()
+		if wsProxyMode {
+			slog.Info("WS proxy mode enabled; publishing real-time events to Redis ws:* for the external proxy tier (in-process /api/ws disabled)")
+		} else {
+			// Single in-process fan-out tier: subscribe the local hub to
+			// ws:* so events produced on any replica reach this replica's
+			// own clients. Skipped in proxy mode (the external proxy is
+			// the subscriber).
+			bgGoroutines.Add(1)
+			go func() {
+				defer bgGoroutines.Done()
+				if err := rp.Subscribe(ctx, hub); err != nil && !errors.Is(err, context.Canceled) {
+					slog.Error("redis ws subscribe loop exited", "err", err)
+				}
+			}()
+		}
 	}
 
 	// notifRepo backs both the notification service and the web-push
@@ -1181,7 +1207,18 @@ func run() error {
 			// the upgrade-handshake reasons noted below) and runs on
 			// the initial HTTP request before the upgrade.
 			r.Use(middleware.IPAllowlist(ipAllowSvc, cfg.TrustedProxyDepth))
-			r.Get("/ws", wsHandler.ServeWS)
+			if wsProxyMode {
+				// WS proxy mode: client connections terminate at the
+				// external proxy tier (Centrifugo/Pusher), not here.
+				// Respond 501 so a client still dialing the API directly
+				// fails loudly instead of opening a socket the proxy
+				// will never feed events into.
+				r.Get("/ws", func(w http.ResponseWriter, _ *http.Request) {
+					middleware.RespondError(w, http.StatusNotImplemented, middleware.ErrCodeUnsupportedOp, "websocket proxy mode enabled; connect via the external proxy tier")
+				})
+			} else {
+				r.Get("/ws", wsHandler.ServeWS)
+			}
 			// Collab WS endpoint: per-document Yjs relay. Mounted
 			// next to /ws because both are long-lived upgrade
 			// endpoints that must skip TenantGuard / rateLimiter

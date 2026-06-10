@@ -240,6 +240,29 @@ also be set; otherwise startup fails.
 | `NATS_URL`       | _empty_ | NATS JetStream URL. When set, the server publishes async-job and webhook events and the worker consumes.     |
 | `CLAMAV_ADDRESS` | _empty_ | `host:port` of a ClamAV INSTREAM daemon. When set, uploads are virus-scanned before becoming visible.        |
 
+## WebSocket proxy tier (`WS_PROXY_MODE`)
+
+| Variable        | Default | Purpose                                                                                          |
+| --------------- | ------- | ------------------------------------------------------------------------------------------------ |
+| `WS_PROXY_MODE` | `false` | Delegate WebSocket fan-out to an external connection proxy (Centrifugo/Pusher). Requires `REDIS_URL`. |
+
+By default each API pod terminates its own WebSocket connections in the
+in-process hub and fans events out across replicas via Redis pub/sub
+(`ws:*`). For deployments past ~10k concurrent connections per pod, set
+`WS_PROXY_MODE=true` to move connection holding to a dedicated proxy
+tier:
+
+- The API still **publishes** every event to Redis (`ws:{workspaceID}:{userID}`,
+  unchanged envelope), but does **not** run the `ws:*`→hub subscribe
+  loop — the external proxy is the subscriber and fans out to clients.
+- `GET /api/ws` responds **501**; clients connect to the proxy instead.
+- **Requires `REDIS_URL`.** If `WS_PROXY_MODE` is set without
+  `REDIS_URL`, the server logs a warning and falls back to the
+  in-process hub rather than silently dropping notifications.
+
+See [`deploy/WEBSOCKET_PROXY.md`](../deploy/WEBSOCKET_PROXY.md) for the
+Centrifugo / Pusher wire contract and example configs.
+
 ## Credential encryption
 
 Workspace-scoped credentials (per-tenant S3 keys, TOTP secrets) are

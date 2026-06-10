@@ -129,6 +129,27 @@ type Config struct {
 	// in-memory implementations are used (single-replica behaviour).
 	RedisURL string
 
+	// WSProxyMode delegates WebSocket fan-out to an external connection
+	// proxy tier (Centrifugo / Pusher) instead of terminating WS
+	// connections on the API pods. Sourced from WS_PROXY_MODE (bool).
+	//
+	// When true, the server:
+	//   - publishes every real-time event to Redis pub/sub (ws:* channels)
+	//     as the egress the external proxy consumes, and does NOT run the
+	//     in-process Redis→hub subscribe loop (the proxy, not this
+	//     process, holds the client connections);
+	//   - serves /api/ws with 501 Not Implemented so a misconfigured
+	//     client that still dials the API directly fails loudly rather
+	//     than opening a connection the proxy will never feed.
+	//
+	// Requires REDIS_URL (the proxy and the API communicate through
+	// Redis). When WS_PROXY_MODE is set but REDIS_URL is empty the server
+	// logs a warning and falls back to in-process WS so a fat-fingered
+	// rollout degrades to the single-process path rather than dropping
+	// notifications silently. See docs/CONFIGURATION.md → WebSocket proxy
+	// tier and deploy/WEBSOCKET_PROXY.md.
+	WSProxyMode bool
+
 	// FabricConsoleURL is the base URL of the zk-object-fabric console
 	// API (e.g. "https://console.fabric.example.com"). When empty,
 	// signup falls back to the static S3_* env vars and per-workspace
@@ -557,6 +578,7 @@ func buildConfigFromEnv() *Config {
 		PreviewPriorityWorkers:        parseIntDefault(os.Getenv("PREVIEW_PRIORITY_WORKERS"), 6),
 		PreviewStandardWorkers:        parseIntDefault(os.Getenv("PREVIEW_STANDARD_WORKERS"), 2),
 		RedisURL:                      os.Getenv("REDIS_URL"),
+		WSProxyMode:                   parseBoolDefault(os.Getenv("WS_PROXY_MODE"), false),
 		FabricConsoleURL:              os.Getenv("FABRIC_CONSOLE_URL"),
 		FabricConsoleAdminToken:       os.Getenv("FABRIC_CONSOLE_ADMIN_TOKEN"),
 		FabricBucketTemplate:          getEnvDefault("FABRIC_BUCKET_TEMPLATE", "zk-drive-{tenant}"),

@@ -50,6 +50,41 @@ type Event struct {
 	Payload any    `json:"payload"`
 }
 
+// clientSnapshotPool recycles the []*Client slices that every
+// BroadcastJSON / BroadcastJSONWorkspace call builds to snapshot the
+// target set under the read lock before delivering outside it. Without
+// the pool each broadcast allocates a fresh slice; at B2C scale (a hot
+// workspace fanning many notifications / change-feed events per second)
+// that is a steady stream of short-lived garbage on the hottest path in
+// the hub. Pooling the snapshot slice removes that allocation entirely.
+//
+// A *[]*Client (pointer to slice) is stored rather than the slice value
+// so Put does not box the slice header into a fresh interface allocation
+// — the standard sync.Pool-of-slices idiom. Slices are always returned
+// with their elements cleared and length reset to 0 so a pooled buffer
+// never pins a dropped *Client (which would defeat GC of closed
+// connections) and the next Get starts from a clean, zero-length slice
+// with its capacity intact.
+var clientSnapshotPool = sync.Pool{
+	New: func() any {
+		s := make([]*Client, 0, 16)
+		return &s
+	},
+}
+
+// putClientSnapshot clears and returns a snapshot slice to the pool. The
+// element clear is mandatory: leaving *Client pointers in the backing
+// array would keep torn-down connections alive until the buffer is
+// next reused.
+func putClientSnapshot(sp *[]*Client) {
+	s := *sp
+	for i := range s {
+		s[i] = nil
+	}
+	*sp = s[:0]
+	clientSnapshotPool.Put(sp)
+}
+
 // Client wraps a single WebSocket connection with a buffered send
 // channel. Exposed so callers (notably tests) can build a Client out
 // of an arbitrary *websocket.Conn without going through ServeWS.
@@ -268,14 +303,17 @@ func (h *Hub) IsConnected(workspaceID, userID uuid.UUID) bool {
 // a closed send channel). Slow consumers — those whose send buffer
 // is full — are unregistered so the next broadcast does not retry.
 func (h *Hub) BroadcastJSON(workspaceID, userID uuid.UUID, payload []byte) {
+	sp := clientSnapshotPool.Get().(*[]*Client)
+	targets := *sp
 	h.mu.RLock()
 	set := h.clients[clientKey{workspaceID, userID}]
-	targets := make([]*Client, 0, len(set))
 	for c := range set {
 		targets = append(targets, c)
 	}
 	h.mu.RUnlock()
 	h.deliver(targets, payload)
+	*sp = targets
+	putClientSnapshot(sp)
 }
 
 // BroadcastJSONWorkspace pushes an already-encoded JSON payload to
@@ -289,14 +327,17 @@ func (h *Hub) BroadcastJSON(workspaceID, userID uuid.UUID, payload []byte) {
 // We snapshot the targets under the read lock and then deliver
 // outside the lock so a slow send / Unregister never blocks the hub.
 func (h *Hub) BroadcastJSONWorkspace(workspaceID uuid.UUID, payload []byte) {
+	sp := clientSnapshotPool.Get().(*[]*Client)
+	targets := *sp
 	h.mu.RLock()
 	wsSet := h.workspaceClients[workspaceID]
-	targets := make([]*Client, 0, len(wsSet))
 	for c := range wsSet {
 		targets = append(targets, c)
 	}
 	h.mu.RUnlock()
 	h.deliver(targets, payload)
+	*sp = targets
+	putClientSnapshot(sp)
 }
 
 // deliver does the bounded send / done / unregister dance for a
