@@ -48,6 +48,42 @@ function emitAuthChange(): void {
   }
 }
 
+// Session-teardown hooks run whenever local auth state is cleared —
+// both an explicit logout() and a hard 401. They let higher-level
+// modules dismantle session-scoped machinery (notably the iam-core
+// silent-refresh timer in oidc.ts) without client.ts importing them,
+// which would create a cycle since oidc.ts already imports client.ts.
+const sessionTeardownHooks = new Set<() => void>();
+
+// onSessionTeardown registers a callback invoked on every local auth
+// clear. Idempotent per callback (backed by a Set).
+export function onSessionTeardown(fn: () => void): void {
+  sessionTeardownHooks.add(fn);
+}
+
+// clearStoredAuth removes ALL persisted auth state — the built-in
+// session keys AND the iam-core refresh token + expiry — then runs the
+// teardown hooks. Centralizing this is what keeps logout() and the 401
+// interceptor in lockstep: a hard 401 must clear the refresh token and
+// cancel the silent-refresh timer, otherwise the still-armed timer
+// could mint a fresh access token from the leftover refresh token and
+// silently resurrect a session the server already rejected.
+function clearStoredAuth(): void {
+  localStorage.removeItem(TOKEN_STORAGE_KEY);
+  localStorage.removeItem(WORKSPACE_STORAGE_KEY);
+  localStorage.removeItem(ROLE_STORAGE_KEY);
+  localStorage.removeItem(USER_STORAGE_KEY);
+  localStorage.removeItem(REFRESH_TOKEN_STORAGE_KEY);
+  localStorage.removeItem(TOKEN_EXPIRES_AT_STORAGE_KEY);
+  for (const fn of sessionTeardownHooks) {
+    try {
+      fn();
+    } catch {
+      // A misbehaving hook must never block session teardown.
+    }
+  }
+}
+
 // Attach the JWT to every outgoing request. Kept as a single interceptor
 // so the token is always fresh (e.g. after login, the next request picks
 // up the new value from localStorage without page reload).
@@ -89,10 +125,12 @@ client.interceptors.response.use(
         // the next 410. Without this, only an explicit logout() cleaned
         // up; an idle-timeout / server-side revocation left the sub live.
         tearDownPushSubscription(currentToken());
-        localStorage.removeItem(TOKEN_STORAGE_KEY);
-        localStorage.removeItem(WORKSPACE_STORAGE_KEY);
-        localStorage.removeItem(ROLE_STORAGE_KEY);
-        localStorage.removeItem(USER_STORAGE_KEY);
+        // Clear ALL auth state (incl. the iam-core refresh token +
+        // expiry) and cancel the silent-refresh timer via the teardown
+        // hooks. Clearing only the session keys here would leave the
+        // refresh token behind for the armed timer to resurrect the
+        // session after the user was already bounced to /login.
+        clearStoredAuth();
         // Notify same-tab useAuth consumers that the session ended, for
         // consistency with logout()/storeAuth(). The redirect below
         // resets React state via full reload in the common case, but
@@ -214,12 +252,7 @@ export function logout(): void {
   // header and the token is removed synchronously just below.
   // Best-effort and fire-and-forget — never blocks logout.
   tearDownPushSubscription(currentToken());
-  localStorage.removeItem(TOKEN_STORAGE_KEY);
-  localStorage.removeItem(WORKSPACE_STORAGE_KEY);
-  localStorage.removeItem(ROLE_STORAGE_KEY);
-  localStorage.removeItem(USER_STORAGE_KEY);
-  localStorage.removeItem(REFRESH_TOKEN_STORAGE_KEY);
-  localStorage.removeItem(TOKEN_EXPIRES_AT_STORAGE_KEY);
+  clearStoredAuth();
   emitAuthChange();
 }
 

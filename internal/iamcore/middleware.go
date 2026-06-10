@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"net/http"
-	"strings"
 	"sync"
 	"time"
 
@@ -13,6 +12,7 @@ import (
 	apimw "github.com/kennguy3n/zk-drive/api/middleware"
 	"github.com/kennguy3n/zk-drive/internal/audit"
 	"github.com/kennguy3n/zk-drive/internal/logging"
+	"github.com/kennguy3n/zk-drive/internal/tracing"
 	"github.com/kennguy3n/zk-drive/internal/user"
 )
 
@@ -81,9 +81,16 @@ func (m *Middleware) WithAudit(svc *audit.Service) *Middleware {
 // and otherwise forwards to next with an identity-bound context.
 func (m *Middleware) Handler(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		raw, ok := bearerToken(r)
+		// Reuse the built-in auth path's extractor so the iam-core
+		// front-end accepts the bearer token from exactly the same
+		// transports: the Authorization header for ordinary API calls
+		// and the Sec-WebSocket-Protocol list for browser WebSocket
+		// upgrades (which cannot carry custom headers). Without the WS
+		// fallback the realtime-sync and collab endpoints mounted behind
+		// this middleware would 401 every browser connection.
+		raw, ok := apimw.ExtractBearerToken(r)
 		if !ok {
-			apimw.RespondError(w, http.StatusUnauthorized, apimw.ErrCodeAuthMissingToken, "missing or malformed Authorization header")
+			apimw.RespondError(w, http.StatusUnauthorized, apimw.ErrCodeAuthMissingToken, "missing or malformed Authorization credentials")
 			return
 		}
 
@@ -115,6 +122,18 @@ func (m *Middleware) Handler(next http.Handler) http.Handler {
 		}
 
 		reqCtx := apimw.WithIdentity(ctx, p.userID, p.workspaceID, p.role)
+		// Mirror the built-in auth middleware's observability
+		// enrichment so logs and traces carry the resolved identity in
+		// iam-core mode too: Enrich mutates the request-scoped logger
+		// slot in place so the post-dispatch AccessLog frame (emitted
+		// outside chi) sees the attributes, and SetSpanUser stamps the
+		// OTel enduser.* attributes onto the active span.
+		reqCtx = logging.Enrich(reqCtx,
+			"workspace_id", p.workspaceID.String(),
+			"user_id", p.userID.String(),
+			"role", p.role,
+		)
+		tracing.SetSpanUser(reqCtx, p.userID.String(), p.workspaceID.String())
 		next.ServeHTTP(w, r.WithContext(reqCtx))
 	})
 }
@@ -215,20 +234,3 @@ func (id Identity) emailOrFallback() string {
 	return id.Subject + "@iamcore.local"
 }
 
-// bearerToken extracts the token from an "Authorization: Bearer <tok>"
-// header. The scheme match is case-insensitive per RFC 7235.
-func bearerToken(r *http.Request) (string, bool) {
-	h := r.Header.Get("Authorization")
-	if h == "" {
-		return "", false
-	}
-	const prefix = "bearer "
-	if len(h) < len(prefix) || !strings.EqualFold(h[:len(prefix)], prefix) {
-		return "", false
-	}
-	token := strings.TrimSpace(h[len(prefix):])
-	if token == "" {
-		return "", false
-	}
-	return token, true
-}

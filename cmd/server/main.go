@@ -1143,12 +1143,15 @@ func run() error {
 			if iamCoreClient != nil {
 				// iam-core is the identity provider: the built-in
 				// password, OAuth-link, refresh/logout and TOTP
-				// endpoints are all disabled and respond 409 with an
-				// SSO-only hint. Clients discover the Universal Login
-				// via GET /api/config and present the resulting iam-core
-				// access token as a bearer credential on the data plane.
-				r.Post("/signup", ssoOnlyAuthHandler)
-				r.Post("/login", ssoOnlyAuthHandler)
+				// endpoints are all disabled. A single wildcard catches
+				// every method and sub-path under /api/auth so any such
+				// call — /login, /logout, /refresh, /oauth/*, /totp/* —
+				// gets a clear 409 with an SSO-only hint rather than a
+				// bare 404, telling stale clients to discover the
+				// Universal Login via GET /api/config and present the
+				// resulting iam-core access token as a bearer credential
+				// on the data plane.
+				r.Handle("/*", http.HandlerFunc(ssoOnlyAuthHandler))
 				return
 			}
 			r.Post("/signup", authHandler.Signup)

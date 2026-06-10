@@ -19,6 +19,7 @@ import {
   currentToken,
   fetchMe,
   logout,
+  onSessionTeardown,
   storeIamCoreTokens,
   storeIdentity,
   tokenExpiresAt,
@@ -239,10 +240,7 @@ let refreshTimer: ReturnType<typeof setTimeout> | null = null;
 // failed refresh ends the session via logout(), which clears storage
 // and lets RequireAuth bounce the user to /login.
 export function scheduleSilentRefresh(cfg: AppConfig): void {
-  if (refreshTimer) {
-    clearTimeout(refreshTimer);
-    refreshTimer = null;
-  }
+  cancelSilentRefresh();
   if (cfg.auth_mode !== "iam-core" || !currentToken() || !currentRefreshToken()) {
     return;
   }
@@ -262,6 +260,22 @@ export function scheduleSilentRefresh(cfg: AppConfig): void {
     })();
   }, delay);
 }
+
+// cancelSilentRefresh disarms any pending refresh timer. Registered as a
+// session-teardown hook so a logout() or a hard 401 (which clear the
+// refresh token) also stop the timer — without this the timer could
+// fire on a still-captured token and resurrect a dead session.
+export function cancelSilentRefresh(): void {
+  if (refreshTimer) {
+    clearTimeout(refreshTimer);
+    refreshTimer = null;
+  }
+}
+
+// Wire the timer cancellation into the central auth-teardown path. This
+// runs once at module load; client.ts dedupes via a Set so a re-import
+// cannot double-register.
+onSessionTeardown(cancelSilentRefresh);
 
 function clearTransient(): void {
   sessionStorage.removeItem(PKCE_VERIFIER_KEY);

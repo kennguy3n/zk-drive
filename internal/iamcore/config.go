@@ -75,25 +75,31 @@ func (c Config) Enabled() bool {
 // EffectiveScopes returns the configured scopes, or DefaultScopes when
 // none were set. openid is always present in the result so the flow
 // stays a valid OIDC request even if an operator overrides the list.
+//
+// The result is always a freshly allocated slice that never aliases
+// c.Scopes' or DefaultScopes' backing array, so callers (and future
+// edits to this method) cannot mutate the configured scopes by
+// appending to the return value.
 func (c Config) EffectiveScopes() []string {
-	scopes := c.Scopes
-	if len(scopes) == 0 {
-		scopes = DefaultScopes
+	src := c.Scopes
+	if len(src) == 0 {
+		src = DefaultScopes
 	}
 	hasOpenID := false
-	for _, s := range scopes {
+	for _, s := range src {
 		if s == "openid" {
 			hasOpenID = true
 			break
 		}
 	}
+	// Prepend "openid" when absent so it leads the space-delimited
+	// scope parameter, matching the convention every OIDC provider
+	// documents. Build into a fresh slice either way to avoid aliasing.
+	scopes := make([]string, 0, len(src)+1)
 	if !hasOpenID {
-		// Prepend rather than append so "openid" leads the
-		// space-delimited scope parameter, matching the convention
-		// every OIDC provider documents.
-		scopes = append([]string{"openid"}, scopes...)
+		scopes = append(scopes, "openid")
 	}
-	return scopes
+	return append(scopes, src...)
 }
 
 // Validate checks that an enabled Config carries the mandatory fields

@@ -515,6 +515,62 @@ func TestIAMCoreMissingBearerRejected(t *testing.T) {
 	}
 }
 
+// TestIAMCoreWebSocketSubprotocolAuth proves the iam-core middleware
+// authenticates browser WebSocket upgrades, which carry the token in
+// the Sec-WebSocket-Protocol list ("bearer", <token>) because browsers
+// cannot set an Authorization header on a WS handshake. The realtime-
+// sync and collab endpoints are mounted behind this middleware, so a
+// header-only extractor would 401 every browser WS connection. We send
+// the upgrade-shaped headers to a protected endpoint and assert auth
+// passes (200) — i.e. the token was extracted from the subprotocol.
+func TestIAMCoreWebSocketSubprotocolAuth(t *testing.T) {
+	env := setupIAMCoreEnv(t)
+	token := env.idp.mint(t, mockClaims{
+		Subject:  "ws-sub-1",
+		Email:    "ws@acme.example",
+		OrgID:    "org-ws",
+		TenantID: "tenant-ws",
+		Roles:    []string{"member"},
+		TTL:      time.Hour,
+	})
+
+	req, err := http.NewRequest(http.MethodGet, env.server.URL+"/api/me", nil)
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	// No Authorization header: the token rides the subprotocol list, and
+	// the upgrade headers gate the fallback exactly as a browser sends.
+	req.Header.Set("Upgrade", "websocket")
+	req.Header.Set("Connection", "Upgrade")
+	req.Header.Set("Sec-WebSocket-Protocol", "bearer, "+token)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("do request: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200 from subprotocol-authenticated request, got %d", resp.StatusCode)
+	}
+
+	// Negative control: the same upgrade WITHOUT the bearer marker must
+	// not authenticate (a bare subprotocol token cannot smuggle auth).
+	req2, err := http.NewRequest(http.MethodGet, env.server.URL+"/api/me", nil)
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	req2.Header.Set("Upgrade", "websocket")
+	req2.Header.Set("Connection", "Upgrade")
+	req2.Header.Set("Sec-WebSocket-Protocol", token)
+	resp2, err := http.DefaultClient.Do(req2)
+	if err != nil {
+		t.Fatalf("do request: %v", err)
+	}
+	defer func() { _ = resp2.Body.Close() }()
+	if resp2.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("expected 401 without bearer marker, got %d", resp2.StatusCode)
+	}
+}
+
 // TestIAMCorePKCEExchange exercises the OAuth2 Authorization Code +
 // PKCE token exchange against the mock IdP: a verifier/challenge pair
 // is generated, an authorization code is issued for the challenge, and
