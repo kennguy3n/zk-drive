@@ -554,6 +554,7 @@
     "subtitle": "Let's get your workspace set up. This takes a couple of minutes.",
     "stepLabel": "Step {{current}} of {{total}}",
     "next": "Continue",
+    "creating": "Creating…",
     "back": "Back",
     "skip": "Skip for now",
     "finish": "Finish setup",

@@ -58,6 +58,7 @@ export default function SetupWizardPage() {
   const [admin, setAdmin] = useState<AdminForm>({ email: "", name: "", password: "" });
   const [workspaceName, setWorkspaceName] = useState("");
   const [signedUp, setSignedUp] = useState(false);
+  const [committing, setCommitting] = useState(false);
   const [finishing, setFinishing] = useState(false);
   const [done, setDone] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -95,14 +96,20 @@ export default function SetupWizardPage() {
   }, []);
 
   // commitWorkspace fires signup() — the admin + workspace creation
-  // commit point — then advances. Idempotency guard: if the user steps
-  // back to and forward through step 4 we don't sign up twice.
+  // commit point — then advances. Two guards keep it firing exactly once:
+  // signedUp stops a re-submit after a forward-then-back navigation, and
+  // committing stops a concurrent double-click landing two signup() calls
+  // before signedUp has been set on the first response.
   const commitWorkspace = useCallback(async () => {
     setError(null);
     if (signedUp) {
       goNext();
       return;
     }
+    if (committing) {
+      return;
+    }
+    setCommitting(true);
     try {
       await signup({
         workspace_name: workspaceName.trim(),
@@ -114,8 +121,10 @@ export default function SetupWizardPage() {
       goNext();
     } catch (e) {
       setError(translateApiError(e, t));
+    } finally {
+      setCommitting(false);
     }
-  }, [admin, workspaceName, signedUp, goNext, t]);
+  }, [admin, workspaceName, signedUp, committing, goNext, t]);
 
   const finish = useCallback(async () => {
     setFinishing(true);
@@ -188,8 +197,8 @@ export default function SetupWizardPage() {
           )}
           {(step === "storage" || step === "services") && <button onClick={goNext}>{t("setup.next")}</button>}
           {step === "workspace" && (
-            <button onClick={commitWorkspace} disabled={workspaceName.trim() === ""}>
-              {t("setup.next")}
+            <button onClick={commitWorkspace} disabled={workspaceName.trim() === "" || committing}>
+              {committing ? t("setup.creating") : t("setup.next")}
             </button>
           )}
           {step === "invite" && (
