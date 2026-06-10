@@ -62,9 +62,15 @@ func RateLimiter(cfg RateLimitConfig) func(http.Handler) http.Handler {
 			}
 			workspaceID, _ := WorkspaceIDFromContext(r.Context())
 			res := limiter.reserve(workspaceID, userID)
-			// The token bucket's ceiling is its burst capacity, so
-			// report that as the limit to keep Remaining <= Limit.
-			setRateLimitHeaders(w, int(limiter.userCap), res.remaining, res.reset)
+			// Report the configured steady-state per-user rate as the
+			// limit, identical to the Redis limiter
+			// (ratelimit_redis.go) so X-RateLimit-Limit means the same
+			// thing — the operator's RATE_LIMIT_PER_USER — no matter
+			// which backend is active. The token bucket's 2x burst
+			// capacity stays an internal grace: setRateLimitHeaders
+			// clamps Remaining to the limit so the advertised budget
+			// never over-promises what a sustained client may send.
+			setRateLimitHeaders(w, int(limiter.userRate), res.remaining, res.reset)
 			if res.wait > 0 {
 				retry := int(math.Ceil(res.wait.Seconds()))
 				if retry < 1 {
@@ -234,6 +240,13 @@ func (b *tokenBucket) reservation(wait time.Duration, now time.Time) reservation
 func setRateLimitHeaders(w http.ResponseWriter, limit, remaining int, reset int64) {
 	if remaining < 0 {
 		remaining = 0
+	}
+	// Keep the advertised contract honest: Remaining must never
+	// exceed Limit. The in-memory token bucket can momentarily hold
+	// up to its 2x burst capacity, but we report the steady-state
+	// rate as the limit, so clamp the burst surplus down to it.
+	if remaining > limit {
+		remaining = limit
 	}
 	h := w.Header()
 	h.Set("X-RateLimit-Limit", strconv.Itoa(limit))

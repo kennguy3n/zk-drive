@@ -88,10 +88,14 @@ func TestRedisRateLimitHeadersOnThrottle(t *testing.T) {
 }
 
 // TestInMemoryRateLimitHeaders verifies the in-memory limiter sets the
-// same headers (Remaining <= Limit since the limit reported is the
-// burst capacity).
+// same headers as the Redis limiter and, crucially, reports the SAME
+// X-RateLimit-Limit for the same configured PerUser rate — i.e. the
+// configured steady-state rate, not the 2x burst capacity. This locks
+// the two backends to one observable contract so a client never sees
+// Limit flip (e.g. 5 -> 10) when the deployment swaps backing store.
 func TestInMemoryRateLimitHeaders(t *testing.T) {
-	mw := RateLimiter(RateLimitConfig{PerUser: 5, PerWorkspace: 1000})
+	const perUser = 5
+	mw := RateLimiter(RateLimitConfig{PerUser: perUser, PerWorkspace: 1000})
 	handler := mw(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	}))
@@ -102,4 +106,35 @@ func TestInMemoryRateLimitHeaders(t *testing.T) {
 		t.Fatalf("expected 200, got %d", rec.Code)
 	}
 	assertRateLimitHeaders(t, rec.Header())
+	if got := rec.Header().Get("X-RateLimit-Limit"); got != strconv.Itoa(perUser) {
+		t.Fatalf("in-memory limiter should report the configured per-user rate %d as the limit (matching the Redis limiter), got %q", perUser, got)
+	}
+}
+
+// TestRateLimitHeadersConsistentAcrossBackends asserts the in-memory
+// and Redis limiters advertise an identical X-RateLimit-Limit for the
+// same configured PerUser, so the header is backend-agnostic.
+func TestRateLimitHeadersConsistentAcrossBackends(t *testing.T) {
+	const perUser = 7
+	user, ws := uuid.New(), uuid.New()
+
+	memRec := httptest.NewRecorder()
+	RateLimiter(RateLimitConfig{PerUser: perUser, PerWorkspace: 1000})(
+		http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) }),
+	).ServeHTTP(memRec, authedRequest(user, ws))
+
+	_, client := newTestRedis(t)
+	redisRec := httptest.NewRecorder()
+	RedisRateLimiter(client, RedisRateLimiterConfig{PerUser: perUser, PerWorkspace: 1000})(
+		http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) }),
+	).ServeHTTP(redisRec, authedRequest(user, ws))
+
+	memLimit := memRec.Header().Get("X-RateLimit-Limit")
+	redisLimit := redisRec.Header().Get("X-RateLimit-Limit")
+	if memLimit != redisLimit {
+		t.Fatalf("X-RateLimit-Limit differs across backends: in-memory=%q redis=%q", memLimit, redisLimit)
+	}
+	if memLimit != strconv.Itoa(perUser) {
+		t.Fatalf("both backends should report the configured per-user rate %d, got %q", perUser, memLimit)
+	}
 }

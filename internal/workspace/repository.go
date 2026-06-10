@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -71,6 +72,18 @@ func NewPostgresRepository(pool *pgxpool.Pool) *PostgresRepository {
 }
 
 const workspaceColumns = "id, name, owner_user_id, storage_quota_bytes, storage_used_bytes, tier, mfa_required, search_language, default_encryption_mode, created_at, updated_at"
+
+// prefixColumns qualifies every column in a comma-separated list with a
+// table alias (e.g. "id, name" -> "w.id, w.name") so a JOIN query can
+// reuse the canonical workspaceColumns set instead of re-listing the
+// columns inline and drifting out of sync with scanWorkspace.
+func prefixColumns(alias, columns string) string {
+	parts := strings.Split(columns, ", ")
+	for i, c := range parts {
+		parts[i] = alias + "." + c
+	}
+	return strings.Join(parts, ", ")
+}
 
 func scanWorkspace(row pgx.Row) (*Workspace, error) {
 	w := &Workspace{}
@@ -331,8 +344,14 @@ func (r *PostgresRepository) SetDefaultEncryptionMode(ctx context.Context, works
 // caller's email (resolved from the supplied user id) so workspaces joined
 // after signup are also returned.
 func (r *PostgresRepository) ListForUser(ctx context.Context, userID uuid.UUID) ([]*Workspace, error) {
+	// Alias workspaceColumns onto the `w` table so this stays a single
+	// source of truth for the column set: a column added to
+	// workspaceColumns (and scanWorkspace) is automatically selected and
+	// scanned here too, instead of silently returning its zero value —
+	// the drift that previously dropped default_encryption_mode from
+	// GET /api/workspaces.
 	q := `
-SELECT w.id, w.name, w.owner_user_id, w.storage_quota_bytes, w.storage_used_bytes, w.tier, w.mfa_required, w.search_language, w.created_at, w.updated_at
+SELECT ` + prefixColumns("w", workspaceColumns) + `
 FROM workspaces w
 JOIN users u ON u.workspace_id = w.id
 WHERE u.email = (SELECT email FROM users WHERE id = $1)
@@ -345,8 +364,8 @@ ORDER BY w.created_at ASC`
 
 	var out []*Workspace
 	for rows.Next() {
-		w := &Workspace{}
-		if err := rows.Scan(&w.ID, &w.Name, &w.OwnerUserID, &w.StorageQuotaBytes, &w.StorageUsedBytes, &w.Tier, &w.MFARequired, &w.SearchLanguage, &w.CreatedAt, &w.UpdatedAt); err != nil {
+		w, err := scanWorkspace(rows)
+		if err != nil {
 			return nil, err
 		}
 		out = append(out, w)
