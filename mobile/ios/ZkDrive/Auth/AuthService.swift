@@ -59,8 +59,17 @@ final class AuthService: ObservableObject {
     func signIn() async {
         do {
             let bundle = try await oauth.signIn()
-            try await bridge.setTokens(bundle)
-            try persist(bundle)
+            do {
+                try await bridge.setTokens(bundle)
+                try persist(bundle)
+            } catch {
+                // Keep sign-in atomic: if the Keychain write fails after the
+                // tokens were loaded into the bridge, roll the bridge back so we
+                // never sit in a half-signed-in state (bridge holds tokens but
+                // nothing is persisted and the UI shows Login).
+                try? await bridge.clearTokens()
+                throw error
+            }
             identity = IdentityClaims.decode(jwt: bundle.accessToken)
             lastError = nil
             state = .signedIn

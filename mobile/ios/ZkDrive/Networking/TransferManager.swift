@@ -33,10 +33,6 @@ final class TransferManager: NSObject, ObservableObject {
     private let offlineStore: OfflineStore
     private let sessionIdentifier: String
 
-    /// Stored so `handleEventsForBackgroundURLSession` can call it once
-    /// all background events have been delivered.
-    var backgroundCompletionHandler: (() -> Void)?
-
     /// Jobs the user explicitly cancelled. The background task still fires a
     /// `didCompleteWithError` (NSURLErrorCancelled) afterwards; this set lets
     /// `finishTask` ignore that late callback so the terminal "Cancelled"
@@ -251,9 +247,13 @@ extension TransferManager: URLSessionDataDelegate, URLSessionDownloadDelegate {
     }
 
     nonisolated func urlSessionDidFinishEvents(forBackgroundURLSession session: URLSession) {
+        // The completion handler lives on the router (it may have been stored
+        // before this instance existed, during a background relaunch), so read
+        // and clear it there.
         Task { @MainActor in
-            self.backgroundCompletionHandler?()
-            self.backgroundCompletionHandler = nil
+            let handler = AppDelegateRouter.shared.pendingBackgroundCompletionHandler
+            AppDelegateRouter.shared.pendingBackgroundCompletionHandler = nil
+            handler?()
         }
     }
 

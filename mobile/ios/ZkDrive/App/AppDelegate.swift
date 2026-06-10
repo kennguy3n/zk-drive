@@ -10,6 +10,13 @@ final class AppDelegateRouter {
     static let shared = AppDelegateRouter()
     weak var push: PushManager?
     weak var transfers: TransferManager?
+    /// Held on the router itself (not on `TransferManager`) because iOS can
+    /// relaunch the app to deliver background-URLSession events — and this
+    /// handler — before `AppServices` has constructed the `TransferManager`.
+    /// Storing it here means it survives that window; `TransferManager`'s
+    /// `urlSessionDidFinishEvents` calls and clears it once all events for the
+    /// reconnected background session have been delivered.
+    var pendingBackgroundCompletionHandler: (() -> Void)?
     private init() {}
 }
 
@@ -32,13 +39,15 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
 
     // MARK: Background URLSession
     //
-    // Store the completion handler so `TransferManager` can call it once
-    // it has finished processing delivered background events.
+    // Store the completion handler unconditionally on the router so it isn't
+    // lost when this fires during an early relaunch (before TransferManager
+    // exists). TransferManager calls it once it has finished processing the
+    // delivered background events.
     func application(_ application: UIApplication,
                      handleEventsForBackgroundURLSession identifier: String,
                      completionHandler: @escaping () -> Void) {
         Task { @MainActor in
-            AppDelegateRouter.shared.transfers?.backgroundCompletionHandler = completionHandler
+            AppDelegateRouter.shared.pendingBackgroundCompletionHandler = completionHandler
         }
     }
 }
