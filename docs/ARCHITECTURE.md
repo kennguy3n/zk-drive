@@ -375,6 +375,55 @@ In both flows, ZK Drive is **not** on the byte path. The ZK Drive API
 servers handle metadata, permissions, and URL brokering; the bytes
 flow directly between the client and the zk-object-fabric data plane.
 
+### 4.3 Inter-service transport (control plane)
+
+The control-plane calls from ZK Drive to zk-object-fabric (placement
+policy reads/writes, CMK forwarding, and — on the download/upload hot
+path — presigned-URL minting) go through `internal/fabric.Client`. At
+5000-tenant scale these are high-fan-out, low-latency RPCs, so the
+default client transport is tuned for connection reuse rather than the
+stdlib defaults:
+
+- **HTTP/2 (`ForceAttemptHTTP2 = true`).** When the gateway advertises
+  `h2` over TLS ALPN, requests multiplex over a single connection per
+  host instead of opening a fresh HTTP/1.1 connection per concurrent
+  request. This collapses the TLS-handshake-per-request overhead that
+  would otherwise dominate a burst of presigned-URL generations.
+- **Connection pooling (`MaxIdleConnsPerHost = 64`).** The stdlib caps
+  idle keep-alive connections per host at 2, which forces a re-dial (and
+  TLS handshake) for every request beyond the second in a burst. Sizing
+  the idle pool to the expected service-to-service concurrency keeps a
+  warm pool of connections ready.
+
+These are set in `fabric.newDefaultTransport()`; a caller may still
+inject its own `*http.Client` via `ClientConfig.HTTPClient` to override.
+
+#### Optional gRPC metadata channel (forward-looking)
+
+For deployments where the metadata RPC volume (presigned-URL generation,
+permission checks) outgrows JSON-over-HTTP, zk-object-fabric can expose
+an **optional internal gRPC metadata service** while the **data plane
+stays on S3** (bytes never transit ZK Drive). The intended contract:
+
+```proto
+service FabricMetadata {
+  // Mint a presigned GET/PUT URL for an object key (replaces the
+  // S3-SDK presign round-trip on the hot download/upload path).
+  rpc PresignURL(PresignRequest) returns (PresignResponse);
+  // Resolve whether a (tenant, principal, object) tuple is permitted —
+  // a server-side permission check colocated with placement metadata.
+  rpc CheckPermission(PermissionRequest) returns (PermissionResponse);
+}
+```
+
+gRPC is the right fit here because it pins HTTP/2 multiplexing, gives a
+typed contract for the two hottest metadata RPCs, and supports
+streaming/deadline propagation natively. It is **opt-in** behind a
+`FABRIC_GRPC_ENDPOINT` config (HTTP/JSON remains the default and the
+fallback) so a deployment adopts it only when the HTTP/2 control plane
+above is no longer sufficient. The S3 data plane is unchanged either
+way.
+
 ---
 
 ## 5. Async Job Architecture
