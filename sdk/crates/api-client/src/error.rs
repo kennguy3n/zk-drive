@@ -25,6 +25,14 @@ pub enum ApiError {
     #[error("api: websocket: {0}")]
     WebSocket(String),
 
+    /// The configured [`crate::TokenProvider`] could not vend an access
+    /// token for an authenticated request (e.g. the underlying OAuth
+    /// refresh failed or no token has been set). Carries the provider's
+    /// error rendered as a string so the transport layer can surface a
+    /// faithful reason without depending on the auth crate's error type.
+    #[error("api: token: {0}")]
+    Token(String),
+
     /// URL parsing or building failed (only happens for a malformed
     /// base URL configured by the caller).
     #[error("api: url: {0}")]

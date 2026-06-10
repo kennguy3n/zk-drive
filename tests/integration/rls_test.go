@@ -48,6 +48,7 @@ var rlsTenantTables = []string{
 	"usage_events",
 	"workspace_storage_credentials",
 	"kchat_room_folders",
+	"device_push_tokens",
 }
 
 // ensureRLSTestRole creates rls_test_role idempotently and grants

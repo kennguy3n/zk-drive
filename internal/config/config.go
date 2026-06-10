@@ -397,6 +397,47 @@ type Config struct {
 	// reports reach them.
 	VAPIDSubscriber string
 
+	// Native mobile push (APNs for iOS, FCM for Android). Each provider is
+	// independently optional: when its credentials are unset that platform
+	// is simply disabled (the publisher skips it and
+	// /api/push/register-device responds 501 for that platform), so the
+	// rest of the notification path keeps working. Provider construction
+	// (reading the key files, parsing the keys) happens in
+	// cmd/server/main.go where IO errors are already logged; Config only
+	// carries the raw env inputs.
+
+	// FCMServiceAccountJSON is the inline Google service-account key JSON
+	// used to authenticate to the FCM HTTP v1 API. Set via
+	// FCM_SERVICE_ACCOUNT_JSON. Mutually exclusive with the file form;
+	// the inline form takes precedence when both are set.
+	FCMServiceAccountJSON string
+	// FCMServiceAccountFile is a path to the service-account key JSON,
+	// for deployments that mount the key as a file. Set via
+	// FCM_SERVICE_ACCOUNT_FILE.
+	FCMServiceAccountFile string
+
+	// APNsAuthKey is the inline contents of the APNs .p8 token-auth signing
+	// key (PEM). Set via APNS_AUTH_KEY. Mutually exclusive with the file
+	// form; inline takes precedence when both are set.
+	APNsAuthKey string
+	// APNsAuthKeyFile is a path to the .p8 key file. Set via
+	// APNS_AUTH_KEY_FILE.
+	APNsAuthKeyFile string
+	// APNsKeyID is the 10-char Key ID of the .p8 key (Apple Developer →
+	// Keys). Set via APNS_KEY_ID.
+	APNsKeyID string
+	// APNsTeamID is the 10-char Apple Developer Team ID. Set via
+	// APNS_TEAM_ID.
+	APNsTeamID string
+	// APNsTopic is the iOS app's bundle identifier (the APNs topic). Set
+	// via APNS_TOPIC.
+	APNsTopic string
+	// APNsProduction selects the production APNs host (api.push.apple.com)
+	// over the sandbox host (api.sandbox.push.apple.com). Set via
+	// APNS_PRODUCTION; defaults to false (sandbox) so a misconfiguration
+	// cannot accidentally target production devices.
+	APNsProduction bool
+
 	// OnlyOfficeURL is the base URL of the ONLYOFFICE Document Server
 	// (e.g. "https://onlyoffice.example.com"). When empty,
 	// collaborative office-document editing is disabled: the
@@ -470,6 +511,23 @@ func (c *Config) OnlyOfficeMaxConcurrentSaves() int {
 // WebSocket notification path only.
 func (c *Config) WebPushEnabled() bool {
 	return c.VAPIDPublicKey != "" && c.VAPIDPrivateKey != ""
+}
+
+// FCMConfigured reports whether an FCM service-account key is supplied
+// (inline or file). The server attempts to build the FCM provider only
+// when true; a parse failure still disables FCM (logged) without
+// aborting startup.
+func (c *Config) FCMConfigured() bool {
+	return c.FCMServiceAccountJSON != "" || c.FCMServiceAccountFile != ""
+}
+
+// APNsConfigured reports whether the full APNs token-auth credential set
+// is supplied: a signing key (inline or file) plus key id, team id and
+// topic. A partial set is treated as unconfigured so APNs stays disabled
+// rather than starting with a guaranteed-to-fail provider.
+func (c *Config) APNsConfigured() bool {
+	hasKey := c.APNsAuthKey != "" || c.APNsAuthKeyFile != ""
+	return hasKey && c.APNsKeyID != "" && c.APNsTeamID != "" && c.APNsTopic != ""
 }
 
 // Load reads configuration from environment variables and returns a populated
@@ -602,6 +660,16 @@ func buildConfigFromEnv() *Config {
 		VAPIDPublicKey:  strings.TrimSpace(os.Getenv("VAPID_PUBLIC_KEY")),
 		VAPIDPrivateKey: strings.TrimSpace(os.Getenv("VAPID_PRIVATE_KEY")),
 		VAPIDSubscriber: strings.TrimSpace(os.Getenv("VAPID_SUBSCRIBER")),
+
+		FCMServiceAccountJSON: os.Getenv("FCM_SERVICE_ACCOUNT_JSON"),
+		FCMServiceAccountFile: strings.TrimSpace(os.Getenv("FCM_SERVICE_ACCOUNT_FILE")),
+
+		APNsAuthKey:     os.Getenv("APNS_AUTH_KEY"),
+		APNsAuthKeyFile: strings.TrimSpace(os.Getenv("APNS_AUTH_KEY_FILE")),
+		APNsKeyID:       strings.TrimSpace(os.Getenv("APNS_KEY_ID")),
+		APNsTeamID:      strings.TrimSpace(os.Getenv("APNS_TEAM_ID")),
+		APNsTopic:       strings.TrimSpace(os.Getenv("APNS_TOPIC")),
+		APNsProduction:  parseBoolDefault(os.Getenv("APNS_PRODUCTION"), false),
 
 		OnlyOfficeURL:                   strings.TrimSpace(os.Getenv("ONLYOFFICE_URL")),
 		OnlyOfficeSecret:                os.Getenv("ONLYOFFICE_SECRET"),
