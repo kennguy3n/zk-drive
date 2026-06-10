@@ -31,7 +31,7 @@ spec:
       {{- include "zk-drive.imagePullSecrets" . | nindent 6 }}
       containers:
         - name: migrate
-          image: {{ include "zk-drive.image" . }}
+          image: {{ include "zk-drive.serverImage" . }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           command: ["/app/migrate"]
           {{- include "zk-drive.envFrom" . | nindent 10 }}

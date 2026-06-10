@@ -49,8 +49,10 @@ resource "aws_ecs_task_definition" "cron" {
 
   container_definitions = jsonencode([
     {
-      name        = each.key
-      image       = "${var.app_image}:${var.app_version}"
+      name = each.key
+      # CronJobs (reconciler / orphan-gc / audit-archiver) share the
+      # heavy preview-tool runtime, so they ride the worker image.
+      image       = local.worker_image
       essential   = true
       entryPoint  = [each.value.entrypoint]
       environment = concat(local.app_environment, each.value.extra_env)

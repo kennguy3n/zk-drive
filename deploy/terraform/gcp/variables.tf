@@ -82,6 +82,36 @@ variable "app_version" {
   default     = "0.1.0"
 }
 
+# Split-image overrides. Leave empty to run everything from the single
+# combined image above (backward-compatible default). Set the server
+# vars to the slim API image (Dockerfile.server) and the worker vars to
+# the heavy image (Dockerfile.worker). The server Cloud Run service uses
+# the server image; the worker service AND the CronJobs (which share the
+# heavy preview-tool runtime) use the worker image.
+variable "server_image" {
+  description = "Container image repository for the slim API server (Dockerfile.server). Empty → fall back to app_image."
+  type        = string
+  default     = ""
+}
+
+variable "server_image_version" {
+  description = "Tag for the server image. Empty → fall back to app_version."
+  type        = string
+  default     = ""
+}
+
+variable "worker_image" {
+  description = "Container image repository for the heavy worker (Dockerfile.worker). Empty → fall back to app_image."
+  type        = string
+  default     = ""
+}
+
+variable "worker_image_version" {
+  description = "Tag for the worker image. Empty → fall back to app_version."
+  type        = string
+  default     = ""
+}
+
 # ----------------------------------------------------------------------------
 # Cloud SQL (Postgres 16)
 # ----------------------------------------------------------------------------

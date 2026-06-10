@@ -30,6 +30,15 @@ locals {
 
   cloud_sql_proxy_image = "gcr.io/cloud-sql-connectors/cloud-sql-proxy:2.11.4"
 
+  # Resolved image references. The server Cloud Run service runs the
+  # slim API image (Dockerfile.server); the worker service and the
+  # CronJobs run the heavy image (Dockerfile.worker). Each falls back to
+  # the shared combined app_image[:app_version] when its split-image
+  # override is empty, so the default single-image deployment is
+  # unchanged.
+  server_image = "${coalesce(var.server_image, var.app_image)}:${coalesce(var.server_image_version, var.app_version)}"
+  worker_image = "${coalesce(var.worker_image, var.app_image)}:${coalesce(var.worker_image_version, var.app_version)}"
+
   # Non-secret application config shared by server + worker. Names mirror
   # the env vars read by internal/config/config.go.
   app_env = {
@@ -93,7 +102,7 @@ resource "google_cloud_run_v2_service" "server" {
 
     containers {
       name    = "server"
-      image   = "${var.app_image}:${var.app_version}"
+      image   = local.server_image
       command = ["/app/server"]
 
       # Gate the app on the Cloud SQL Proxy sidecar being ready before it
@@ -246,7 +255,7 @@ resource "google_cloud_run_v2_service" "worker" {
 
     containers {
       name    = "worker"
-      image   = "${var.app_image}:${var.app_version}"
+      image   = local.worker_image
       command = ["/app/worker"]
 
       # Gate the worker on the Cloud SQL Proxy sidecar being ready (see the

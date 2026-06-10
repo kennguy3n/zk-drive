@@ -39,6 +39,13 @@ import (
 // installed exporter.
 const publisherTracerName = "github.com/kennguy3n/zk-drive/internal/jobs"
 
+// StreamName is the JetStream WorkQueue stream that backs every
+// drive.* job subject. The worker (cmd/worker) is the single creator
+// of this stream (ensureStream); other components — the compact
+// supervisor's readiness barrier, operator tooling — reference this
+// constant so the name has one source of truth.
+const StreamName = "DRIVE_JOBS"
+
 // Subject constants. Keep these in sync with cmd/worker/main.go — the
 // worker uses the same strings when declaring JetStream consumers.
 const (
