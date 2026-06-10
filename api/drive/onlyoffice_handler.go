@@ -41,11 +41,33 @@ import (
 	"github.com/kennguy3n/zk-drive/internal/webhooks"
 )
 
-// onlyOfficeFetchTimeout bounds the GET the callback makes to pull the
-// edited document back from the Document Server's cache. The server is
-// typically co-located, so the window is generous but finite to avoid
-// a hung callback pinning a goroutine.
+// onlyOfficeFetchTimeout bounds how long the save callback waits for
+// the Document Server to START responding to the GET that pulls the
+// edited document from its cache — connect, send the request, and
+// receive the response headers. It is applied as the transport's
+// ResponseHeaderTimeout, NOT as a whole-request http.Client.Timeout.
+//
+// This distinction is load-bearing: the streaming save path relays
+// resp.Body straight into the object-storage PUT, so the body read is
+// paced by the UPLOAD. A client-level Timeout covers body reading, so
+// it would also bound the upload — a large document on a slow or
+// cross-region storage link could trip the fetch timer mid-relay and
+// fail the save. Because a fresh version/object key is minted per
+// attempt, every Document Server retry would hit the same wall and the
+// edited bytes would eventually be lost. ResponseHeaderTimeout bounds
+// only the header wait (the original "don't let a hung Document Server
+// pin a goroutine" intent) and leaves the body free to stream for as
+// long as onlyOfficeRelayTimeout allows.
 const onlyOfficeFetchTimeout = 60 * time.Second
+
+// onlyOfficeRelayTimeout bounds the WHOLE relay — header fetch plus
+// streaming the body to object storage — via the per-call context. It
+// is a budget independent of onlyOfficeFetchTimeout so a stalled upload
+// can never pin a callback goroutine indefinitely, while still being
+// far above any legitimate transfer: the per-document cap is 100 MiB,
+// which completes well inside this window even on a slow (~0.3 MiB/s)
+// cross-region storage link.
+const onlyOfficeRelayTimeout = 10 * time.Minute
 
 // defaultOnlyOfficeMaxDocumentBytes caps how many bytes the save
 // callback will buffer in memory from the Document Server's
@@ -87,8 +109,30 @@ const _ = uint(defaultOnlyOfficeMaxConcurrentSaves - 1)                         
 const _ = uint(defaultOnlyOfficeSaveMemoryBudget - defaultOnlyOfficeMaxConcurrentSaves*defaultOnlyOfficeMaxDocumentBytes) // worst case <= budget
 
 // onlyOfficeHTTPClient pulls edited bytes from the Document Server in
-// the save callback. Shared so connections are reused across callbacks.
-var onlyOfficeHTTPClient = &http.Client{Timeout: onlyOfficeFetchTimeout}
+// the save callback. Its transport sets ResponseHeaderTimeout (the
+// fetch bound), but the client itself has NO whole-request Timeout so
+// the streaming relay into object storage is not strangled by the
+// fetch timer — see onlyOfficeFetchTimeout for why. The whole relay is
+// instead bounded by onlyOfficeRelayTimeout via the per-call context.
+// Shared so connections are reused across callbacks.
+var onlyOfficeHTTPClient = &http.Client{Transport: newOnlyOfficeTransport()}
+
+// newOnlyOfficeTransport clones http.DefaultTransport (inheriting its
+// dialer, TLS-handshake, and idle-pool defaults) and sets
+// ResponseHeaderTimeout so only the wait for response headers is
+// bounded — body reading (and thus the streamed upload it paces) is
+// left to the per-call context deadline.
+func newOnlyOfficeTransport() *http.Transport {
+	base, ok := http.DefaultTransport.(*http.Transport)
+	if !ok {
+		// Always *http.Transport in the stdlib; defensive fallback so a
+		// future change can never nil-panic here.
+		base = &http.Transport{}
+	}
+	t := base.Clone()
+	t.ResponseHeaderTimeout = onlyOfficeFetchTimeout
+	return t
+}
 
 // errOnlyOfficeSaveBusy is returned by the save path's bounded buffered
 // fallback when its concurrency semaphore is full. It is mapped to a
@@ -583,6 +627,12 @@ func (h *Handler) saveEditedVersion(ctx context.Context, workspaceID, fileID uui
 // semaphore is full it returns errOnlyOfficeSaveBusy for a retryable
 // 503.
 func (h *Handler) writeEditedObject(ctx context.Context, store *storage.Client, workspaceID uuid.UUID, objectKey, contentType, url string) (int64, error) {
+	// Bound the whole relay (fetch headers + stream body to storage)
+	// with a budget independent of the transport's ResponseHeaderTimeout,
+	// so a stalled upload cannot pin this goroutine forever. The fetch
+	// itself is still capped at onlyOfficeFetchTimeout by the transport.
+	ctx, cancel := context.WithTimeout(ctx, onlyOfficeRelayTimeout)
+	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return 0, err

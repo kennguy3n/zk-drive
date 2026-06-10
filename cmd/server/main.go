@@ -666,6 +666,19 @@ func run() error {
 		notificationPublisher = notification.NewWebPushPublisher(notificationPublisher, hub, webPushSvc).
 			WithWaitGroup(&bgGoroutines)
 		slog.Info("web push enabled, offline notifications will fan out via VAPID")
+		if wsProxyMode {
+			// In proxy mode the in-process hub holds no client
+			// connections, so the replica-local IsConnected presence
+			// check always reports "not connected" and the web-push
+			// fallback fires for EVERY notification — even for users
+			// with a live socket on the external proxy tier. Operators
+			// who enable both will see push volume spike. The fix is to
+			// drive presence from the proxy (Centrifugo exposes
+			// presence); warn loudly so this is not a silent surprise.
+			// See deploy/WEBSOCKET_PROXY.md ("Presence / web-push
+			// fallback").
+			slog.Warn("WS_PROXY_MODE and web push are both enabled: in-process presence is always 'not connected' in proxy mode, so web push fires for every notification (including users connected to the proxy). Drive presence from the proxy tier to suppress redundant pushes — see deploy/WEBSOCKET_PROXY.md")
+		}
 	} else {
 		slog.Warn("web push disabled (VAPID_PUBLIC_KEY / VAPID_PRIVATE_KEY unset), /api/push/* will respond 501")
 	}
