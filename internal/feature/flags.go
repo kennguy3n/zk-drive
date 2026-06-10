@@ -81,8 +81,8 @@ var AllFeatures = []string{
 	FeatureWebhooks,
 	FeatureKChat,
 	FeatureStrictZK,
-	FeatureDataResidency,
 	FeatureCMK,
+	FeatureDataResidency,
 	FeatureAISummaries,
 }
 
