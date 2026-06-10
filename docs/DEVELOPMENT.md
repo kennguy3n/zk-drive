@@ -91,6 +91,55 @@ golangci-lint run
 The CI runs both with the race detector enabled
 (`go test -race ./...`) on every PR.
 
+## Security scanning (supply chain)
+
+A dedicated `Security` workflow (`.github/workflows/security.yml`)
+runs four supply-chain gates on every PR and push to `main`. Each is
+reproducible locally:
+
+```
+# Secret scanning — full git history, uses .gitleaks.toml
+gitleaks detect --no-banner --redact --config .gitleaks.toml
+
+# Go vulnerability scanning — call-graph-aware, only reports reachable vulns
+govulncheck ./...
+
+# Frontend dependency audit — gate on the shipped (production) tree
+cd frontend && npm audit --omit=dev --audit-level=high
+```
+
+Notes:
+
+- **gitleaks** extends the upstream ruleset (`useDefault = true`) and
+  allowlists only specific, audited non-secret fixtures by value (see
+  `.gitleaks.toml`). It does **not** blanket-skip `_test.go` files, so
+  a real provider credential in a test still trips the high-confidence
+  rules. A finding means a secret must be rotated and purged from
+  history — never widen the allowlist to silence a real leak.
+- **govulncheck** reports only vulnerabilities whose vulnerable symbols
+  are reachable from our code, so every finding is actionable. The fix
+  is almost always a dependency or Go-toolchain bump (the `go` directive
+  in `go.mod` pins the minimum patch release the stdlib scan resolves
+  against).
+- **npm audit** gates on the **production** dependency tree at `high`
+  severity — the code that ships to browsers. Dev/build-tooling
+  advisories (e.g. the Vite dev-server) are reported informationally but
+  don't block, since clearing them can require a breaking toolchain
+  major bump that is its own risk; review those manually.
+
+### SBOM (Software Bill of Materials)
+
+The production Docker image generates an SPDX 2.3 SBOM during the build
+(a dedicated `sbom` stage runs Syft over the compiled binaries and the
+Go module graph) and ships it at `/usr/share/sbom/zk-drive.spdx.json`.
+The `Security` workflow also exports it as a build artifact
+(`zk-drive-sbom-spdx`). To produce it locally:
+
+```
+docker build --target sbom -o type=local,dest=./sbom-out .
+cat ./sbom-out/sbom.spdx.json | jq .spdxVersion   # -> "SPDX-2.3"
+```
+
 ## Frontend
 
 The frontend is a React + TypeScript SPA built with Vite, packaged

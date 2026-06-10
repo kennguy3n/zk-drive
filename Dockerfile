@@ -43,6 +43,29 @@ RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w -X github.com/ke
 # two dates" requests. Operators run it ad-hoc, not on a schedule.
 RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w -X github.com/kennguy3n/zk-drive/internal/version.Version=${APP_VERSION}" -o /out/audit-restore ./cmd/audit-restore
 
+# ---- SBOM stage (Workstream 6.7) ----
+# Generate an SPDX-format Software Bill of Materials for the artifacts
+# that actually ship in the runtime image, so every release carries an
+# auditable supply-chain manifest a tenant security team can ingest
+# (Grype, Dependency-Track, `cosign attach sbom`, etc.).
+#
+# We scan BOTH inputs because they catalog different things:
+#   - the compiled binaries under /out — syft's go-module-binary
+#     cataloger reads the module versions Go embeds in each binary,
+#     which is the authoritative list of what is linked into the
+#     shipped executables (build tags, replaces and all);
+#   - go.mod/go.sum — pins the full resolved graph including modules
+#     that a given binary may not reference, so the SBOM is a superset
+#     rather than only the call-graph-reachable subset.
+#
+# The syft image is distroless (no shell), so the scan runs via exec
+# form. The tag is pinned (not :latest) so a syft default-format
+# change can't silently alter the SBOM shape between builds.
+FROM anchore/syft:v1.18.1 AS sbom
+COPY --from=builder /src/go.mod /src/go.sum /scan/src/
+COPY --from=builder /out /scan/bin
+RUN ["/syft", "scan", "dir:/scan", "--source-name", "zk-drive", "-o", "spdx-json=/sbom.spdx.json"]
+
 # ---- Runtime stage ----
 # debian:bookworm-slim (instead of distroless static) so the worker
 # can shell out to external preview tools. Each tool's licence is
@@ -97,6 +120,10 @@ COPY --from=builder /out/orphan-gc /app/orphan-gc
 COPY --from=builder /out/audit-archiver /app/audit-archiver
 COPY --from=builder /out/audit-restore /app/audit-restore
 COPY --from=builder /src/migrations /app/migrations
+# SPDX SBOM (Workstream 6.7) shipped at a stable, documented path so a
+# running container can serve its own bill of materials to a scanner
+# or a compliance export without rebuilding.
+COPY --from=sbom /sbom.spdx.json /usr/share/sbom/zk-drive.spdx.json
 
 USER nonroot:nonroot
 EXPOSE 8080

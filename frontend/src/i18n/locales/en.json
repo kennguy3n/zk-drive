@@ -555,6 +555,7 @@
     "MFA_ENROLL_REQUIRED": "You must enable two-factor authentication.",
     "RATE_LIMIT_EXCEEDED": "You're doing that too often. Please try again later.",
     "AUTH_TOO_MANY_ATTEMPTS": "Too many failed sign-in attempts from your network. Please wait a moment and try again.",
+    "AUTH_SESSION_ANOMALY": "We noticed a change in your device or network. Please sign in again to keep your account secure.",
     "FORBIDDEN": "You don't have permission to do that.",
     "ADMIN_ACCESS_REQUIRED": "This action requires admin privileges.",
     "READ_ONLY_ROLE": "Your account has read-only access.",
