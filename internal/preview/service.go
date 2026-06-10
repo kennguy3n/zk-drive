@@ -166,11 +166,39 @@ func (s *Service) Generate(ctx context.Context, fileID, versionID uuid.UUID) (*P
 		return nil, fmt.Errorf("download source: %w", err)
 	}
 
+	// Heavy (subprocess) renders pass through the per-process
+	// concurrency gate so a burst of office/video jobs cannot fork
+	// enough LibreOffice/ffmpeg processes to OOM the pod. The gate is
+	// acquired only for heavy MIMEs and only around the render itself
+	// (the download above is pure I/O and does not need a slot). A
+	// nil/zero cap makes this a no-op. The slot is released as soon as
+	// the render returns, before the resize/encode/upload steps which
+	// are in-process and cheap.
+	if WeightForMime(meta.mimeType) == WeightHeavy {
+		release, aerr := acquireSubprocessSlot(ctx)
+		if aerr != nil {
+			return nil, fmt.Errorf("wait for heavy render slot: %w", aerr)
+		}
+		img, rerr := r.Render(ctx, srcBytes)
+		release()
+		if rerr != nil {
+			return nil, rerr
+		}
+		return s.finishPreview(ctx, meta, fileID, versionID, img)
+	}
+
 	img, err := r.Render(ctx, srcBytes)
 	if err != nil {
 		return nil, err
 	}
+	return s.finishPreview(ctx, meta, fileID, versionID, img)
+}
 
+// finishPreview resizes the rendered image to a thumbnail, encodes it
+// to PNG, uploads it to object storage, and upserts the preview row.
+// Factored out of Generate so the heavy (gated) and light render paths
+// share the identical post-render pipeline.
+func (s *Service) finishPreview(ctx context.Context, meta versionMeta, fileID, versionID uuid.UUID, img image.Image) (*Preview, error) {
 	thumb := resize(img, ThumbnailSize, ThumbnailSize)
 
 	var encoded bytes.Buffer

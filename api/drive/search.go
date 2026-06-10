@@ -1,15 +1,52 @@
 package drive
 
 import (
+	"context"
 	"errors"
+	"fmt"
 	"net/http"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/kennguy3n/zk-drive/api/middleware"
 	"github.com/kennguy3n/zk-drive/internal/logging"
+	"github.com/kennguy3n/zk-drive/internal/responsecache"
 	"github.com/kennguy3n/zk-drive/internal/search"
 	"github.com/kennguy3n/zk-drive/internal/workspace"
 )
+
+// searchCacheTTL is the freshness window for cached search results. 30s
+// matches the spec: long enough to absorb the rapid-fire requests a user
+// types into the search box (and the duplicate queries across members of
+// a busy workspace), short enough that a newly-indexed file surfaces
+// quickly even if the workspace-generation bust is somehow missed.
+const searchCacheTTL = 30 * time.Second
+
+// searchCacheKey builds a collision-free cache discriminator from every
+// input that changes the result set: the normalised query, the resolved
+// FTS language, the fuzzy toggle, and the pagination window. Every
+// variable-length, free-form field (query AND language) is length-
+// prefixed so no choice of `|`-containing values can alias two distinct
+// tuples onto the same key — the encoding is injective. The remaining
+// fields are fixed-alphabet (fuzzy is "0"/"1"; limit/offset are decimal
+// integers) and cannot contain the separator, so they need no prefix.
+// Language is server-controlled today (workspaces.search_language), but
+// length-prefixing it removes the latent footgun if it ever becomes
+// user-influenced.
+func searchCacheKey(query string, opts search.Options, limit, offset int) string {
+	fuzzy := "0"
+	if opts.FuzzyEnabled {
+		fuzzy = "1"
+	}
+	return fmt.Sprintf("%d:%s|%d:%s|%s|%s|%s",
+		len(query), query,
+		len(opts.Language), opts.Language,
+		fuzzy,
+		strconv.Itoa(limit),
+		strconv.Itoa(offset),
+	)
+}
 
 // Search runs a workspace-scoped multilingual search over file +
 // folder names, tags, and indexed content. q is required; limit
@@ -91,7 +128,20 @@ func (h *Handler) Search(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	results, err := h.search.Search(r.Context(), workspaceID, query, opts, limit, offset)
+	// Cache the (workspace, query, opts, page) → results for a short
+	// window. Search is workspace-scoped and not per-user filtered, so
+	// every member issuing the same query gets the same hits — the cache
+	// key needs only the query parameters, not the caller's identity.
+	// The 30s TTL bounds staleness for newly-indexed files; the
+	// workspace generation counter busts the cache immediately on any
+	// workspace mutation (see folder.Service write paths) so deletes /
+	// renames never linger behind stale search hits.
+	cacheKey := searchCacheKey(query, opts, limit, offset)
+	results, err := responsecache.GetOrCompute(r.Context(), h.respCache, workspaceID,
+		"search", cacheKey, searchCacheTTL,
+		func(ctx context.Context) ([]search.Result, error) {
+			return h.search.Search(ctx, workspaceID, query, opts, limit, offset)
+		})
 	if err != nil {
 		if errors.Is(err, search.ErrInvalidQuery) {
 			middleware.RespondError(w, http.StatusBadRequest, middleware.ErrCodeBadRequest, err.Error())

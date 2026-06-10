@@ -17,8 +17,12 @@ is read-only against S3.
 
 | Variable       | Purpose                                                |
 | -------------- | ------------------------------------------------------ |
-| `DATABASE_URL` | Postgres DSN (pgx-style).                              |
+| `DATABASE_URL` | Postgres DSN (pgx-style). Primary (writes + read-your-write). |
 | `JWT_SECRET`   | HS256 signing secret for session tokens.               |
+
+> `DATABASE_READ_URL` (optional) points the read path at a Postgres
+> read replica or a PgBouncer read pool. See
+> [Read replicas](#read-replicas-database_read_url) below.
 
 ## Deployment profiles (`ZKDRIVE_PROFILE`)
 
@@ -219,6 +223,58 @@ refused (`FATAL: sorry, too many clients already`).
 > part of the upgrade — make it a conscious choice rather than a
 > surprise.
 
+### Read replicas (`DATABASE_READ_URL`)
+
+For read-heavy workloads (5000 SME tenants + B2C consumers browsing
+folders and searching), offload `SELECT` traffic to one or more Postgres
+read replicas. Set `DATABASE_READ_URL` to the replica DSN (or a PgBouncer
+pool that fronts the replicas):
+
+```
+DATABASE_URL=postgres://app@primary:5432/zkdrive?sslmode=require
+DATABASE_READ_URL=postgres://app@replica:5432/zkdrive?sslmode=require
+```
+
+| Variable            | Default        | Purpose                                                                 |
+| ------------------- | -------------- | ----------------------------------------------------------------------- |
+| `DATABASE_READ_URL` | _(unset)_      | Read-replica DSN. Unset (or equal to `DATABASE_URL`) → reads use the primary. |
+
+**Routing.** When set and distinct from `DATABASE_URL`, the server opens
+a second `pgxpool` (sized by the same `DB_MAX_CONNS` / `DB_MIN_CONNS` /
+`DB_MAX_CONN_IDLE_TIME`) and wires the read-heavy repositories (folder
+tree walks, file listings, version/tag lookups) through a
+`ReadWriteSplitter` (`internal/database/splitter.go`). The splitter
+classifies each statement:
+
+- **Replica:** plain `SELECT` / read-only CTE (`WITH … SELECT`) /
+  `VALUES` / `TABLE` / `SHOW` / `EXPLAIN` (without `ANALYZE`).
+- **Primary (always):** `INSERT` / `UPDATE` / `DELETE` / `MERGE`,
+  data-modifying CTEs, `SELECT … FOR UPDATE/SHARE`, sequence functions
+  (`nextval`), `EXPLAIN ANALYZE`, every `Exec`, `CopyFrom`, `SendBatch`,
+  and **all transactions** (`Begin` / `BeginTx`, including read-only
+  transactions — a unit of work is never split across hosts).
+
+The classifier is conservative: anything it cannot positively prove is
+read-only is routed to the primary, so a misclassification only costs a
+missed offload, never a write sent to a read-only host.
+
+**Replica lag & read-your-write.** Physical replicas are asynchronous,
+so a `SELECT` issued immediately after a write may observe a slightly
+stale replica. Code paths that require read-your-write consistency
+(e.g. re-reading a row inside the same logical operation) run inside a
+transaction, which the splitter pins to the primary. If you front the
+replica with PgBouncer, use **session or transaction pooling** — not
+statement pooling — so the GUC-based tenant isolation
+(`SELECT set_config('app.workspace_id', …)` on connection acquire) and
+RLS policies behave identically to the primary.
+
+**Health.** Both pools are pinged at startup; a configured-but-
+unreachable replica fails the boot fast rather than silently serving all
+reads off the primary.
+
+See `deploy/POSTGRES_SCALING.md` for the full PgBouncer + replica
+topology, example configs, and HPA sizing math.
+
 ## JWT signing
 
 | Variable                   | Default | Purpose                                                                                                                                            |
@@ -247,10 +303,33 @@ also be set; otherwise startup fails.
 
 | Variable         | Default | Purpose                                                                                                     |
 | ---------------- | ------- | ----------------------------------------------------------------------------------------------------------- |
-| `REDIS_URL`      | _empty_ | Redis / Valkey DSN. When set, sessions, rate-limit counters, and the WebSocket fan-out hub use Redis.        |
+| `REDIS_URL`      | _empty_ | Redis / Valkey DSN. When set, sessions, rate-limit counters, the WebSocket fan-out hub, the permission cache, and the response cache (folder listings, search, storage usage) use Redis. |
 | `NATS_URL`       | _empty_ | NATS JetStream URL. When set, the server publishes async-job and webhook events and the worker consumes.     |
 | `CLAMAV_ADDRESS` | _empty_ | `host:port` of a ClamAV INSTREAM daemon. When set, uploads are virus-scanned before becoming visible.        |
 | `ZKDRIVE_NATS_STORE_DIR` | _temp dir_ | **Compact mode only.** Filesystem directory the in-process embedded NATS JetStream broker (`cmd/compact`) persists stream/consumer state to. Mount a volume here so durable consumers survive a restart; defaults to a temporary directory (state lost on restart) when unset. Ignored when NATS runs as an external service. |
+
+## WebSocket proxy tier (`WS_PROXY_MODE`)
+
+| Variable        | Default | Purpose                                                                                          |
+| --------------- | ------- | ------------------------------------------------------------------------------------------------ |
+| `WS_PROXY_MODE` | `false` | Delegate WebSocket fan-out to an external connection proxy (Centrifugo/Pusher). Requires `REDIS_URL`. |
+
+By default each API pod terminates its own WebSocket connections in the
+in-process hub and fans events out across replicas via Redis pub/sub
+(`ws:*`). For deployments past ~10k concurrent connections per pod, set
+`WS_PROXY_MODE=true` to move connection holding to a dedicated proxy
+tier:
+
+- The API still **publishes** every event to Redis (`ws:{workspaceID}:{userID}`,
+  unchanged envelope), but does **not** run the `ws:*`→hub subscribe
+  loop — the external proxy is the subscriber and fans out to clients.
+- `GET /api/ws` responds **501**; clients connect to the proxy instead.
+- **Requires `REDIS_URL`.** If `WS_PROXY_MODE` is set without
+  `REDIS_URL`, the server logs a warning and falls back to the
+  in-process hub rather than silently dropping notifications.
+
+See [`deploy/WEBSOCKET_PROXY.md`](../deploy/WEBSOCKET_PROXY.md) for the
+Centrifugo / Pusher wire contract and example configs.
 
 ## Credential encryption
 
@@ -285,6 +364,10 @@ scaling") for the runbook.
 | `PREVIEW_BUDGET_PER_WORKSPACE_HOUR` | `100`   | Max previews rendered per workspace per rolling hour. Over budget, the job is `NakWithDelay`-deferred (exponential backoff up to 5m) rather than dropped. Needs `REDIS_URL`; with no Redis the budget is unenforced (all admitted). A value `<= 0` falls back to the default (`100`), so to keep Redis but effectively disable the budget, set this very high (e.g. `1000000`). |
 | `PREVIEW_PRIORITY_WORKERS`          | `6`     | Goroutine pool size for the priority preview subject (`drive.preview.generate.priority`, Business/Secure-Business tiers). Values `<= 0` fall back to the default; the pool is clamped to a minimum of 1. |
 | `PREVIEW_STANDARD_WORKERS`          | `2`     | Goroutine pool size for the standard preview subject (`drive.preview.generate.standard`, Free/Starter tiers). Same `<= 0` / minimum-1 semantics as the priority pool. |
+| `PREVIEW_LIGHTWEIGHT_WORKERS`       | `8`     | Goroutine pool size for the **lightweight** preview tier (`drive.preview.generate.lightweight`) — pure-Go renderers (images, text, archives, email) that carry no subprocess. Run these on the slim server image. Set to `0` on heavy-only pods to skip the subscription entirely. |
+| `PREVIEW_HEAVY_WORKERS`             | `4`     | Goroutine pool size for the **heavy** preview tier (`drive.preview.generate.heavy`) — subprocess renderers (LibreOffice, FFmpeg, ImageMagick, PDF, SVG). Run these only on the heavy worker image that ships those binaries. Set to `0` on slim pods to skip the subscription. |
+| `PREVIEW_WORKER_CONCURRENCY`        | `0`     | Per-pod cap on **concurrent subprocess renders** (the slot is taken once per heavy job, not per nested subprocess, so a Office→PDF render never deadlocks against itself). Bounds peak RAM/CPU from LibreOffice/FFmpeg, which are single-threaded and memory-hungry. `0` = unlimited (gate disabled). Size it to roughly `pod_memory ÷ per-render-RSS`. |
+| `PREVIEW_HEAVY_QUEUE_BACKPRESSURE_THRESHOLD` | `0` | When `> 0`, before publishing a **heavy** preview job the publisher probes the heavy consumer's queue depth (pending + unacked) and, when it is `>=` this threshold, defers the job (`ErrPreviewDeferred`) instead of enqueueing — clients get a "preview generating…" placeholder and the file is previewed later. Lightweight jobs are never deferred. Probe errors fail **open** (the job is published): backpressure is an optimization, not a correctness gate. `0` disables the probe. |
 
 ## OAuth2 single sign-on (Google / Microsoft)
 
@@ -421,30 +504,40 @@ key and must not see plaintext.
 | ------------------- | ------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `ONLYOFFICE_URL`    | _empty_ | Base URL of the ONLYOFFICE Document Server (e.g. `https://onlyoffice.example.com`). When empty, office editing is disabled: `/api/onlyoffice/status` reports `enabled:false`, the editor-config endpoint returns `503`, and the frontend hides the "Edit" / "Open in editor" affordances. |
 | `ONLYOFFICE_SECRET` | _empty_ | Shared JWT secret matching the Document Server's `JWT_SECRET` (`JWT_ENABLED=true`). ZK Drive signs the editor config with it (HS256) and verifies the inbound save callback against it. When empty, the config is emitted unsigned and the callback skips verification — acceptable only for trusted local development. |
-| `ONLYOFFICE_MAX_DOCUMENT_MB` | `100` | Maximum size (MiB) of a single edited document the save callback will buffer in memory before rejecting it. Generous — real office documents are 1–50 MiB. |
-| `ONLYOFFICE_SAVE_MEMORY_BUDGET_MB` | `256` | Total memory (MiB) the save path may buffer **concurrently**. The save-concurrency cap is **derived** as `budget ÷ per-document`, so the worst case (`concurrency × per-document`) never exceeds the budget. Must be `>=` `ONLYOFFICE_MAX_DOCUMENT_MB` or the server refuses to start. |
+| `ONLYOFFICE_MAX_DOCUMENT_MB` | `100` | Maximum size (MiB) of a single edited document the save callback will accept before rejecting it. Generous — real office documents are 1–50 MiB. Enforced on both the streaming path (against the advertised `Content-Length`) and the buffered fallback. |
+| `ONLYOFFICE_SAVE_MEMORY_BUDGET_MB` | `256` | Memory (MiB) budget for the **buffered fallback** save path. The fallback-concurrency cap is **derived** as `budget ÷ per-document`, so its worst case (`concurrency × per-document`) never exceeds the budget. Must be `>=` `ONLYOFFICE_MAX_DOCUMENT_MB` or the server refuses to start. With streaming saves (the normal path) this budget is rarely exercised. |
 
-**Save concurrency & memory.** The editor-callback route runs outside
-the per-user / per-workspace rate limiter (the Document Server holds no
-ZK Drive JWT), so a burst of save callbacks could each buffer a whole
-document and OOM the API container. ZK Drive bounds this with a counting
-semaphore whose size is **derived** from the two knobs above:
-`max_concurrent_saves = ONLYOFFICE_SAVE_MEMORY_BUDGET_MB ÷ ONLYOFFICE_MAX_DOCUMENT_MB`
+**Save path: streaming, with a bounded buffered fallback.** The save
+callback relays the edited document from the Document Server straight to
+object storage. The **primary path streams** the fetched body directly
+into a presigned PUT (`storage.PutObjectStream`) — only a small fixed
+copy buffer is ever in memory, regardless of document size — so
+concurrent saves are **not** memory-bounded and need no up-front gate.
+This is taken whenever the Document Server's cache download advertises a
+`Content-Length` (its normal behaviour).
+
+The editor-callback route runs outside the per-user / per-workspace rate
+limiter (the Document Server holds no ZK Drive JWT). Only the **buffered
+fallback** — used in the rare case the cache download omits
+`Content-Length` (a chunked response) and the whole document must be
+read into memory to learn its size — could OOM the API container under a
+burst. That fallback alone is bounded by a counting semaphore whose size
+is **derived** from the two knobs above:
+`max_concurrent_buffered_saves = ONLYOFFICE_SAVE_MEMORY_BUDGET_MB ÷ ONLYOFFICE_MAX_DOCUMENT_MB`
 (floored at 1). The defaults (`256 ÷ 100 = 2`) are sized for the 512 MiB
 production API container in
-[`deploy/docker-compose.prod.yml`](../deploy/docker-compose.prod.yml)
-(half the container, leaving headroom for the runtime and other
-requests). Excess callbacks are shed with a retryable `503` — the
-Document Server keeps the edited bytes in its cache and retries, so a
-storm degrades gracefully instead of OOMing.
+[`deploy/docker-compose.prod.yml`](../deploy/docker-compose.prod.yml).
+Excess **buffered-fallback** callbacks are shed with a retryable `503` —
+the Document Server keeps the edited bytes in its cache and retries, so a
+storm degrades gracefully instead of OOMing. Streaming saves are never
+shed.
 
-- **Raising throughput** on a larger container: raise
-  `ONLYOFFICE_SAVE_MEMORY_BUDGET_MB` (e.g. to half a 1 GiB container →
-  `512`, giving concurrency `5` at the default per-document cap). Do
-  **not** simply raise it past what the container can hold — the budget
-  exists to keep `concurrency × per-document` inside the container.
+- **Throughput** is no longer gated for the streaming path; raising
+  `ONLYOFFICE_SAVE_MEMORY_BUDGET_MB` only widens the rarely-used buffered
+  fallback. Do **not** raise it past what the container can hold — the
+  budget exists to keep `concurrency × per-document` inside the container.
 - **Smaller documents** (lowering `ONLYOFFICE_MAX_DOCUMENT_MB`) raises
-  concurrency at the same budget, but rejects larger legitimate
+  fallback concurrency at the same budget, but rejects larger legitimate
   documents — keep it above your largest expected office file.
 
 The callback URL the Document Server posts to is composed from

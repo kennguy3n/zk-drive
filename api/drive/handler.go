@@ -34,6 +34,7 @@ import (
 	"github.com/kennguy3n/zk-drive/internal/notification"
 	"github.com/kennguy3n/zk-drive/internal/permission"
 	"github.com/kennguy3n/zk-drive/internal/preview"
+	"github.com/kennguy3n/zk-drive/internal/responsecache"
 	"github.com/kennguy3n/zk-drive/internal/search"
 	"github.com/kennguy3n/zk-drive/internal/sharing"
 	"github.com/kennguy3n/zk-drive/internal/storage"
@@ -89,6 +90,7 @@ type Handler struct {
 	onlyOfficeSaveConcurrency  int
 	tagSuggest                 TagSuggester
 	queryExpand                QueryExpander
+	respCache                  *responsecache.Cache
 }
 
 // TagSuggester is the narrow interface the drive handler needs from
@@ -238,6 +240,15 @@ func (h *Handler) WithSharing(s *sharing.Service) *Handler {
 // /api/search endpoint.
 func (h *Handler) WithSearch(s *search.Service) *Handler {
 	h.search = s
+	return h
+}
+
+// WithResponseCache wires the workspace-scoped response cache used to
+// memoise hot read responses (currently search results; folder listings
+// are cached in the folder service). Optional and nil-safe: without
+// Redis the responses are computed on every request, exactly as before.
+func (h *Handler) WithResponseCache(c *responsecache.Cache) *Handler {
+	h.respCache = c
 	return h
 }
 

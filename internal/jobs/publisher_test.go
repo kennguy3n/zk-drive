@@ -34,6 +34,9 @@ func TestPublisherNilReceiverMethods(t *testing.T) {
 	if err := p.PublishPreview(ctx, fileID, versionID); err != nil {
 		t.Fatalf("PublishPreview on nil receiver: %v", err)
 	}
+	if err := p.PublishPreviewWeighted(ctx, fileID, versionID, true); err != nil {
+		t.Fatalf("PublishPreviewWeighted on nil receiver: %v", err)
+	}
 	if err := p.PublishScan(ctx, fileID, versionID); err != nil {
 		t.Fatalf("PublishScan on nil receiver: %v", err)
 	}

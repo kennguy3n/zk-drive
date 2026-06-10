@@ -249,6 +249,16 @@ func run() error {
 	var indexSvc *index.Service
 	if storageClient != nil {
 		previewSvc = preview.NewService(pool, storageClient, preview.NewPostgresRepository(pool))
+		// Cap concurrent heavy (subprocess) renders per pod so a burst
+		// of office/video jobs cannot fork enough LibreOffice/ffmpeg
+		// processes to OOM this worker. 0 leaves it unlimited (the
+		// goroutine-pool size then bounds concurrency on its own).
+		preview.SetSubprocessConcurrency(cfg.PreviewWorkerConcurrency)
+		slog.Info("preview subprocess concurrency configured",
+			"limit", preview.SubprocessConcurrency(),
+			"lightweight_workers", cfg.PreviewLightweightWorkers,
+			"heavy_workers", cfg.PreviewHeavyWorkers,
+			"heavy_formats", len(preview.HeavyMimes()))
 		scanSvc = scan.NewService(pool, storageClient, os.Getenv("CLAMAV_ADDRESS"))
 		scanSvc.SetNotifier(notifSvc)
 		archiveSvc = retention.NewArchiveService(pool, storageClient, nil)
@@ -430,7 +440,7 @@ func run() error {
 		return fmt.Errorf("reconcile preview consumers: %w", err)
 	}
 
-	subs, poolDrains, err := subscribeAll(ctx, &bgGoroutines, js, pool, metricsSurface, previewSvc, scanSvc, archiveSvc, indexSvc, classifySvc, cfg.PreviewPriorityWorkers, cfg.PreviewStandardWorkers)
+	subs, poolDrains, err := subscribeAll(ctx, &bgGoroutines, js, pool, metricsSurface, previewSvc, scanSvc, archiveSvc, indexSvc, classifySvc, cfg.PreviewPriorityWorkers, cfg.PreviewStandardWorkers, cfg.PreviewLightweightWorkers, cfg.PreviewHeavyWorkers)
 	if err != nil {
 		return fmt.Errorf("subscribe: %w", err)
 	}
@@ -599,7 +609,7 @@ func startMetricsServer(_ context.Context, listenAddr string, m *metrics.Metrics
 func ensureStream(js nats.JetStreamContext) error {
 	cfg := &nats.StreamConfig{
 		Name:      streamName,
-		Subjects:  []string{jobs.SubjectPreview, jobs.SubjectPreviewPriority, jobs.SubjectPreviewStandard, jobs.SubjectScan, jobs.SubjectIndex, jobs.SubjectArchive, jobs.SubjectRetention, jobs.SubjectClassify, webhooks.SubjectEvents},
+		Subjects:  []string{jobs.SubjectPreview, jobs.SubjectPreviewPriority, jobs.SubjectPreviewStandard, jobs.SubjectPreviewLightweight, jobs.SubjectPreviewHeavy, jobs.SubjectScan, jobs.SubjectIndex, jobs.SubjectArchive, jobs.SubjectRetention, jobs.SubjectClassify, webhooks.SubjectEvents},
 		Storage:   nats.FileStorage,
 		Retention: nats.WorkQueuePolicy,
 		MaxAge:    7 * 24 * time.Hour,
@@ -631,7 +641,7 @@ func ensureStream(js nats.JetStreamContext) error {
 // operator intervention. Consumers that don't exist yet are skipped:
 // Subscribe creates them fresh with the correct cap.
 func reconcilePreviewConsumers(js nats.JetStreamContext) error {
-	for _, durable := range []string{"drive-preview", "drive-preview-priority", "drive-preview-standard"} {
+	for _, durable := range []string{"drive-preview", "drive-preview-priority", "drive-preview-standard", jobs.DurablePreviewLightweight, jobs.DurablePreviewHeavy} {
 		ci, err := js.ConsumerInfo(streamName, durable)
 		if err != nil {
 			if errors.Is(err, nats.ErrConsumerNotFound) {
@@ -656,7 +666,7 @@ func reconcilePreviewConsumers(js nats.JetStreamContext) error {
 // Each metrics.JobHandler is wrapped via InstrumentJob so the
 // (subject, result) labels land on zkdrive_worker_jobs_total and
 // the duration histogram captures wall time per subject.
-func subscribeAll(ctx context.Context, wg *sync.WaitGroup, js nats.JetStreamContext, pool *pgxpool.Pool, m *metrics.Metrics, previewSvc *preview.Service, scanSvc *scan.Service, archiveSvc *retention.ArchiveService, indexSvc *index.Service, classifySvc *classify.Service, previewPriorityWorkers, previewStandardWorkers int) ([]*nats.Subscription, []func(), error) {
+func subscribeAll(ctx context.Context, wg *sync.WaitGroup, js nats.JetStreamContext, pool *pgxpool.Pool, m *metrics.Metrics, previewSvc *preview.Service, scanSvc *scan.Service, archiveSvc *retention.ArchiveService, indexSvc *index.Service, classifySvc *classify.Service, previewPriorityWorkers, previewStandardWorkers, previewLightweightWorkers, previewHeavyWorkers int) ([]*nats.Subscription, []func(), error) {
 	// Webhook delivery worker. Constructed once and shared
 	// across all webhook.events deliveries; the DeliveryClient
 	// holds an http.Client + URLValidator that are both safe for
@@ -686,6 +696,14 @@ func subscribeAll(ctx context.Context, wg *sync.WaitGroup, js nats.JetStreamCont
 		// rendered concurrently. 0 keeps the legacy single-goroutine
 		// (inline callback) behaviour every other subject uses.
 		workers int
+		// optional marks a subject this pod should NOT bind when its
+		// worker count is 0. Used by the weight-tiered preview subjects
+		// so a slim pod (PREVIEW_HEAVY_WORKERS=0) never subscribes to
+		// the heavy subject — if it did, it would receive heavy jobs it
+		// has no binaries to render and Ack-skip them, silently denying
+		// those files a thumbnail. Non-optional subjects keep the legacy
+		// behaviour where workers==0 means single-goroutine inline.
+		optional bool
 	}{
 		// QueueMaxDeliver caps how many times JetStream redelivers a
 		// preview job that the handler keeps Nak'ing.
@@ -706,7 +724,7 @@ func subscribeAll(ctx context.Context, wg *sync.WaitGroup, js nats.JetStreamCont
 		// jobs published by an un-upgraded API server keep being
 		// processed during a rolling deploy. New, tier-routed jobs
 		// arrive on the priority / standard subjects below.
-		{jobs.SubjectPreview, "drive-preview", m.InstrumentJob(ctx, jobs.SubjectPreview, traceJob(jobs.SubjectPreview, previewHandler(pool, previewSvc))), []nats.SubOpt{nats.MaxDeliver(preview.QueueMaxDeliver)}, 0},
+		{jobs.SubjectPreview, "drive-preview", m.InstrumentJob(ctx, jobs.SubjectPreview, traceJob(jobs.SubjectPreview, previewHandler(pool, previewSvc))), []nats.SubOpt{nats.MaxDeliver(preview.QueueMaxDeliver)}, 0, false},
 		// Priority (Business / Secure-Business) and standard (Free /
 		// Starter) preview subjects. Each gets its own durable
 		// consumer and its own goroutine pool; the priority pool is
@@ -714,12 +732,20 @@ func subscribeAll(ctx context.Context, wg *sync.WaitGroup, js nats.JetStreamCont
 		// render concurrency. QueueMaxDeliver is higher than the
 		// legacy cap because Naks here include budget DEFERRALS, not
 		// just decode failures (see preview.QueueMaxDeliver).
-		{jobs.SubjectPreviewPriority, "drive-preview-priority", m.InstrumentJob(ctx, jobs.SubjectPreviewPriority, traceJob(jobs.SubjectPreviewPriority, previewHandler(pool, previewSvc))), []nats.SubOpt{nats.MaxDeliver(preview.QueueMaxDeliver)}, previewPriorityWorkers},
-		{jobs.SubjectPreviewStandard, "drive-preview-standard", m.InstrumentJob(ctx, jobs.SubjectPreviewStandard, traceJob(jobs.SubjectPreviewStandard, previewHandler(pool, previewSvc))), []nats.SubOpt{nats.MaxDeliver(preview.QueueMaxDeliver)}, previewStandardWorkers},
-		{jobs.SubjectScan, "drive-scan", m.InstrumentJob(ctx, jobs.SubjectScan, traceJob(jobs.SubjectScan, scanHandler(pool, scanSvc))), nil, 0},
-		{jobs.SubjectIndex, "drive-index", m.InstrumentJob(ctx, jobs.SubjectIndex, traceJob(jobs.SubjectIndex, indexHandler(pool, indexSvc))), nil, 0},
-		{jobs.SubjectArchive, "drive-archive", m.InstrumentJob(ctx, jobs.SubjectArchive, traceJob(jobs.SubjectArchive, archiveHandler(archiveSvc))), nil, 0},
-		{jobs.SubjectClassify, "drive-classify", m.InstrumentJob(ctx, jobs.SubjectClassify, traceJob(jobs.SubjectClassify, classifyHandler(pool, classifySvc))), nil, 0},
+		{jobs.SubjectPreviewPriority, "drive-preview-priority", m.InstrumentJob(ctx, jobs.SubjectPreviewPriority, traceJob(jobs.SubjectPreviewPriority, previewHandler(pool, previewSvc))), []nats.SubOpt{nats.MaxDeliver(preview.QueueMaxDeliver)}, previewPriorityWorkers, false},
+		{jobs.SubjectPreviewStandard, "drive-preview-standard", m.InstrumentJob(ctx, jobs.SubjectPreviewStandard, traceJob(jobs.SubjectPreviewStandard, previewHandler(pool, previewSvc))), []nats.SubOpt{nats.MaxDeliver(preview.QueueMaxDeliver)}, previewStandardWorkers, false},
+		// Weight-tiered preview subjects (workstream 5.4). The
+		// lightweight subject carries pure-Go renders and binds on slim
+		// pods; the heavy subject carries subprocess renders and binds
+		// only on heavy worker pods. Both are optional: a pod with the
+		// corresponding worker count at 0 skips the subscription entirely
+		// so it never pulls work it cannot (or should not) serve.
+		{jobs.SubjectPreviewLightweight, jobs.DurablePreviewLightweight, m.InstrumentJob(ctx, jobs.SubjectPreviewLightweight, traceJob(jobs.SubjectPreviewLightweight, previewHandler(pool, previewSvc))), []nats.SubOpt{nats.MaxDeliver(preview.QueueMaxDeliver)}, previewLightweightWorkers, true},
+		{jobs.SubjectPreviewHeavy, jobs.DurablePreviewHeavy, m.InstrumentJob(ctx, jobs.SubjectPreviewHeavy, traceJob(jobs.SubjectPreviewHeavy, previewHandler(pool, previewSvc))), []nats.SubOpt{nats.MaxDeliver(preview.QueueMaxDeliver)}, previewHeavyWorkers, true},
+		{jobs.SubjectScan, "drive-scan", m.InstrumentJob(ctx, jobs.SubjectScan, traceJob(jobs.SubjectScan, scanHandler(pool, scanSvc))), nil, 0, false},
+		{jobs.SubjectIndex, "drive-index", m.InstrumentJob(ctx, jobs.SubjectIndex, traceJob(jobs.SubjectIndex, indexHandler(pool, indexSvc))), nil, 0, false},
+		{jobs.SubjectArchive, "drive-archive", m.InstrumentJob(ctx, jobs.SubjectArchive, traceJob(jobs.SubjectArchive, archiveHandler(archiveSvc))), nil, 0, false},
+		{jobs.SubjectClassify, "drive-classify", m.InstrumentJob(ctx, jobs.SubjectClassify, traceJob(jobs.SubjectClassify, classifyHandler(pool, classifySvc))), nil, 0, false},
 		// MaxDeliver is server-side defense-in-depth for the
 		// webhook consumer. The application-side counter in
 		// internal/webhooks/worker.go also returns "dropped" once
@@ -731,7 +757,7 @@ func subscribeAll(ctx context.Context, wg *sync.WaitGroup, js nats.JetStreamCont
 		// redeliveries at the same number rather than retrying for
 		// up to MaxAge (7 days). Sized identically to the
 		// application-side cap so the two layers agree.
-		{webhooks.SubjectEvents, "webhook-deliveries", m.InstrumentJob(ctx, webhooks.SubjectEvents, traceJob(webhooks.SubjectEvents, webhookDeliveryHandler(webhookWorker))), []nats.SubOpt{nats.MaxDeliver(webhooks.MaxAttempts)}, 0},
+		{webhooks.SubjectEvents, "webhook-deliveries", m.InstrumentJob(ctx, webhooks.SubjectEvents, traceJob(webhooks.SubjectEvents, webhookDeliveryHandler(webhookWorker))), []nats.SubOpt{nats.MaxDeliver(webhooks.MaxAttempts)}, 0, false},
 	}
 	var subs []*nats.Subscription
 	// drains holds one pool-drain hook per pooled subject. run()
@@ -739,6 +765,13 @@ func subscribeAll(ctx context.Context, wg *sync.WaitGroup, js nats.JetStreamCont
 	// in-flight handlers ack while the connection is still open.
 	var drains []func()
 	for _, s := range subjects {
+		// Optional (weight-tiered) subjects with no workers are not
+		// bound at all on this pod: a slim pod skips the heavy subject
+		// and vice versa, so neither pulls work it isn't built to run.
+		if s.optional && s.workers <= 0 {
+			slog.Info("preview tier subject not bound on this pod (0 workers)", "subject", s.subject)
+			continue
+		}
 		opts := []nats.SubOpt{
 			nats.Durable(s.durable),
 			nats.AckWait(ackWait),

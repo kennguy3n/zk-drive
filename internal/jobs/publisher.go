@@ -19,6 +19,7 @@ package jobs
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 
 	"github.com/google/uuid"
@@ -32,20 +33,31 @@ import (
 	"go.opentelemetry.io/otel/trace"
 )
 
+// StreamName is the JetStream WorkQueue stream that backs every
+// drive.* job subject. The worker (cmd/worker) is the single creator
+// of this stream (ensureStream); other components — the publisher
+// (which inspects consumer depth for heavy-preview backpressure), the
+// server's admin health-dashboard stream-depth probe, the compact
+// supervisor's readiness barrier, and operator tooling — reference
+// this constant so the name has one source of truth and the worker
+// and publisher cannot drift on it.
+const StreamName = "DRIVE_JOBS"
+
+// ErrPreviewDeferred is returned by PublishPreviewWeighted when the
+// heavy preview queue is already at or above its backpressure
+// threshold. It is NOT a failure: the caller should surface a
+// "preview generating…" placeholder to the client and move on. The
+// preview will be (re)generated later — on the next access via the
+// on-demand path, or by the preview backfill reconciler — rather than
+// piling onto an already-saturated heavy worker fleet.
+var ErrPreviewDeferred = errors.New("jobs: heavy preview queue saturated, job deferred")
+
 // publisherTracerName is the instrumentation-scope name. Resolved
 // lazily via otel.Tracer on each Start call rather than cached at
 // init — a cached tracer would bind to the no-op global provider
 // that exists before tracing.Init runs and would never see the
 // installed exporter.
 const publisherTracerName = "github.com/kennguy3n/zk-drive/internal/jobs"
-
-// StreamName is the JetStream WorkQueue stream that backs every
-// drive.* job subject. The worker (cmd/worker) is the single creator
-// of this stream (ensureStream); other components — the server's admin
-// health-dashboard stream-depth probe, the compact supervisor's
-// readiness barrier, operator tooling — reference this constant so the
-// name has one source of truth and cannot drift.
-const StreamName = "DRIVE_JOBS"
 
 // Subject constants. Keep these in sync with cmd/worker/main.go — the
 // worker uses the same strings when declaring JetStream consumers.
@@ -74,6 +86,33 @@ const (
 	// rollout are not stranded.
 	SubjectPreviewPriority = "drive.preview.generate.priority"
 	SubjectPreviewStandard = "drive.preview.generate.standard"
+
+	// Preview weight subjects. Orthogonal to the priority/standard
+	// (billing) split above: these route by RENDERER WEIGHT so the two
+	// worker pod images can each consume only the work they are built
+	// for. The slim server image ships no subprocess binaries and
+	// subscribes only to the lightweight subject (pure-Go renderers:
+	// images, text, markdown, CSV, archives, email). The heavy worker
+	// image ships LibreOffice / FFmpeg / ImageMagick / poppler /
+	// librsvg and is the only pod that subscribes to the heavy subject.
+	//
+	// The dispatcher chooses the subject from preview.IsHeavyMime at
+	// publish time, so a DOCX upload never lands on a slim pod that
+	// cannot render it (it would otherwise Ack-skip and the file would
+	// never get a thumbnail), and an image upload never burns a scarce
+	// heavy-pod slot. Both stay under the drive.preview.* prefix so the
+	// stream subject filter and dashboards keep one grep-able namespace.
+	SubjectPreviewLightweight = "drive.preview.generate.lightweight"
+	SubjectPreviewHeavy       = "drive.preview.generate.heavy"
+)
+
+// Durable consumer names for the weight-tiered preview subjects. The
+// publisher needs the heavy durable to probe queue depth for
+// backpressure; the worker uses both when binding its consumers. Shared
+// here so the two sides cannot drift.
+const (
+	DurablePreviewLightweight = "drive-preview-lightweight"
+	DurablePreviewHeavy       = "drive-preview-heavy"
 )
 
 // PreviewSubjectForTier maps a billing tier name to the NATS subject
@@ -105,6 +144,13 @@ type FileJob struct {
 // handlers can call methods unconditionally without null-checking.
 type Publisher struct {
 	js nats.JetStreamContext
+
+	// heavyBackpressure is the maximum number of in-flight + pending
+	// jobs the heavy preview consumer may have queued before
+	// PublishPreviewWeighted starts deferring new heavy jobs. 0
+	// disables backpressure (every heavy job is enqueued
+	// unconditionally), which is the default.
+	heavyBackpressure int
 }
 
 // NewPublisher constructs a Publisher bound to the supplied JetStream
@@ -115,6 +161,23 @@ func NewPublisher(js nats.JetStreamContext) *Publisher {
 		return nil
 	}
 	return &Publisher{js: js}
+}
+
+// WithHeavyBackpressure sets the heavy-preview-queue depth threshold at
+// which PublishPreviewWeighted starts returning ErrPreviewDeferred
+// instead of enqueuing. threshold <= 0 disables backpressure. Returns
+// the receiver for chaining and is safe to call on a nil *Publisher
+// (no-op). Intended to be called once at server startup, before the
+// publisher is shared with request handlers.
+func (p *Publisher) WithHeavyBackpressure(threshold int) *Publisher {
+	if p == nil {
+		return nil
+	}
+	if threshold < 0 {
+		threshold = 0
+	}
+	p.heavyBackpressure = threshold
+	return p
 }
 
 // PublishPreview enqueues a preview-generation job for the (file,
@@ -131,6 +194,57 @@ func (p *Publisher) PublishPreview(ctx context.Context, fileID, versionID uuid.U
 // nil receiver.
 func (p *Publisher) PublishPreviewTier(ctx context.Context, fileID, versionID uuid.UUID, tier string) error {
 	return p.publish(ctx, PreviewSubjectForTier(tier), FileJob{FileID: fileID, VersionID: versionID})
+}
+
+// PublishPreviewWeighted routes a preview job to the lightweight or
+// heavy subject according to the renderer weight of the file's MIME
+// type (heavy == true means a subprocess renderer). This is the
+// dispatch path used by ConfirmUpload so a job only ever reaches a pod
+// that can actually render it.
+//
+// When heavy is true and a backpressure threshold is configured (see
+// WithHeavyBackpressure), the heavy consumer's queue depth is probed
+// first. If it is already at or above the threshold the job is NOT
+// enqueued and ErrPreviewDeferred is returned so the caller can show a
+// "preview generating…" placeholder rather than growing an unbounded
+// backlog on the heavy fleet. Lightweight jobs are never deferred —
+// pure-Go renders are cheap and the slim pool scales horizontally.
+//
+// Safe to call on a nil receiver (no-op returning nil).
+func (p *Publisher) PublishPreviewWeighted(ctx context.Context, fileID, versionID uuid.UUID, heavy bool) error {
+	if p == nil || p.js == nil {
+		return nil
+	}
+	if !heavy {
+		return p.publish(ctx, SubjectPreviewLightweight, FileJob{FileID: fileID, VersionID: versionID})
+	}
+	if p.heavyOverThreshold(ctx) {
+		return ErrPreviewDeferred
+	}
+	return p.publish(ctx, SubjectPreviewHeavy, FileJob{FileID: fileID, VersionID: versionID})
+}
+
+// heavyOverThreshold reports whether the heavy preview consumer's
+// backlog (pending + unacked) is at or above the configured
+// backpressure threshold. It FAILS OPEN: a zero/disabled threshold, a
+// missing consumer (worker not yet started), or any JetStream probe
+// error all return false so a backpressure-probe hiccup never blocks a
+// legitimate preview. Backpressure is a load-shedding optimisation, not
+// a correctness gate.
+func (p *Publisher) heavyOverThreshold(ctx context.Context) bool {
+	if p.heavyBackpressure <= 0 {
+		return false
+	}
+	info, err := p.js.ConsumerInfo(StreamName, DurablePreviewHeavy, nats.Context(ctx))
+	if err != nil || info == nil {
+		return false
+	}
+	// NumPending is messages not yet delivered; NumAckPending is
+	// messages delivered but not yet Ack'd (currently rendering or
+	// awaiting redelivery). Their sum is the true outstanding heavy
+	// workload the fleet still owes.
+	depth := int(info.NumPending) + info.NumAckPending
+	return depth >= p.heavyBackpressure
 }
 
 // PublishScan enqueues a virus-scan job. Safe to call on a nil receiver.
