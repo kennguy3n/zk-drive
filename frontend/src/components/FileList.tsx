@@ -263,6 +263,14 @@ export default function FileList({
   );
 
   const onKeyDown = (e: React.KeyboardEvent) => {
+    // Grid-level navigation/shortcuts apply only when focus is on a row
+    // itself. If focus has moved into an interactive child (action button,
+    // selection checkbox), let that control own the key — otherwise
+    // Enter/Delete/Space would fire both the grid action (download/delete/
+    // toggle) and the control's native click, causing a double action.
+    const target = e.target as HTMLElement;
+    if (target.closest("button, input, a, [role='button']")) return;
+
     if (e.key === "ArrowDown") {
       e.preventDefault();
       moveActive(activeIndex + 1);
@@ -318,7 +326,7 @@ export default function FileList({
     <div
       role="grid"
       aria-label={t("common.name")}
-      aria-rowcount={sorted.length}
+      aria-rowcount={sorted.length + 1}
       onKeyDown={onKeyDown}
     >
       {/* Header */}

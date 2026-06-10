@@ -119,4 +119,16 @@ describe("FileList", () => {
     fireEvent.keyDown(grid, { key: "Delete" });
     expect(onDelete).toHaveBeenCalledWith("2");
   });
+
+  it("ignores grid shortcuts when focus is on a row action button", () => {
+    const onDelete = vi.fn();
+    render(<FileList files={files} onRename={() => {}} onDelete={onDelete} />);
+    // With focus on an action button (not the row), a Delete keypress must
+    // NOT trash the active row — otherwise the grid handler fires alongside
+    // the button's own action (the double-action bug). The Download button is
+    // a non-destructive proxy for "focus is inside a row control".
+    const downloadBtn = screen.getAllByLabelText("Download")[0];
+    fireEvent.keyDown(downloadBtn, { key: "Delete" });
+    expect(onDelete).not.toHaveBeenCalled();
+  });
 });
