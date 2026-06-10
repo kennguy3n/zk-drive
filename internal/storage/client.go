@@ -37,6 +37,15 @@ type Config struct {
 	AccessKey string
 	SecretKey string
 	Region    string
+	// HTTPClient, when non-nil, overrides the AWS SDK's default HTTP
+	// client for this client's transport. The trusted data plane
+	// leaves it nil (SDK default). It exists so a caller handling an
+	// UNTRUSTED, externally-supplied endpoint — today only the
+	// first-boot setup wizard's connection tester — can inject a
+	// transport with an SSRF-guarded dialer without that guard
+	// leaking onto, or slowing, the operator-configured data-plane
+	// client.
+	HTTPClient aws.HTTPClient
 }
 
 // Client wraps an s3.PresignClient scoped to a single bucket. It only
@@ -95,12 +104,16 @@ func NewClient(cfg Config) (*Client, error) {
 
 	creds := aws.NewCredentialsCache(credentials.NewStaticCredentialsProvider(cfg.AccessKey, cfg.SecretKey, ""))
 
-	s3Client := s3.New(s3.Options{
-		Region:           region,
-		Credentials:      creds,
+	opts := s3.Options{
+		Region:             region,
+		Credentials:        creds,
 		EndpointResolverV2: staticEndpointResolver{endpoint: cfg.Endpoint},
-		UsePathStyle:     true,
-	})
+		UsePathStyle:       true,
+	}
+	if cfg.HTTPClient != nil {
+		opts.HTTPClient = cfg.HTTPClient
+	}
+	s3Client := s3.New(opts)
 
 	return &Client{
 		bucket:  cfg.Bucket,

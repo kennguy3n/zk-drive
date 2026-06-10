@@ -217,3 +217,75 @@ func TestFailoverHealthLoopRecovers(t *testing.T) {
 		}
 	}
 }
+
+// TestFailoverFlushesRevocationsOnRecovery is the security regression
+// for the recovery-loss window: a force-sign-out recorded while Redis
+// is down must survive the switch back to Redis. Before the
+// flush-on-recovery fix the revocation lived only in the in-memory
+// fallback, so once IsRevoked resumed consulting Redis the killed
+// token came back to life.
+func TestFailoverFlushesRevocationsOnRecovery(t *testing.T) {
+	primary := newFlakyStore()
+	fallback := NewMemoryStore()
+	var mu sync.Mutex
+	ready := false
+	ping := func(context.Context) error {
+		mu.Lock()
+		defer mu.Unlock()
+		if ready {
+			return nil
+		}
+		return &net.OpError{Op: "dial", Err: errors.New("refused")}
+	}
+	f := NewFailoverStore(primary, fallback, ping, quietLogger())
+	f.pingTimeout = 100 * time.Millisecond
+
+	ws, uid := uuid.New(), uuid.New()
+	issuedAt := time.Now().UTC().Add(-time.Minute) // token predates the revocation
+	cutoff := time.Now().UTC()
+
+	// Redis goes down, then a force-sign-out is issued: it must land in
+	// the fallback, and Redis (primary) must NOT yet know about it.
+	primary.setFail(&net.OpError{Op: "write", Err: errors.New("broken pipe")})
+	if err := f.RevokeUser(context.Background(), ws, uid, cutoff, time.Hour); err != nil {
+		t.Fatalf("RevokeUser during outage: %v", err)
+	}
+	if f.Healthy() {
+		t.Fatal("precondition: store should be degraded after a connectivity error")
+	}
+	primary.setFail(nil)
+	if revoked, _ := primary.backing.IsRevoked(context.Background(), ws, uid, issuedAt); revoked {
+		t.Fatal("precondition: primary should not yet hold the degraded-window revocation")
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go f.RunHealthLoop(ctx, 10*time.Millisecond)
+
+	mu.Lock()
+	ready = true
+	mu.Unlock()
+
+	deadline := time.After(2 * time.Second)
+	for !f.Healthy() {
+		select {
+		case <-deadline:
+			t.Fatal("health loop did not recover within 2s")
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+
+	// After recovery the revocation must be present in Redis: a request
+	// routed to the (now healthy) primary still sees the user as
+	// revoked. This is the core anti-resurrection guarantee.
+	revoked, err := f.IsRevoked(context.Background(), ws, uid, issuedAt)
+	if err != nil {
+		t.Fatalf("IsRevoked after recovery: %v", err)
+	}
+	if !revoked {
+		t.Fatal("revocation was lost on recovery: token resurrected after Redis came back")
+	}
+	if got, _ := primary.backing.IsRevoked(context.Background(), ws, uid, issuedAt); !got {
+		t.Fatal("revocation was not flushed into the primary store on recovery")
+	}
+}

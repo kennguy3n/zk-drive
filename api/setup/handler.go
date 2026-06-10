@@ -12,6 +12,12 @@
 // once setup is complete they refuse to expose detail / run probes, so
 // a provisioned (and possibly internet-exposed) install cannot be used
 // as an anonymous config-disclosure or SSRF surface.
+//
+// As defence-in-depth for the pre-completion window (before the
+// self-disabling guard engages), test-storage runs its outbound probe
+// through an SSRF-guarded HTTP transport that refuses link-local /
+// instance-metadata destinations (see ssrf.go), so the endpoint field
+// cannot be aimed at 169.254.169.254 to read cloud credentials.
 package setup
 
 import (
@@ -46,9 +52,16 @@ type storageTester interface {
 
 // liveStorageTester is the production storageTester: it constructs a
 // real client against the supplied credentials and issues a HeadBucket.
+//
+// The endpoint here is supplied by an as-yet-unauthenticated caller
+// (the wizard runs before the first admin exists), so the client is
+// given an SSRF-guarded HTTP transport that refuses link-local /
+// metadata destinations (see ssrf.go). The data-plane storage client,
+// whose endpoint comes from trusted operator config, is unaffected.
 type liveStorageTester struct{}
 
 func (liveStorageTester) Test(ctx context.Context, cfg storage.Config) error {
+	cfg.HTTPClient = guardedHTTPClient(8 * time.Second)
 	client, err := storage.NewClient(cfg)
 	if err != nil {
 		return err
@@ -120,7 +133,11 @@ type testStorageResponse struct {
 // Self-disabling: once setup is complete this returns 403. Allowing an
 // anonymous caller to drive arbitrary outbound HeadBucket requests on a
 // live install is an SSRF vector; on a fresh, not-yet-configured box
-// (the only time the wizard runs) there is no such exposure.
+// (the only time the wizard runs) there is no such exposure. As
+// belt-and-braces for that first-boot window the probe additionally
+// uses an SSRF-guarded transport (guardedHTTPClient) that blocks
+// link-local / metadata targets while still allowing public and
+// on-prem private-LAN S3 endpoints.
 func (h *Handler) TestStorage(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	completed, err := h.svc.IsCompleted(ctx)

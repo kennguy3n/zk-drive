@@ -47,6 +47,7 @@ import (
 	"github.com/kennguy3n/zk-drive/internal/jobs"
 	"github.com/kennguy3n/zk-drive/internal/logging"
 	"github.com/kennguy3n/zk-drive/internal/metrics"
+	"github.com/kennguy3n/zk-drive/internal/natsutil"
 	"github.com/kennguy3n/zk-drive/internal/notification"
 	"github.com/kennguy3n/zk-drive/internal/permission"
 	"github.com/kennguy3n/zk-drive/internal/preview"
@@ -76,36 +77,7 @@ const (
 	// hung clamd socket cannot stall the health loop for a full
 	// interval.
 	clamAVPingTimeout = 5 * time.Second
-	// natsReconnectBaseDelay / natsReconnectMaxDelay bound the
-	// exponential reconnect backoff (WS8 8.4): the delay doubles each
-	// attempt from the base up to the cap, so a brief blip recovers
-	// in ~1s while a prolonged outage settles into a low-frequency
-	// 30s retry instead of a hot loop.
-	natsReconnectBaseDelay = 1 * time.Second
-	natsReconnectMaxDelay  = 30 * time.Second
-	// natsReconnectJitter is the +/- randomisation applied to each
-	// reconnect delay so a fleet of workers does not reconnect in
-	// lockstep (thundering herd) after a shared NATS outage.
-	natsReconnectJitter = 1 * time.Second
 )
-
-// natsReconnectDelay is the nats.CustomReconnectDelay backoff:
-// exponential from natsReconnectBaseDelay, doubling each attempt, and
-// clamped at natsReconnectMaxDelay. nats.go adds the configured jitter
-// on top, so the returned value is the pre-jitter base delay.
-func natsReconnectDelay(attempts int) time.Duration {
-	if attempts < 1 {
-		attempts = 1
-	}
-	delay := natsReconnectBaseDelay
-	for i := 1; i < attempts; i++ {
-		delay *= 2
-		if delay >= natsReconnectMaxDelay {
-			return natsReconnectMaxDelay
-		}
-	}
-	return delay
-}
 
 func main() {
 	if err := run(); err != nil {
@@ -431,8 +403,8 @@ func run() error {
 		// handlers surface the status in the log so an operator sees
 		// the outage and the automatic recovery without inspecting
 		// NATS itself.
-		nats.ReconnectJitter(natsReconnectJitter, natsReconnectJitter),
-		nats.CustomReconnectDelay(natsReconnectDelay),
+		nats.ReconnectJitter(natsutil.ReconnectJitter, natsutil.ReconnectJitter),
+		nats.CustomReconnectDelay(natsutil.ReconnectDelay),
 		nats.DisconnectErrHandler(func(_ *nats.Conn, derr error) {
 			slog.Warn("nats disconnected, reconnecting with backoff", "err", derr)
 		}),

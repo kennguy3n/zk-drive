@@ -25,14 +25,23 @@ import (
 // in-memory store, logs a single warning, and a background pinger flips
 // back to Redis as soon as it answers again.
 //
-// Trade-off (documented and intentional): while degraded, revocation
-// state is per-replica rather than shared. A logout/force-sign-out is
-// honoured on the replica that served it, but a sibling replica won't
-// see it until Redis recovers. For the single-node SME profile this
-// product targets there are no siblings, so behaviour is identical to
-// healthy Redis; for multi-replica deployments this is the correct
-// availability-over-consistency choice for a transient outage, and the
-// warning log makes the degraded state visible.
+// Trade-off (documented and intentional): while degraded, newly
+// created sessions live only in the per-replica in-memory store. A
+// session created mid-outage is therefore not shared with siblings and
+// is dropped on recovery (the user re-authenticates once) — the
+// accepted availability-over-consistency cost of serving through an
+// outage instead of 401-ing every request.
+//
+// Revocations are the security-sensitive exception and are NOT simply
+// dropped. A force-sign-out / logout recorded while degraded is
+// replayed into Redis on recovery (see flushRevocations, invoked by
+// RunHealthLoop before primary reads resume). Without that, a token
+// deliberately killed during an outage would silently come back to
+// life the moment IsRevoked started consulting Redis again — a
+// privilege the in-memory cutoff was specifically created to deny.
+// Revocation cutoffs are monotonic (max-update) and replay is
+// idempotent, so flushing can only ever tighten access, never loosen
+// it, and is safe under concurrent multi-replica recovery.
 type FailoverStore struct {
 	primary  Store // Redis-backed
 	fallback Store // in-memory
@@ -132,11 +141,86 @@ func (f *FailoverStore) RunHealthLoop(ctx context.Context, interval time.Duratio
 			pctx, cancel := context.WithTimeout(ctx, f.pingTimeout)
 			err := f.ping(pctx)
 			cancel()
-			if err == nil && f.healthy.CompareAndSwap(false, true) {
+			if err != nil {
+				continue
+			}
+			// Replay revocations recorded while degraded into Redis
+			// BEFORE flipping reads back to it, so there is no instant
+			// where IsRevoked consults a Redis that has forgotten a
+			// force-sign-out issued during the outage. If the flush
+			// itself hits a Redis blip we stay degraded and retry on
+			// the next tick rather than resuming with a gap.
+			fctx, fcancel := context.WithTimeout(ctx, f.pingTimeout)
+			ferr := f.flushRevocations(fctx)
+			fcancel()
+			if ferr != nil {
+				f.logger.Warn("redis answered but revocation flush failed, staying degraded", "err", ferr)
+				continue
+			}
+			if f.healthy.CompareAndSwap(false, true) {
+				// A revocation may have landed in the fallback in the
+				// narrow window between the flush and the flip; replay
+				// once more (idempotent) so it is not stranded now that
+				// reads route to Redis.
+				f2ctx, f2cancel := context.WithTimeout(ctx, f.pingTimeout)
+				if err := f.flushRevocations(f2ctx); err != nil {
+					f.logger.Warn("post-recovery revocation re-flush failed (cutoffs expire on their own TTL)", "err", err)
+				}
+				f2cancel()
 				f.logger.Info("redis session store recovered, resuming shared session/revocation backend")
 			}
 		}
 	}
+}
+
+// revocationRecord is a single per-user revocation cutoff exported from
+// the in-memory fallback for replay into Redis on recovery.
+type revocationRecord struct {
+	workspaceID uuid.UUID
+	userID      uuid.UUID
+	cutoff      time.Time
+	expiresAt   time.Time
+}
+
+// revocationSnapshotter is implemented by the in-memory store so the
+// FailoverStore can read back the cutoffs it recorded while degraded
+// without widening the Store interface (the Redis store has no need to
+// export its state). The fallback is always a *MemoryStore in
+// production; the type assertion in flushRevocations degrades to a
+// no-op for any fallback that does not implement it.
+type revocationSnapshotter interface {
+	snapshotRevocations() []revocationRecord
+}
+
+// flushRevocations replays every live revocation cutoff held in the
+// fallback into the primary (Redis). It is called on recovery so a
+// force-sign-out issued during an outage survives the switch back to
+// Redis. RevokeUser is monotonic (max-update) and idempotent, so
+// replaying an already-present cutoff is a no-op and concurrent
+// replays from multiple recovering replicas converge safely. A
+// connectivity error is returned so the caller keeps the store
+// degraded and retries; a non-connectivity error on a single entry is
+// logged and skipped so one bad row cannot block recovery.
+func (f *FailoverStore) flushRevocations(ctx context.Context) error {
+	snap, ok := f.fallback.(revocationSnapshotter)
+	if !ok {
+		return nil
+	}
+	now := time.Now()
+	for _, r := range snap.snapshotRevocations() {
+		ttl := r.expiresAt.Sub(now)
+		if ttl <= 0 {
+			continue // already expired; nothing to preserve
+		}
+		if err := f.primary.RevokeUser(ctx, r.workspaceID, r.userID, r.cutoff, ttl); err != nil {
+			if isUnavailable(err) {
+				return err
+			}
+			f.logger.Warn("replaying degraded-window revocation into redis failed",
+				"workspace_id", r.workspaceID, "user_id", r.userID, "err", err)
+		}
+	}
+	return nil
 }
 
 func (f *FailoverStore) Set(ctx context.Context, sessionID string, userID, workspaceID uuid.UUID, ttl time.Duration) error {

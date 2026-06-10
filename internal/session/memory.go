@@ -75,8 +75,10 @@ type memUserIndex struct {
 }
 
 type memRevocation struct {
-	cutoff    int64 // unix seconds
-	expiresAt time.Time
+	workspaceID uuid.UUID
+	userID      uuid.UUID
+	cutoff      int64 // unix seconds
+	expiresAt   time.Time
 }
 
 // NewMemoryStore returns an empty in-memory session store.
@@ -189,9 +191,41 @@ func (m *MemoryStore) RevokeUser(_ context.Context, workspaceID, userID uuid.UUI
 	defer m.mu.Unlock()
 	cur, ok := m.revoked[key]
 	if !ok || cutoff > cur.cutoff {
-		m.revoked[key] = memRevocation{cutoff: cutoff, expiresAt: exp}
+		m.revoked[key] = memRevocation{
+			workspaceID: workspaceID,
+			userID:      userID,
+			cutoff:      cutoff,
+			expiresAt:   exp,
+		}
 	}
 	return nil
+}
+
+// snapshotRevocations returns the live (non-expired) per-user
+// revocation cutoffs held in memory. It exists so a FailoverStore can
+// replay revocations recorded while degraded back into Redis on
+// recovery (flush-on-recovery), closing the window where a
+// force-sign-out issued during an outage would otherwise be forgotten
+// once reads resume against Redis. Expired entries are skipped (and
+// lazily reaped) so a flush never resurrects a cutoff past its TTL.
+func (m *MemoryStore) snapshotRevocations() []revocationRecord {
+	now := m.now()
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := make([]revocationRecord, 0, len(m.revoked))
+	for k, r := range m.revoked {
+		if !r.expiresAt.After(now) {
+			delete(m.revoked, k)
+			continue
+		}
+		out = append(out, revocationRecord{
+			workspaceID: r.workspaceID,
+			userID:      r.userID,
+			cutoff:      time.Unix(r.cutoff, 0).UTC(),
+			expiresAt:   r.expiresAt,
+		})
+	}
+	return out
 }
 
 // IsRevoked reports whether the per-user cutoff is at or after
