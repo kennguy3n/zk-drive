@@ -452,7 +452,8 @@ profile default.
 Under `ZKDRIVE_PROFILE=compact` the box emits a single startup line
 noting tracing and metrics are disabled by the profile, so an operator
 who later wants them knows exactly which switch turned them off. The
-same three variables and defaults apply to the zk-object-fabric gateway.
+zk-object-fabric gateway mirrors `LOG_FORMAT` / `LOG_LEVEL` with the
+same defaults; its compact-posture switch is `ZKOF_PROFILE=compact`.
 
 ## OpenTelemetry tracing
 
