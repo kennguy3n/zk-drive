@@ -52,6 +52,10 @@ final class TransferManager: NSObject, ObservableObject {
         let jobID: String
         let fileID: String
         let title: String
+        /// Whether the completed download should also be encrypted into the
+        /// offline cache. Persisted so the intent survives an app relaunch
+        /// while the download is still in flight.
+        let cacheOffline: Bool
     }
 
     private let defaults = UserDefaults.standard
@@ -121,7 +125,7 @@ final class TransferManager: NSObject, ObservableObject {
             guard let url = URL(string: target.downloadUrl) else {
                 throw AppError(category: .invalidInput, message: "Bad download URL", httpStatus: nil)
             }
-            storePending(PendingDownload(jobID: jobID, fileID: fileID, title: title), offline: cacheOffline)
+            storePending(PendingDownload(jobID: jobID, fileID: fileID, title: title, cacheOffline: cacheOffline))
             var request = URLRequest(url: url)
             request.httpMethod = "GET"
             let task = session.downloadTask(with: request)
@@ -180,11 +184,10 @@ final class TransferManager: NSObject, ObservableObject {
         if let data = try? JSONEncoder().encode(all) { defaults.set(data, forKey: Self.pendingUploadsKey) }
     }
 
-    private func storePending(_ pending: PendingDownload, offline: Bool) {
+    private func storePending(_ pending: PendingDownload) {
         var all = loadPendingDownloads()
         all[pending.jobID] = pending
         if let data = try? JSONEncoder().encode(all) { defaults.set(data, forKey: Self.pendingDownloadsKey) }
-        if offline { offlineWanted.insert(pending.jobID) }
     }
 
     private func loadPendingDownloads() -> [String: PendingDownload] {
@@ -197,10 +200,7 @@ final class TransferManager: NSObject, ObservableObject {
         var all = loadPendingDownloads()
         all.removeValue(forKey: jobID)
         if let data = try? JSONEncoder().encode(all) { defaults.set(data, forKey: Self.pendingDownloadsKey) }
-        offlineWanted.remove(jobID)
     }
-
-    private var offlineWanted: Set<String> = []
 }
 
 // MARK: - URLSession delegates
@@ -253,7 +253,17 @@ extension TransferManager: URLSessionDataDelegate, URLSessionDownloadDelegate {
     // MARK: Completion handling (main actor)
 
     private func finishTask(jobID: String, isUpload: Bool, statusCode: Int, errorMessage: String?) async {
-        guard isUpload else { return } // downloads finish via didFinishDownloadingTo
+        guard isUpload else {
+            // A *successful* download is finalised in `didFinishDownloadingTo`.
+            // That delegate never fires for a transport-level failure (timeout,
+            // connection lost), so this is the only place such a download can be
+            // surfaced as failed and its pending bookkeeping cleaned up.
+            if let errorMessage {
+                updateJob(jobID) { $0.status = .failed(errorMessage) }
+                removePendingDownload(jobID: jobID)
+            }
+            return
+        }
         guard let pending = loadPendingUploads()[jobID] else {
             if let errorMessage { updateJob(jobID) { $0.status = .failed(errorMessage) } }
             return
@@ -285,9 +295,8 @@ extension TransferManager: URLSessionDataDelegate, URLSessionDownloadDelegate {
             return
         }
         let pending = loadPendingDownloads()[jobID]
-        let wantsOffline = offlineWanted.contains(jobID)
         updateJob(jobID) { $0.fraction = 1; $0.status = .completed; $0.localURL = localURL }
-        if wantsOffline, let pending, let data = try? Data(contentsOf: localURL) {
+        if let pending, pending.cacheOffline, let data = try? Data(contentsOf: localURL) {
             try? await offlineStore.store(fileID: pending.fileID, plaintext: data)
         }
         removePendingDownload(jobID: jobID)

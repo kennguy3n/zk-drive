@@ -67,7 +67,7 @@ final class AuthService: ObservableObject {
         } catch {
             let appError = error.asAppError()
             // A user-cancelled sign-in is not an error worth surfacing.
-            if appError.message != "Sign-in was cancelled" {
+            if appError.category != .cancelled {
                 lastError = appError
             }
         }

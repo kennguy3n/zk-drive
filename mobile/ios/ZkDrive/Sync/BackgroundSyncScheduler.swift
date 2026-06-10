@@ -21,12 +21,21 @@ final class BackgroundSyncScheduler {
     /// Register the launch handler. Must be called before the app
     /// finishes launching (per `BGTaskScheduler` contract).
     func register() {
+        // The launch handler is invoked on a non-main queue. `handle(_:)` and
+        // everything it touches (`coordinator`, `logger`) are `@MainActor`, so
+        // hop onto the main actor before doing any work to avoid a data race.
         BGTaskScheduler.shared.register(forTaskWithIdentifier: Self.taskIdentifier, using: nil) { [weak self] task in
-            guard let self, let refreshTask = task as? BGAppRefreshTask else {
+            guard let refreshTask = task as? BGAppRefreshTask else {
                 task.setTaskCompleted(success: false)
                 return
             }
-            self.handle(refreshTask)
+            Task { @MainActor [weak self] in
+                guard let self else {
+                    refreshTask.setTaskCompleted(success: false)
+                    return
+                }
+                self.handle(refreshTask)
+            }
         }
     }
 

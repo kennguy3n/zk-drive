@@ -10,9 +10,18 @@ import Foundation
 /// This is a real, self-contained use of the bridge crypto that does not
 /// depend on server-side key wrapping: offline copies are confidential
 /// even if the device filesystem is extracted.
-struct OfflineStore {
+final class OfflineStore: @unchecked Sendable {
     private let keychain: KeychainStore
     private static let dekAccount = "offline-cache-dek"
+
+    /// The crypto engine is derived once from the device DEK and reused for
+    /// the lifetime of the store. It is internally immutable — every seal
+    /// generates a fresh random nonce — so reuse is safe and avoids a
+    /// Keychain `SecItemCopyMatching` IPC on every offline read/write
+    /// (which matters when caching many files at once). Access is guarded
+    /// by a lock for the lazy initialisation.
+    private let engineLock = NSLock()
+    private var cachedEngine: CryptoEngine?
 
     init(keychain: KeychainStore) {
         self.keychain = keychain
@@ -29,7 +38,12 @@ struct OfflineStore {
     }
 
     private func engine() throws -> CryptoEngine {
-        try CryptoEngine(dek: try cacheKey())
+        engineLock.lock()
+        defer { engineLock.unlock() }
+        if let cachedEngine { return cachedEngine }
+        let engine = try CryptoEngine(dek: try cacheKey())
+        cachedEngine = engine
+        return engine
     }
 
     private func blobURL(fileID: String) throws -> URL {

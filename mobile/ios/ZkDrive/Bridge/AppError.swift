@@ -13,7 +13,8 @@ struct AppError: Error, Identifiable, Equatable {
         case server          // 5xx
         case crypto          // decrypt/encrypt failure
         case storage         // local catalogue / disk
-        case invalidInput    // programming error / bad argument
+        case invalidInput    // 4xx client error / bad argument — not retryable
+        case cancelled       // user aborted the operation (e.g. dismissed sign-in)
         case unknown
     }
 
@@ -48,7 +49,7 @@ struct AppError: Error, Identifiable, Equatable {
         case .server: return "The server had a problem. Please try again shortly."
         case .crypto: return "Could not decrypt this file. The key may be wrong."
         case .storage: return "Local storage error. Try restarting the app."
-        case .invalidInput, .unknown: return message
+        case .invalidInput, .unknown, .cancelled: return message
         }
     }
 }
@@ -90,12 +91,21 @@ extension AppError {
     }
 
     private static func category(forStatus status: Int?) -> Category {
+        // No HTTP response at all means the request never reached the server
+        // (DNS, timeout, connection lost): a genuine transport failure, which
+        // is safe to retry.
+        guard let status else { return .network }
         switch status {
-        case .some(401): return .auth
-        case .some(403): return .permission
-        case .some(404): return .notFound
-        case .some(let s) where s >= 500: return .server
-        default: return .network
+        case 401: return .auth
+        case 403: return .permission
+        case 404: return .notFound
+        // Request-timeout and rate-limit are transient — retry with backoff.
+        case 408, 429: return .server
+        case 500...: return .server
+        // Every other 4xx (400, 409, 422, …) is a client error: the identical
+        // request will keep failing, so it must NOT be marked retryable.
+        case 400..<500: return .invalidInput
+        default: return .unknown
         }
     }
 

@@ -60,7 +60,7 @@ final class OAuthService: NSObject {
             let webSession = ASWebAuthenticationSession(url: authURL, callbackURLScheme: scheme) { callback, error in
                 if let error {
                     if let asError = error as? ASWebAuthenticationSessionError, asError.code == .canceledLogin {
-                        continuation.resume(throwing: AppError(category: .auth, message: "Sign-in was cancelled", httpStatus: nil))
+                        continuation.resume(throwing: AppError(category: .cancelled, message: "Sign-in was cancelled", httpStatus: nil))
                     } else {
                         continuation.resume(throwing: AppError(category: .auth, message: error.localizedDescription, httpStatus: nil))
                     }
@@ -74,8 +74,9 @@ final class OAuthService: NSObject {
             }
             webSession.presentationContextProvider = self
             // Use an ephemeral session so a shared-device sign-out is
-            // clean: no IdP cookie lingers between users.
-            webSession.prefersEphemeralWebBrowserSession = false
+            // clean: no IdP cookie lingers between users, preventing one
+            // user from silently inheriting another's IdP session.
+            webSession.prefersEphemeralWebBrowserSession = true
             self.webSession = webSession
             if !webSession.start() {
                 continuation.resume(throwing: AppError(category: .auth, message: "Could not start the sign-in session", httpStatus: nil))
