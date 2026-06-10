@@ -1,0 +1,52 @@
+package com.zkdrive.app.ui.navigation
+
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.outlined.Folder
+import androidx.compose.material.icons.outlined.Search
+import androidx.compose.material.icons.outlined.Settings
+import androidx.compose.ui.graphics.vector.ImageVector
+
+/** Stable route constants and argument keys for the nav graph. */
+object Routes {
+    const val BROWSER = "browser"
+    const val SEARCH = "search"
+    const val SETTINGS = "settings"
+
+    const val PREVIEW = "preview"
+    const val ARG_FILE_ID = "fileId"
+    const val ARG_FILE_NAME = "name"
+    const val ARG_FILE_MIME = "mime"
+    const val PREVIEW_PATTERN = "$PREVIEW/{$ARG_FILE_ID}?$ARG_FILE_NAME={$ARG_FILE_NAME}&$ARG_FILE_MIME={$ARG_FILE_MIME}"
+
+    const val SHARE = "share"
+    const val ARG_RESOURCE_TYPE = "resourceType"
+    const val ARG_RESOURCE_ID = "resourceId"
+    const val ARG_RESOURCE_NAME = "resourceName"
+    const val SHARE_PATTERN = "$SHARE/{$ARG_RESOURCE_TYPE}/{$ARG_RESOURCE_ID}?$ARG_RESOURCE_NAME={$ARG_RESOURCE_NAME}"
+
+    fun preview(fileId: String, name: String, mime: String): String =
+        "$PREVIEW/$fileId?$ARG_FILE_NAME=${encode(name)}&$ARG_FILE_MIME=${encode(mime)}"
+
+    fun share(resourceType: String, resourceId: String, name: String): String =
+        "$SHARE/$resourceType/$resourceId?$ARG_RESOURCE_NAME=${encode(name)}"
+
+    private fun encode(value: String): String =
+        java.net.URLEncoder.encode(value, Charsets.UTF_8.name())
+}
+
+/** Resource discriminators shared across sharing + permission routes. */
+object ResourceTypes {
+    const val FILE = "file"
+    const val FOLDER = "folder"
+}
+
+/** The three primary bottom-bar destinations. */
+enum class TopLevelDestination(
+    val route: String,
+    val label: String,
+    val icon: ImageVector,
+) {
+    Browser(Routes.BROWSER, "Files", Icons.Outlined.Folder),
+    Search(Routes.SEARCH, "Search", Icons.Outlined.Search),
+    Settings(Routes.SETTINGS, "Settings", Icons.Outlined.Settings),
+}

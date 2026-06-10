@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<paths>
+    <!-- Camera capture staging directory. -->
+    <cache-path name="captures" path="captures/" />
+    <!-- Decrypted files materialised for the system share-sheet / preview. -->
+    <cache-path name="shared" path="shared/" />
+    <!-- Offline-synced catalogue files. -->
+    <files-path name="offline" path="offline/" />
+</paths>

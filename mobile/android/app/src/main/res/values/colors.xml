@@ -1,0 +1,7 @@
+<resources>
+    <!-- ZK Drive brand blue (#2563eb), matching the web console primary. -->
+    <color name="brand_primary">#2563EB</color>
+    <color name="brand_primary_dark">#1D4ED8</color>
+    <color name="splash_background">#FFFAFAFA</color>
+    <color name="splash_background_dark">#FF0B1220</color>
+</resources>
