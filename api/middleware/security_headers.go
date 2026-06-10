@@ -217,8 +217,11 @@ func SecurityHeaders(opts SecurityHeadersOptions) func(http.Handler) http.Handle
 	} else {
 		// Drop the sentinel if nonces are disabled but buildCSP
 		// still planted it (defensive: keeps the emitted policy
-		// valid regardless of option combinations).
-		cspPrefix = strings.Replace(csp, "'nonce-"+cspNonceSentinel+"'", "", 1)
+		// valid regardless of option combinations). Match the
+		// leading space buildCSP emits with the source (" 'nonce-…'",
+		// see scriptSrc assembly) so the fallback leaves no
+		// double-space artifact even if that invariant ever changes.
+		cspPrefix = strings.Replace(csp, " 'nonce-"+cspNonceSentinel+"'", "", 1)
 	}
 
 	emitExpectCT := opts.ExpectCT && !opts.DisableHSTS
