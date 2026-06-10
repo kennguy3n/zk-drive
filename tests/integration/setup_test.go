@@ -461,6 +461,12 @@ func setupEnv(t *testing.T) *testEnv {
 				PerWorkspace: 0,
 			}))
 
+			// Resolved-identity endpoint. Mirrors cmd/server/main.go
+			// so the integration harness exercises the same auth-mode-
+			// agnostic /api/me contract the SPA relies on in both
+			// built-in and iam-core modes.
+			r.Get("/me", driveHandler.Me)
+
 			r.Get("/workspaces", driveHandler.ListWorkspaces)
 			r.Post("/workspaces", driveHandler.CreateWorkspace)
 			r.Get("/workspaces/{id}", driveHandler.GetWorkspace)

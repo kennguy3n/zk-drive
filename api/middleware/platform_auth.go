@@ -34,7 +34,7 @@ type platformPrincipalCtxKey struct{}
 func PlatformAuth(a PlatformAuthenticator) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			token, ok := extractBearerToken(r)
+			token, ok := ExtractBearerToken(r)
 			if !ok {
 				RespondError(w, http.StatusUnauthorized, ErrCodeAuthMissingToken, "missing platform API key")
 				return
