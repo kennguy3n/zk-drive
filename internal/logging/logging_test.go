@@ -345,6 +345,38 @@ func TestBridgeEmitsAboveLogLevel(t *testing.T) {
 	}
 }
 
+// TestUnfilteredHandlerStaysUnfilteredAfterDerivation pins that the
+// always-enabled property survives WithAttrs/WithGroup. A plain
+// embedded handler would be promoted and revert to level filtering,
+// silently re-dropping bridged records — the override must re-wrap so
+// the derived handler is still unfiltered and still formats output.
+func TestUnfilteredHandlerStaysUnfilteredAfterDerivation(t *testing.T) {
+	var buf bytes.Buffer
+	// Floor at error so a plain (non-wrapped) handler would drop Info.
+	base := unfilteredHandler{slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelError})}
+
+	derived := base.WithAttrs([]slog.Attr{slog.String("subsystem", "reconciler")})
+	if !derived.Enabled(context.Background(), slog.LevelInfo) {
+		t.Fatal("WithAttrs lost the unfiltered property")
+	}
+	if _, ok := derived.(unfilteredHandler); !ok {
+		t.Fatalf("WithAttrs returned %T, want unfilteredHandler", derived)
+	}
+	if grouped := base.WithGroup("g"); !grouped.Enabled(context.Background(), slog.LevelInfo) {
+		t.Fatal("WithGroup lost the unfiltered property")
+	}
+
+	bridge := slog.NewLogLogger(derived, slog.LevelInfo)
+	bridge.Printf("reconcile tick")
+	out := buf.String()
+	if !strings.Contains(out, "reconcile tick") {
+		t.Fatalf("derived unfiltered handler dropped output at LOG_LEVEL=error; got %q", out)
+	}
+	if !strings.Contains(out, `"subsystem":"reconciler"`) {
+		t.Fatalf("derived handler lost the attrs added via WithAttrs; got %q", out)
+	}
+}
+
 // hijackerRecorder is a minimal http.ResponseWriter that ALSO
 // implements http.Hijacker. Used to assert that AccessLog's
 // internal response-writer wrapper preserves Hijacker delegation

@@ -178,6 +178,21 @@ type unfilteredHandler struct{ slog.Handler }
 
 func (unfilteredHandler) Enabled(context.Context, slog.Level) bool { return true }
 
+// WithAttrs and WithGroup re-wrap the derived handler so the
+// always-enabled property survives derivation. Without these overrides
+// the embedded slog.Handler would be promoted, returning a plain
+// handler that reverts to normal level filtering — silently defeating
+// the bridge if this type is ever used somewhere that derives a child
+// handler. slog.NewLogLogger's writer never derives today, but keeping
+// the wrapper closed under derivation removes the latent trap.
+func (u unfilteredHandler) WithAttrs(attrs []slog.Attr) slog.Handler {
+	return unfilteredHandler{u.Handler.WithAttrs(attrs)}
+}
+
+func (u unfilteredHandler) WithGroup(name string) slog.Handler {
+	return unfilteredHandler{u.Handler.WithGroup(name)}
+}
+
 // parseLevel maps the user-facing LOG_LEVEL values to slog
 // constants. Unknown values fall back to info — log configuration
 // shouldn't be the thing that crashes a pod on startup.
