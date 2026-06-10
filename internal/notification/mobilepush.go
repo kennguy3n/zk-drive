@@ -150,6 +150,11 @@ func (s *MobilePushService) Register(ctx context.Context, workspaceID, userID uu
 // Unregister removes a device token for (workspace, user). Idempotent:
 // removing an unknown token returns nil. Validation mirrors Register so a
 // malformed unregister is a 400, not a silent no-op.
+//
+// Unlike Register it deliberately does NOT call SupportsPlatform: a user
+// who registered while a provider was configured must still be able to
+// unregister after that provider is removed, so cleanup never depends on
+// current provider configuration.
 func (s *MobilePushService) Unregister(ctx context.Context, workspaceID, userID uuid.UUID, dt DeviceToken) error {
 	if s == nil {
 		return ErrPlatformUnsupported

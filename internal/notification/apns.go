@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"sync"
 	"time"
 
@@ -151,7 +152,12 @@ func (p *APNsProvider) Send(ctx context.Context, token string, payload Notificat
 	if err != nil {
 		return false, fmt.Errorf("apns: marshal payload: %w", err)
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, p.host+"/3/device/"+token, bytes.NewReader(body))
+	// Percent-encode the token as a single path segment. Real APNs tokens
+	// are hex (URL-safe), but escaping keeps a token containing a reserved
+	// byte (?, #, %) from being reinterpreted as a query/fragment/escape by
+	// the URL parser instead of reaching APNs verbatim.
+	sendURL := p.host + "/3/device/" + url.PathEscape(token)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, sendURL, bytes.NewReader(body))
 	if err != nil {
 		return false, fmt.Errorf("apns: build request: %w", err)
 	}

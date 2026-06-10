@@ -611,8 +611,11 @@ func (e *testEnv) ResetTables() {
 		// producing flaky "subscription already exists" / counter
 		// drift symptoms that are hard to diagnose. Same defensive
 		// reason kchat_room_folders is listed even though it
-		// cascades from client_rooms.
-		`TRUNCATE webhook_deliveries, webhook_subscriptions, kchat_room_folders, workspace_storage_credentials, workspace_plans, usage_events, file_tags, retention_policies, audit_log, notifications, file_previews, client_rooms, guest_invites, share_links, activity_log, permissions, file_versions, files, folders, users, workspaces RESTART IDENTITY CASCADE`,
+		// cascades from client_rooms, and device_push_tokens
+		// (mobile push, migration 039) / webpush_subscriptions
+		// (browser push, migration 038) even though both cascade
+		// from workspaces / users.
+		`TRUNCATE webhook_deliveries, webhook_subscriptions, kchat_room_folders, workspace_storage_credentials, workspace_plans, usage_events, file_tags, retention_policies, audit_log, notifications, device_push_tokens, webpush_subscriptions, file_previews, client_rooms, guest_invites, share_links, activity_log, permissions, file_versions, files, folders, users, workspaces RESTART IDENTITY CASCADE`,
 		`ALTER TABLE workspaces ADD CONSTRAINT fk_workspaces_owner FOREIGN KEY (owner_user_id) REFERENCES users(id)`,
 	}
 	for _, s := range stmts {
