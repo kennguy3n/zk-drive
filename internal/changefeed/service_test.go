@@ -658,6 +658,84 @@ func TestService_Record_BustsOnFolderMove(t *testing.T) {
 	}
 }
 
+// TestService_Record_ContentBusterBustsOnEveryMutation verifies the
+// content-cache buster fires on mutations the permission buster
+// deliberately ignores (file.create, folder.rename). The content cache
+// (folder listings / search) reflects the exact resource set, so a
+// create or rename must invalidate it even though it does not change
+// permission resolution.
+func TestService_Record_ContentBusterBustsOnEveryMutation(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		kind string
+		op   string
+	}{
+		{"file.create", changefeed.KindFile, changefeed.OpCreate},
+		{"folder.rename", changefeed.KindFolder, changefeed.OpRename},
+		{"file.delete", changefeed.KindFile, changefeed.OpDelete},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			repo := newFakeRepo()
+			permBuster := &recordingBuster{}
+			contentBuster := &recordingBuster{}
+			svc := changefeed.NewService(repo).
+				WithCacheBuster(permBuster).
+				WithContentCacheBuster(contentBuster)
+			ws := uuid.New()
+			if _, err := svc.Record(context.Background(), changefeed.RecordInput{
+				WorkspaceID: ws,
+				ActorID:     ptrUUID(uuid.New()),
+				Kind:        tc.kind,
+				Op:          tc.op,
+				ResourceID:  uuid.New(),
+			}); err != nil {
+				t.Fatalf("record: %v", err)
+			}
+			// Content buster must always fire.
+			if got := contentBuster.snapshot(); len(got) != 1 || got[0] != ws {
+				t.Errorf("content buster: expected 1 bust on %s; got %v", ws, got)
+			}
+			// Permission buster only fires for the narrow topology/grant
+			// set; file.create and folder.rename must NOT bust it.
+			if tc.op == changefeed.OpCreate || tc.op == changefeed.OpRename {
+				if got := permBuster.snapshot(); len(got) != 0 {
+					t.Errorf("perm buster: expected no bust on %s; got %v", tc.name, got)
+				}
+			}
+		})
+	}
+}
+
+// TestService_BatchRecord_ContentBusterDeduplicates verifies the
+// content buster collapses a multi-item batch to one bust per
+// workspace, like the permission buster, even though it has no
+// per-mutation predicate gate.
+func TestService_BatchRecord_ContentBusterDeduplicates(t *testing.T) {
+	t.Parallel()
+	repo := newFakeRepo()
+	contentBuster := &recordingBuster{}
+	svc := changefeed.NewService(repo).WithContentCacheBuster(contentBuster)
+	ws := uuid.New()
+	inputs := make([]changefeed.RecordInput, 0, 5)
+	for i := 0; i < 5; i++ {
+		inputs = append(inputs, changefeed.RecordInput{
+			WorkspaceID: ws,
+			ActorID:     ptrUUID(uuid.New()),
+			Kind:        changefeed.KindFile,
+			Op:          changefeed.OpCreate,
+			ResourceID:  uuid.New(),
+		})
+	}
+	if _, err := svc.BatchRecord(context.Background(), inputs); err != nil {
+		t.Fatalf("batch record: %v", err)
+	}
+	if got := contentBuster.snapshot(); len(got) != 1 || got[0] != ws {
+		t.Errorf("expected 1 deduplicated content bust on %s; got %v", ws, got)
+	}
+}
+
 // TestService_BatchRecord_DeduplicatesBusts verifies that a
 // bulk operation (e.g. 100-item bulk move) collapses to a single
 // bust per workspace. Without this, a large bulk would issue N

@@ -54,10 +54,40 @@ func (f RendererFunc) Render(ctx context.Context, srcBytes []byte) (image.Image,
 // The map is guarded by a sync.RWMutex so tests can register / unset
 // renderers without racing the worker's lookups. In production code
 // path the mutex is read-only after init() so contention is nil.
+//
+// registryWeight runs alongside registry and records each MIME's
+// RenderWeight so the dispatcher can route a preview job to the
+// lightweight (pure-Go) or heavy (subprocess) worker pool by MIME
+// alone, without instantiating the renderer. The two maps are written
+// together under the same lock so they can never drift.
 var (
-	registryMu sync.RWMutex
-	registry   = map[string]Renderer{}
+	registryMu     sync.RWMutex
+	registry       = map[string]Renderer{}
+	registryWeight = map[string]RenderWeight{}
 )
+
+// RenderWeight classifies a renderer by the resources it needs, which
+// determines the worker pod tier its jobs are routed to.
+type RenderWeight int
+
+const (
+	// WeightLight is a pure-Go renderer (images, text, markdown, CSV,
+	// archives, email, SVG): no subprocess, modest CPU/memory. These
+	// run on the slim server image pods.
+	WeightLight RenderWeight = iota
+	// WeightHeavy is a subprocess renderer (LibreOffice, FFmpeg,
+	// ImageMagick): forks an external, memory-hungry binary. These run
+	// only on the heavy worker image pods that ship those binaries.
+	WeightHeavy
+)
+
+// String renders the weight as the suffix used in subject names / logs.
+func (w RenderWeight) String() string {
+	if w == WeightHeavy {
+		return "heavy"
+	}
+	return "lightweight"
+}
 
 // Register associates a Renderer with each of the supplied MIME types.
 // MIME types are normalised (lowercase, whitespace trimmed) so callers
@@ -75,6 +105,16 @@ var (
 // Tests that need to swap a real handler for a fake use Unregister
 // (or replaceForTest below) — they never rely on silent overwrite.
 func Register(r Renderer, mimes ...string) {
+	RegisterWeighted(WeightLight, r, mimes...)
+}
+
+// RegisterWeighted is Register plus an explicit RenderWeight. Pure-Go
+// handlers call Register (defaulting to WeightLight); subprocess
+// handlers (office/LibreOffice, audio/video/ffmpeg, design/ImageMagick)
+// call RegisterWeighted(WeightHeavy, …) so the dispatcher routes their
+// MIMEs to the heavy worker pods. The weight is recorded next to the
+// renderer under the same lock.
+func RegisterWeighted(weight RenderWeight, r Renderer, mimes ...string) {
 	if r == nil {
 		panic("preview: Register called with nil Renderer")
 	}
@@ -91,6 +131,7 @@ func Register(r Renderer, mimes ...string) {
 				"use Unregister or replaceForTest if you need to override in a test")
 		}
 		registry[key] = r
+		registryWeight[key] = weight
 	}
 }
 
@@ -112,6 +153,9 @@ func replaceForTest(r Renderer, mime string) {
 		panic("preview: replaceForTest called with empty MIME type")
 	}
 	registry[key] = r
+	if _, ok := registryWeight[key]; !ok {
+		registryWeight[key] = WeightLight
+	}
 }
 
 // Unregister removes the renderer for a MIME type, if any. Only used
@@ -120,7 +164,45 @@ func replaceForTest(r Renderer, mime string) {
 func Unregister(mime string) {
 	registryMu.Lock()
 	defer registryMu.Unlock()
-	delete(registry, normalizeMime(mime))
+	key := normalizeMime(mime)
+	delete(registry, key)
+	delete(registryWeight, key)
+}
+
+// WeightForMime returns the RenderWeight registered for a MIME type.
+// Unknown / unsupported MIMEs resolve to WeightLight: routing an
+// unrenderable type to the slim pool is harmless (the handler Acks it
+// as an unsupported skip) and keeps a misclassified type off the
+// scarce heavy pods. Callers that care whether a renderer exists at
+// all should consult IsSupportedMime first.
+func WeightForMime(mime string) RenderWeight {
+	registryMu.RLock()
+	defer registryMu.RUnlock()
+	return registryWeight[normalizeMime(mime)]
+}
+
+// IsHeavyMime reports whether a MIME type is rendered by a subprocess
+// renderer (and therefore must run on the heavy worker pods). It is the
+// single source of truth the publish path uses to choose between the
+// lightweight and heavy preview subjects.
+func IsHeavyMime(mime string) bool {
+	return WeightForMime(mime) == WeightHeavy
+}
+
+// HeavyMimes returns the sorted list of MIME types that route to the
+// heavy pool in the current build. Used for observability / docs ("the
+// heavy worker boots with N subprocess formats").
+func HeavyMimes() []string {
+	registryMu.RLock()
+	defer registryMu.RUnlock()
+	out := make([]string, 0)
+	for k, w := range registryWeight {
+		if w == WeightHeavy {
+			out = append(out, k)
+		}
+	}
+	sort.Strings(out)
+	return out
 }
 
 // lookup returns the renderer for a MIME type, or nil if none is

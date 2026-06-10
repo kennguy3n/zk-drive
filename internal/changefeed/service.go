@@ -31,9 +31,10 @@ const DefaultLimit = 100
 // WS / Redis outage means live clients miss a frame but every
 // reconnect-and-replay completes correctly. We log and continue.
 type Service struct {
-	repo        Repository
-	pub         WSPublisher
-	cacheBuster CacheBuster
+	repo               Repository
+	pub                WSPublisher
+	cacheBuster        CacheBuster
+	contentCacheBuster CacheBuster
 }
 
 // CacheBuster is the optional hook the changefeed calls after a
@@ -87,6 +88,23 @@ func (s *Service) WithPublisher(pub WSPublisher) *Service {
 // the time the broadcast lands.
 func (s *Service) WithCacheBuster(b CacheBuster) *Service {
 	s.cacheBuster = b
+	return s
+}
+
+// WithContentCacheBuster attaches a CacheBuster for *content* response
+// caches (folder listings, search results). Unlike the permission cache
+// — which only needs invalidation on the topology / grant mutations
+// captured by shouldBustForMutation — a content cache reflects the exact
+// set of files and folders in a workspace, so it must invalidate on
+// EVERY recorded mutation (create, rename, delete, move, content
+// re-index). This buster is therefore fired unconditionally for every
+// mutation the changefeed records, not gated by shouldBustForMutation.
+//
+// Same fail-soft contract as WithCacheBuster: BustWorkspace must never
+// error or block. Nil (or a typed-nil cache) disables it, leaving the
+// content caches to converge via their per-entry TTL.
+func (s *Service) WithContentCacheBuster(b CacheBuster) *Service {
+	s.contentCacheBuster = b
 	return s
 }
 
@@ -248,6 +266,11 @@ func (s *Service) Record(ctx context.Context, in RecordInput) (Mutation, error) 
 	if s.cacheBuster != nil && shouldBustForMutation(in.Kind, in.Op) {
 		s.cacheBuster.BustWorkspace(ctx, in.WorkspaceID)
 	}
+	// Content caches (listing/search) reflect the exact resource set,
+	// so any recorded mutation invalidates them — no predicate gate.
+	if s.contentCacheBuster != nil {
+		s.contentCacheBuster.BustWorkspace(ctx, in.WorkspaceID)
+	}
 	if s.pub != nil {
 		if err := s.pub.Publish(ctx, in.WorkspaceID, Event{Type: "change", Payload: m}); err != nil {
 			logging.FromContext(ctx).Warn("changefeed publish failed; row persisted",
@@ -328,6 +351,18 @@ func (s *Service) BatchRecord(ctx context.Context, inputs []RecordInput) ([]Muta
 			}
 			seen[m.WorkspaceID] = struct{}{}
 			s.cacheBuster.BustWorkspace(ctx, m.WorkspaceID)
+		}
+	}
+	// Content caches invalidate on every mutation; de-dup per workspace
+	// so a 1000-item bulk issues one INCR per affected workspace.
+	if s.contentCacheBuster != nil {
+		seen := make(map[uuid.UUID]struct{}, len(muts))
+		for _, m := range muts {
+			if _, dup := seen[m.WorkspaceID]; dup {
+				continue
+			}
+			seen[m.WorkspaceID] = struct{}{}
+			s.contentCacheBuster.BustWorkspace(ctx, m.WorkspaceID)
 		}
 	}
 	if s.pub != nil {
