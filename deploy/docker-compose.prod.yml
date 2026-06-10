@@ -124,8 +124,11 @@ services:
       PUBLIC_URL: ${PUBLIC_URL:-}
     ports:
       - "127.0.0.1:8080:8080"
+    # The zk-drive image ships no wget/curl (combined debian-slim and the
+    # split distroless server image both omit them), so the probe runs the
+    # bundled /app/healthcheck binary, which GETs /healthz over loopback.
     healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://localhost:8080/healthz"]
+      test: ["CMD", "/app/healthcheck"]
       interval: 10s
       timeout: 5s
       retries: 5

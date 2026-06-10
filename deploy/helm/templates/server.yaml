@@ -58,7 +58,7 @@ spec:
       {{- end }}
       containers:
         - name: server
-          image: {{ include "zk-drive.image" . }}
+          image: {{ include "zk-drive.serverImage" . }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           command: ["/app/server"]
           {{- include "zk-drive.envFrom" . | nindent 10 }}

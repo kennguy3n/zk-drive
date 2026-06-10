@@ -1,0 +1,94 @@
+# syntax=docker/dockerfile:1.7
+
+# ---- Heavy worker image ----
+#
+# The worker is the only process that shells out to external preview /
+# scan tooling, so it carries the full Debian runtime with LibreOffice,
+# FFmpeg, ImageMagick, poppler-utils, and rsvg baked in. This is the
+# ~800MB half of the old combined image; isolating it here keeps the
+# API-server image (Dockerfile.server) at ~30MB.
+#
+# Contents: /app/worker plus the CronJob / ad-hoc binaries that share
+# the same preview-tool runtime — /app/reconciler, /app/orphan-gc,
+# /app/audit-archiver, /app/audit-restore. (audit-restore only needs
+# S3, but it ships here rather than in the slim image so operators have
+# a single "ops" image carrying every batch/maintenance entrypoint.)
+FROM golang:1.25-alpine AS builder
+WORKDIR /src
+
+RUN apk add --no-cache git
+
+COPY go.mod go.sum ./
+RUN go mod download
+
+COPY . .
+
+ARG APP_VERSION=dev
+RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w -X github.com/kennguy3n/zk-drive/internal/version.Version=${APP_VERSION}" -o /out/worker ./cmd/worker
+RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w -X github.com/kennguy3n/zk-drive/internal/version.Version=${APP_VERSION}" -o /out/reconciler ./cmd/reconciler
+RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w -X github.com/kennguy3n/zk-drive/internal/version.Version=${APP_VERSION}" -o /out/orphan-gc ./cmd/orphan-gc
+RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w -X github.com/kennguy3n/zk-drive/internal/version.Version=${APP_VERSION}" -o /out/audit-archiver ./cmd/audit-archiver
+RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w -X github.com/kennguy3n/zk-drive/internal/version.Version=${APP_VERSION}" -o /out/audit-restore ./cmd/audit-restore
+
+# ---- Runtime stage ----
+# debian:bookworm-slim (instead of distroless static) so the worker
+# can shell out to external preview tools. Each tool's licence is
+# called out here so the proprietary-build implications are auditable
+# from this single Dockerfile rather than scattered across the
+# Go handler files:
+#
+#   poppler-utils (pdftoppm)     GPL — subprocess, not linked
+#   libreoffice                  MPL-2.0 — subprocess, not linked
+#   ffmpeg                       LGPL — subprocess, not linked
+#   librsvg2-bin (rsvg-convert)  LGPL — subprocess, not linked
+#   imagemagick                  ImageMagick Licence (Apache-2.0-style)
+#                                 — subprocess, not linked
+#   audiowaveform (optional)     not installed in the default image
+#                                 because the upstream Debian package
+#                                 is not available everywhere; the
+#                                 audio handler transparently falls
+#                                 back to ffmpeg's showwavespic when
+#                                 audiowaveform is missing. Bake it
+#                                 in per-deployment if you want the
+#                                 BBC-quality output.
+#
+# All shelled-out — none of these are linked into the Go binaries —
+# so they do not affect the proprietary licence of the binaries copied
+# in below.
+FROM debian:bookworm-slim AS runtime
+WORKDIR /app
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        ca-certificates \
+        poppler-utils \
+        libreoffice-core \
+        libreoffice-writer \
+        libreoffice-calc \
+        libreoffice-impress \
+        ffmpeg \
+        librsvg2-bin \
+        imagemagick \
+    && rm -rf /var/lib/apt/lists/* \
+    && groupadd --system --gid 65532 nonroot \
+    && useradd --system --uid 65532 --gid 65532 --home-dir /app nonroot \
+    && sed -i 's@<policy domain="coder" rights="none" pattern="PS"/>@<policy domain="coder" rights="read" pattern="PS"/>@' /etc/ImageMagick-6/policy.xml \
+    && sed -i 's@<policy domain="coder" rights="none" pattern="EPS"/>@<policy domain="coder" rights="read" pattern="EPS"/>@' /etc/ImageMagick-6/policy.xml \
+    && sed -i 's@<policy domain="coder" rights="none" pattern="PDF"/>@<policy domain="coder" rights="read" pattern="PDF"/>@' /etc/ImageMagick-6/policy.xml
+
+COPY --from=builder /out/worker /app/worker
+COPY --from=builder /out/reconciler /app/reconciler
+COPY --from=builder /out/orphan-gc /app/orphan-gc
+COPY --from=builder /out/audit-archiver /app/audit-archiver
+COPY --from=builder /out/audit-restore /app/audit-restore
+# No /app/migrations here: the worker never applies migrations (it only
+# asserts a minimum schema version via a DB query — see
+# database.RequireMinMigrationVersion in cmd/worker). Schema changes are
+# owned by the migrate Job / server --auto-migrate, which run from the
+# server image that ships both /app/migrate and /app/migrations. Shipping
+# the SQL files here without the migrate binary was dead weight and
+# misleading to operators.
+
+USER nonroot:nonroot
+
+ENTRYPOINT ["/app/worker"]

@@ -20,26 +20,82 @@ is read-only against S3.
 | `DATABASE_URL` | Postgres DSN (pgx-style).                              |
 | `JWT_SECRET`   | HS256 signing secret for session tokens.               |
 
-## Deployment profile
+## Deployment profiles (`ZKDRIVE_PROFILE`)
 
-| Variable          | Default       | Purpose |
-| ----------------- | ------------- | ------- |
-| `ZKDRIVE_PROFILE` | `development` | Bundles security defaults so a non-technical SME operator gets a hardened configuration from one variable instead of tuning a dozen knobs. Parsed case-insensitively (`prod` is accepted as an alias of `production`); empty or unrecognised values fall back to `development` — the server never silently assumes production. |
+A profile is a named bundle of defaults that collapses the 50+ knobs
+below into a single deployment-shape selector. Set `ZKDRIVE_PROFILE`
+and the profile fills in sensible defaults for everything else; you
+only supply the handful of genuinely site-specific variables. An
+explicitly-set env var always wins over a profile default — the profile
+only fills blanks, it never overrides a deliberate choice. An
+unrecognised value fails closed at startup (no silent zero-preset boot).
 
-Profiles:
+| Variable          | Default   | Purpose                                            |
+| ----------------- | --------- | -------------------------------------------------- |
+| `ZKDRIVE_PROFILE` | _empty_   | One of `compact`, `production`, `development`. Empty = no profile (read every var directly; pre-profile behaviour). |
 
-- **`production`** — hardened. JWT signing is **asymmetric-only**: the
-  default `JWT_ALGORITHM` becomes `ES256`, the server **auto-generates
-  an ES256 signing key at startup** if none exists yet (so first login
-  works with no manual rotation step), and HS256 tokens are **rejected
-  on verification** — a leaked `JWT_SECRET` can neither sign nor forge
-  a session the server will accept. `Expect-CT` is emitted for TLS
-  deployments.
-- **`compact`** / **`development`** (default) — relaxed. The HS256
-  fallback is retained for single-binary and local-dev simplicity
-  (`JWT_ALGORITHM` defaults to `auto`).
+### `compact` — single-node SME (NoOps)
 
-An explicit `JWT_ALGORITHM` always overrides the profile default.
+The shape behind [`deploy/docker-compose.compact.yml`](../deploy/docker-compose.compact.yml):
+one container runs the API server + async worker (as supervised child
+processes) plus an **embedded NATS JetStream** broker, targeting
+<512MB RAM. Reduces configuration to ~5 site-specific variables:
+
+| Variable        | Required | Notes                                  |
+| --------------- | -------- | -------------------------------------- |
+| `JWT_SECRET`    | yes      | 32+ byte signing secret.               |
+| `DATABASE_URL`  | yes\*    | \*Defaults to the bundled Postgres in the compact compose file; required if you point at an external database. |
+| `S3_ENDPOINT`   | yes      | zk-object-fabric / S3 endpoint.        |
+| `S3_BUCKET`     | yes      | Bucket name.                           |
+| `S3_ACCESS_KEY` | yes      | Access key.                            |
+| `S3_SECRET_KEY` | yes      | Secret key.                            |
+
+Everything else is defaulted by the profile:
+
+- `ZKDRIVE_AUTO_MIGRATE=true` — schema is applied in-process on startup
+  under the advisory lock (no separate `migrate` Job/binary).
+- `NATS_URL=nats://127.0.0.1:4222` — the in-process embedded broker.
+- No Redis — the rate limiter and session store run in-memory (single
+  node, so cross-replica coordination is moot).
+- ClamAV optional — virus scanning is skipped when `CLAMAV_ADDRESS` is
+  unset; point it at a daemon to enable.
+- Trimmed resource footprint — `DB_MAX_CONNS=10`, `DB_MIN_CONNS=1`,
+  `PREVIEW_PRIORITY_WORKERS=2`, `PREVIEW_STANDARD_WORKERS=1`.
+
+The embedded broker persists JetStream state under
+`ZKDRIVE_NATS_STORE_DIR` (see [Cache, queue, and scan
+dependencies](#cache-queue-and-scan-dependencies)) so durable consumers
+survive a restart.
+
+### `production` — horizontally-scaled, multi-replica
+
+Adds **fail-closed requirements** rather than defaults: `REDIS_URL` and
+`NATS_URL` are both **required** (startup aborts if either is missing),
+because in-memory rate limiting / session revocation and an embedded
+broker are not safe across replicas. Migrations run out-of-band via the
+`migrate` Job, so `ZKDRIVE_AUTO_MIGRATE` stays off. All workers enabled.
+
+JWT signing is **asymmetric-only** under this profile (6.1): the default
+`JWT_ALGORITHM` becomes `ES256`, the server **auto-generates an ES256
+signing key at startup** if none exists yet (so first login works with
+no manual rotation step), and HS256 tokens are **rejected on
+verification** — a leaked `JWT_SECRET` can neither sign nor forge a
+session the server will accept. `Expect-CT` is emitted for TLS
+deployments. An explicit `JWT_ALGORITHM` always overrides this default;
+`compact`/`development` keep the HS256 `auto` fallback for
+single-binary and local-dev simplicity.
+
+### `development` — local laptop
+
+The same dependency-free in-memory behaviour as `compact` but without
+compact's resource clamps, so a developer's box uses the full
+connection pool. Imposes no required-var validation.
+
+## Auto-migration (`ZKDRIVE_AUTO_MIGRATE`)
+
+| Variable               | Default | Purpose                                                       |
+| ---------------------- | ------- | ------------------------------------------------------------- |
+| `ZKDRIVE_AUTO_MIGRATE` | `false` | When `true`, `server` applies pending migrations before it begins listening, guarded by the same Postgres advisory lock `migrate` uses (so multiple replicas racing to boot apply migrations safely — only one wins the lock, the rest wait then no-op). Equivalent to the `--auto-migrate` flag. Always on under the `compact` profile. For production K8s the separate `migrate` Job remains recommended; leave this off there. |
 
 ## Server runtime
 
@@ -204,6 +260,7 @@ also be set; otherwise startup fails.
 | `REDIS_URL`      | _empty_ | Redis / Valkey DSN. When set, sessions, rate-limit counters, and the WebSocket fan-out hub use Redis.        |
 | `NATS_URL`       | _empty_ | NATS JetStream URL. When set, the server publishes async-job and webhook events and the worker consumes.     |
 | `CLAMAV_ADDRESS` | _empty_ | `host:port` of a ClamAV INSTREAM daemon. When set, uploads are virus-scanned before becoming visible.        |
+| `ZKDRIVE_NATS_STORE_DIR` | _temp dir_ | **Compact mode only.** Filesystem directory the in-process embedded NATS JetStream broker (`cmd/compact`) persists stream/consumer state to. Mount a volume here so durable consumers survive a restart; defaults to a temporary directory (state lost on restart) when unset. Ignored when NATS runs as an external service. |
 
 ## Credential encryption
 

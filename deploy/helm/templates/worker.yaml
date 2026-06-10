@@ -45,7 +45,7 @@ spec:
       {{- end }}
       containers:
         - name: worker
-          image: {{ include "zk-drive.image" . }}
+          image: {{ include "zk-drive.workerImage" . }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           command: ["/app/worker"]
           {{- include "zk-drive.envFrom" . | nindent 10 }}

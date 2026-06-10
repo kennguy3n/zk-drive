@@ -125,12 +125,18 @@ func requireEnv(t *testing.T, envs map[string]string) {
 		// specific var themselves after requireEnv runs.
 		"DB_MAX_CONNS", "DB_MIN_CONNS", "DB_MAX_CONN_IDLE_TIME",
 		"JWT_ALGORITHM", "JWT_KEY_REFRESH_INTERVAL",
-		// ZKDRIVE_PROFILE selects the deployment profile and shifts the
-		// JWT_ALGORITHM default (ES256 under production). Baseline-clear
-		// it so a runner exporting ZKDRIVE_PROFILE=production cannot
-		// bleed an ES256 default into tests exercising the "auto"
-		// fallback path.
-		"ZKDRIVE_PROFILE",
+		// ZKDRIVE_PROFILE selects the deployment profile and shifts
+		// env-var defaults. On this branch it shifts the JWT_ALGORITHM
+		// default (ES256 under production); for WS2 it also drives
+		// applyProfileDefaults + validateProfile (production requires
+		// Redis + NATS). Baseline-clear it so a runner exporting
+		// ZKDRIVE_PROFILE=production cannot bleed an ES256 default into
+		// tests exercising the "auto" fallback, nor force the
+		// profile-validation path on every test here. ZKDRIVE_AUTO_MIGRATE
+		// is the WS2 auto-migrate toggle read by buildConfigFromEnv;
+		// cleared for the same reason. Profile-specific tests live in
+		// profiles_test.go and manage these vars themselves.
+		"ZKDRIVE_PROFILE", "ZKDRIVE_AUTO_MIGRATE",
 		// Security-header knobs whose defaults are profile- or
 		// constant-derived. Baseline-clear them so a runner exporting
 		// e.g. SECURITY_HEADERS_EXPECT_CT=true can't bleed into tests
@@ -755,32 +761,6 @@ func TestJWTKeyRefreshIntervalFromEnv(t *testing.T) {
 	}
 }
 
-// TestNormaliseProfile pins the ZKDRIVE_PROFILE parsing contract:
-// case-insensitive, whitespace-tolerant, "prod" alias, and a safe
-// fall-back to development for empty/unknown values (never production).
-func TestNormaliseProfile(t *testing.T) {
-	tests := []struct {
-		in   string
-		want string
-	}{
-		{"", ProfileDevelopment},
-		{"   ", ProfileDevelopment},
-		{"production", ProfileProduction},
-		{"PRODUCTION", ProfileProduction},
-		{"  Production  ", ProfileProduction},
-		{"prod", ProfileProduction},
-		{"compact", ProfileCompact},
-		{"development", ProfileDevelopment},
-		{"dev", ProfileDevelopment},
-		{"nonsense", ProfileDevelopment},
-	}
-	for _, tc := range tests {
-		if got := normaliseProfile(tc.in); got != tc.want {
-			t.Errorf("normaliseProfile(%q) = %q, want %q", tc.in, got, tc.want)
-		}
-	}
-}
-
 // TestSecurityHeaderDefaults pins the 6.5 config contract:
 //   - CSP nonce defaults ON (additive hardening) regardless of profile.
 //   - Expect-CT defaults ON under production, OFF otherwise.
@@ -807,6 +787,11 @@ func TestSecurityHeaderDefaults(t *testing.T) {
 			"DATABASE_URL":    "postgres://x/y",
 			"JWT_SECRET":      "secret",
 			"ZKDRIVE_PROFILE": "production",
+			// production fails closed without Redis + NATS
+			// (validateProfile); supply them so Load succeeds and the
+			// security-header defaults are what's under test here.
+			"REDIS_URL": "redis://127.0.0.1:6379",
+			"NATS_URL":  "nats://127.0.0.1:4222",
 		})
 		cfg, err := Load()
 		if err != nil {
@@ -824,6 +809,8 @@ func TestSecurityHeaderDefaults(t *testing.T) {
 			"DATABASE_URL":               "postgres://x/y",
 			"JWT_SECRET":                 "secret",
 			"ZKDRIVE_PROFILE":            "production",
+			"REDIS_URL":                  "redis://127.0.0.1:6379",
+			"NATS_URL":                   "nats://127.0.0.1:4222",
 			"SECURITY_HEADERS_EXPECT_CT": "false",
 			"SECURITY_HEADERS_CSP_NONCE": "false",
 		})
@@ -847,7 +834,7 @@ func TestJWTAlgorithmFromEnv(t *testing.T) {
 	tests := []struct {
 		name    string
 		raw     string
-		profile string
+		profile Profile
 		want    string
 	}{
 		{"explicit_es256_dev", "ES256", ProfileDevelopment, "ES256"},

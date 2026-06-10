@@ -20,22 +20,6 @@ type Config struct {
 	DatabaseURL string
 	JWTSecret   string
 
-	// Profile selects a deployment profile that bundles security
-	// defaults so a non-technical SME operator gets a hardened
-	// configuration from a single env var rather than tuning a dozen
-	// knobs. Sourced from ZKDRIVE_PROFILE:
-	//   - "production": hardened defaults. JWT signing is ES256 only
-	//     (a leaked JWT_SECRET cannot forge or verify any session —
-	//     HS256 is rejected on both sign AND verify), the server
-	//     auto-generates an ES256 signing key at startup if none
-	//     exists, and Expect-CT is emitted for TLS deployments.
-	//   - "compact" / "development" (default): relaxed defaults that
-	//     keep the HS256 fallback for single-binary / local-dev
-	//     simplicity.
-	// Parsed case-insensitively; unrecognised or empty values fall
-	// back to "development".
-	Profile string
-
 	// DB connection-pool sizing. These tune the pgxpool created by
 	// internal/database.ConnectWithPool. Sourced from DB_MAX_CONNS,
 	// DB_MIN_CONNS, and DB_MAX_CONN_IDLE_TIME. DBMaxConns is clamped
@@ -539,6 +523,21 @@ type Config struct {
 	// instead. Applies to both SuspensionGuard (REST/WS) and the
 	// ONLYOFFICE save-callback write boundary.
 	SuspensionFailClosed bool
+
+	// Profile is the resolved ZKDRIVE_PROFILE deployment shape
+	// ("compact", "production", "development", or "" for none). It is
+	// applied BEFORE the other fields are read so its env-var defaults
+	// (see internal/config/profiles.go) feed into the parsing below;
+	// the value recorded here is purely for logging / validateProfile.
+	Profile string
+
+	// AutoMigrate makes the server apply pending migrations under the
+	// schema advisory lock at startup, before it begins serving. It is
+	// sourced from ZKDRIVE_AUTO_MIGRATE (default false) and the compact
+	// profile defaults it to true. The cmd/server --auto-migrate flag
+	// ORs with this. Production K8s leaves it off and runs the separate
+	// migrate Job so schema changes are decoupled from pod rollout.
+	AutoMigrate bool
 }
 
 // OnlyOfficeMaxConcurrentSaves derives how many save callbacks may
@@ -573,6 +572,14 @@ func (c *Config) WebPushEnabled() bool {
 // bucket, access key, and secret key must also be set — a half-configured
 // storage client would only fail at request time.
 func Load() (*Config, error) {
+	// Resolve ZKDRIVE_PROFILE first so its env-var defaults are in
+	// place (only-if-unset) before buildConfigFromEnv reads them. An
+	// unknown profile name fails closed here rather than silently
+	// running with zero presets.
+	if _, err := applyProfileDefaults(); err != nil {
+		return nil, err
+	}
+
 	cfg := buildConfigFromEnv()
 
 	var missing []string
@@ -590,6 +597,9 @@ func Load() (*Config, error) {
 		return nil, err
 	}
 	if err := validateOnlyOfficeGroup(cfg); err != nil {
+		return nil, err
+	}
+	if err := validateProfile(cfg); err != nil {
 		return nil, err
 	}
 	return cfg, nil
@@ -612,7 +622,7 @@ func buildConfigFromEnv() *Config {
 	return &Config{
 		DatabaseURL:                   os.Getenv("DATABASE_URL"),
 		JWTSecret:                     os.Getenv("JWT_SECRET"),
-		Profile:                       profile,
+		Profile:                       string(profile),
 		DBMaxConns:                    dbMaxConns,
 		DBMinConns:                    dbMinConnsFromEnv(dbMaxConns),
 		DBMaxConnIdleTime:             parseDurationDefault(os.Getenv("DB_MAX_CONN_IDLE_TIME"), defaultDBMaxConnIdleTime),
@@ -720,6 +730,8 @@ func buildConfigFromEnv() *Config {
 		OnlyOfficeSaveMemoryBudgetBytes: onlyOfficeBytesFromEnv("ONLYOFFICE_SAVE_MEMORY_BUDGET_MB", defaultOnlyOfficeSaveMemoryBudgetMB),
 
 		SuspensionFailClosed: parseBoolDefault(os.Getenv("SUSPENSION_FAIL_CLOSED"), false),
+
+		AutoMigrate: parseBoolDefault(os.Getenv("ZKDRIVE_AUTO_MIGRATE"), false),
 	}
 }
 
@@ -1083,36 +1095,12 @@ func dbMinConnsFromEnv(maxConns int32) int32 {
 	return int32(n)
 }
 
-// Deployment-profile identifiers parsed from ZKDRIVE_PROFILE. See the
-// Config.Profile doc for the security defaults each one bundles.
-const (
-	ProfileProduction  = "production"
-	ProfileCompact     = "compact"
-	ProfileDevelopment = "development"
-)
-
-// normaliseProfile canonicalises ZKDRIVE_PROFILE to one of the known
-// profile identifiers. Parsing is case-insensitive and
-// whitespace-tolerant. An empty or unrecognised value falls back to
-// "development" — the safe default for a local checkout, never
-// "production" (which would surprise a developer by demanding an
-// ES256 key on first boot). Operators opt INTO the hardened profile
-// explicitly.
-func normaliseProfile(s string) string {
-	switch strings.ToLower(strings.TrimSpace(s)) {
-	case ProfileProduction, "prod":
-		return ProfileProduction
-	case ProfileCompact:
-		return ProfileCompact
-	default:
-		return ProfileDevelopment
-	}
-}
-
 // IsProduction reports whether the server is running under the
-// hardened production profile.
+// hardened production profile (ZKDRIVE_PROFILE=production). The profile
+// machinery itself — the Profile type, normaliseProfile, the profile
+// env-var defaults, and validateProfile — lives in profiles.go.
 func (c *Config) IsProduction() bool {
-	return c.Profile == ProfileProduction
+	return Profile(c.Profile) == ProfileProduction
 }
 
 // Audit HMAC key derivation constants (6.6). The key length is the
@@ -1159,7 +1147,7 @@ func hkdfExpand(secret []byte, info string) []byte {
 // (or unrecognised) the default is profile-dependent: "ES256" under
 // the production profile (asymmetric-only signing is mandatory there)
 // and "auto" otherwise.
-func jwtAlgorithmFromEnv(raw, profile string) string {
+func jwtAlgorithmFromEnv(raw string, profile Profile) string {
 	switch strings.ToUpper(strings.TrimSpace(raw)) {
 	case "ES256":
 		return "ES256"
