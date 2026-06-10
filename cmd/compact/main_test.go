@@ -1,13 +1,18 @@
 package main
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	natsserver "github.com/nats-io/nats-server/v2/server"
+	"github.com/nats-io/nats.go"
+
+	"github.com/kennguy3n/zk-drive/internal/jobs"
 )
 
 // TestHostPortFromNATSURL covers the parse paths the embedded broker
@@ -98,6 +103,68 @@ func TestResolveBinaryEnvOverride(t *testing.T) {
 	t.Setenv("ZKDRIVE_SERVER_BIN", notExe)
 	if _, err := resolveBinary("ZKDRIVE_SERVER_BIN", "server"); err == nil {
 		t.Fatalf("expected error for non-executable override")
+	}
+}
+
+// TestWaitForJobsStream verifies the cold-start barrier the supervisor
+// uses before launching the server: it must block while the DRIVE_JOBS
+// stream is absent (returning a bounded-timeout error), return promptly
+// on context cancellation, and succeed once the worker has created the
+// stream.
+func TestWaitForJobsStream(t *testing.T) {
+	ns, err := natsserver.NewServer(&natsserver.Options{
+		Host:      "127.0.0.1",
+		Port:      -1, // ephemeral free port
+		JetStream: true,
+		StoreDir:  t.TempDir(),
+		NoSigs:    true,
+		NoLog:     true,
+	})
+	if err != nil {
+		t.Fatalf("new embedded nats: %v", err)
+	}
+	go ns.Start()
+	if !ns.ReadyForConnections(5 * time.Second) {
+		t.Fatal("embedded nats did not become ready")
+	}
+	defer func() { ns.Shutdown(); ns.WaitForShutdown() }()
+	url := ns.ClientURL()
+
+	// Stream absent → bounded wait elapses with a "not ready" error.
+	if err := waitForJobsStream(context.Background(), url, 300*time.Millisecond); err == nil {
+		t.Fatal("expected timeout error while DRIVE_JOBS stream is absent")
+	}
+
+	// Stream absent + already-cancelled ctx → returns promptly, not after
+	// the (here, long) timeout.
+	cancelled, cancel := context.WithCancel(context.Background())
+	cancel()
+	start := time.Now()
+	if err := waitForJobsStream(cancelled, url, time.Minute); err == nil {
+		t.Fatal("expected error on cancelled context")
+	}
+	if elapsed := time.Since(start); elapsed > 5*time.Second {
+		t.Fatalf("cancelled wait took %s, expected prompt return", elapsed)
+	}
+
+	// Create the stream the worker would create, then the barrier passes.
+	nc, err := nats.Connect(url)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	defer nc.Close()
+	js, err := nc.JetStream()
+	if err != nil {
+		t.Fatalf("jetstream: %v", err)
+	}
+	if _, err := js.AddStream(&nats.StreamConfig{
+		Name:     jobs.StreamName,
+		Subjects: []string{"drive.>"},
+	}); err != nil {
+		t.Fatalf("add stream: %v", err)
+	}
+	if err := waitForJobsStream(context.Background(), url, 5*time.Second); err != nil {
+		t.Fatalf("expected stream ready, got %v", err)
 	}
 }
 
