@@ -100,7 +100,10 @@ services:
     environment:
       DATABASE_URL: postgres://zkdrive:zkdrive@postgres:5432/zk-drive?sslmode=disable
       JWT_SECRET: ${JWT_SECRET:-dev-secret}
-      MIGRATIONS_DIR: /app/migrations
+      # No MIGRATIONS_DIR: the worker image (Dockerfile.worker) ships no
+      # /app/migrations and never reads migration files — it only asserts a
+      # minimum schema version via a DB query (RequireMinMigrationVersion).
+      # Migrations are owned by the migrate Job / server --auto-migrate.
       NATS_URL: nats://nats:4222
       S3_ENDPOINT: ${S3_ENDPOINT:-}
       S3_BUCKET: ${S3_BUCKET:-}
