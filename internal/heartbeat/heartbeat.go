@@ -49,6 +49,23 @@ const StaleAfter = 3 * DefaultInterval
 // process is gone".
 const DeadAfter = 8 * DefaultInterval
 
+// PruneRetention is how long a heartbeat row may persist after its
+// last refresh before Prune deletes it. A restarted worker gets a new
+// pid-based instance_id (see InstanceID), so its old row is never
+// overwritten — without pruning the table grows by one row per process
+// restart, unbounded across rolling deploys. The threshold sits far
+// beyond DeadAfter (two minutes) so a recently crashed worker still
+// shows red on the dashboard for diagnosis; only long-gone instances
+// are reaped.
+const PruneRetention = 24 * time.Hour
+
+// PruneInterval is how often the Recorder reaps rows older than
+// PruneRetention. Hourly is ample: the table only accretes a row per
+// restart, so cleanup cadence is not latency-sensitive. Every worker
+// process prunes independently; the DELETE is idempotent so concurrent
+// pruners are harmless.
+const PruneInterval = time.Hour
+
 // Status is the worker-type health a producer reports. Kept as a
 // small closed set of strings that map directly onto the dashboard's
 // traffic-light colours.
@@ -207,6 +224,26 @@ func (s *Store) List(ctx context.Context) ([]WorkerHealth, error) {
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].WorkerType < out[j].WorkerType })
 	return out, nil
+}
+
+// Prune deletes heartbeat rows whose last_seen_at is older than
+// PruneRetention, bounding the table against the one-row-per-restart
+// growth that the pid-based instance_id would otherwise cause. Returns
+// the number of rows reaped. Idempotent and safe to call concurrently
+// from every worker process; the threshold is computed server-side via
+// make_interval so all instances share the database clock.
+func (s *Store) Prune(ctx context.Context) (int64, error) {
+	if s == nil || s.pool == nil {
+		return 0, fmt.Errorf("heartbeat: store not initialised")
+	}
+	tag, err := s.pool.Exec(ctx, `
+		DELETE FROM worker_heartbeats
+		WHERE last_seen_at < now() - make_interval(secs => $1)
+	`, PruneRetention.Seconds())
+	if err != nil {
+		return 0, fmt.Errorf("heartbeat: prune: %w", err)
+	}
+	return tag.RowsAffected(), nil
 }
 
 // InstanceID builds a stable-per-process instance identifier

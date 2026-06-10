@@ -1077,9 +1077,12 @@ export interface SetupStatus {
 }
 
 // fetchSetupStatus reads the setup status. It is intentionally callable
-// pre-authentication (the wizard runs before any admin exists), so it
-// uses a bare request and never trips the 401 session-teardown
-// interceptor.
+// pre-authentication (the wizard runs before any admin exists). It goes
+// through the shared `client`, but that is safe before login: the
+// request interceptor simply omits the Authorization header when no
+// token is stored, and GET /api/setup/status is a public endpoint that
+// answers 200 to anonymous callers — so the 401 session-teardown
+// response interceptor is never reached.
 export async function fetchSetupStatus(): Promise<SetupStatus> {
   const { data } = await client.get<SetupStatus>("/setup/status");
   return data;

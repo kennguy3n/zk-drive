@@ -589,12 +589,12 @@ func run() error {
 
 	rateLimiter := func() func(http.Handler) http.Handler {
 		if redisClient != nil {
-			return middleware.RedisRateLimiter(redisClient, middleware.RedisRateLimiterConfig{
+			return middleware.RedisRateLimiter(ctx, redisClient, middleware.RedisRateLimiterConfig{
 				PerUser:      cfg.RateLimitPerUser,
 				PerWorkspace: cfg.RateLimitPerWorkspace,
 			})
 		}
-		return middleware.RateLimiter(middleware.RateLimitConfig{
+		return middleware.RateLimiter(ctx, middleware.RateLimitConfig{
 			PerUser:      cfg.RateLimitPerUser,
 			PerWorkspace: cfg.RateLimitPerWorkspace,
 		})
@@ -1442,7 +1442,7 @@ func run() error {
 			// Redis is unconfigured; passing the typed-nil *redis.Client
 			// here would defeat IPRateLimiter's nil-check and skip its
 			// in-memory fallback.
-			r.Use(middleware.IPRateLimiter(ipAllowRedis, middleware.DefaultPlatformIPRate, cfg.TrustedProxyDepth))
+			r.Use(middleware.IPRateLimiter(ctx, ipAllowRedis, middleware.DefaultPlatformIPRate, cfg.TrustedProxyDepth))
 			r.Use(middleware.PlatformAuth(platformHandler))
 			platformHandler.RegisterRoutes(r)
 		})

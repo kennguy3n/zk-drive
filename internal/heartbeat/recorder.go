@@ -57,16 +57,43 @@ func (r *Recorder) Run(ctx context.Context) {
 		return
 	}
 	r.writeOnce(ctx)
+	r.pruneOnce(ctx)
 
 	ticker := time.NewTicker(r.interval)
 	defer ticker.Stop()
+	// A slower, independent cadence reaps rows left behind by
+	// restarted instances (new pid → new row), keeping the table
+	// bounded across rolling deploys without adding write load to the
+	// frequent heartbeat tick.
+	pruneTicker := time.NewTicker(PruneInterval)
+	defer pruneTicker.Stop()
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
 			r.writeOnce(ctx)
+		case <-pruneTicker.C:
+			r.pruneOnce(ctx)
 		}
+	}
+}
+
+// pruneOnce reaps long-dead heartbeat rows. A failed prune is logged
+// at warn and otherwise ignored: it is pure housekeeping and must
+// never crash the worker or interrupt the heartbeat loop. ctx
+// cancellation during shutdown is expected and not logged.
+func (r *Recorder) pruneOnce(ctx context.Context) {
+	n, err := r.store.Prune(ctx)
+	if err != nil {
+		if ctx.Err() != nil {
+			return
+		}
+		r.logger.Warn("worker heartbeat prune failed", "err", err)
+		return
+	}
+	if n > 0 {
+		r.logger.Info("pruned stale worker heartbeats", "rows", n)
 	}
 }
 

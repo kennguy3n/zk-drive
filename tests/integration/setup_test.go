@@ -456,7 +456,7 @@ func setupEnv(t *testing.T) *testEnv {
 			// Permissive rate-limit (PerUser/PerWorkspace=0) so tests
 			// don't have to worry about throttling, but still exercise
 			// the middleware's request-counting code path.
-			r.Use(middleware.RateLimiter(middleware.RateLimitConfig{
+			r.Use(middleware.RateLimiter(context.Background(), middleware.RateLimitConfig{
 				PerUser:      0,
 				PerWorkspace: 0,
 			}))

@@ -103,14 +103,14 @@ type Dashboard struct {
 const DefaultDashboardTimeout = 5 * time.Second
 
 // NewDashboard builds a Dashboard. A zero or negative timeout falls
-// back to DefaultCheckTimeout. The dashboard is admin-triggered (not
-// a k8s probe), so callers may legitimately pass a larger timeout
-// than /readyz uses — a ClamAV version round-trip or a NATS stream
-// info call can exceed the 900ms readiness budget without that being
-// a fault.
+// back to DefaultDashboardTimeout (5s), NOT the 900ms /readyz budget:
+// the dashboard is admin-triggered (not a k8s probe), so a ClamAV
+// version round-trip or a NATS stream info call that takes a couple of
+// seconds is a slow-but-healthy state, not a fault. Falling back to the
+// readiness budget here would make those probes spuriously report red.
 func NewDashboard(probes []DashboardProbe, timeout time.Duration) *Dashboard {
 	if timeout <= 0 {
-		timeout = DefaultCheckTimeout
+		timeout = DefaultDashboardTimeout
 	}
 	return &Dashboard{probes: probes, timeout: timeout}
 }

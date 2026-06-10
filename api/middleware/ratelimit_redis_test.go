@@ -70,8 +70,8 @@ func TestRateLimitAcrossReplicas(t *testing.T) {
 	_, client := newTestRedis(t)
 
 	cfg := RedisRateLimiterConfig{PerUser: 4, PerWorkspace: 1000}
-	replicaA := RedisRateLimiter(client, cfg)
-	replicaB := RedisRateLimiter(client, cfg)
+	replicaA := RedisRateLimiter(context.Background(), client, cfg)
+	replicaB := RedisRateLimiter(context.Background(), client, cfg)
 
 	noop := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
@@ -149,7 +149,7 @@ func TestRateLimitFailsOpenOnRedisDown(t *testing.T) {
 	mr, client := newTestRedis(t)
 	mr.Close() // mimic Redis going away while the server keeps running.
 
-	mw := RedisRateLimiter(client, RedisRateLimiterConfig{PerUser: 1, PerWorkspace: 1})
+	mw := RedisRateLimiter(context.Background(), client, RedisRateLimiterConfig{PerUser: 1, PerWorkspace: 1})
 	called := false
 	handler := mw(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		called = true
@@ -179,7 +179,7 @@ func TestUserDeniedDoesNotPollutWorkspaceCounter(t *testing.T) {
 	// allowed) — every denied request must be a no-op for the
 	// workspace counter.
 	cfg := RedisRateLimiterConfig{PerUser: 2, PerWorkspace: 5}
-	mw := RedisRateLimiter(client, cfg)
+	mw := RedisRateLimiter(context.Background(), client, cfg)
 	noop := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	})
@@ -214,7 +214,7 @@ func TestUserDeniedDoesNotPollutWorkspaceCounter(t *testing.T) {
 // passes through unchanged, matching the in-memory implementation.
 func TestRateLimitWithoutUserID(t *testing.T) {
 	_, client := newTestRedis(t)
-	mw := RedisRateLimiter(client, RedisRateLimiterConfig{PerUser: 1, PerWorkspace: 1})
+	mw := RedisRateLimiter(context.Background(), client, RedisRateLimiterConfig{PerUser: 1, PerWorkspace: 1})
 
 	called := false
 	handler := mw(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {

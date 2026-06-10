@@ -190,6 +190,53 @@ func TestHeartbeatStoreRoundTrip(t *testing.T) {
 	}
 }
 
+// TestHeartbeatPruneReapsOnlyLongDeadRows verifies Prune deletes rows
+// older than PruneRetention (left behind by restarted instances whose
+// pid-based id never gets overwritten) while leaving fresh rows — and
+// the freshly written instances of a still-running worker type —
+// untouched, so the table stays bounded across rolling deploys.
+func TestHeartbeatPruneReapsOnlyLongDeadRows(t *testing.T) {
+	ctx, pool := freshMigratedPool(t)
+	store := heartbeat.NewStore(pool)
+
+	// A fresh, live instance.
+	if err := store.Upsert(ctx, "host-live/1", heartbeat.Beat{
+		WorkerType: "scan", Status: heartbeat.StatusOK,
+	}); err != nil {
+		t.Fatalf("upsert live: %v", err)
+	}
+	// A stale instance from a since-restarted process. Age its row
+	// well beyond PruneRetention so Prune must reap exactly it.
+	if err := store.Upsert(ctx, "host-dead/9999", heartbeat.Beat{
+		WorkerType: "scan", Status: heartbeat.StatusOK,
+	}); err != nil {
+		t.Fatalf("upsert dead: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `
+		UPDATE worker_heartbeats
+		SET last_seen_at = now() - make_interval(secs => $1)
+		WHERE instance_id = 'host-dead/9999'
+	`, (heartbeat.PruneRetention + time.Hour).Seconds()); err != nil {
+		t.Fatalf("age dead row: %v", err)
+	}
+
+	n, err := store.Prune(ctx)
+	if err != nil {
+		t.Fatalf("Prune: %v", err)
+	}
+	if n != 1 {
+		t.Fatalf("Prune reaped %d rows, want exactly 1 (the long-dead instance)", n)
+	}
+
+	var remaining int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM worker_heartbeats`).Scan(&remaining); err != nil {
+		t.Fatalf("count: %v", err)
+	}
+	if remaining != 1 {
+		t.Fatalf("expected 1 surviving row (the live instance), got %d", remaining)
+	}
+}
+
 // TestPreviewSetStatus pins the preview lifecycle column the
 // auto-healing worker writes when a job exhausts its retries (WS8 8.4).
 func TestPreviewSetStatus(t *testing.T) {

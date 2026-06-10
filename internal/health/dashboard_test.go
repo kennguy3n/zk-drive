@@ -40,6 +40,23 @@ func TestColorSeverityOrder(t *testing.T) {
 	}
 }
 
+// TestNewDashboardZeroTimeoutFallsBackToDashboardDefault pins the
+// fallback: a zero/negative timeout must adopt DefaultDashboardTimeout
+// (5s), not the 900ms /readyz budget, so slow-but-healthy probes
+// (ClamAV, ONLYOFFICE) are not spuriously timed out to red.
+func TestNewDashboardZeroTimeoutFallsBackToDashboardDefault(t *testing.T) {
+	for _, tc := range []time.Duration{0, -1} {
+		d := NewDashboard(nil, tc)
+		if d.timeout != DefaultDashboardTimeout {
+			t.Fatalf("NewDashboard(_, %v).timeout = %v, want %v", tc, d.timeout, DefaultDashboardTimeout)
+		}
+	}
+	// An explicit positive timeout is honoured verbatim.
+	if d := NewDashboard(nil, 2*time.Second); d.timeout != 2*time.Second {
+		t.Fatalf("explicit timeout overridden: got %v", d.timeout)
+	}
+}
+
 func TestReportRollupWorstSeverity(t *testing.T) {
 	d := NewDashboard([]DashboardProbe{
 		stubProbe{name: "postgres", result: Subsystem{Name: "postgres", Status: ColorGreen}},

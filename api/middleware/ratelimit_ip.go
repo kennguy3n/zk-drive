@@ -51,7 +51,7 @@ return {0, c}
 // The client IP is resolved via ClientIPFromRequest honouring
 // trustedProxyDepth, so a spoofed X-Forwarded-For can't be used to
 // dodge the limit (the same extraction the IP allowlist uses).
-func IPRateLimiter(client redis.UniversalClient, perIP, trustedProxyDepth int) func(http.Handler) http.Handler {
+func IPRateLimiter(ctx context.Context, client redis.UniversalClient, perIP, trustedProxyDepth int) func(http.Handler) http.Handler {
 	if perIP <= 0 {
 		perIP = DefaultPlatformIPRate
 	}
@@ -71,7 +71,7 @@ func IPRateLimiter(client redis.UniversalClient, perIP, trustedProxyDepth int) f
 	}
 	if client == nil {
 		l.mem = newIPMemoryLimiter(float64(perIP))
-		go l.mem.runJanitor(5 * time.Minute)
+		go l.mem.runJanitor(ctx, 5*time.Minute)
 	}
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -181,19 +181,27 @@ func (l *ipMemoryLimiter) reserve(ip string, now time.Time) time.Duration {
 	return b.consume(now)
 }
 
-func (l *ipMemoryLimiter) runJanitor(window time.Duration) {
+// runJanitor reaps idle per-IP buckets until ctx is cancelled, so the
+// goroutine is tied to the server lifecycle instead of leaking for the
+// process lifetime (and accumulating across limiters built in tests).
+func (l *ipMemoryLimiter) runJanitor(ctx context.Context, window time.Duration) {
 	t := time.NewTicker(window)
 	defer t.Stop()
-	for now := range t.C {
-		threshold := now.Add(-2 * window)
-		l.mu.Lock()
-		for ip, last := range l.touched {
-			if last.After(threshold) {
-				continue
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case now := <-t.C:
+			threshold := now.Add(-2 * window)
+			l.mu.Lock()
+			for ip, last := range l.touched {
+				if last.After(threshold) {
+					continue
+				}
+				delete(l.touched, ip)
+				delete(l.buckets, ip)
 			}
-			delete(l.touched, ip)
-			delete(l.buckets, ip)
+			l.mu.Unlock()
 		}
-		l.mu.Unlock()
 	}
 }

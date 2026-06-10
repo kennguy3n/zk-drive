@@ -81,7 +81,7 @@ type RedisRateLimiterConfig struct {
 // against accidental floods, not a security control — silently
 // blocking every request because Redis hiccuped would be a worse
 // outcome than briefly serving above quota.
-func RedisRateLimiter(client redis.UniversalClient, cfg RedisRateLimiterConfig) func(http.Handler) http.Handler {
+func RedisRateLimiter(ctx context.Context, client redis.UniversalClient, cfg RedisRateLimiterConfig) func(http.Handler) http.Handler {
 	userRate := cfg.PerUser
 	if userRate <= 0 {
 		userRate = DefaultUserRate
@@ -101,7 +101,7 @@ func RedisRateLimiter(client redis.UniversalClient, cfg RedisRateLimiterConfig) 
 	// Redis script succeeds again the limiter resumes using the shared
 	// counters.
 	fallback := newRateLimiter(float64(userRate), float64(wsRate))
-	go fallback.runJanitor(5 * time.Minute)
+	go fallback.runJanitor(ctx, 5*time.Minute)
 	limiter := &redisRateLimiter{
 		client:   client,
 		userRate: userRate,

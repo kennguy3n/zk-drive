@@ -301,6 +301,50 @@ func TestInitBridgesLegacyLogPackage(t *testing.T) {
 	}
 }
 
+// TestBridgeEmitsAboveLogLevel is the regression test for the bug
+// where the std-log bridge silently dropped log.Print* output once
+// LOG_LEVEL resolved above info: slog.NewLogLogger's writer checks
+// handler.Enabled(ctx, LevelInfo) before formatting, so a handler
+// floored at error discarded every bridged line. unfilteredHandler
+// makes bridged records bypass the level filter so fatal/operator
+// diagnostics are never swallowed, while native slog calls still
+// honour LOG_LEVEL.
+func TestBridgeEmitsAboveLogLevel(t *testing.T) {
+	var buf bytes.Buffer
+	// Handler floored at error — a native Info record is dropped.
+	handler := slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelError})
+	logger := slog.New(handler).With("component", "server")
+	prev := slog.Default()
+	defer slog.SetDefault(prev)
+	slog.SetDefault(logger)
+	prevFlags := log.Flags()
+	prevOut := log.Writer()
+	defer log.SetFlags(prevFlags)
+	defer log.SetOutput(prevOut)
+
+	bridge := slog.NewLogLogger(unfilteredHandler{logger.Handler()}, slog.LevelInfo)
+	log.SetFlags(0)
+	log.SetOutput(bridge.Writer())
+
+	log.Printf("nats: server requested reconnect")
+
+	out := buf.String()
+	if !strings.Contains(out, "nats: server requested reconnect") {
+		t.Fatalf("bridged log output dropped at LOG_LEVEL=error; got %q", out)
+	}
+	if !strings.Contains(out, `"component":"server"`) {
+		t.Fatalf("bridged record missing component attribute; got %q", out)
+	}
+
+	// A native Info slog call on the same handler MUST still be
+	// filtered out — the wrapper only affects the bridge.
+	buf.Reset()
+	logger.Info("this should be filtered")
+	if buf.Len() != 0 {
+		t.Fatalf("native Info leaked past LOG_LEVEL=error; got %q", buf.String())
+	}
+}
+
 // hijackerRecorder is a minimal http.ResponseWriter that ALSO
 // implements http.Hijacker. Used to assert that AccessLog's
 // internal response-writer wrapper preserves Hijacker delegation

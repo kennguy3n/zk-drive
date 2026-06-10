@@ -153,12 +153,30 @@ func Init(component string) *slog.Logger {
 	// emits. Without this, a third-party `log.Printf` from nats.go
 	// would land in the log stream WITHOUT a component field,
 	// breaking operators' filter-by-binary queries.
-	bridge := slog.NewLogLogger(logger.Handler(), slog.LevelInfo)
+	//
+	// The handler is wrapped in unfilteredHandler so bridged records
+	// ALWAYS emit regardless of LOG_LEVEL. slog.NewLogLogger's writer
+	// calls handler.Enabled(ctx, LevelInfo) before formatting, so a
+	// handler floored at warn/error would silently discard every
+	// bridged line — including the std-`log` Fatal/Panic paths and
+	// http.Server connection errors an operator must see. The std
+	// `log` package has no level concept, so every line through it is
+	// treated as must-emit; LOG_LEVEL still governs native slog calls.
+	bridge := slog.NewLogLogger(unfilteredHandler{logger.Handler()}, slog.LevelInfo)
 	log.SetFlags(0)
 	log.SetOutput(bridge.Writer())
 
 	return logger
 }
+
+// unfilteredHandler wraps a slog.Handler so Enabled always reports
+// true, letting records pass the level filter while still being
+// formatted (and carrying the embedded attributes) by the wrapped
+// handler. Used only for the std-`log` bridge in Init, whose records
+// have no level of their own and must never be dropped.
+type unfilteredHandler struct{ slog.Handler }
+
+func (unfilteredHandler) Enabled(context.Context, slog.Level) bool { return true }
 
 // parseLevel maps the user-facing LOG_LEVEL values to slog
 // constants. Unknown values fall back to info — log configuration

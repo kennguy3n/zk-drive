@@ -237,7 +237,7 @@ func NewNATSDashboardProbe(conn *nats.Conn, js nats.JetStreamContext, streamName
 func (n *NATSDashboardProbe) SubsystemName() string { return "nats" }
 
 // Probe implements DashboardProbe.
-func (n *NATSDashboardProbe) Probe(_ context.Context) Subsystem {
+func (n *NATSDashboardProbe) Probe(ctx context.Context) Subsystem {
 	s := Subsystem{Name: n.SubsystemName()}
 	if n == nil || n.conn == nil {
 		s.Status = ColorUnknown
@@ -263,7 +263,11 @@ func (n *NATSDashboardProbe) Probe(_ context.Context) Subsystem {
 		// Passing a *StreamInfoRequest with a SubjectsFilter asks the
 		// server to populate State.Subjects (the per-subject message
 		// counts); StreamInfoRequest satisfies nats.JSOpt directly.
-		if info, err := n.js.StreamInfo(n.streamName, &nats.StreamInfoRequest{SubjectsFilter: ">"}); err == nil && info != nil {
+		// nats.Context binds the request to the dashboard's per-probe
+		// deadline so a wedged JetStream server can't hang the probe
+		// past the dashboard timeout — without it StreamInfo would only
+		// honour the client's own (longer) request timeout.
+		if info, err := n.js.StreamInfo(n.streamName, &nats.StreamInfoRequest{SubjectsFilter: ">"}, nats.Context(ctx)); err == nil && info != nil {
 			detail["stream"] = n.streamName
 			detail["messages"] = info.State.Msgs
 			if len(info.State.Subjects) > 0 {
