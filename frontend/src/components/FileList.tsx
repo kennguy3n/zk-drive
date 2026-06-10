@@ -308,7 +308,12 @@ export default function FileList({
     ) : null;
 
   return (
-    <div role="grid" aria-label={t("common.name")} aria-rowcount={sorted.length}>
+    <div
+      role="grid"
+      aria-label={t("common.name")}
+      aria-rowcount={sorted.length}
+      onKeyDown={onKeyDown}
+    >
       {/* Header */}
       <div
         role="row"
@@ -351,9 +356,11 @@ export default function FileList({
       {virtualize ? (
         <div
           ref={scrollRef}
-          onKeyDown={onKeyDown}
           className="max-h-[60vh] overflow-y-auto"
-          style={{ contain: "strict" }}
+          // `contain: paint` confines repaints to the scroll box without
+          // applying size containment (which would collapse a max-height
+          // container to zero). Keeps scrolling cheap for 1000+ rows.
+          style={{ contain: "paint" }}
         >
           <div style={{ height: virtualizer.getTotalSize(), position: "relative", width: "100%" }}>
             {virtualizer.getVirtualItems().map((vi) => {
@@ -378,7 +385,7 @@ export default function FileList({
           </div>
         </div>
       ) : (
-        <div onKeyDown={onKeyDown}>
+        <div>
           {sorted.map((f, i) => (
             <FileRow key={f.id} {...rowProps(f, i)} />
           ))}
