@@ -22,12 +22,9 @@ const seed = hasSeed ? JSON.parse(fs.readFileSync(statePath, "utf-8")) : { folde
 const F = seed.folders as Record<string, string>;
 
 // Conditionally skip the entire suite when no live seed is present. The output
-// dir is created lazily and only when seeded, so nothing runs when skipped.
+// dir is created in a describe-scoped beforeAll (see the first describe below),
+// so nothing runs when the suite is skipped.
 const describe = hasSeed ? test.describe : test.describe.skip;
-
-test.beforeAll(() => {
-  if (hasSeed) fs.mkdirSync(shotDir, { recursive: true });
-});
 
 async function apiLogin(request: APIRequestContext, email: string, password = "DemoPass!2026") {
   const r = await request.post("/api/auth/login", { data: { email, password } });
@@ -63,6 +60,10 @@ async function shot(page: Page, name: string) {
 
 // ---------- Unauthenticated marketing-facing entry points ----------
 describe("public", () => {
+  // First describe in the suite; only runs when seeded, so this is where the
+  // screenshot output dir is ensured (matches demo-screenshots.spec.ts).
+  test.beforeAll(() => fs.mkdirSync(shotDir, { recursive: true }));
+
   test("login + signup pages", async ({ page }) => {
     await page.goto("/login");
     await page.waitForLoadState("networkidle");
