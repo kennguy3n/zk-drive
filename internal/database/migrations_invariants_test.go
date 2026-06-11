@@ -12,11 +12,14 @@ import (
 
 // migrationFilePattern is the canonical naming contract for every file
 // in migrations/: a zero-padded 3-digit version prefix, an underscore,
-// a lower-snake-case name, and a .up.sql / .down.sql suffix. Migrate()
-// derives schema_migrations.version from the stem, so a malformed name
-// (wrong padding, uppercase, stray characters) would either sort into
-// the wrong apply position or produce a surprising version string.
-var migrationFilePattern = regexp.MustCompile(`^([0-9]{3})_[a-z0-9_]+\.(up|down)\.sql$`)
+// a strict lower_snake_case name, and a .up.sql / .down.sql suffix.
+// Migrate() derives schema_migrations.version from the stem, so a
+// malformed name (wrong padding, uppercase, stray characters) would
+// either sort into the wrong apply position or produce a surprising
+// version string. The name segment is `[a-z0-9]+(_[a-z0-9]+)*`, which
+// enforces true snake_case: no leading, trailing, or doubled
+// underscores (e.g. `041__.up.sql` or `041_foo_.up.sql` are rejected).
+var migrationFilePattern = regexp.MustCompile(`^([0-9]{3})_[a-z0-9]+(_[a-z0-9]+)*\.(up|down)\.sql$`)
 
 // migrationsDirForTest locates the repo-root migrations/ directory
 // relative to this source file (internal/database/ -> ../../migrations).
