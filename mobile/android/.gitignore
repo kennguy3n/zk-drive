@@ -1,0 +1,25 @@
+# Android / Gradle build outputs
+.gradle/
+build/
+app/build/
+
+# Local SDK location + developer secrets (never committed)
+local.properties
+oauth.properties
+
+# Signing material — keystores are supplied via CI secrets only
+*.jks
+*.keystore
+
+# Firebase config carries the project's sender id / api key; supplied
+# per-deployment, never committed.
+app/google-services.json
+
+# IDE
+.idea/
+*.iml
+.DS_Store
+
+# Captured Compose screenshots / test output
+captures/
+.kotlin/

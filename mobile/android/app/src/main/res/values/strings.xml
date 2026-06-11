@@ -1,0 +1,25 @@
+<resources>
+    <string name="app_name">ZK Drive</string>
+
+    <!-- Notification channels -->
+    <string name="notif_channel_push">zk_push</string>
+    <string name="notif_channel_push_name">Activity</string>
+    <string name="notif_channel_transfers">zk_transfers</string>
+    <string name="notif_channel_transfers_name">Uploads &amp; downloads</string>
+    <string name="notif_channel_sync">zk_sync</string>
+    <string name="notif_channel_sync_name">Background sync</string>
+
+    <!-- Login -->
+    <string name="login_tagline">Zero-knowledge file storage for your team</string>
+    <string name="login_sign_in">Sign in</string>
+    <string name="login_unlock">Unlock</string>
+    <string name="login_biometric_title">Unlock ZK Drive</string>
+    <string name="login_biometric_subtitle">Confirm it\'s you to access your encrypted files</string>
+
+    <!-- Generic -->
+    <string name="action_retry">Retry</string>
+    <string name="action_cancel">Cancel</string>
+    <string name="action_create">Create</string>
+    <string name="action_share">Share</string>
+    <string name="action_delete">Delete</string>
+</resources>

@@ -1,0 +1,24 @@
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="96dp"
+    android:height="96dp"
+    android:viewportWidth="48"
+    android:viewportHeight="48">
+    <!-- Shield silhouette conveys zero-knowledge / privacy. -->
+    <path
+        android:fillColor="#2563EB"
+        android:pathData="M24,3L40,9V23C40,33.5 33.2,42.5 24,45C14.8,42.5 8,33.5 8,23V9L24,3Z" />
+    <!-- Padlock body -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M17,23H31A2,2 0 0,1 33,25V35A2,2 0 0,1 31,37H17A2,2 0 0,1 15,35V25A2,2 0 0,1 17,23Z" />
+    <!-- Padlock shackle -->
+    <path
+        android:strokeColor="#FFFFFF"
+        android:strokeWidth="3"
+        android:fillColor="#00000000"
+        android:pathData="M19,23V19A5,5 0 0,1 29,19V23" />
+    <!-- Keyhole -->
+    <path
+        android:fillColor="#2563EB"
+        android:pathData="M24,27A2.2,2.2 0 0,1 25,31.2V33H23V31.2A2.2,2.2 0 0,1 24,27Z" />
+</vector>

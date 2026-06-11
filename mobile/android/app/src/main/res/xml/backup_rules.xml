@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Full-backup is disabled at the application level (allowBackup=false).
+     This file documents the intent: encrypted token material and the local
+     catalogue must never leave the device via cloud backup. -->
+<full-backup-content>
+    <exclude domain="sharedpref" path="zk_secure_tokens.xml" />
+    <exclude domain="file" path="catalogue/" />
+</full-backup-content>

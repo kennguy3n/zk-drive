@@ -1,0 +1,13 @@
+<resources>
+    <style name="Theme.ZkDrive" parent="android:Theme.Material.NoActionBar">
+        <item name="android:windowBackground">@color/splash_background_dark</item>
+        <item name="android:statusBarColor">@color/brand_primary_dark</item>
+        <item name="android:navigationBarColor">@color/splash_background_dark</item>
+    </style>
+
+    <style name="Theme.ZkDrive.Splash" parent="Theme.SplashScreen">
+        <item name="windowSplashScreenBackground">@color/splash_background_dark</item>
+        <item name="windowSplashScreenAnimatedIcon">@drawable/ic_zk_logo</item>
+        <item name="postSplashScreenTheme">@style/Theme.ZkDrive</item>
+    </style>
+</resources>

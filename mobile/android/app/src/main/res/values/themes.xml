@@ -1,0 +1,18 @@
+<resources xmlns:tools="http://schemas.android.com/tools">
+    <!-- Base theme is a Material 3 DayNight shell; the live UI palette is
+         driven entirely by Compose (see ui/theme), so this only needs to
+         carry the window background + status bar for the pre-Compose frame. -->
+    <style name="Theme.ZkDrive" parent="android:Theme.Material.Light.NoActionBar">
+        <item name="android:windowBackground">@color/splash_background</item>
+        <item name="android:statusBarColor">@color/brand_primary</item>
+        <item name="android:navigationBarColor">@color/splash_background</item>
+    </style>
+
+    <!-- SplashScreen (androidx.core:core-splashscreen) shown until the first
+         Compose frame is ready. -->
+    <style name="Theme.ZkDrive.Splash" parent="Theme.SplashScreen">
+        <item name="windowSplashScreenBackground">@color/splash_background</item>
+        <item name="windowSplashScreenAnimatedIcon">@drawable/ic_zk_logo</item>
+        <item name="postSplashScreenTheme">@style/Theme.ZkDrive</item>
+    </style>
+</resources>
