@@ -21,19 +21,30 @@ const hasSeed = fs.existsSync(statePath);
 const seed = hasSeed ? JSON.parse(fs.readFileSync(statePath, "utf-8")) : { folders: {} };
 const F = seed.folders as Record<string, string>;
 
-// Conditionally skip the entire suite when no live seed is present.
+// Conditionally skip the entire suite when no live seed is present. The output
+// dir is created lazily and only when seeded, so nothing runs when skipped.
 const describe = hasSeed ? test.describe : test.describe.skip;
 
-test.beforeAll(() => fs.mkdirSync(shotDir, { recursive: true }));
+test.beforeAll(() => {
+  if (hasSeed) fs.mkdirSync(shotDir, { recursive: true });
+});
 
 async function apiLogin(request: APIRequestContext, email: string, password = "DemoPass!2026") {
   const r = await request.post("/api/auth/login", { data: { email, password } });
   if (!r.ok()) throw new Error(`login ${email} -> ${r.status()}`);
-  return r.json();
+  const grant = await r.json();
+  // The controlled seed enrolls no MFA, so login returns the grant directly. If
+  // a future seed enables MFA the response is { mfa_required, mfa_token, ... };
+  // fail loudly here instead of silently storing "undefined" tokens downstream.
+  if (!grant?.token) {
+    throw new Error(`login ${email}: unexpected response (mfa_required=${grant?.mfa_required ?? false})`);
+  }
+  return grant;
 }
 
-// Seed localStorage exactly like the SPA's client.ts does after a real login,
-// then reload so the app boots authenticated against the live backend.
+// Seed localStorage exactly like the SPA's client.ts does after a real login;
+// the per-test page.goto(...) then boots the SPA authenticated against the
+// live backend (this helper itself does not reload).
 async function authAs(page: Page, request: APIRequestContext, email: string) {
   const id = await apiLogin(request, email);
   await page.goto("/login");
