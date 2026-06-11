@@ -1,0 +1,23 @@
+# The Xcode project is generated from project.yml by XcodeGen — never
+# committed, so there is one declarative source of truth and no
+# pbxproj merge conflicts.
+*.xcodeproj
+*.xcworkspace
+
+# Build output / derived data.
+build/
+DerivedData/
+*.ipa
+*.dSYM.zip
+*.dSYM
+
+# User-specific Xcode state.
+xcuserdata/
+*.xcuserstate
+
+# Swift Package Manager / CocoaPods (not used today, ignored defensively).
+.build/
+Pods/
+
+# macOS cruft.
+.DS_Store

@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- APNs environment. CI / release tooling flips this to "production". -->
+	<key>aps-environment</key>
+	<string>development</string>
+
+	<!-- Universal-link callback for the OAuth redirect (preferred over the
+	     custom scheme). Replace the host with the deployment's domain; the
+	     associated-domains file must be served at
+	     https://<host>/.well-known/apple-app-site-association. -->
+	<key>com.apple.developer.associated-domains</key>
+	<array>
+		<string>applinks:app.zkdrive.example.com</string>
+	</array>
+
+	<!-- Keychain access group so tokens persist across reinstalls within
+	     the team's app suite. -->
+	<key>keychain-access-groups</key>
+	<array>
+		<string>$(AppIdentifierPrefix)com.zkdrive.app</string>
+	</array>
+</dict>
+</plist>
