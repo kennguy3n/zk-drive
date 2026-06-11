@@ -51,8 +51,6 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import coil.compose.AsyncImage
 import com.zkdrive.app.ui.components.ErrorState
 import com.zkdrive.app.ui.components.LoadingBox
-import kotlinx.coroutines.sync.Mutex
-import kotlinx.coroutines.sync.withLock
 import java.io.Closeable
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -205,16 +203,26 @@ private fun UnsupportedView(onOpen: () -> Unit, onShare: () -> Unit) {
 /**
  * A lazily-rendered PDF: keeps a single [PdfRenderer] open and rasterises pages
  * one at a time on demand. [PdfRenderer] only allows one open page at a time and
- * is not thread-safe, so access is serialised through [mutex].
+ * is not thread-safe, so rendering and close() are serialised through [lock].
  */
 private class PdfDocument(
     private val renderer: PdfRenderer,
 ) : Closeable {
     val pageCount: Int = renderer.pageCount
-    private val mutex = Mutex()
 
-    suspend fun renderPage(index: Int): Bitmap? = mutex.withLock {
-        withContext(Dispatchers.IO) {
+    // PdfRenderer is not thread-safe and allows only one open page at a time, so
+    // page rendering and close() must be mutually exclusive. A plain monitor
+    // (not a coroutine Mutex) is required because close() is a synchronous
+    // Closeable call from onDispose and must be able to block an in-flight
+    // render running on Dispatchers.IO; a suspend-only lock couldn't guard it.
+    private val lock = Any()
+    private var closed = false
+
+    suspend fun renderPage(index: Int): Bitmap? = withContext(Dispatchers.IO) {
+        synchronized(lock) {
+            // The renderer may have been closed (composable left composition)
+            // while this render was queued — never touch native after close().
+            if (closed) return@withContext null
             runCatching {
                 renderer.openPage(index).use { page ->
                     val scale = 2
@@ -232,10 +240,16 @@ private class PdfDocument(
     }
 
     override fun close() {
-        // PdfRenderer takes ownership of the ParcelFileDescriptor passed to its
-        // constructor and closes it in close(); closing the fd again here would be
-        // a double-close, so we only close the renderer.
-        runCatching { renderer.close() }
+        // Serialise with renderPage() so we never close the native renderer
+        // while a page is being opened/rendered on another thread.
+        synchronized(lock) {
+            if (closed) return
+            closed = true
+            // PdfRenderer takes ownership of the ParcelFileDescriptor passed to
+            // its constructor and closes it in close(); closing the fd again here
+            // would be a double-close, so we only close the renderer.
+            runCatching { renderer.close() }
+        }
     }
 }
 

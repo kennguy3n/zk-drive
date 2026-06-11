@@ -7,6 +7,7 @@ import androidx.work.WorkerParameters
 import com.zkdrive.app.bridge.BridgeHolder
 import dagger.assisted.Assisted
 import dagger.assisted.AssistedInject
+import kotlin.coroutines.cancellation.CancellationException
 
 /**
  * Periodic background sync. Pulls the changefeed and reflects it into the
@@ -26,6 +27,10 @@ class SyncWorker @AssistedInject constructor(
         return try {
             coordinator.syncNow()
             Result.success()
+        } catch (e: CancellationException) {
+            // WorkManager stopped us (constraints lost / cancelled): honour the
+            // coroutine cancellation contract and propagate instead of retrying.
+            throw e
         } catch (e: Exception) {
             // Transient (network/storage) — let WorkManager back off and retry.
             Result.retry()
