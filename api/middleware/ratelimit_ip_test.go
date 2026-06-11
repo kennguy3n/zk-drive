@@ -1,6 +1,7 @@
 package middleware
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -14,7 +15,7 @@ func newIPLimitHandler(perIP int) http.Handler {
 	next := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	})
-	return IPRateLimiter(nil, perIP, 0)(next)
+	return IPRateLimiter(context.Background(), nil, perIP, 0)(next)
 }
 
 func doGet(h http.Handler, remoteAddr string) *httptest.ResponseRecorder {
@@ -76,7 +77,7 @@ func TestIPRateLimiter_TypedNilRedisClientUsesMemory(t *testing.T) {
 	next := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
 
 	const perIP = 1
-	h := IPRateLimiter(typedNil, perIP, 0)(next)
+	h := IPRateLimiter(context.Background(), typedNil, perIP, 0)(next)
 
 	const ip = "192.0.2.50:4444"
 	cap := perIP * burstMultiplier
@@ -96,7 +97,7 @@ func TestIPRateLimiter_TypedNilRedisClientUsesMemory(t *testing.T) {
 // key, so spoofed left entries don't create new buckets.
 func TestIPRateLimiter_SpoofedXFFCannotDodge(t *testing.T) {
 	next := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
-	h := IPRateLimiter(nil, 1, 1)(next)
+	h := IPRateLimiter(context.Background(), nil, 1, 1)(next)
 
 	send := func(spoof string) int {
 		req := httptest.NewRequest(http.MethodGet, "/platform/jwt/rotate", nil)

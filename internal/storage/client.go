@@ -38,6 +38,15 @@ type Config struct {
 	AccessKey string
 	SecretKey string
 	Region    string
+	// HTTPClient, when non-nil, overrides the AWS SDK's default HTTP
+	// client for this client's transport. The trusted data plane
+	// leaves it nil (SDK default). It exists so a caller handling an
+	// UNTRUSTED, externally-supplied endpoint — today only the
+	// first-boot setup wizard's connection tester — can inject a
+	// transport with an SSRF-guarded dialer without that guard
+	// leaking onto, or slowing, the operator-configured data-plane
+	// client.
+	HTTPClient aws.HTTPClient
 }
 
 // Client wraps an s3.PresignClient scoped to a single bucket. It only
@@ -53,6 +62,12 @@ type Client struct {
 	bucket  string
 	s3      *s3.Client
 	presign *s3.PresignClient
+	// opRate tracks a rolling-window error rate over the client's
+	// server-side direct operations (HealthCheck / Put / Get / Delete
+	// / List) for the admin health dashboard. Presign calls are NOT
+	// recorded: they never touch the gateway, so they carry no
+	// reachability signal. Always non-nil after NewClient.
+	rate *opRate
 }
 
 // staticEndpointResolver forces every S3 operation to target the configured
@@ -90,18 +105,46 @@ func NewClient(cfg Config) (*Client, error) {
 
 	creds := aws.NewCredentialsCache(credentials.NewStaticCredentialsProvider(cfg.AccessKey, cfg.SecretKey, ""))
 
-	s3Client := s3.New(s3.Options{
-		Region:           region,
-		Credentials:      creds,
+	opts := s3.Options{
+		Region:             region,
+		Credentials:        creds,
 		EndpointResolverV2: staticEndpointResolver{endpoint: cfg.Endpoint},
-		UsePathStyle:     true,
-	})
+		UsePathStyle:       true,
+	}
+	if cfg.HTTPClient != nil {
+		opts.HTTPClient = cfg.HTTPClient
+	}
+	s3Client := s3.New(opts)
 
 	return &Client{
 		bucket:  cfg.Bucket,
 		s3:      s3Client,
 		presign: s3.NewPresignClient(s3Client),
+		rate:    newOpRate(),
 	}, nil
+}
+
+// recordOp feeds the result of a server-side direct operation into the
+// rolling error-rate window. Nil-safe on the receiver's rate field so
+// a Client constructed outside NewClient (none today, but defensive)
+// never panics.
+func (c *Client) recordOp(err error) {
+	if c == nil || c.rate == nil {
+		return
+	}
+	c.rate.record(err != nil)
+}
+
+// RecentErrorStats returns the trailing-window summary of server-side
+// direct operations for the admin health dashboard. A client that has
+// performed no operations (or was not constructed via NewClient)
+// returns a zero-Total summary, which the dashboard renders as "no
+// recent activity" rather than an error.
+func (c *Client) RecentErrorStats() OpStats {
+	if c == nil || c.rate == nil {
+		return OpStats{Window: opRateWindow}
+	}
+	return c.rate.stats()
 }
 
 // HealthCheck verifies the storage backend is reachable and the
@@ -131,6 +174,7 @@ func (c *Client) HealthCheck(ctx context.Context) error {
 	_, err := c.s3.HeadBucket(ctx, &s3.HeadBucketInput{
 		Bucket: aws.String(c.bucket),
 	})
+	c.recordOp(err)
 	if err != nil {
 		return fmt.Errorf("storage health check: %w", err)
 	}
@@ -208,6 +252,7 @@ func (c *Client) DeleteObject(ctx context.Context, objectKey string) error {
 		Bucket: aws.String(c.bucket),
 		Key:    aws.String(objectKey),
 	})
+	c.recordOp(err)
 	if err != nil {
 		return fmt.Errorf("delete object: %w", err)
 	}
@@ -242,7 +287,9 @@ func (c *Client) PutObject(ctx context.Context, objectKey, contentType string, b
 	if strings.TrimSpace(contentType) != "" {
 		in.ContentType = aws.String(contentType)
 	}
-	if _, err := c.s3.PutObject(ctx, in); err != nil {
+	_, err := c.s3.PutObject(ctx, in)
+	c.recordOp(err)
+	if err != nil {
 		return fmt.Errorf("put object: %w", err)
 	}
 	return nil
@@ -330,8 +377,19 @@ func (c *Client) PutObjectStream(ctx context.Context, objectKey, contentType str
 	if strings.TrimSpace(contentType) != "" {
 		req.Header.Set("Content-Type", contentType)
 	}
+	// The raw streamed PUT is a server-side gateway operation just like
+	// the SDK Put/Get/Delete/List paths, so its outcome feeds the same
+	// rolling error-rate window the admin health dashboard's storage
+	// probe reads. Without this the dashboard would be blind to
+	// ONLYOFFICE save failures (this is the document-save write path)
+	// and could show storage green while large-body PUTs were failing.
+	// The earlier GenerateUploadURL step is deliberately NOT recorded:
+	// presigning is a local signing operation that never touches the
+	// gateway, so it carries no reachability signal (same rationale as
+	// the presign hot path).
 	resp, err := streamUploadClient.Do(req)
 	if err != nil {
+		c.recordOp(err)
 		return fmt.Errorf("storage: stream put: %w", err)
 	}
 	defer func() { _ = resp.Body.Close() }()
@@ -340,8 +398,11 @@ func (c *Client) PutObjectStream(ctx context.Context, objectKey, contentType str
 		// auth / quota / policy rejection is diagnosable without
 		// leaking an unbounded response into logs.
 		snippet, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
-		return fmt.Errorf("storage: stream put unexpected status %s: %s", resp.Status, strings.TrimSpace(string(snippet)))
+		statusErr := fmt.Errorf("storage: stream put unexpected status %s: %s", resp.Status, strings.TrimSpace(string(snippet)))
+		c.recordOp(statusErr)
+		return statusErr
 	}
+	c.recordOp(nil)
 	return nil
 }
 
@@ -363,6 +424,7 @@ func (c *Client) GetObject(ctx context.Context, objectKey string) ([]byte, error
 		Bucket: aws.String(c.bucket),
 		Key:    aws.String(objectKey),
 	})
+	c.recordOp(err)
 	if err != nil {
 		return nil, fmt.Errorf("get object %q: %w", objectKey, err)
 	}
@@ -394,6 +456,7 @@ func (c *Client) ListObjects(ctx context.Context, prefix string, fn func(key str
 	})
 	for paginator.HasMorePages() {
 		page, err := paginator.NextPage(ctx)
+		c.recordOp(err)
 		if err != nil {
 			return fmt.Errorf("list objects: %w", err)
 		}

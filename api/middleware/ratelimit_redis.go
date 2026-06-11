@@ -81,7 +81,7 @@ type RedisRateLimiterConfig struct {
 // against accidental floods, not a security control — silently
 // blocking every request because Redis hiccuped would be a worse
 // outcome than briefly serving above quota.
-func RedisRateLimiter(client redis.UniversalClient, cfg RedisRateLimiterConfig) func(http.Handler) http.Handler {
+func RedisRateLimiter(ctx context.Context, client redis.UniversalClient, cfg RedisRateLimiterConfig) func(http.Handler) http.Handler {
 	userRate := cfg.PerUser
 	if userRate <= 0 {
 		userRate = DefaultUserRate
@@ -90,11 +90,24 @@ func RedisRateLimiter(client redis.UniversalClient, cfg RedisRateLimiterConfig) 
 	if wsRate <= 0 {
 		wsRate = DefaultWorkspaceRate
 	}
+	// In-memory fallback enforced when Redis is unreachable (WS8 8.4
+	// server self-healing). Previously a Redis outage failed fully
+	// open — every request was allowed — which left the node with no
+	// flood protection at exactly the moment a dependency was already
+	// struggling. The fallback is the same per-replica token bucket
+	// the Redis-less deployment uses, so during an outage each replica
+	// still enforces a local budget (the cross-replica sharing Redis
+	// provides is the only thing lost). It self-heals: as soon as the
+	// Redis script succeeds again the limiter resumes using the shared
+	// counters.
+	fallback := newRateLimiter(float64(userRate), float64(wsRate))
+	go fallback.runJanitor(ctx, 5*time.Minute)
 	limiter := &redisRateLimiter{
 		client:   client,
 		userRate: userRate,
 		wsRate:   wsRate,
 		window:   redisRateLimitWindow,
+		fallback: fallback,
 	}
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -125,6 +138,9 @@ type redisRateLimiter struct {
 	userRate int
 	wsRate   int
 	window   time.Duration
+	// fallback is the per-replica in-memory limiter used when the
+	// Redis script fails (connectivity loss). Never nil.
+	fallback *rateLimiter
 }
 
 // reservation is the outcome of a limiter check: the wait the caller
@@ -155,9 +171,6 @@ type reservation struct {
 func (l *redisRateLimiter) reserve(ctx context.Context, workspaceID, userID uuid.UUID, now time.Time) reservation {
 	bucket := now.Truncate(l.window).Unix()
 	bucketEnd := time.Unix(bucket, 0).Add(l.window)
-	// Fail-open default: report a full budget so a Redis outage never
-	// makes a client think it is being throttled.
-	open := reservation{wait: 0, remaining: l.userRate, reset: bucketEnd.Unix()}
 
 	userKey := rateLimitKey(workspaceID, userID, bucket)
 	wsKey := workspaceLimitKey(workspaceID, bucket)
@@ -176,14 +189,22 @@ func (l *redisRateLimiter) reserve(ctx context.Context, workspaceID, userID uuid
 		l.userRate, l.wsRate, ttlSeconds, hasWS,
 	).Slice()
 	if err != nil {
-		// Fail open. Logging here is intentional — a quiet drop
-		// would mask Redis outages from operators.
-		logging.FromContext(ctx).Error("ratelimit_redis script failed, allowing request", "err", err)
-		return open
+		// Redis is unreachable. Rather than failing fully open (which
+		// would leave the node with zero flood protection during the
+		// outage), degrade to the per-replica in-memory limiter so a
+		// local budget is still enforced. Logged at error so the
+		// outage is visible to operators; the fallback self-heals when
+		// Redis recovers and this branch stops firing.
+		logging.FromContext(ctx).Error("ratelimit_redis script failed, falling back to in-memory limiter", "err", err)
+		return l.fallback.reserve(workspaceID, userID)
 	}
+	// The success path below reads res[0] and res[1], so guard on < 2
+	// (main tightened this from < 1). A short reply means the script
+	// did not return the expected (status, userCount) pair, so degrade
+	// to the in-memory limiter rather than risk an out-of-range index.
 	if len(res) < 2 {
-		logging.FromContext(ctx).Warn("ratelimit_redis script returned too few values, allowing request")
-		return open
+		logging.FromContext(ctx).Warn("ratelimit_redis script returned too few values, falling back to in-memory limiter")
+		return l.fallback.reserve(workspaceID, userID)
 	}
 	status, _ := res[0].(int64)
 	userCount, _ := res[1].(int64)

@@ -33,6 +33,7 @@ import (
 	apikchat "github.com/kennguy3n/zk-drive/api/kchat"
 	"github.com/kennguy3n/zk-drive/api/middleware"
 	apiplatform "github.com/kennguy3n/zk-drive/api/platform"
+	apisetup "github.com/kennguy3n/zk-drive/api/setup"
 	apiwebhooks "github.com/kennguy3n/zk-drive/api/webhooks"
 	"github.com/kennguy3n/zk-drive/api/ws"
 	"github.com/kennguy3n/zk-drive/internal/activity"
@@ -50,11 +51,13 @@ import (
 	"github.com/kennguy3n/zk-drive/internal/file"
 	"github.com/kennguy3n/zk-drive/internal/folder"
 	"github.com/kennguy3n/zk-drive/internal/health"
+	"github.com/kennguy3n/zk-drive/internal/heartbeat"
 	"github.com/kennguy3n/zk-drive/internal/iamcore"
 	"github.com/kennguy3n/zk-drive/internal/jobs"
 	"github.com/kennguy3n/zk-drive/internal/kchat"
 	"github.com/kennguy3n/zk-drive/internal/logging"
 	"github.com/kennguy3n/zk-drive/internal/metrics"
+	"github.com/kennguy3n/zk-drive/internal/natsutil"
 	"github.com/kennguy3n/zk-drive/internal/notification"
 	"github.com/kennguy3n/zk-drive/internal/permission"
 	"github.com/kennguy3n/zk-drive/internal/platform"
@@ -63,6 +66,7 @@ import (
 	"github.com/kennguy3n/zk-drive/internal/retention"
 	"github.com/kennguy3n/zk-drive/internal/search"
 	"github.com/kennguy3n/zk-drive/internal/session"
+	"github.com/kennguy3n/zk-drive/internal/setup"
 	"github.com/kennguy3n/zk-drive/internal/sharing"
 	"github.com/kennguy3n/zk-drive/internal/storage"
 	"github.com/kennguy3n/zk-drive/internal/totp"
@@ -116,8 +120,22 @@ func run() error {
 	// LogStartup announces the effective state in the same boot
 	// log slot as the database / redis / SMTP "X enabled/disabled"
 	// lines so operators see all three pillars at a glance.
+	// In the compact single-node profile the OTLP exporter is
+	// forced off: an SME box ships no collector, so blank the
+	// endpoint before building the operator config. tracing.Init
+	// then installs a no-op provider (span calls stay valid, nothing
+	// exports) and we log the override once so an operator who set
+	// OTEL_EXPORTER_OTLP_ENDPOINT under a compact profile sees why
+	// nothing is arriving at their backend.
+	otelEndpoint := cfg.OTELExporterOTLPEndpoint
+	if !cfg.TracingEnabled() {
+		if otelEndpoint != "" {
+			slog.Info("compact profile active: ignoring OTEL_EXPORTER_OTLP_ENDPOINT, tracing disabled", "endpoint", otelEndpoint)
+		}
+		otelEndpoint = ""
+	}
 	traceProvider, err := tracing.Init(ctx, tracing.BuildFromOperatorConfig(tracing.OperatorConfig{
-		Endpoint:              cfg.OTELExporterOTLPEndpoint,
+		Endpoint:              otelEndpoint,
 		Headers:               cfg.OTELExporterOTLPHeaders,
 		Insecure:              cfg.OTELExporterOTLPInsecure,
 		Compression:           cfg.OTELExporterOTLPCompression,
@@ -529,11 +547,27 @@ func run() error {
 	var jobPublisher *jobs.Publisher
 	var webhookPublisher *webhooks.Publisher
 	var natsConn *nats.Conn
+	// jobsJetStream is retained at function scope (not just inside the
+	// connect block) so the admin health dashboard can read per-subject
+	// stream depth from the same JetStream context the publishers use.
+	// nil signals "JetStream not available" to the dashboard probe.
+	var jobsJetStream nats.JetStreamContext
 	if natsURL := os.Getenv("NATS_URL"); natsURL != "" {
 		nc, nerr := nats.Connect(natsURL,
 			nats.Name("zk-drive-server"),
 			nats.MaxReconnects(-1),
-			nats.ReconnectWait(2*time.Second),
+			// Exponential reconnect backoff + jitter (WS8 8.4),
+			// matching the worker: a NATS outage no longer drives a
+			// fixed 2s retry storm, and the status is surfaced in the
+			// log on disconnect / reconnect.
+			nats.ReconnectJitter(natsutil.ReconnectJitter, natsutil.ReconnectJitter),
+			nats.CustomReconnectDelay(natsutil.ReconnectDelay),
+			nats.DisconnectErrHandler(func(_ *nats.Conn, derr error) {
+				slog.Warn("nats disconnected, reconnecting with backoff", "err", derr)
+			}),
+			nats.ReconnectHandler(func(c *nats.Conn) {
+				slog.Info("nats reconnected", "url", c.ConnectedUrl())
+			}),
 		)
 		if nerr != nil {
 			slog.Warn("nats connect failed, post-upload jobs disabled", "url", natsURL, "err", nerr)
@@ -546,6 +580,7 @@ func run() error {
 				jobPublisher = jobs.NewPublisher(js).WithHeavyBackpressure(cfg.PreviewHeavyQueueBackpressureThreshold)
 				webhookPublisher = webhooks.NewPublisher(js)
 				natsConn = nc
+				jobsJetStream = js
 				slog.Info("nats connected, post-upload jobs enabled", "url", natsURL)
 				defer nc.Drain() //nolint:errcheck // best-effort drain
 			}
@@ -559,7 +594,14 @@ func run() error {
 	// implementations are used. redisClient itself is declared with
 	// the rest of the teardown plumbing further up so the Close defer
 	// runs in the right LIFO position; here we just initialise it.
-	var sessionStore *session.RedisSessionStore
+	// sessionStore is the interface the rest of the server depends on
+	// (auth revocation, platform force-sign-out). When Redis is
+	// connected it is a *session.FailoverStore that transparently
+	// degrades to an in-memory store on a Redis outage and recovers
+	// when Redis returns (WS8 8.4); when Redis was never configured it
+	// stays nil and tokens behave like stateless JWTs (single-replica
+	// dev mode), preserving the previous behaviour.
+	var sessionStore session.Store
 	if cfg.RedisURL != "" {
 		opts, perr := redis.ParseURL(cfg.RedisURL)
 		if perr != nil {
@@ -592,8 +634,24 @@ func run() error {
 			_ = redisClient.Close()
 			redisClient = nil
 		} else {
-			sessionStore = session.NewRedisSessionStore(redisClient)
-			slog.Info("redis connected, rate limiter, session store, and ws pub/sub backed by Redis", "url", cfg.RedisURL)
+			// Wrap the Redis store in a FailoverStore so a Redis
+			// outage that begins after startup degrades to a
+			// process-local store (per-replica revocation) instead of
+			// turning every authenticated request into a 401, and
+			// recovers automatically when Redis returns. The memory
+			// fallback's janitor and the failover health loop are tied
+			// to the server's root context so they stop on shutdown.
+			memFallback := session.NewMemoryStore()
+			go memFallback.RunJanitor(ctx, 5*time.Minute)
+			failover := session.NewFailoverStore(
+				session.NewRedisSessionStore(redisClient),
+				memFallback,
+				func(c context.Context) error { return redisClient.Ping(c).Err() },
+				slog.Default(),
+			)
+			go failover.RunHealthLoop(ctx, 5*time.Second)
+			sessionStore = failover
+			slog.Info("redis connected, rate limiter, session store, and ws pub/sub backed by Redis (with in-memory failover)", "url", cfg.RedisURL)
 		}
 	} else {
 		slog.Info("redis REDIS_URL not set, using in-memory rate limiter and single-process ws (single-replica only)")
@@ -626,12 +684,12 @@ func run() error {
 
 	rateLimiter := func() func(http.Handler) http.Handler {
 		if redisClient != nil {
-			return middleware.RedisRateLimiter(redisClient, middleware.RedisRateLimiterConfig{
+			return middleware.RedisRateLimiter(ctx, redisClient, middleware.RedisRateLimiterConfig{
 				PerUser:      cfg.RateLimitPerUser,
 				PerWorkspace: cfg.RateLimitPerWorkspace,
 			})
 		}
-		return middleware.RateLimiter(middleware.RateLimitConfig{
+		return middleware.RateLimiter(ctx, middleware.RateLimitConfig{
 			PerUser:      cfg.RateLimitPerUser,
 			PerWorkspace: cfg.RateLimitPerWorkspace,
 		})
@@ -1065,6 +1123,23 @@ func run() error {
 	}
 	ipAllowSvc := workspace.NewIPAllowService(workspace.NewPostgresIPAllowStore(pool), ipAllowRedis)
 
+	// Comprehensive admin health dashboard (WS8). Each probe is given
+	// the live dependency handle the server already holds; nil handles
+	// (Redis / NATS / storage / ClamAV / ONLYOFFICE not configured)
+	// degrade to a grey "not configured" pill rather than a fault, so
+	// a single-node SME box without optional services still shows an
+	// overall-green dashboard. The worker probe reads the
+	// worker_heartbeats table populated by the worker fleet.
+	healthDashboard := health.NewDashboard([]health.DashboardProbe{
+		health.NewPostgresDashboardProbe(pool),
+		health.NewRedisDashboardProbe(redisClient),
+		health.NewNATSDashboardProbe(natsConn, jobsJetStream, jobs.StreamName),
+		health.NewClamAVDashboardProbe(cfg.ClamAVAddress),
+		health.NewOnlyOfficeDashboardProbe(cfg.OnlyOfficeURL, nil),
+		health.NewStorageDashboardProbe(storageClient),
+		health.NewWorkerDashboardProbe(heartbeat.NewStore(pool)),
+	}, health.DefaultDashboardTimeout)
+
 	adminHandler := admin.NewHandler(pool, userSvc, auditSvc, retentionSvc).
 		WithBilling(billingSvc).
 		WithStripe(stripeService).
@@ -1072,7 +1147,21 @@ func run() error {
 		WithWorkspaces(wsSvc).
 		WithWebhooks(webhookPublisher).
 		WithIPAllow(ipAllowSvc).
+		WithHealthDashboard(healthDashboard).
 		WithResponseCache(respCache)
+
+	// Guided setup wizard (WS8 8.2). The capability snapshot is a pure
+	// function of the process config (it cannot change without a
+	// restart), so it is computed once here; the dynamic "has an admin
+	// / a workspace yet?" checks are read live from the DB per request.
+	setupSvc := setup.NewService(pool, setup.Capabilities{
+		StorageConfigured:              cfg.S3Endpoint != "" && cfg.S3Bucket != "" && cfg.S3AccessKey != "" && cfg.S3SecretKey != "",
+		EmailConfigured:                cfg.SMTPHost != "",
+		VirusScanningConfigured:        cfg.ClamAVAddress != "",
+		AIConfigured:                   cfg.OllamaURL != "",
+		CollaborativeEditingConfigured: cfg.OnlyOfficeURL != "",
+	})
+	setupHandler := apisetup.NewHandler(setupSvc)
 
 	// Platform control plane (Session 9): fleet-wide tenant management
 	// authenticated by platform API keys, mounted under /api/platform
@@ -1379,7 +1468,16 @@ func run() error {
 	// stats are modest internal state but should not leak to
 	// untrusted clients. See README "Deploying" for the recommended
 	// posture.
-	r.Get("/metrics", metricsSurface.Handler().ServeHTTP)
+	//
+	// In the compact single-node profile the scrape surface is not
+	// mounted at all: there is no Prometheus to read it on an SME
+	// box, and an unmounted route is a strictly smaller attack
+	// surface than a firewalled-but-present one.
+	if cfg.MetricsEnabled() {
+		r.Get("/metrics", metricsSurface.Handler().ServeHTTP)
+	} else {
+		slog.Info("compact profile active: Prometheus /metrics endpoint not mounted")
+	}
 
 	// configHandler backs GET /api/config: a public, unauthenticated
 	// endpoint the SPA fetches at startup to discover which auth mode
@@ -1432,6 +1530,21 @@ func run() error {
 	}
 
 	r.Route("/api", func(r chi.Router) {
+		// Guided setup wizard (WS8 8.2). status + test-storage are
+		// public because the wizard runs before the first admin
+		// account exists; both self-disable once setup is complete.
+		// complete is admin-gated (it dismisses the wizard fleet-wide)
+		// behind the same auth + AdminOnly stack as the admin API.
+		r.Route("/setup", func(r chi.Router) {
+			r.Get("/status", setupHandler.Status)
+			r.Post("/test-storage", setupHandler.TestStorage)
+			r.Group(func(r chi.Router) {
+				r.Use(middleware.AuthMiddlewareWithKeys(jwtKeyManager, sessionChecker))
+				r.Use(middleware.AdminOnly())
+				r.Post("/complete", setupHandler.Complete)
+			})
+		})
+
 		r.Get("/config", configHandler)
 		r.Route("/auth", func(r chi.Router) {
 			if iamCoreClient != nil {
@@ -1725,7 +1838,7 @@ func run() error {
 			// Redis is unconfigured; passing the typed-nil *redis.Client
 			// here would defeat IPRateLimiter's nil-check and skip its
 			// in-memory fallback.
-			r.Use(middleware.IPRateLimiter(ipAllowRedis, middleware.DefaultPlatformIPRate, cfg.TrustedProxyDepth))
+			r.Use(middleware.IPRateLimiter(ctx, ipAllowRedis, middleware.DefaultPlatformIPRate, cfg.TrustedProxyDepth))
 			r.Use(middleware.PlatformAuth(platformHandler))
 			platformHandler.RegisterRoutes(r)
 		})

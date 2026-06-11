@@ -221,7 +221,27 @@ func (s *Service) finishPreview(ctx context.Context, meta versionMeta, fileID, v
 	if err := s.repo.Upsert(ctx, p); err != nil {
 		return nil, err
 	}
+	// Record the terminal success state on the version row so the admin
+	// dashboard / operators can distinguish "rendered" from "no preview
+	// yet" without joining file_previews. Best-effort: a failure here
+	// does not invalidate the preview that was just stored, so we log
+	// and continue rather than returning an error that would Nak an
+	// already-successful job.
+	if err := s.repo.SetStatus(ctx, versionID, StatusDone, ""); err != nil {
+		slog.Warn("preview: failed to mark version done", "version_id", versionID, "err", err)
+	}
 	return p, nil
+}
+
+// MarkStatus records a terminal preview lifecycle state
+// (StatusUnsupported / StatusFailed) on the version row. The worker
+// calls this when it acks a job without a rendered preview — an
+// unsupported MIME type, or PreviewMaxAttempts consecutive failures —
+// so the state is queryable and the job is not retried. Best-effort by
+// nature (the version may have been deleted); callers log rather than
+// fail the ack.
+func (s *Service) MarkStatus(ctx context.Context, versionID uuid.UUID, status, detail string) error {
+	return s.repo.SetStatus(ctx, versionID, status, detail)
 }
 
 // checkBudget enforces the per-workspace preview budget. It returns

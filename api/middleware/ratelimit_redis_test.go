@@ -70,8 +70,8 @@ func TestRateLimitAcrossReplicas(t *testing.T) {
 	_, client := newTestRedis(t)
 
 	cfg := RedisRateLimiterConfig{PerUser: 4, PerWorkspace: 1000}
-	replicaA := RedisRateLimiter(client, cfg)
-	replicaB := RedisRateLimiter(client, cfg)
+	replicaA := RedisRateLimiter(context.Background(), client, cfg)
+	replicaB := RedisRateLimiter(context.Background(), client, cfg)
 
 	noop := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
@@ -142,14 +142,19 @@ func TestRateLimitAcrossReplicas(t *testing.T) {
 	}
 }
 
-// TestRateLimitFailsOpenOnRedisDown — if Redis is unavailable the
-// middleware must allow the request rather than 429-ing every
-// caller. We close the client to simulate a connectivity failure.
-func TestRateLimitFailsOpenOnRedisDown(t *testing.T) {
+// TestRateLimitFallsBackToMemoryOnRedisDown — when Redis is
+// unreachable the middleware must NOT 429 every caller; it falls back
+// to the per-replica in-memory token bucket (WS8 8.4). A first request
+// from a fresh user/workspace therefore still passes. This is a
+// fallback-to-local-limiting behaviour, NOT unlimited fail-open: the
+// in-memory bucket still enforces a budget (covered by the in-memory
+// limiter tests in ratelimit_test.go). We close the client to simulate
+// a connectivity failure.
+func TestRateLimitFallsBackToMemoryOnRedisDown(t *testing.T) {
 	mr, client := newTestRedis(t)
 	mr.Close() // mimic Redis going away while the server keeps running.
 
-	mw := RedisRateLimiter(client, RedisRateLimiterConfig{PerUser: 1, PerWorkspace: 1})
+	mw := RedisRateLimiter(context.Background(), client, RedisRateLimiterConfig{PerUser: 1, PerWorkspace: 1})
 	called := false
 	handler := mw(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		called = true
@@ -159,10 +164,10 @@ func TestRateLimitFailsOpenOnRedisDown(t *testing.T) {
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, authedRequest(uuid.New(), uuid.New()))
 	if !called {
-		t.Fatalf("handler should be invoked when Redis is down (fail-open)")
+		t.Fatalf("handler should be invoked when Redis is down (in-memory fallback)")
 	}
 	if rec.Code != http.StatusOK {
-		t.Fatalf("expected 200 (fail-open), got %d", rec.Code)
+		t.Fatalf("expected 200 from in-memory fallback, got %d", rec.Code)
 	}
 }
 
@@ -179,7 +184,7 @@ func TestUserDeniedDoesNotPollutWorkspaceCounter(t *testing.T) {
 	// allowed) — every denied request must be a no-op for the
 	// workspace counter.
 	cfg := RedisRateLimiterConfig{PerUser: 2, PerWorkspace: 5}
-	mw := RedisRateLimiter(client, cfg)
+	mw := RedisRateLimiter(context.Background(), client, cfg)
 	noop := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	})
@@ -214,7 +219,7 @@ func TestUserDeniedDoesNotPollutWorkspaceCounter(t *testing.T) {
 // passes through unchanged, matching the in-memory implementation.
 func TestRateLimitWithoutUserID(t *testing.T) {
 	_, client := newTestRedis(t)
-	mw := RedisRateLimiter(client, RedisRateLimiterConfig{PerUser: 1, PerWorkspace: 1})
+	mw := RedisRateLimiter(context.Background(), client, RedisRateLimiterConfig{PerUser: 1, PerWorkspace: 1})
 
 	called := false
 	handler := mw(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {

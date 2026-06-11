@@ -30,6 +30,7 @@ import (
 	"github.com/kennguy3n/zk-drive/internal/billing"
 	cryptopkg "github.com/kennguy3n/zk-drive/internal/crypto"
 	"github.com/kennguy3n/zk-drive/internal/fabric"
+	"github.com/kennguy3n/zk-drive/internal/health"
 	"github.com/kennguy3n/zk-drive/internal/responsecache"
 	"github.com/kennguy3n/zk-drive/internal/retention"
 	"github.com/kennguy3n/zk-drive/internal/storage"
@@ -68,6 +69,7 @@ type Handler struct {
 	storeFactory *storage.ClientFactory
 	webhooks     MemberEventPublisher
 	ipAllow      *workspace.IPAllowService
+	healthDash   *health.Dashboard
 	respCache    *responsecache.Cache
 }
 
@@ -133,6 +135,15 @@ func (h *Handler) WithFabric(c FabricClient, p *fabric.Provisioner, sf *storage.
 	return h
 }
 
+// WithHealthDashboard wires the comprehensive health dashboard
+// (GET /health-dashboard). A nil dashboard leaves the route
+// responding 501 Not Implemented, matching the optional-dependency
+// convention of the other admin sub-services.
+func (h *Handler) WithHealthDashboard(d *health.Dashboard) *Handler {
+	h.healthDash = d
+	return h
+}
+
 // WithResponseCache wires the workspace-scoped response cache used to
 // memoise the expensive storage-usage aggregation (a full-table SUM/COUNT
 // over files, grouped per user). Optional: a nil cache leaves the
@@ -173,6 +184,30 @@ func (h *Handler) RegisterRoutes(r chi.Router) {
 	r.Post("/ip-allowlist", h.AddIPAllowRule)
 	r.Delete("/ip-allowlist/{id}", h.RemoveIPAllowRule)
 	r.Patch("/ip-allowlist/policy", h.UpdateIPAllowPolicy)
+	r.Get("/health-dashboard", h.HealthDashboard)
+}
+
+// HealthDashboard serves GET /api/admin/health-dashboard: a
+// comprehensive, per-subsystem traffic-light health report
+// (Postgres, Redis, NATS, ClamAV, ONLYOFFICE, storage/Fabric, and the
+// worker fleet). Unlike /readyz — a k8s probe that returns 503 to
+// drain traffic — this endpoint always returns 200 with the report in
+// the body: it is an operator dashboard, so a degraded subsystem is
+// data to render (red/yellow pill), not an HTTP error. The colour
+// roll-up lives in the body's "status" field.
+//
+// Admin-only (the route group applies middleware.AdminOnly), so the
+// report may include bounded, non-sensitive error summaries that
+// /readyz deliberately omits.
+func (h *Handler) HealthDashboard(w http.ResponseWriter, r *http.Request) {
+	if h.healthDash == nil {
+		writeJSON(w, http.StatusNotImplemented, map[string]string{
+			"error": "health dashboard not configured",
+		})
+		return
+	}
+	report := h.healthDash.Report(r.Context())
+	writeJSON(w, http.StatusOK, report)
 }
 
 // updateMFAPolicyRequest carries the boolean toggle for the

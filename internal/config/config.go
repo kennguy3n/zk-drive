@@ -663,7 +663,12 @@ type Config struct {
 	// ("compact", "production", "development", or "" for none). It is
 	// applied BEFORE the other fields are read so its env-var defaults
 	// (see internal/config/profiles.go) feed into the parsing below;
-	// the value recorded here is purely for logging / validateProfile.
+	// the value recorded here drives logging / validateProfile and the
+	// compact observability gates (IsCompactProfile / TracingEnabled /
+	// MetricsEnabled): in the compact single-node SME posture the OTLP
+	// exporter and the Prometheus /metrics surface are both forced off
+	// regardless of any OTEL_* env vars, so a non-technical admin can't
+	// half-wire an observability stack they have no collector for.
 	Profile string
 
 	// AutoMigrate makes the server apply pending migrations under the
@@ -1584,6 +1589,40 @@ func parseFloatDefault(s string, def float64) float64 {
 		return def
 	}
 	return v
+}
+
+// compactProfile is the compact ZKDRIVE_PROFILE token, aliased from
+// ProfileCompact (internal/config/profiles.go) so the observability
+// gates below and the profile machinery share one source of truth.
+// logging.CompactProfile exports the same token and a test asserts the
+// two stay in sync.
+const compactProfile = string(ProfileCompact)
+
+// IsCompactProfile reports whether the compact single-node SME
+// posture is active (ZKDRIVE_PROFILE=compact).
+func (c *Config) IsCompactProfile() bool {
+	return c.Profile == compactProfile
+}
+
+// TracingEnabled reports whether the OpenTelemetry OTLP exporter
+// should be wired. False in the compact profile (NoOps single-node
+// deployments ship no collector) regardless of OTEL_* env vars;
+// otherwise true so tracing.Init can decide based on the endpoint.
+// Gating here — rather than only in tracing.Init — means main.go
+// can emit a single clear "tracing disabled by compact profile"
+// startup line instead of silently installing a no-op tracer while
+// the operator's OTEL_EXPORTER_OTLP_ENDPOINT sits ignored.
+func (c *Config) TracingEnabled() bool {
+	return !c.IsCompactProfile()
+}
+
+// MetricsEnabled reports whether the Prometheus /metrics scrape
+// surface should be mounted (server) or served (worker). False in
+// the compact profile: an SME single-node box has no Prometheus to
+// scrape it, and exposing the endpoint only widens the attack
+// surface. True in every other posture.
+func (c *Config) MetricsEnabled() bool {
+	return !c.IsCompactProfile()
 }
 
 // parseOTELHeaders parses a W3C-style comma-separated list of

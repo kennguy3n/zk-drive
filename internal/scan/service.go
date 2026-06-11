@@ -11,6 +11,7 @@ import (
 	"net"
 	"net/http"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
@@ -50,6 +51,15 @@ type Service struct {
 	dialer    func(ctx context.Context, address string) (net.Conn, error)
 	address   string
 	permissive bool
+	// available reflects whether clamd is currently reachable. It is
+	// only meaningful when !permissive (a configured scanner). The
+	// worker's self-healing loop (cmd/worker) flips it to false when
+	// clamd stops responding and back to true when it recovers; while
+	// false, scanBytes degrades to "skip + mark clean" instead of
+	// Nak-looping the job forever (WS8 auto-healing). Defaults to true
+	// for a configured scanner so the first job before the health
+	// loop's initial probe still attempts a real scan.
+	available atomic.Bool
 	now       func() time.Time
 }
 
@@ -59,7 +69,7 @@ type Service struct {
 // requiring a ClamAV instance.
 func NewService(pool *pgxpool.Pool, storage PresignClient, address string) *Service {
 	d := &net.Dialer{Timeout: 10 * time.Second}
-	return &Service{
+	s := &Service{
 		pool:    pool,
 		storage: storage,
 		httpc:   &http.Client{Timeout: 5 * time.Minute},
@@ -70,6 +80,71 @@ func NewService(pool *pgxpool.Pool, storage PresignClient, address string) *Serv
 		permissive: strings.TrimSpace(address) == "",
 		now:        time.Now,
 	}
+	// A configured scanner starts "available" so the first job
+	// attempts a real scan even before the worker's health loop runs
+	// its initial probe.
+	s.available.Store(true)
+	return s
+}
+
+// Configured reports whether a clamd address is set (i.e. virus
+// scanning is enabled at all). When false the service is in permissive
+// mode and the worker should not run a health-check loop.
+func (s *Service) Configured() bool { return !s.permissive }
+
+// Available reports whether clamd is currently reachable, per the most
+// recent health probe. Always true for a permissive (unconfigured)
+// service. Used by the worker heartbeat to surface a degraded scan
+// subsystem on the admin dashboard.
+func (s *Service) Available() bool {
+	if s.permissive {
+		return true
+	}
+	return s.available.Load()
+}
+
+// SetAvailable records the outcome of a health probe. Called by the
+// worker's self-healing loop. A no-op for permissive services.
+func (s *Service) SetAvailable(ok bool) {
+	if s.permissive {
+		return
+	}
+	s.available.Store(ok)
+}
+
+// Ping checks clamd liveness via the lightweight PING command
+// (clamd replies "PONG"). Returns nil when reachable and responding.
+// Used by the worker's 60s self-healing re-check loop. Always returns
+// nil for a permissive (unconfigured) service so the loop, if it ever
+// runs, treats "no scanner" as "nothing to heal".
+func (s *Service) Ping(ctx context.Context) error {
+	if s.permissive {
+		return nil
+	}
+	addr := s.address
+	if addr == "" {
+		addr = DefaultAddress
+	}
+	conn, err := s.dialer(ctx, addr)
+	if err != nil {
+		return fmt.Errorf("dial clamd: %w", err)
+	}
+	defer func() { _ = conn.Close() }()
+	if deadline, ok := ctx.Deadline(); ok {
+		_ = conn.SetDeadline(deadline)
+	}
+	if _, err := conn.Write([]byte("zPING\x00")); err != nil {
+		return fmt.Errorf("write PING: %w", err)
+	}
+	buf := make([]byte, 16)
+	n, err := conn.Read(buf)
+	if err != nil {
+		return fmt.Errorf("read PONG: %w", err)
+	}
+	if got := strings.TrimRight(string(buf[:n]), "\x00\n"); got != "PONG" {
+		return fmt.Errorf("unexpected clamd ping reply %q", got)
+	}
+	return nil
 }
 
 // SetNotifier wires (or rewires) the notifier used for quarantine
@@ -127,6 +202,19 @@ func (s *Service) Scan(ctx context.Context, fileID, versionID uuid.UUID) (Verdic
 func (s *Service) scanBytes(ctx context.Context, body []byte) (Verdict, error) {
 	if s.permissive {
 		return Verdict{Status: StatusClean, Detail: "permissive mode: scan skipped"}, nil
+	}
+	// Auto-healing: when the worker's health loop has marked clamd
+	// unreachable, degrade to "skip + mark clean" and ACK the job
+	// (return a nil error) rather than Nak-looping it forever while
+	// the scanner is down. This is the deliberate NoOps availability
+	// tradeoff from WS8 8.4 — the alternative (Nak until clamd
+	// returns) wedges the whole scan subject and blocks every upload's
+	// post-processing. The skip is recorded in scan_detail so an
+	// operator can later re-scan once clamd recovers, and the admin
+	// dashboard surfaces the degraded scan subsystem via the worker
+	// heartbeat.
+	if !s.available.Load() {
+		return Verdict{Status: StatusClean, Detail: "clamav unavailable: scan skipped (auto-healing)"}, nil
 	}
 	sig, err := s.instream(ctx, body)
 	if err != nil {

@@ -19,6 +19,11 @@ type Repository interface {
 	Upsert(ctx context.Context, p *Preview) error
 	GetByVersion(ctx context.Context, fileID, versionID uuid.UUID) (*Preview, error)
 	GetLatestByFile(ctx context.Context, fileID uuid.UUID) (*Preview, error)
+	// SetStatus records the preview lifecycle state on the parent
+	// file_versions row (see migration 040). status must be one of the
+	// Status* constants; detail is a short human-readable reason
+	// (empty stores NULL).
+	SetStatus(ctx context.Context, versionID uuid.UUID, status, detail string) error
 }
 
 // PostgresRepository implements Repository against Postgres using a
@@ -79,4 +84,22 @@ func (r *PostgresRepository) GetByVersion(ctx context.Context, fileID, versionID
 func (r *PostgresRepository) GetLatestByFile(ctx context.Context, fileID uuid.UUID) (*Preview, error) {
 	q := "SELECT " + previewColumns + " FROM file_previews WHERE file_id = $1 ORDER BY created_at DESC LIMIT 1"
 	return scanPreview(r.pool.QueryRow(ctx, q, fileID))
+}
+
+// SetStatus updates file_versions.preview_status / preview_detail for
+// versionID. The worker runs without app.workspace_id set (RLS bypass
+// branch, same as the scan service), so the update reaches the row
+// regardless of tenant context. A missing version is not an error:
+// the row may have been deleted between enqueue and render, and the
+// caller is on a best-effort terminal-marking path.
+func (r *PostgresRepository) SetStatus(ctx context.Context, versionID uuid.UUID, status, detail string) error {
+	const q = `
+UPDATE file_versions
+SET preview_status = $2,
+    preview_detail = NULLIF($3, '')
+WHERE id = $1`
+	if _, err := r.pool.Exec(ctx, q, versionID, status, detail); err != nil {
+		return fmt.Errorf("update preview_status: %w", err)
+	}
+	return nil
 }

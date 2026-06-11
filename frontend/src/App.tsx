@@ -1,4 +1,4 @@
-import { lazy, Suspense, useEffect } from "react";
+import { lazy, Suspense, useEffect, useState } from "react";
 import { Navigate, Route, Routes } from "react-router-dom";
 import LoginPage from "./pages/LoginPage";
 import SignupPage from "./pages/SignupPage";
@@ -6,6 +6,7 @@ import CallbackPage from "./pages/CallbackPage";
 import FileBrowserPage from "./pages/FileBrowserPage";
 import RequireAuth from "./components/RequireAuth";
 import InstallPrompt from "./components/InstallPrompt";
+import { fetchSetupStatus } from "./api/client";
 import { useAuth } from "./hooks/useAuth";
 import { useAppConfig } from "./hooks/useAppConfig";
 import { scheduleSilentRefresh } from "./api/oidc";
@@ -33,6 +34,45 @@ const DocumentEditorPage = lazy(() => import("./pages/DocumentEditorPage"));
 // keeps shipping only the login + drive flow.
 const MfaChallengePage = lazy(() => import("./pages/MfaChallengePage"));
 const TwoFactorEnrollPage = lazy(() => import("./pages/TwoFactorEnrollPage"));
+// First-boot guided setup wizard (WS8 8.2). Off the critical path:
+// only a brand-new, unconfigured deployment ever renders it.
+const SetupWizardPage = lazy(() => import("./pages/SetupWizardPage"));
+
+// RootRedirect resolves the "/" landing target. A fresh, unconfigured
+// deployment (no workspace yet) is sent to the setup wizard; everything
+// else lands in the drive. The setup probe is cheap and only runs for
+// the bare "/" hit, not on every route, so it doesn't tax steady-state
+// navigation. While the probe is in flight we render nothing to avoid a
+// flash of the drive's login redirect before the wizard decision lands.
+function RootRedirect() {
+  const { token } = useAuth();
+  const [target, setTarget] = useState<string | null>(token ? "/drive" : null);
+
+  useEffect(() => {
+    // An authenticated user always belongs in the drive; skip the probe.
+    if (token) {
+      setTarget("/drive");
+      return;
+    }
+    let cancelled = false;
+    (async () => {
+      try {
+        const s = await fetchSetupStatus();
+        if (!cancelled) setTarget(s.needs_setup && !s.setup_completed ? "/setup" : "/drive");
+      } catch {
+        // If the probe fails (e.g. server momentarily unreachable),
+        // fall back to the drive so the normal login flow still works.
+        if (!cancelled) setTarget("/drive");
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [token]);
+
+  if (target === null) return null;
+  return <Navigate to={target} replace />;
+}
 
 // App-level routing. Unauthenticated visitors hit /login; everyone else
 // lands in the file browser at /drive. The :folderId variant lets us keep
@@ -87,6 +127,10 @@ export default function App() {
               so these routes are not mounted and fall through to the
               catch-all redirect. */}
           {!iamCoreMode && <Route path="/signup" element={<SignupPage />} />}
+          {/* First-boot guided setup wizard (WS8 8.2). Unauthenticated:
+              a fresh box has no admin yet. The page self-redirects to
+              /drive if setup is already complete. */}
+          <Route path="/setup" element={<SetupWizardPage />} />
           {/* MFA pages are unauthenticated routes: they accept the
               short-lived mfa_challenge / mfa_enroll token passed via
               react-router navigation state, NOT a stored session
@@ -199,7 +243,7 @@ export default function App() {
               </RequireAuth>
             }
           />
-          <Route path="/" element={<Navigate to="/drive" replace />} />
+          <Route path="/" element={<RootRedirect />} />
           <Route path="*" element={<Navigate to="/drive" replace />} />
         </Routes>
       </Suspense>
