@@ -28,6 +28,19 @@
 //   - LOG_FORMAT: json | text (default: json). Text is useful for
 //     local dev tail-following; production should always be json.
 //
+// Deployment profile
+//
+// ZKDRIVE_PROFILE=compact selects the single-node SME posture
+// (NoOps: "just give me clean logs"). When set, the LOG_FORMAT
+// default flips from json to text and the LOG_LEVEL default stays
+// info — so a small-business admin who sets one env var gets
+// human-readable, info-level logs to stdout without learning the
+// OpenTelemetry / Prometheus surface. Explicit LOG_FORMAT /
+// LOG_LEVEL values always win over the profile default, so an
+// operator can still force json+debug on a compact node. The same
+// profile is read by internal/config to disable the OTLP exporter
+// and the Prometheus scrape endpoint; see config.Config.Profile.
+//
 // Request-scoped logging
 //
 // HTTP handlers should call logging.FromContext(r.Context()) to
@@ -114,8 +127,9 @@ func (s *requestLoggerSlot) set(l *slog.Logger) {
 // deployment can distinguish server vs worker vs reconciler
 // without parsing the message string.
 func Init(component string) *slog.Logger {
+	compact := isCompactProfile(os.Getenv("ZKDRIVE_PROFILE"))
 	level := parseLevel(os.Getenv("LOG_LEVEL"))
-	handler := newHandler(os.Stderr, level)
+	handler := newHandler(os.Stderr, level, compact)
 	logger := slog.New(handler).With("component", component)
 	slog.SetDefault(logger)
 
@@ -139,11 +153,44 @@ func Init(component string) *slog.Logger {
 	// emits. Without this, a third-party `log.Printf` from nats.go
 	// would land in the log stream WITHOUT a component field,
 	// breaking operators' filter-by-binary queries.
-	bridge := slog.NewLogLogger(logger.Handler(), slog.LevelInfo)
+	//
+	// The handler is wrapped in unfilteredHandler so bridged records
+	// ALWAYS emit regardless of LOG_LEVEL. slog.NewLogLogger's writer
+	// calls handler.Enabled(ctx, LevelInfo) before formatting, so a
+	// handler floored at warn/error would silently discard every
+	// bridged line — including the std-`log` Fatal/Panic paths and
+	// http.Server connection errors an operator must see. The std
+	// `log` package has no level concept, so every line through it is
+	// treated as must-emit; LOG_LEVEL still governs native slog calls.
+	bridge := slog.NewLogLogger(unfilteredHandler{logger.Handler()}, slog.LevelInfo)
 	log.SetFlags(0)
 	log.SetOutput(bridge.Writer())
 
 	return logger
+}
+
+// unfilteredHandler wraps a slog.Handler so Enabled always reports
+// true, letting records pass the level filter while still being
+// formatted (and carrying the embedded attributes) by the wrapped
+// handler. Used only for the std-`log` bridge in Init, whose records
+// have no level of their own and must never be dropped.
+type unfilteredHandler struct{ slog.Handler }
+
+func (unfilteredHandler) Enabled(context.Context, slog.Level) bool { return true }
+
+// WithAttrs and WithGroup re-wrap the derived handler so the
+// always-enabled property survives derivation. Without these overrides
+// the embedded slog.Handler would be promoted, returning a plain
+// handler that reverts to normal level filtering — silently defeating
+// the bridge if this type is ever used somewhere that derives a child
+// handler. slog.NewLogLogger's writer never derives today, but keeping
+// the wrapper closed under derivation removes the latent trap.
+func (u unfilteredHandler) WithAttrs(attrs []slog.Attr) slog.Handler {
+	return unfilteredHandler{u.Handler.WithAttrs(attrs)}
+}
+
+func (u unfilteredHandler) WithGroup(name string) slog.Handler {
+	return unfilteredHandler{u.Handler.WithGroup(name)}
 }
 
 // parseLevel maps the user-facing LOG_LEVEL values to slog
@@ -166,16 +213,43 @@ func parseLevel(raw string) slog.Level {
 	}
 }
 
+// CompactProfile is the ZKDRIVE_PROFILE value that selects the
+// single-node SME deployment posture: text logs, no OTLP exporter,
+// no Prometheus endpoint. Exported so internal/config can reuse the
+// exact token without importing this package's env-read path.
+const CompactProfile = "compact"
+
+// isCompactProfile reports whether the raw ZKDRIVE_PROFILE value
+// selects the compact posture. Compared case-insensitively after
+// trimming so " Compact " and "compact" both match.
+func isCompactProfile(raw string) bool {
+	return strings.EqualFold(strings.TrimSpace(raw), CompactProfile)
+}
+
 // newHandler picks JSON vs text based on LOG_FORMAT. JSON is the
 // default because every production log shipper indexes JSON for
 // free; text is only useful when a developer is tailing the log
-// from their terminal.
-func newHandler(w io.Writer, level slog.Level) slog.Handler {
+// from their terminal — or when the compact single-node profile is
+// active, where stdout is read by a human, not a shipper.
+//
+// `compact` only changes the DEFAULT when LOG_FORMAT is unset: an
+// explicit LOG_FORMAT=json on a compact node still wins, so an
+// operator who wires a shipper into a compact deployment is never
+// silently downgraded to text.
+func newHandler(w io.Writer, level slog.Level, compact bool) slog.Handler {
 	opts := &slog.HandlerOptions{Level: level}
 	switch strings.ToLower(strings.TrimSpace(os.Getenv("LOG_FORMAT"))) {
 	case "text":
 		return slog.NewTextHandler(w, opts)
+	case "json":
+		return slog.NewJSONHandler(w, opts)
 	default:
+		// Unset: the compact profile defaults to human-readable
+		// text; every other profile defaults to shipper-friendly
+		// json.
+		if compact {
+			return slog.NewTextHandler(w, opts)
+		}
 		return slog.NewJSONHandler(w, opts)
 	}
 }

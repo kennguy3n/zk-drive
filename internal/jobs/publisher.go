@@ -37,9 +37,10 @@ import (
 // drive.* job subject. The worker (cmd/worker) is the single creator
 // of this stream (ensureStream); other components — the publisher
 // (which inspects consumer depth for heavy-preview backpressure), the
-// compact supervisor's readiness barrier, and operator tooling —
-// reference this constant so the name has one source of truth and the
-// worker and publisher cannot drift on it.
+// server's admin health-dashboard stream-depth probe, the compact
+// supervisor's readiness barrier, and operator tooling — reference
+// this constant so the name has one source of truth and the worker
+// and publisher cannot drift on it.
 const StreamName = "DRIVE_JOBS"
 
 // ErrPreviewDeferred is returned by PublishPreviewWeighted when the

@@ -48,6 +48,59 @@ func TestParseLevelMapsAllSupportedAliases(t *testing.T) {
 	}
 }
 
+// TestIsCompactProfile pins the ZKDRIVE_PROFILE=compact matcher:
+// case-insensitive, whitespace-trimmed, and only the exact
+// "compact" token flips the posture.
+func TestIsCompactProfile(t *testing.T) {
+	cases := []struct {
+		in   string
+		want bool
+	}{
+		{"compact", true},
+		{"Compact", true},
+		{"  COMPACT  ", true},
+		{"", false},
+		{"full", false},
+		{"compact-ish", false},
+	}
+	for _, tc := range cases {
+		if got := isCompactProfile(tc.in); got != tc.want {
+			t.Fatalf("isCompactProfile(%q) = %v, want %v", tc.in, got, tc.want)
+		}
+	}
+}
+
+// TestNewHandlerFormatSelection pins the LOG_FORMAT / compact-profile
+// interaction: an explicit LOG_FORMAT always wins, and when it is
+// unset the compact profile defaults to text while every other
+// profile defaults to json. We assert on the concrete handler type
+// because that is the observable contract (JSON shipper vs human
+// text on stdout).
+func TestNewHandlerFormatSelection(t *testing.T) {
+	cases := []struct {
+		name      string
+		logFormat string
+		compact   bool
+		wantText  bool
+	}{
+		{"unset/full→json", "", false, false},
+		{"unset/compact→text", "", true, true},
+		{"explicit text/full", "text", false, true},
+		{"explicit json/compact wins over profile", "json", true, false},
+		{"explicit TEXT case-insensitive", "TEXT", false, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("LOG_FORMAT", tc.logFormat)
+			h := newHandler(&bytes.Buffer{}, slog.LevelInfo, tc.compact)
+			_, isText := h.(*slog.TextHandler)
+			if isText != tc.wantText {
+				t.Fatalf("newHandler(LOG_FORMAT=%q, compact=%v): text=%v, want text=%v", tc.logFormat, tc.compact, isText, tc.wantText)
+			}
+		})
+	}
+}
+
 // TestFromContextReturnsDefaultWhenUnset covers the fallback path
 // that internal services rely on: if nobody attached a logger to
 // ctx (background workers, tests, init code), FromContext must
@@ -245,6 +298,82 @@ func TestInitBridgesLegacyLogPackage(t *testing.T) {
 	out := buf.String()
 	if !strings.Contains(out, `"msg":"nats: connected to nats://localhost:4222"`) {
 		t.Fatalf("legacy log.Printf did not flow through slog handler: %s", out)
+	}
+}
+
+// TestBridgeEmitsAboveLogLevel is the regression test for the bug
+// where the std-log bridge silently dropped log.Print* output once
+// LOG_LEVEL resolved above info: slog.NewLogLogger's writer checks
+// handler.Enabled(ctx, LevelInfo) before formatting, so a handler
+// floored at error discarded every bridged line. unfilteredHandler
+// makes bridged records bypass the level filter so fatal/operator
+// diagnostics are never swallowed, while native slog calls still
+// honour LOG_LEVEL.
+func TestBridgeEmitsAboveLogLevel(t *testing.T) {
+	var buf bytes.Buffer
+	// Handler floored at error — a native Info record is dropped.
+	handler := slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelError})
+	logger := slog.New(handler).With("component", "server")
+	prev := slog.Default()
+	defer slog.SetDefault(prev)
+	slog.SetDefault(logger)
+	prevFlags := log.Flags()
+	prevOut := log.Writer()
+	defer log.SetFlags(prevFlags)
+	defer log.SetOutput(prevOut)
+
+	bridge := slog.NewLogLogger(unfilteredHandler{logger.Handler()}, slog.LevelInfo)
+	log.SetFlags(0)
+	log.SetOutput(bridge.Writer())
+
+	log.Printf("nats: server requested reconnect")
+
+	out := buf.String()
+	if !strings.Contains(out, "nats: server requested reconnect") {
+		t.Fatalf("bridged log output dropped at LOG_LEVEL=error; got %q", out)
+	}
+	if !strings.Contains(out, `"component":"server"`) {
+		t.Fatalf("bridged record missing component attribute; got %q", out)
+	}
+
+	// A native Info slog call on the same handler MUST still be
+	// filtered out — the wrapper only affects the bridge.
+	buf.Reset()
+	logger.Info("this should be filtered")
+	if buf.Len() != 0 {
+		t.Fatalf("native Info leaked past LOG_LEVEL=error; got %q", buf.String())
+	}
+}
+
+// TestUnfilteredHandlerStaysUnfilteredAfterDerivation pins that the
+// always-enabled property survives WithAttrs/WithGroup. A plain
+// embedded handler would be promoted and revert to level filtering,
+// silently re-dropping bridged records — the override must re-wrap so
+// the derived handler is still unfiltered and still formats output.
+func TestUnfilteredHandlerStaysUnfilteredAfterDerivation(t *testing.T) {
+	var buf bytes.Buffer
+	// Floor at error so a plain (non-wrapped) handler would drop Info.
+	base := unfilteredHandler{slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelError})}
+
+	derived := base.WithAttrs([]slog.Attr{slog.String("subsystem", "reconciler")})
+	if !derived.Enabled(context.Background(), slog.LevelInfo) {
+		t.Fatal("WithAttrs lost the unfiltered property")
+	}
+	if _, ok := derived.(unfilteredHandler); !ok {
+		t.Fatalf("WithAttrs returned %T, want unfilteredHandler", derived)
+	}
+	if grouped := base.WithGroup("g"); !grouped.Enabled(context.Background(), slog.LevelInfo) {
+		t.Fatal("WithGroup lost the unfiltered property")
+	}
+
+	bridge := slog.NewLogLogger(derived, slog.LevelInfo)
+	bridge.Printf("reconcile tick")
+	out := buf.String()
+	if !strings.Contains(out, "reconcile tick") {
+		t.Fatalf("derived unfiltered handler dropped output at LOG_LEVEL=error; got %q", out)
+	}
+	if !strings.Contains(out, `"subsystem":"reconciler"`) {
+		t.Fatalf("derived handler lost the attrs added via WithAttrs; got %q", out)
 	}
 }
 

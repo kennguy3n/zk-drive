@@ -1,6 +1,7 @@
 package middleware
 
 import (
+	"context"
 	"math"
 	"net/http"
 	"strconv"
@@ -42,7 +43,7 @@ type RateLimitConfig struct {
 // sync.Map and each bucket holds its own mutex so hot accounts never
 // block cold ones. Idle buckets are cleaned up lazily by a background
 // goroutine.
-func RateLimiter(cfg RateLimitConfig) func(http.Handler) http.Handler {
+func RateLimiter(ctx context.Context, cfg RateLimitConfig) func(http.Handler) http.Handler {
 	userRate := cfg.PerUser
 	if userRate <= 0 {
 		userRate = DefaultUserRate
@@ -52,7 +53,7 @@ func RateLimiter(cfg RateLimitConfig) func(http.Handler) http.Handler {
 		wsRate = DefaultWorkspaceRate
 	}
 	limiter := newRateLimiter(float64(userRate), float64(wsRate))
-	go limiter.runJanitor(5 * time.Minute)
+	go limiter.runJanitor(ctx, 5*time.Minute)
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			userID, ok := UserIDFromContext(r.Context())
@@ -152,24 +153,30 @@ func (l *rateLimiter) reserve(workspaceID, userID uuid.UUID) reservation {
 }
 
 // runJanitor evicts buckets that haven't been touched in twice the
-// cleanup window. The simple policy is fine for a single-process
-// MVP; a Redis-backed implementation (deferred to a later phase)
-// would not need this at all.
-func (l *rateLimiter) runJanitor(window time.Duration) {
+// cleanup window, returning when ctx is cancelled so the goroutine
+// does not outlive the server (it is launched once per limiter at
+// startup; without ctx it would leak for the process lifetime and,
+// worse, accumulate across the many limiters tests construct).
+func (l *rateLimiter) runJanitor(ctx context.Context, window time.Duration) {
 	t := time.NewTicker(window)
 	defer t.Stop()
-	for now := range t.C {
-		threshold := now.Add(-2 * window)
-		l.mu.Lock()
-		for id, last := range l.touched {
-			if last.After(threshold) {
-				continue
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case now := <-t.C:
+			threshold := now.Add(-2 * window)
+			l.mu.Lock()
+			for id, last := range l.touched {
+				if last.After(threshold) {
+					continue
+				}
+				delete(l.touched, id)
+				delete(l.users, id)
+				delete(l.work, id)
 			}
-			delete(l.touched, id)
-			delete(l.users, id)
-			delete(l.work, id)
+			l.mu.Unlock()
 		}
-		l.mu.Unlock()
 	}
 }
 

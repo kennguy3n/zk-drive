@@ -1,0 +1,88 @@
+# XcodeGen project spec for the ZK Drive native iOS app.
+#
+# Why XcodeGen: the `.xcodeproj` is generated, not committed, so there is
+# a single declarative source of truth for targets, build settings and
+# the linked Rust bridge XCFramework — no merge-conflict-prone pbxproj.
+# CI (.github/workflows/mobile-ios.yml) installs xcodegen, runs
+# `mobile/rust-bridge/build-ios.sh` to produce the XCFramework + generated
+# Swift bindings, then `xcodegen generate` + `xcodebuild`.
+#
+# Regenerate locally (on macOS) with:
+#   cd mobile/ios && xcodegen generate && open ZkDrive.xcodeproj
+name: ZkDrive
+options:
+  bundleIdPrefix: com.zkdrive
+  deploymentTarget:
+    iOS: "15.0"
+  createIntermediateGroups: true
+  groupSortPosition: top
+
+settings:
+  base:
+    SWIFT_VERSION: "5.9"
+    DEVELOPMENT_TEAM: "$(ZKDRIVE_DEVELOPMENT_TEAM)"
+    CODE_SIGN_STYLE: Automatic
+    MARKETING_VERSION: "1.0.0"
+    CURRENT_PROJECT_VERSION: "1"
+    ENABLE_USER_SCRIPT_SANDBOXING: YES
+    SWIFT_STRICT_CONCURRENCY: targeted
+
+packages: {}
+
+targets:
+  ZkDrive:
+    type: application
+    platform: iOS
+    deploymentTarget: "15.0"
+    sources:
+      - path: ZkDrive
+      # The Rust FFI bridge's generated Swift API. build-ios.sh emits this
+      # from the SAME UniFFI crate metadata that produces the XCFramework,
+      # so the Swift contract can never drift from the shipped binary.
+      - path: ../rust-bridge/build/ios/Sources/ZkMobileBridge
+        optional: true
+        group: Generated/ZkMobileBridge
+    dependencies:
+      # Device arm64 + fat simulator slice of the Rust bridge. Produced by
+      # build-ios.sh on the macOS runner before xcodebuild runs.
+      - framework: ../rust-bridge/build/ios/ZkMobileBridge.xcframework
+        embed: true
+        codeSign: true
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.zkdrive.app
+        INFOPLIST_FILE: ZkDrive/Resources/Info.plist
+        CODE_SIGN_ENTITLEMENTS: ZkDrive/Resources/ZkDrive.entitlements
+        ENABLE_BITCODE: NO
+        # The generated UniFFI Swift file imports the C shim as a Clang
+        # module ("zk_mobile_bridgeFFI") that lives inside the XCFramework's
+        # Headers/module.modulemap, so no extra search paths are needed.
+        OTHER_LDFLAGS: ["-ObjC"]
+        SWIFT_OBJC_BRIDGING_HEADER: ""
+    info:
+      path: ZkDrive/Resources/Info.plist
+    entitlements:
+      path: ZkDrive/Resources/ZkDrive.entitlements
+
+  ZkDriveTests:
+    type: bundle.unit-test
+    platform: iOS
+    deploymentTarget: "15.0"
+    sources:
+      - path: ZkDriveTests
+    dependencies:
+      - target: ZkDrive
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.zkdrive.app.tests
+
+schemes:
+  ZkDrive:
+    build:
+      targets:
+        ZkDrive: all
+        ZkDriveTests: [test]
+    test:
+      targets:
+        - ZkDriveTests
+      gatherCoverageData: true

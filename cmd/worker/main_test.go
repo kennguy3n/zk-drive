@@ -134,3 +134,7 @@ func TestStartJobPool_DrainIdempotent(t *testing.T) {
 	drain()
 	bg.Wait()
 }
+
+// The NATS reconnect-backoff schedule now lives in internal/natsutil
+// (shared by the server and worker); its unit tests moved there too
+// (internal/natsutil/reconnect_test.go).

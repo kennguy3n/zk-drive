@@ -1183,6 +1183,113 @@ export async function deleteRetentionPolicy(id: string): Promise<void> {
   await client.delete(`/admin/retention-policies/${id}`);
 }
 
+// --- Health dashboard (WS8 8.1) ------------------------------------
+
+// HealthColor mirrors internal/health.Color: the traffic-light signal
+// rendered as a coloured pill per subsystem. "unknown" means the
+// subsystem is not configured in this deployment and is excluded from
+// the overall roll-up (rendered grey).
+export type HealthColor = "green" | "yellow" | "red" | "unknown";
+
+// HealthSubsystem mirrors internal/health.Subsystem. detail is an
+// opaque, subsystem-specific bag of structured context (pool stats,
+// memory usage, stream depths, worker last-seen, …) rendered as
+// key/value rows; error is a short, non-sensitive failure summary
+// present only when status is red/yellow.
+export interface HealthSubsystem {
+  name: string;
+  status: HealthColor;
+  detail?: Record<string, unknown>;
+  error?: string;
+}
+
+// HealthReport mirrors internal/health.Report, the body of
+// GET /api/admin/health-dashboard.
+export interface HealthReport {
+  status: HealthColor;
+  generated_at: string;
+  subsystems: HealthSubsystem[];
+}
+
+export async function fetchHealthDashboard(): Promise<HealthReport> {
+  const { data } = await client.get<HealthReport>("/admin/health-dashboard");
+  return data;
+}
+
+// --- Guided setup wizard (WS8 8.2) ---------------------------------
+
+// SetupStep mirrors internal/setup.Step.
+export interface SetupStep {
+  configured: boolean;
+  detail?: string;
+}
+
+// SetupOptionalServices mirrors internal/setup.OptionalServices.
+export interface SetupOptionalServices {
+  email: boolean;
+  virus_scanning: boolean;
+  ai: boolean;
+  collaborative_editing: boolean;
+}
+
+// SetupSteps mirrors internal/setup.Steps. Present only while setup is
+// incomplete (the backend omits it once complete to avoid leaking the
+// deployment shape to anonymous callers).
+export interface SetupSteps {
+  admin_account: SetupStep;
+  storage: SetupStep;
+  workspace: SetupStep;
+  optional_services: SetupOptionalServices;
+}
+
+// SetupStatus mirrors internal/setup.Status, the body of
+// GET /api/setup/status.
+export interface SetupStatus {
+  setup_completed: boolean;
+  needs_setup: boolean;
+  completed_at?: string;
+  steps?: SetupSteps;
+}
+
+// fetchSetupStatus reads the setup status. It is intentionally callable
+// pre-authentication (the wizard runs before any admin exists). It goes
+// through the shared `client`, but that is safe before login: the
+// request interceptor simply omits the Authorization header when no
+// token is stored, and GET /api/setup/status is a public endpoint that
+// answers 200 to anonymous callers — so the 401 session-teardown
+// response interceptor is never reached.
+export async function fetchSetupStatus(): Promise<SetupStatus> {
+  const { data } = await client.get<SetupStatus>("/setup/status");
+  return data;
+}
+
+export interface TestStorageInput {
+  endpoint: string;
+  bucket: string;
+  access_key: string;
+  secret_key: string;
+  region?: string;
+}
+
+export interface TestStorageResult {
+  ok: boolean;
+  error?: string;
+}
+
+// testSetupStorage validates S3/Fabric credentials via a real
+// HeadBucket before the operator commits them. A failed connection is
+// reported as { ok: false, error } with HTTP 200, so callers render an
+// inline message rather than treating it as a request failure.
+export async function testSetupStorage(input: TestStorageInput): Promise<TestStorageResult> {
+  const { data } = await client.post<TestStorageResult>("/setup/test-storage", input);
+  return data;
+}
+
+// completeSetup marks the wizard finished (admin-only). Idempotent.
+export async function completeSetup(): Promise<void> {
+  await client.post("/setup/complete", {});
+}
+
 // --- Placement -----------------------------------------------------
 
 // PlacementPolicy mirrors internal/fabric.Policy. Only the subset the

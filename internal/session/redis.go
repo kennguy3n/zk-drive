@@ -51,6 +51,11 @@ import (
 // client knows to re-authenticate.
 var ErrSessionNotFound = errors.New("session not found")
 
+// errSessionIDRequired is returned by Set/Create when called with an
+// empty session ID. Shared by the Redis and memory stores so both
+// backends reject the same invalid input identically.
+var errSessionIDRequired = errors.New("session id required")
+
 // ErrSessionAnomaly is returned by ValidateSession when the request's
 // device fingerprint (User-Agent + IP network) no longer matches the
 // fingerprint captured when the session was established. The caller
@@ -231,7 +236,7 @@ func (s *RedisSessionStore) Set(ctx context.Context, sessionID string, userID, w
 // maxUserAgentLen so a hostile header can't bloat the hash.
 func (s *RedisSessionStore) Create(ctx context.Context, rec SessionRecord, ttl time.Duration) error {
 	if rec.SessionID == "" {
-		return errors.New("session id required")
+		return errSessionIDRequired
 	}
 	if rec.CreatedAt.IsZero() {
 		rec.CreatedAt = time.Now().UTC()

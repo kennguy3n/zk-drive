@@ -1,6 +1,7 @@
 package middleware
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
@@ -41,7 +42,7 @@ func assertRateLimitHeaders(t *testing.T, h http.Header) {
 // request.
 func TestRedisRateLimitHeadersOnAllow(t *testing.T) {
 	_, client := newTestRedis(t)
-	mw := RedisRateLimiter(client, RedisRateLimiterConfig{PerUser: 5, PerWorkspace: 1000})
+	mw := RedisRateLimiter(context.Background(), client, RedisRateLimiterConfig{PerUser: 5, PerWorkspace: 1000})
 	handler := mw(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	}))
@@ -67,7 +68,7 @@ func TestRedisRateLimitHeadersOnAllow(t *testing.T) {
 // on the 429 too, with remaining pinned at 0.
 func TestRedisRateLimitHeadersOnThrottle(t *testing.T) {
 	_, client := newTestRedis(t)
-	mw := RedisRateLimiter(client, RedisRateLimiterConfig{PerUser: 1, PerWorkspace: 1000})
+	mw := RedisRateLimiter(context.Background(), client, RedisRateLimiterConfig{PerUser: 1, PerWorkspace: 1000})
 	handler := mw(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	}))
@@ -95,7 +96,7 @@ func TestRedisRateLimitHeadersOnThrottle(t *testing.T) {
 // Limit flip (e.g. 5 -> 10) when the deployment swaps backing store.
 func TestInMemoryRateLimitHeaders(t *testing.T) {
 	const perUser = 5
-	mw := RateLimiter(RateLimitConfig{PerUser: perUser, PerWorkspace: 1000})
+	mw := RateLimiter(context.Background(), RateLimitConfig{PerUser: perUser, PerWorkspace: 1000})
 	handler := mw(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	}))
@@ -119,13 +120,13 @@ func TestRateLimitHeadersConsistentAcrossBackends(t *testing.T) {
 	user, ws := uuid.New(), uuid.New()
 
 	memRec := httptest.NewRecorder()
-	RateLimiter(RateLimitConfig{PerUser: perUser, PerWorkspace: 1000})(
+	RateLimiter(context.Background(), RateLimitConfig{PerUser: perUser, PerWorkspace: 1000})(
 		http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) }),
 	).ServeHTTP(memRec, authedRequest(user, ws))
 
 	_, client := newTestRedis(t)
 	redisRec := httptest.NewRecorder()
-	RedisRateLimiter(client, RedisRateLimiterConfig{PerUser: perUser, PerWorkspace: 1000})(
+	RedisRateLimiter(context.Background(), client, RedisRateLimiterConfig{PerUser: perUser, PerWorkspace: 1000})(
 		http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) }),
 	).ServeHTTP(redisRec, authedRequest(user, ws))
 
