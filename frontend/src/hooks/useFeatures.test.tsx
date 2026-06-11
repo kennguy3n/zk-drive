@@ -41,6 +41,7 @@ describe("useFeatures", () => {
   afterEach(() => {
     cleanup();
     vi.restoreAllMocks();
+    vi.useRealTimers();
   });
 
   it("fetches features on mount and gates by the returned map", async () => {
@@ -59,16 +60,47 @@ describe("useFeatures", () => {
     expect(screen.getByTestId("folders").textContent).toBe("true");
   });
 
-  it("fails closed when the fetch errors (no flags enabled)", async () => {
+  it("retries then fails closed when the fetch keeps erroring", async () => {
+    vi.useFakeTimers();
     getFeatures.mockRejectedValue(new Error("boom"));
     render(
       <FeaturesProvider>
         <Probe />
       </FeaturesProvider>,
     );
-    await waitFor(() => expect(screen.getByTestId("loaded").textContent).toBe("true"));
+    // Drive the initial attempt plus all backoff retries to completion.
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+    // Initial attempt + RETRY_DELAYS_MS.length (3) retries = 4 calls.
+    expect(getFeatures).toHaveBeenCalledTimes(4);
+    expect(screen.getByTestId("loaded").textContent).toBe("true");
     expect(screen.getByTestId("sso").textContent).toBe("false");
     expect(screen.getByTestId("folders").textContent).toBe("false");
+  });
+
+  it("recovers via retry after a transient fetch failure", async () => {
+    vi.useFakeTimers();
+    getFeatures
+      .mockRejectedValueOnce(new Error("transient"))
+      .mockResolvedValueOnce({
+        tier: "business",
+        features: { folders: true, sso: true },
+      });
+    render(
+      <FeaturesProvider>
+        <Probe />
+      </FeaturesProvider>,
+    );
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+    // First attempt rejected, second (after one backoff) succeeded.
+    expect(getFeatures).toHaveBeenCalledTimes(2);
+    expect(screen.getByTestId("loaded").textContent).toBe("true");
+    expect(screen.getByTestId("tier").textContent).toBe("business");
+    expect(screen.getByTestId("sso").textContent).toBe("true");
+    expect(screen.getByTestId("folders").textContent).toBe("true");
   });
 
   it("ignores a slow features response that resolves after logout", async () => {

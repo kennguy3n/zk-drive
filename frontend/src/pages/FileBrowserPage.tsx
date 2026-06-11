@@ -58,6 +58,9 @@ export default function FileBrowserPage() {
   // openRef lets the onboarding "Upload your first file" card trigger the
   // UploadButton's hidden file picker without duplicating upload logic.
   const uploadOpenRef = useRef<(() => void) | null>(null);
+  // Monotonic sequence used by refresh() to discard superseded responses
+  // (out-of-order folder-navigation / mutation refetch races).
+  const refreshSeq = useRef(0);
 
   const [folder, setFolder] = useState<Folder | null>(null);
   const [subfolders, setSubfolders] = useState<Folder[]>([]);
@@ -90,22 +93,33 @@ export default function FileBrowserPage() {
   }, []);
 
   const refresh = useCallback(async () => {
+    // Supersession guard: rapid folder navigation (or a mutation refetch
+    // racing a navigation) can leave two requests in flight. Without this,
+    // an out-of-order earlier response would write stale contents to state
+    // (the skeleton hides the flash, but the stale data still lands). Bump a
+    // sequence per call and drop any response that a newer call has
+    // superseded so only the latest view's data is ever committed.
+    const seq = ++refreshSeq.current;
     setError(null);
     try {
       if (currentFolderID) {
         const { folder: f, children, files: f2 } = await getFolderContents(currentFolderID);
+        if (seq !== refreshSeq.current) return;
         setFolder(f);
         setSubfolders(children);
         setFiles(f2);
       } else {
+        const roots = await listFolders(null);
+        if (seq !== refreshSeq.current) return;
         setFolder(null);
-        setSubfolders(await listFolders(null));
+        setSubfolders(roots);
         // Root view: backend doesn't expose a file listing for the
         // null folder, so we show an empty table and nudge the user
         // to open a subfolder.
         setFiles([]);
       }
     } catch (err) {
+      if (seq !== refreshSeq.current) return;
       setError(translateApiError(err, t));
     }
   }, [currentFolderID, t]);

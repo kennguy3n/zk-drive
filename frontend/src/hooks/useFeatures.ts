@@ -31,6 +31,14 @@ export interface FeaturesState {
 
 const FeaturesContext = createContext<FeaturesState | null>(null);
 
+// Bounded exponential backoff for the initial feature fetch. A transient
+// network hiccup at login would otherwise leave every gated surface hidden
+// (fail-closed) until a manual reload — unacceptable for non-technical SME
+// admins (no-ops). We retry a few times before settling into the fail-closed
+// error state; the reqSeq supersession check aborts any pending retry the
+// moment the token changes (logout / login into another workspace).
+const RETRY_DELAYS_MS = [500, 1500, 4000];
+
 // FeaturesProvider fetches GET /api/features whenever an authenticated
 // session appears (login) and clears the cache on logout. It gates
 // progressive feature disclosure across the app: consumers call
@@ -68,21 +76,35 @@ export function FeaturesProvider({ children }: { children: ReactNode }) {
     const seq = ++reqSeq.current;
     setLoading(true);
     setError(false);
-    try {
-      const resp = await getFeatures();
-      if (seq !== reqSeq.current) return; // superseded
-      setFeatures(resp.features);
-      setTier(resp.tier);
-      setLoaded(true);
-    } catch {
-      if (seq !== reqSeq.current) return;
-      // Fail-closed: drop to an empty map so only always-on baseline
-      // surfaces (which the caller may treat as defaults) render.
-      setFeatures({});
-      setError(true);
-      setLoaded(true);
-    } finally {
-      if (seq === reqSeq.current) setLoading(false);
+    // Retry on transient failure with bounded backoff, keeping loading=true
+    // (so the UI shows skeletons, not the error state) until we either
+    // succeed or exhaust the attempts. Each await re-checks supersession so a
+    // logout / token change during a backoff window cancels the loop.
+    for (let attempt = 0; ; attempt++) {
+      try {
+        const resp = await getFeatures();
+        if (seq !== reqSeq.current) return; // superseded
+        setFeatures(resp.features);
+        setTier(resp.tier);
+        setError(false);
+        setLoaded(true);
+        setLoading(false);
+        return;
+      } catch {
+        if (seq !== reqSeq.current) return; // superseded
+        if (attempt >= RETRY_DELAYS_MS.length) {
+          // Retries exhausted — fail closed: drop to an empty map so only
+          // always-on baseline surfaces render, and expose error so the UI
+          // can offer a manual retry affordance.
+          setFeatures({});
+          setError(true);
+          setLoaded(true);
+          setLoading(false);
+          return;
+        }
+        await new Promise((r) => setTimeout(r, RETRY_DELAYS_MS[attempt]));
+        if (seq !== reqSeq.current) return; // superseded during backoff
+      }
     }
   }, [token]);
 
