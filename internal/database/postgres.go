@@ -283,6 +283,20 @@ func RequireMinMigrationVersionFor(ctx context.Context, pool *pgxpool.Pool, requ
 // them in lexicographic order and record applied versions in a
 // schema_migrations table.
 //
+// Version identity is the FULL filename stem (e.g. "041_workspace_features"),
+// not the leading numeric prefix. schema_migrations.version is that whole
+// string and is the unit of "applied" tracking. A consequence — and a
+// deliberate one — is that the numeric prefix need NOT be globally unique:
+// independent feature branches developed in parallel routinely land
+// migrations that share a prefix (e.g. "041_setup_state" alongside
+// "041_workspace_features"). Because they are distinct version strings that
+// touch disjoint objects, each applies exactly once and the lexicographic
+// order among same-prefix files is stable. Do NOT "fix" a duplicated prefix
+// by renumbering an already-merged migration: the rename produces a new,
+// unseen version string, so every database that already applied the old name
+// would re-run the body and fail (e.g. "relation ... already exists").
+// TestMigrationVersionsAreFilenameKeyed pins this invariant.
+//
 // Concurrency: Migrate acquires a session-scoped Postgres advisory
 // lock keyed on migrateAdvisoryLockKey on a dedicated connection
 // before doing any work. Two Migrate calls against the same database
