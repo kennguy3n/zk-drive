@@ -3,16 +3,27 @@ package database
 import (
 	"os"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"sort"
 	"strings"
 	"testing"
 )
 
+// migrationFilePattern is the canonical naming contract for every file
+// in migrations/: a zero-padded 3-digit version prefix, an underscore,
+// a lower-snake-case name, and a .up.sql / .down.sql suffix. Migrate()
+// derives schema_migrations.version from the stem, so a malformed name
+// (wrong padding, uppercase, stray characters) would either sort into
+// the wrong apply position or produce a surprising version string.
+var migrationFilePattern = regexp.MustCompile(`^([0-9]{3})_[a-z0-9_]+\.(up|down)\.sql$`)
+
 // migrationsDirForTest locates the repo-root migrations/ directory
 // relative to this source file (internal/database/ -> ../../migrations).
 // Using runtime.Caller keeps the test independent of the working
-// directory `go test` happens to run from.
+// directory `go test` happens to run from. (If this repo ever moves to
+// a hermetic build that relocates the test binary, switch to
+// go:embed migrations/* and drop this helper.)
 func migrationsDirForTest(t *testing.T) string {
 	t.Helper()
 	_, file, _, ok := runtime.Caller(0)
@@ -27,7 +38,9 @@ func migrationsDirForTest(t *testing.T) string {
 	return dir
 }
 
-func migrationFiles(t *testing.T, suffix string) []string {
+// migrationFileNames returns every entry in migrations/ (both
+// directions), sorted, so callers can validate the directory as a whole.
+func migrationFileNames(t *testing.T) []string {
 	t.Helper()
 	entries, err := os.ReadDir(migrationsDirForTest(t))
 	if err != nil {
@@ -35,12 +48,32 @@ func migrationFiles(t *testing.T, suffix string) []string {
 	}
 	var out []string
 	for _, e := range entries {
-		if !e.IsDir() && strings.HasSuffix(e.Name(), suffix) {
+		if !e.IsDir() {
 			out = append(out, e.Name())
 		}
 	}
 	sort.Strings(out)
 	return out
+}
+
+// TestMigrationFilenamesWellFormed asserts every file in migrations/
+// matches the <NNN>_<lower_snake>.{up,down}.sql contract. Unlike the
+// stem-uniqueness check (which the filesystem makes structurally
+// impossible to violate), this guard is genuinely falsifiable: a
+// migration committed as `41_foo.up.sql`, `041-foo.up.sql`, or
+// `041_Foo.up.SQL` fails here, before it lands and silently sorts into
+// the wrong apply order or skews the prefix scheme.
+func TestMigrationFilenamesWellFormed(t *testing.T) {
+	names := migrationFileNames(t)
+	if len(names) == 0 {
+		t.Fatal("no migration files found")
+	}
+	for _, name := range names {
+		if !migrationFilePattern.MatchString(name) {
+			t.Errorf("migration %q does not match %s — expected e.g. 041_workspace_features.up.sql",
+				name, migrationFilePattern.String())
+		}
+	}
 }
 
 // TestMigrationVersionsAreFilenameKeyed pins the invariant that
@@ -51,78 +84,69 @@ func migrationFiles(t *testing.T, suffix string) []string {
 // prefix (e.g. 041_setup_state + 041_workspace_features) without
 // colliding.
 //
-// The test asserts the two properties that make that safe:
-//  1. Every .up.sql maps to a UNIQUE version string. If this ever
-//     fails, two migrations would map to the same schema_migrations row
-//     and the second would be silently skipped on a fresh database.
-//  2. Numeric-prefix collisions are explicitly TOLERATED — we assert the
-//     uniqueness holds on full stems even when prefixes repeat, so a
-//     well-meaning contributor who "dedupes" prefixes by renumbering an
-//     already-merged migration is steered here (and to Migrate's doc)
-//     to understand why that breaks already-migrated databases.
+// Two properties make that safe and are asserted here:
+//  1. Stem uniqueness within each direction. A directory can't hold two
+//     identically-named files, so this is documentation of intent (it
+//     steers a contributor who "dedupes" prefixes by renumbering a
+//     merged migration here, and to Migrate's doc, to learn why that
+//     re-runs an already-applied body and breaks live databases).
+//  2. The .up and .down stems form the SAME set — every forward
+//     migration is reversible and no rollback is orphaned. This one is
+//     falsifiable: add an .up without its .down (or vice versa) and it
+//     fails. It folds the old separate parity check into the version
+//     space so "version identity" and "reversibility" are pinned
+//     together.
 func TestMigrationVersionsAreFilenameKeyed(t *testing.T) {
-	ups := migrationFiles(t, ".up.sql")
+	ups := stemSet(t, ".up.sql")
+	downs := stemSet(t, ".down.sql")
+
 	if len(ups) == 0 {
 		t.Fatal("no .up.sql migrations found")
 	}
 
-	seenVersion := make(map[string]string, len(ups))
+	// (1) Document the filename-keyed scheme and surface tolerated
+	// prefix collisions in -v output.
 	prefixCounts := make(map[string]int, len(ups))
-	for _, name := range ups {
-		version := strings.TrimSuffix(name, ".up.sql")
-		if prev, dup := seenVersion[version]; dup {
-			t.Errorf("duplicate migration version %q from files %q and %q: "+
-				"version identity is the full filename stem and must be unique",
-				version, prev, name)
-		}
-		seenVersion[version] = name
-
-		prefix, _, found := strings.Cut(version, "_")
+	for stem := range ups {
+		prefix, _, found := strings.Cut(stem, "_")
 		if !found || prefix == "" {
-			t.Errorf("migration %q does not follow <version>_<name>.up.sql", name)
+			t.Errorf("migration stem %q does not contain a <version>_<name> separator", stem)
 			continue
 		}
 		prefixCounts[prefix]++
 	}
-
-	// Document (and lock in) that prefix collisions are expected and
-	// safe under filename-keyed tracking. This is informational, not a
-	// failure: it surfaces in -v output so the scheme is visible.
 	for prefix, n := range prefixCounts {
 		if n > 1 {
 			t.Logf("numeric prefix %q is shared by %d migrations — tolerated: "+
 				"each is tracked by its full version string", prefix, n)
 		}
 	}
+
+	// (2) up and down version spaces must be identical sets.
+	for stem := range ups {
+		if _, ok := downs[stem]; !ok {
+			t.Errorf("migration %q has no matching %q rollback file", stem+".up.sql", stem+".down.sql")
+		}
+	}
+	for stem := range downs {
+		if _, ok := ups[stem]; !ok {
+			t.Errorf("rollback %q has no matching %q forward migration", stem+".down.sql", stem+".up.sql")
+		}
+	}
 }
 
-// TestMigrationUpDownParity asserts every forward migration has a
-// matching rollback file and vice versa. A missing .down.sql would make
-// a migration irreversible (no clean rollback path during an incident);
-// a .down.sql with no .up.sql is dead weight that signals a botched
-// rename. Both are cheap to catch at the filename layer before they
-// reach an operator mid-rollback.
-func TestMigrationUpDownParity(t *testing.T) {
-	ups := migrationFiles(t, ".up.sql")
-	downs := migrationFiles(t, ".down.sql")
-
-	downSet := make(map[string]struct{}, len(downs))
-	for _, d := range downs {
-		downSet[strings.TrimSuffix(d, ".down.sql")] = struct{}{}
-	}
-	upSet := make(map[string]struct{}, len(ups))
-	for _, u := range ups {
-		upSet[strings.TrimSuffix(u, ".up.sql")] = struct{}{}
-	}
-
-	for v := range upSet {
-		if _, ok := downSet[v]; !ok {
-			t.Errorf("migration %q has no matching %q (.down.sql) rollback file", v+".up.sql", v+".down.sql")
+// stemSet reads migrations/ and returns the set of version stems for
+// files with the given suffix (e.g. "041_workspace_features" for
+// ".up.sql"). Because os.ReadDir yields unique names, a duplicate stem
+// is impossible — the map is the natural representation of the version
+// space for set comparison.
+func stemSet(t *testing.T, suffix string) map[string]struct{} {
+	t.Helper()
+	out := map[string]struct{}{}
+	for _, name := range migrationFileNames(t) {
+		if strings.HasSuffix(name, suffix) {
+			out[strings.TrimSuffix(name, suffix)] = struct{}{}
 		}
 	}
-	for v := range downSet {
-		if _, ok := upSet[v]; !ok {
-			t.Errorf("rollback %q has no matching %q (.up.sql) — orphaned down migration", v+".down.sql", v+".up.sql")
-		}
-	}
+	return out
 }
