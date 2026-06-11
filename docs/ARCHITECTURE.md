@@ -243,6 +243,41 @@ per-request check stays effectively read-only on the hot path.
 
 - `GET /api/search?q=...`
 
+### 3.6a Feature Flags (Progressive Disclosure)
+
+- `GET /api/features` — returns the active feature set for the caller's
+  workspace plus the resolved billing tier. The frontend (`useFeatures`
+  hook) fetches this once on login and gates UI surfaces behind it so
+  features outside the workspace's tier never render.
+
+  Response:
+
+  ```json
+  {
+    "tier": "business",
+    "features": { "folders": true, "sso": true, "strict_zk": false, "...": false }
+  }
+  ```
+
+  `features` always contains an entry for **every** known feature key
+  (see `internal/feature/flags.go` `AllFeatures`), so the client can treat
+  a missing/false key uniformly as "hidden". The map is computed as the
+  tier defaults overlaid with any per-workspace overrides stored in the
+  `workspace_features` table:
+
+  - **Free / Starter** (baseline): `folders`, `files`, `share_links`,
+    `basic_search`.
+  - **Business** adds: `sso`, `audit_log`, `retention_policies`,
+    `onlyoffice`, `client_rooms`, `webhooks`, `kchat`.
+  - **Secure Business** adds: `strict_zk`, `cmk`, `data_residency`,
+    `ai_summaries`.
+
+  Tier resolution fails closed to Free on any transient billing-lookup
+  error, and unknown feature keys are always disabled, so a paid surface
+  is never exposed to an unentitled workspace. Requires authentication
+  (401 otherwise); the response is tenant-scoped via row-level security on
+  `workspace_features`.
+
 ### 3.7 Admin
 
 - `GET /api/admin/users`

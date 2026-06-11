@@ -1537,4 +1537,25 @@ export function tearDownPushSubscription(token: string | null): void {
     .catch(() => undefined);
 }
 
+// --- Feature flags -------------------------------------------------------
+
+// FeaturesResponse mirrors api/drive GET /api/features. `features` is the
+// complete enabled/disabled map across every known feature key; `tier` is
+// the workspace's resolved billing tier.
+export interface FeaturesResponse {
+  tier: string;
+  features: Record<string, boolean>;
+}
+
+// getFeatures fetches the active feature set for the current workspace.
+// Called once on login by the useFeatures hook to gate progressive
+// feature disclosure.
+export async function getFeatures(): Promise<FeaturesResponse> {
+  const { data } = await client.get<FeaturesResponse>("/features");
+  return {
+    tier: typeof data?.tier === "string" ? data.tier : "free",
+    features: data?.features ?? {},
+  };
+}
+
 export default client;

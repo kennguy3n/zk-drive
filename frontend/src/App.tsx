@@ -6,6 +6,7 @@ import CallbackPage from "./pages/CallbackPage";
 import FileBrowserPage from "./pages/FileBrowserPage";
 import RequireAuth from "./components/RequireAuth";
 import InstallPrompt from "./components/InstallPrompt";
+import { PagePreviewSkeleton } from "./components/ui/Skeleton";
 import { fetchSetupStatus } from "./api/client";
 import { useAuth } from "./hooks/useAuth";
 import { useAppConfig } from "./hooks/useAppConfig";
@@ -114,7 +115,7 @@ export default function App() {
   return (
     <>
       <InstallPrompt />
-      <Suspense fallback={<div>Loading...</div>}>
+      <Suspense fallback={<PagePreviewSkeleton />}>
         <Routes>
           <Route path="/login" element={<LoginPage />} />
           {/* iam-core OAuth2 redirect target. Present only in iam-core

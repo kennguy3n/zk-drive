@@ -28,6 +28,7 @@ import (
 	"github.com/kennguy3n/zk-drive/internal/collab"
 	"github.com/kennguy3n/zk-drive/internal/document"
 	"github.com/kennguy3n/zk-drive/internal/email"
+	"github.com/kennguy3n/zk-drive/internal/feature"
 	"github.com/kennguy3n/zk-drive/internal/file"
 	"github.com/kennguy3n/zk-drive/internal/folder"
 	"github.com/kennguy3n/zk-drive/internal/jobs"
@@ -100,7 +101,13 @@ type Handler struct {
 	onlyOfficeStreamSaveLimit int
 	tagSuggest                TagSuggester
 	queryExpand               QueryExpander
-	respCache                 *responsecache.Cache
+	// features resolves the active feature set for a workspace
+	// (progressive feature disclosure). A nil *feature.Service is a
+	// valid receiver that resolves every workspace to the Free-tier
+	// defaults, so GET /api/features still serves the baseline set when
+	// the service is not wired.
+	features  *feature.Service
+	respCache *responsecache.Cache
 }
 
 // TagSuggester is the narrow interface the drive handler needs from
@@ -321,6 +328,15 @@ func (h *Handler) WithQueryExpander(e QueryExpander) *Handler {
 		return h
 	}
 	h.queryExpand = e
+	return h
+}
+
+// WithFeatures wires the progressive-feature-disclosure service that
+// backs GET /api/features. A nil service leaves the handler's nil-safe
+// *feature.Service in place, which resolves every workspace to the
+// Free-tier defaults.
+func (h *Handler) WithFeatures(f *feature.Service) *Handler {
+	h.features = f
 	return h
 }
 

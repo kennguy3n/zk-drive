@@ -22,8 +22,19 @@ import {
 } from "../api/client";
 import { translateApiError } from "../api/errors";
 import { useAuth } from "../hooks/useAuth";
+import { useFeatures } from "../hooks/useFeatures";
+import { Feature } from "../features/featureKeys";
+import { Skeleton } from "../components/ui/Skeleton";
 
 type Tab = "users" | "audit" | "retention" | "storage" | "health";
+
+// Admin tabs that require a feature flag. "users" and "storage" are baseline
+// admin surfaces (always available to an admin); the rest are progressive
+// disclosure tied to billing tier.
+const TAB_FEATURE: Partial<Record<Tab, string>> = {
+  audit: Feature.AuditLog,
+  retention: Feature.RetentionPolicies,
+};
 
 // AdminPage is the single-page admin console. Sub-views are tab-switched
 // inline (rather than separate routes) because the underlying data sets
@@ -32,8 +43,20 @@ type Tab = "users" | "audit" | "retention" | "storage" | "health";
 // console localizes alongside the rest of the SPA.
 export default function AdminPage() {
   const { isAdmin, logout } = useAuth();
+  const { isEnabled, loaded: featuresLoaded } = useFeatures();
   const { t } = useTranslation();
   const [tab, setTab] = useState<Tab>("users");
+
+  const visibleTabs = (["users", "audit", "retention", "storage", "health"] as Tab[]).filter(
+    (id) => {
+      const feature = TAB_FEATURE[id];
+      return !feature || isEnabled(feature);
+    },
+  );
+  // If the active tab gets gated out (e.g. tier downgrade, or it was selected
+  // before features resolved), fall back to the first visible tab so we never
+  // render a hidden sub-view.
+  const activeTab = visibleTabs.includes(tab) ? tab : visibleTabs[0];
 
   if (!isAdmin) {
     return (
@@ -64,9 +87,11 @@ export default function AdminPage() {
           <Link to="/admin/encryption" style={{ marginRight: 16 }}>
             {t("admin.encryption")}
           </Link>
-          <Link to="/admin/kchat" style={{ marginRight: 16 }}>
-            {t("nav.kchatRooms")}
-          </Link>
+          {isEnabled(Feature.KChat) ? (
+            <Link to="/admin/kchat" style={{ marginRight: 16 }}>
+              {t("nav.kchatRooms")}
+            </Link>
+          ) : null}
           <Link to="/billing" style={{ marginRight: 16 }}>
             {t("nav.billing")}
           </Link>
@@ -83,28 +108,50 @@ export default function AdminPage() {
           borderBottom: "1px solid #e5e7eb",
           marginBottom: 16,
         }}
+        role={featuresLoaded ? undefined : "status"}
+        aria-label={featuresLoaded ? undefined : t("common.loading")}
       >
-        {(["users", "audit", "retention", "storage", "health"] as Tab[]).map((id) => (
-          <button
-            key={id}
-            onClick={() => setTab(id)}
-            style={{
-              padding: "8px 12px",
-              background: tab === id ? "#eff6ff" : "transparent",
-              border: "none",
-              borderBottom: tab === id ? "2px solid #2563eb" : "2px solid transparent",
-              cursor: "pointer",
-            }}
-          >
-            {t(`admin.tab.${id}`)}
-          </button>
-        ))}
+        {featuresLoaded
+          ? visibleTabs.map((id) => (
+              <button
+                key={id}
+                onClick={() => setTab(id)}
+                style={{
+                  padding: "8px 12px",
+                  background: activeTab === id ? "#eff6ff" : "transparent",
+                  border: "none",
+                  borderBottom:
+                    activeTab === id
+                      ? "2px solid #2563eb"
+                      : "2px solid transparent",
+                  cursor: "pointer",
+                }}
+              >
+                {t(`admin.tab.${id}`)}
+              </button>
+            ))
+          : // Until /api/features resolves, isEnabled() is fail-closed (false)
+            // for every gated tab, so rendering the real strip now would show
+            // only the baseline tabs and then visibly pop the audit/retention
+            // tabs in once features load. Show a same-height skeleton strip
+            // instead so the final tabs replace placeholders rather than
+            // appearing from nothing. Size it to visibleTabs.length — which,
+            // while loading, is exactly the always-on baseline tabs (users,
+            // storage, health) — so a Free workspace settles with zero layout
+            // shift; a higher tier reveals its extra tabs additively rather
+            // than the strip shrinking from a hardcoded count.
+            Array.from({ length: visibleTabs.length }).map((_, i) => (
+              <Skeleton
+                key={i}
+                style={{ height: 34, width: 84, borderRadius: 6 }}
+              />
+            ))}
       </nav>
-      {tab === "users" && <UsersTab />}
-      {tab === "audit" && <AuditTab />}
-      {tab === "retention" && <RetentionTab />}
-      {tab === "storage" && <StorageTab />}
-      {tab === "health" && <HealthTab />}
+      {activeTab === "users" && <UsersTab />}
+      {activeTab === "audit" && <AuditTab />}
+      {activeTab === "retention" && <RetentionTab />}
+      {activeTab === "storage" && <StorageTab />}
+      {activeTab === "health" && <HealthTab />}
     </div>
   );
 }

@@ -9,11 +9,33 @@ import "./index.css";
 // shows raw translation keys until i18next finishes its async init
 // pass.
 import "./i18n";
+import { ThemeProvider } from "./theme/ThemeProvider";
+import { ToastProvider } from "./components/ui/toast";
+import { FeaturesProvider } from "./hooks/useFeatures";
+import { CommandPaletteProvider } from "./components/CommandPalette";
+import { OfflineIndicator } from "./components/OfflineIndicator";
 
+// Provider order (outermost first):
+//   ThemeProvider          — applies the .dark class + tokens app-wide.
+//   ToastProvider          — imperative toast API for any descendant.
+//   FeaturesProvider       — fetches /api/features on login for gating.
+//   CommandPaletteProvider — global Cmd+K palette (needs the router +
+//                            auth + features above it).
+// These are mounted here rather than inside App.tsx so the iam-core
+// workstream's edits to App.tsx merge cleanly.
 ReactDOM.createRoot(document.getElementById("root")!).render(
   <React.StrictMode>
     <BrowserRouter>
-      <App />
+      <ThemeProvider>
+        <ToastProvider>
+          <FeaturesProvider>
+            <CommandPaletteProvider>
+              <OfflineIndicator />
+              <App />
+            </CommandPaletteProvider>
+          </FeaturesProvider>
+        </ToastProvider>
+      </ThemeProvider>
     </BrowserRouter>
   </React.StrictMode>,
 );

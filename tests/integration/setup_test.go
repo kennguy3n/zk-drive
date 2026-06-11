@@ -32,6 +32,7 @@ import (
 	"github.com/kennguy3n/zk-drive/internal/billing"
 	"github.com/kennguy3n/zk-drive/internal/database"
 	"github.com/kennguy3n/zk-drive/internal/fabric"
+	"github.com/kennguy3n/zk-drive/internal/feature"
 	"github.com/kennguy3n/zk-drive/internal/file"
 	"github.com/kennguy3n/zk-drive/internal/folder"
 	"github.com/kennguy3n/zk-drive/internal/health"
@@ -329,6 +330,10 @@ func setupEnv(t *testing.T) *testEnv {
 		WithPreviews(previewRepo).
 		WithAudit(auditSvc).
 		WithBilling(billingSvc).
+		WithFeatures(feature.NewService(
+			feature.NewPostgresRepository(pool),
+			feature.NewBillingTierResolver(billingSvc),
+		)).
 		WithWebhooks(webhookCap).
 		WithTagSuggester(tagSuggestSvc).
 		WithQueryExpander(queryExpandSvc)
@@ -501,6 +506,8 @@ func setupEnv(t *testing.T) *testEnv {
 				PerUser:      0,
 				PerWorkspace: 0,
 			}))
+
+			r.Get("/features", driveHandler.GetFeatures)
 
 			// Resolved-identity endpoint. Mirrors cmd/server/main.go
 			// so the integration harness exercises the same auth-mode-

@@ -1,5 +1,6 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
+import { Search as SearchIcon } from "lucide-react";
 import { Trans, useTranslation } from "react-i18next";
 import FolderTree from "../components/FolderTree";
 import FileList from "../components/FileList";
@@ -29,6 +30,12 @@ import {
   type Folder,
 } from "../api/client";
 import { useAuth } from "../hooks/useAuth";
+import { useFeatures } from "../hooks/useFeatures";
+import { Feature } from "../features/featureKeys";
+import { ThemeToggle } from "../components/ThemeToggle";
+import { useCommandPalette } from "../components/CommandPalette";
+import { OnboardingEmptyState } from "../components/OnboardingEmptyState";
+import { FileListSkeleton } from "../components/ui/Skeleton";
 
 // shareTarget is the resource currently being shared via ShareDialog.
 // Kept discriminated-union so the dialog can render the right noun
@@ -46,11 +53,27 @@ export default function FileBrowserPage() {
   const nav = useNavigate();
   const { t } = useTranslation();
   const { logout, isAdmin } = useAuth();
+  const { isEnabled } = useFeatures();
+  const palette = useCommandPalette();
+  // openRef lets the onboarding "Upload your first file" card trigger the
+  // UploadButton's hidden file picker without duplicating upload logic.
+  const uploadOpenRef = useRef<(() => void) | null>(null);
+  // Monotonic sequence used by refresh() to discard superseded responses
+  // (out-of-order folder-navigation / mutation refetch races).
+  const refreshSeq = useRef(0);
 
   const [folder, setFolder] = useState<Folder | null>(null);
   const [subfolders, setSubfolders] = useState<Folder[]>([]);
   const [files, setFiles] = useState<FileItem[]>([]);
   const [error, setError] = useState<string | null>(null);
+  // True while the listing for the current view is loading (initial mount
+  // and folder navigation). Gates the onboarding cards and the file/folder
+  // sections so neither flashes before real data arrives: the arrays start
+  // empty, which would otherwise read as "empty workspace" on the first
+  // render. Only the navigation effect toggles this — in-place refetches
+  // after a mutation (rename/delete/move) keep the current list visible
+  // rather than blinking it back to a skeleton.
+  const [loading, setLoading] = useState(true);
   const [shareTarget, setShareTarget] = useState<ShareTarget | null>(null);
   const [selectedFiles, setSelectedFiles] = useState<Set<string>>(new Set());
   const [createFolderOpen, setCreateFolderOpen] = useState(false);
@@ -70,28 +93,48 @@ export default function FileBrowserPage() {
   }, []);
 
   const refresh = useCallback(async () => {
+    // Supersession guard: rapid folder navigation (or a mutation refetch
+    // racing a navigation) can leave two requests in flight. Without this,
+    // an out-of-order earlier response would write stale contents to state
+    // (the skeleton hides the flash, but the stale data still lands). Bump a
+    // sequence per call and drop any response that a newer call has
+    // superseded so only the latest view's data is ever committed.
+    const seq = ++refreshSeq.current;
     setError(null);
     try {
       if (currentFolderID) {
         const { folder: f, children, files: f2 } = await getFolderContents(currentFolderID);
+        if (seq !== refreshSeq.current) return;
         setFolder(f);
         setSubfolders(children);
         setFiles(f2);
       } else {
+        const roots = await listFolders(null);
+        if (seq !== refreshSeq.current) return;
         setFolder(null);
-        setSubfolders(await listFolders(null));
+        setSubfolders(roots);
         // Root view: backend doesn't expose a file listing for the
         // null folder, so we show an empty table and nudge the user
         // to open a subfolder.
         setFiles([]);
       }
     } catch (err) {
+      if (seq !== refreshSeq.current) return;
       setError(translateApiError(err, t));
     }
   }, [currentFolderID, t]);
 
+  // Initial load + folder navigation: drive the loading flag here (not in
+  // refresh) so post-mutation refetches don't toggle it and blink the list.
   useEffect(() => {
-    refresh();
+    let cancelled = false;
+    setLoading(true);
+    refresh().finally(() => {
+      if (!cancelled) setLoading(false);
+    });
+    return () => {
+      cancelled = true;
+    };
   }, [refresh]);
 
   // Probe the office-editing feature flag once on mount. A failure
@@ -127,6 +170,19 @@ export default function FileBrowserPage() {
     refresh();
   };
 
+  // First-run experience: at the workspace root with nothing in it yet, show
+  // the onboarding action cards instead of empty folder/file sections. The
+  // explicit files.length check keeps this correct if root-level file listing
+  // is ever added (today files is [] at root). Gated on !loading so a
+  // workspace that already has content never flashes the cards before its
+  // first listing resolves.
+  const showOnboarding =
+    !loading &&
+    !currentFolderID &&
+    subfolders.length === 0 &&
+    files.length === 0 &&
+    !error;
+
   return (
     <div style={{ display: "flex", minHeight: "100vh" }}>
       <FolderTree currentFolderID={currentFolderID} />
@@ -142,14 +198,25 @@ export default function FileBrowserPage() {
           <Breadcrumb folder={folder} />
           <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
             <SearchBar />
+            <button
+              type="button"
+              onClick={() => palette.open()}
+              aria-label={t("search.commandPaletteAria", { defaultValue: "Search (Ctrl+K)" })}
+              title="Ctrl+K"
+              className="inline-flex h-9 items-center gap-2 rounded-lg border border-border bg-surface px-3 text-sm text-muted hover:bg-surface-2"
+            >
+              <SearchIcon className="h-4 w-4" aria-hidden="true" />
+              <kbd className="hidden rounded border border-border px-1.5 text-xs sm:inline">⌘K</kbd>
+            </button>
+            <ThemeToggle />
             <EnableNotificationsButton style={btn} />
             <button onClick={handleCreateFolder} style={btn}>{t("drive.newFolder")}</button>
-            {isAdmin ? (
+            {isAdmin && isEnabled(Feature.ClientRooms) ? (
               <button onClick={() => setTemplateDialogOpen(true)} style={btn}>
                 {t("drive.createFromTemplate")}
               </button>
             ) : null}
-            <UploadButton folderID={currentFolderID} onUploaded={() => refresh()} />
+            <UploadButton folderID={currentFolderID} onUploaded={() => refresh()} openRef={uploadOpenRef} />
             {currentFolderID ? (
               <Link
                 to={`/drive/folder/${currentFolderID}/documents`}
@@ -192,7 +259,25 @@ export default function FileBrowserPage() {
           <div style={{ color: "#b91c1c", marginBottom: 16, fontSize: 13 }}>{error}</div>
         ) : null}
 
-        {subfolders.length > 0 ? (
+        {/*
+          First listing in flight: show a skeleton instead of any content
+          branch. Without this, the !loading guard on showOnboarding means
+          the files section would briefly render FileList's "No files"
+          empty state before the onboarding cards (or real rows) take its
+          place — trading one flash for another. The skeleton also keeps
+          layout stable (CLS 0) on slower connections.
+        */}
+        {loading && !error ? <FileListSkeleton /> : null}
+
+        {!loading && showOnboarding ? (
+          <OnboardingEmptyState
+            onUpload={() => uploadOpenRef.current?.()}
+            onCreateFolder={handleCreateFolder}
+            onInvite={isAdmin ? () => nav("/admin") : undefined}
+          />
+        ) : null}
+
+        {!loading && !showOnboarding && subfolders.length > 0 ? (
           <section style={{ marginBottom: 24 }}>
             <h2 style={{ fontSize: 14, color: "#6b7280", textTransform: "uppercase", margin: "8px 0" }}>
               {t("drive.folders")}
@@ -276,6 +361,7 @@ export default function FileBrowserPage() {
           </section>
         ) : null}
 
+        {!loading && !showOnboarding ? (
         <section>
           <h2 style={{ fontSize: 14, color: "#6b7280", textTransform: "uppercase", margin: "8px 0" }}>
             {t("drive.files")}
@@ -358,11 +444,16 @@ export default function FileBrowserPage() {
               refresh();
             }}
             onShare={(f) => setShareTarget({ type: "file", value: f })}
-            onEdit={onlyOfficeEnabled ? (f) => setEditorFile(f) : undefined}
+            onEdit={
+              onlyOfficeEnabled && isEnabled(Feature.OnlyOffice)
+                ? (f) => setEditorFile(f)
+                : undefined
+            }
             selectedIDs={selectedFiles}
             onToggleSelect={toggleSelect}
           />
         </section>
+        ) : null}
       </main>
       {shareTarget ? (
         <ShareDialog resource={shareTarget} onClose={() => setShareTarget(null)} />

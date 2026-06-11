@@ -65,6 +65,11 @@ export default defineConfig({
   ],
   server: {
     port: 5173,
+    // Allow serving from the repo root (one level up, resolved relative to
+    // this config's root) so the feature-key parity test can ?raw-import
+    // internal/feature/flags.go. Covers frontend/ too; dev/test-only — the
+    // production build never consults fs.allow.
+    fs: { allow: [".."] },
     proxy: {
       "/api": {
         target: "http://localhost:8080",
