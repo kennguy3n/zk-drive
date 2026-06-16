@@ -164,7 +164,7 @@ test.describe("Demo Flow Screenshots", () => {
     await page.goto("/admin/encryption");
     await page.waitForLoadState("networkidle");
     await page.waitForTimeout(500);
-    await expect(page.getByRole("heading", { name: /encryption/i })).toBeVisible();
+    await expect(page.getByRole("heading", { name: /encryption \(cmk\)/i })).toBeVisible();
     await page.screenshot({ path: `${screenshotDir}/15-encryption-cmk.png`, fullPage: true });
   });
 
