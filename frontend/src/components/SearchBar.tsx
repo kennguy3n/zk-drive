@@ -84,8 +84,11 @@ export default function SearchBar() {
     setQuery("");
     if (hit.type === "folder") {
       nav(`/drive/folder/${hit.id}`);
-    } else if (hit.folder_id) {
-      nav(`/drive/folder/${hit.folder_id}`);
+    } else {
+      // File hit: open its containing folder. A file at the workspace
+      // root has folder_id === null and lives directly under /drive, so
+      // route there rather than leaving the click a no-op.
+      nav(hit.folder_id ? `/drive/folder/${hit.folder_id}` : "/drive");
     }
   };
 
