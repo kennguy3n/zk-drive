@@ -87,6 +87,34 @@ describe("SearchBar", () => {
     expect(screen.queryByText("fresh-result.txt")).not.toBeNull();
   });
 
+  it("clears stale hits the moment the query changes", async () => {
+    const first = deferred<SearchResponse>();
+    const second = deferred<SearchResponse>();
+    vi.mocked(searchFiles)
+      .mockReturnValueOnce(first.promise)
+      .mockReturnValueOnce(second.promise);
+
+    renderBar();
+    const input = screen.getByPlaceholderText("Search files and folders…");
+
+    // First query resolves and its results populate the dropdown.
+    fireEvent.change(input, { target: { value: "rep" } });
+    await vi.advanceTimersByTimeAsync(250);
+    first.resolve(resp("rep-result.txt"));
+    await vi.runAllTimersAsync();
+    expect(screen.queryByText("rep-result.txt")).not.toBeNull();
+
+    // Typing a new query must drop the previous results immediately —
+    // before the new (still-pending) request resolves.
+    fireEvent.change(input, { target: { value: "report" } });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(screen.queryByText("rep-result.txt")).toBeNull();
+
+    // Resolve the pending request so the test leaves no timer in flight.
+    second.resolve(resp("report.txt"));
+    await vi.runAllTimersAsync();
+  });
+
   it("clears a stale error the moment the query changes", async () => {
     const failed = deferred<SearchResponse>();
     const next = deferred<SearchResponse>();

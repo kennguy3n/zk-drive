@@ -39,9 +39,11 @@ export default function SearchBar() {
       setLoading(false);
       return;
     }
-    // A new query supersedes the previous one, so drop any error left
-    // over from an earlier query immediately rather than letting it
-    // linger on screen until this query's response arrives.
+    // A new query supersedes the previous one, so drop the previous
+    // query's results and error immediately rather than leaving them on
+    // screen (showing matches for "rep" while the box reads "report")
+    // until this query's response arrives.
+    setHits([]);
     setError(null);
     // 250 ms is a comfortable compromise: fast enough to feel live,
     // slow enough to skip intermediate keystrokes on fast typists.
