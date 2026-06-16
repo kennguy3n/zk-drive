@@ -39,6 +39,10 @@ export default function SearchBar() {
       setLoading(false);
       return;
     }
+    // A new query supersedes the previous one, so drop any error left
+    // over from an earlier query immediately rather than letting it
+    // linger on screen until this query's response arrives.
+    setError(null);
     // 250 ms is a comfortable compromise: fast enough to feel live,
     // slow enough to skip intermediate keystrokes on fast typists.
     //
@@ -47,9 +51,12 @@ export default function SearchBar() {
     // already fired, so on slow networks an older query's response can
     // resolve after a newer one. Without this guard the late response
     // would overwrite the current results (and reset loading) for a
-    // query the user has already moved on from.
+    // query the user has already moved on from. Every state mutation in
+    // the callback — including setLoading — sits behind the guard so a
+    // superseded effect can never touch state for the current query.
     let cancelled = false;
     const handle = window.setTimeout(async () => {
+      if (cancelled) return;
       setLoading(true);
       try {
         const resp = await searchFiles(query.trim(), { limit: 20 });

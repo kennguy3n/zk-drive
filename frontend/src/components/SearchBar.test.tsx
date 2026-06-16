@@ -16,10 +16,12 @@ import { searchFiles } from "../api/client";
 
 function deferred<T>() {
   let resolve!: (v: T) => void;
-  const promise = new Promise<T>((r) => {
-    resolve = r;
+  let reject!: (e: unknown) => void;
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res;
+    reject = rej;
   });
-  return { promise, resolve };
+  return { promise, resolve, reject };
 }
 
 function resp(name: string): SearchResponse {
@@ -83,6 +85,35 @@ describe("SearchBar", () => {
     await vi.runAllTimersAsync();
     expect(screen.queryByText("stale-result.txt")).toBeNull();
     expect(screen.queryByText("fresh-result.txt")).not.toBeNull();
+  });
+
+  it("clears a stale error the moment the query changes", async () => {
+    const failed = deferred<SearchResponse>();
+    const next = deferred<SearchResponse>();
+    vi.mocked(searchFiles)
+      .mockReturnValueOnce(failed.promise)
+      .mockReturnValueOnce(next.promise);
+
+    renderBar();
+    const input = screen.getByPlaceholderText("Search files and folders…");
+
+    // First query fails; focus opens the dropdown so the error shows.
+    fireEvent.change(input, { target: { value: "rep" } });
+    fireEvent.focus(input);
+    await vi.advanceTimersByTimeAsync(250);
+    failed.reject(new Error("search failed"));
+    await vi.runAllTimersAsync();
+    expect(screen.queryByText("search failed")).not.toBeNull();
+
+    // Typing a new query must drop the stale error immediately —
+    // before the new (still-pending) request resolves.
+    fireEvent.change(input, { target: { value: "report" } });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(screen.queryByText("search failed")).toBeNull();
+
+    // Resolve the pending request so the test leaves no timer in flight.
+    next.resolve(resp("report.txt"));
+    await vi.runAllTimersAsync();
   });
 
   it("discards a response that resolves after the query is cleared", async () => {
