@@ -36,24 +36,38 @@ export default function SearchBar() {
     if (!query.trim()) {
       setHits([]);
       setError(null);
+      setLoading(false);
       return;
     }
     // 250 ms is a comfortable compromise: fast enough to feel live,
     // slow enough to skip intermediate keystrokes on fast typists.
+    //
+    // `cancelled` guards against out-of-order responses: clearing the
+    // debounce timer in the cleanup cannot abort a request that has
+    // already fired, so on slow networks an older query's response can
+    // resolve after a newer one. Without this guard the late response
+    // would overwrite the current results (and reset loading) for a
+    // query the user has already moved on from.
+    let cancelled = false;
     const handle = window.setTimeout(async () => {
       setLoading(true);
       try {
         const resp = await searchFiles(query.trim(), { limit: 20 });
+        if (cancelled) return;
         setHits(resp.hits);
         setError(null);
         setOpen(true);
       } catch (err) {
+        if (cancelled) return;
         setError(translateApiError(err, t));
       } finally {
-        setLoading(false);
+        if (!cancelled) setLoading(false);
       }
     }, 250);
-    return () => window.clearTimeout(handle);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(handle);
+    };
   }, [query, t]);
 
   const pick = (hit: SearchHit) => {
