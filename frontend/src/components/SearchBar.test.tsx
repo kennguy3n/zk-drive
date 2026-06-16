@@ -12,6 +12,14 @@ vi.mock("../api/client", async (orig) => {
   return { ...actual, searchFiles: vi.fn() };
 });
 
+// useNavigate is mocked so picking a result can assert the navigation
+// target without standing up real routes.
+const navigateMock = vi.fn();
+vi.mock("react-router-dom", async (orig) => {
+  const actual = await orig<typeof import("react-router-dom")>();
+  return { ...actual, useNavigate: () => navigateMock };
+});
+
 import { searchFiles } from "../api/client";
 
 function deferred<T>() {
@@ -25,16 +33,33 @@ function deferred<T>() {
 }
 
 function resp(name: string): SearchResponse {
+  return respWith({ type: "file", id: name, name, folder_id: null });
+}
+
+function respWith(overrides: Partial<SearchHit> & { name: string }): SearchResponse {
   const hit: SearchHit = {
     type: "file",
-    id: name,
-    name,
-    path: `/${name}`,
+    id: overrides.name,
+    path: `/${overrides.name}`,
     workspace_id: "ws",
     folder_id: null,
     updated_at: "2024-01-01T00:00:00Z",
+    ...overrides,
   };
-  return { query: name, limit: 20, offset: 0, hits: [hit] };
+  return { query: hit.name, limit: 20, offset: 0, hits: [hit] };
+}
+
+// Drive the dropdown to a populated, open state for the given response so
+// a result row can be clicked.
+async function showResult(value: string, response: SearchResponse) {
+  const input = screen.getByPlaceholderText("Search files and folders\u2026");
+  const d = deferred<SearchResponse>();
+  vi.mocked(searchFiles).mockReturnValue(d.promise);
+  fireEvent.change(input, { target: { value } });
+  fireEvent.focus(input);
+  await vi.advanceTimersByTimeAsync(250);
+  d.resolve(response);
+  await vi.runAllTimersAsync();
 }
 
 function renderBar() {
@@ -142,6 +167,32 @@ describe("SearchBar", () => {
     // Resolve the pending request so the test leaves no timer in flight.
     next.resolve(resp("report.txt"));
     await vi.runAllTimersAsync();
+  });
+
+  it("navigates to the drive root when a root-level file result is picked", async () => {
+    renderBar();
+    // A file at the workspace root: folder_id === null. Before the fix
+    // this click was a no-op (neither pick() branch matched).
+    await showResult("root-file.txt", respWith({ name: "root-file.txt", folder_id: null }));
+
+    fireEvent.click(screen.getByText("root-file.txt"));
+    expect(navigateMock).toHaveBeenCalledWith("/drive");
+  });
+
+  it("navigates to the containing folder when a nested file result is picked", async () => {
+    renderBar();
+    await showResult("nested.txt", respWith({ name: "nested.txt", folder_id: "folder-123" }));
+
+    fireEvent.click(screen.getByText("nested.txt"));
+    expect(navigateMock).toHaveBeenCalledWith("/drive/folder/folder-123");
+  });
+
+  it("navigates to the folder itself when a folder result is picked", async () => {
+    renderBar();
+    await showResult("my-folder", respWith({ type: "folder", id: "folder-9", name: "my-folder", folder_id: null }));
+
+    fireEvent.click(screen.getByText("my-folder"));
+    expect(navigateMock).toHaveBeenCalledWith("/drive/folder/folder-9");
   });
 
   it("discards a response that resolves after the query is cleared", async () => {
