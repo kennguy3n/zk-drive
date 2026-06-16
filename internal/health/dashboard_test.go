@@ -33,9 +33,9 @@ func (p stubProbe) Probe(ctx context.Context) Subsystem {
 func TestColorSeverityOrder(t *testing.T) {
 	// Unknown must sit below green so an unconfigured optional
 	// dependency never drags the overall roll-up down.
-	if !(ColorUnknown.severity() < ColorGreen.severity() &&
-		ColorGreen.severity() < ColorYellow.severity() &&
-		ColorYellow.severity() < ColorRed.severity()) {
+	if ColorUnknown.severity() >= ColorGreen.severity() ||
+		ColorGreen.severity() >= ColorYellow.severity() ||
+		ColorYellow.severity() >= ColorRed.severity() {
 		t.Fatal("severity ordering must be unknown < green < yellow < red")
 	}
 }

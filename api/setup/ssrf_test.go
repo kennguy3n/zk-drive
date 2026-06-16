@@ -56,7 +56,7 @@ func TestGuardedDialContextRejectsLinkLocal(t *testing.T) {
 
 	conn, err := dial(ctx, "tcp", "169.254.169.254:80")
 	if err == nil {
-		conn.Close()
+		_ = conn.Close()
 		t.Fatal("guarded dialer connected to the instance-metadata address; want refusal")
 	}
 	if !strings.Contains(err.Error(), "refusing to connect") {

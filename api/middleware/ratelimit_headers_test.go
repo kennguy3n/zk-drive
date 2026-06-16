@@ -48,7 +48,7 @@ func TestRedisRateLimitHeadersOnAllow(t *testing.T) {
 	}))
 
 	user, ws := uuid.New(), uuid.New()
-	var prev int = -1
+	prev := -1
 	for i := 0; i < 3; i++ {
 		rec := httptest.NewRecorder()
 		handler.ServeHTTP(rec, authedRequest(user, ws))

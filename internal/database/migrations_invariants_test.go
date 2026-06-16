@@ -25,8 +25,8 @@ var migrationFilePattern = regexp.MustCompile(`^([0-9]{3})_[a-z0-9]+(_[a-z0-9]+)
 // relative to this source file (internal/database/ -> ../../migrations).
 // Using runtime.Caller keeps the test independent of the working
 // directory `go test` happens to run from. (If this repo ever moves to
-// a hermetic build that relocates the test binary, switch to
-// go:embed migrations/* and drop this helper.)
+// a hermetic build that relocates the test binary, switch to a go:embed
+// of migrations/* and drop this helper.)
 func migrationsDirForTest(t *testing.T) string {
 	t.Helper()
 	_, file, _, ok := runtime.Caller(0)
