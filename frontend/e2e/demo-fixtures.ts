@@ -100,6 +100,33 @@ export const STORAGE_USAGE = {
   ],
 };
 
+// ---- Feature flags ----
+// The SPA's FeaturesProvider fetches GET /api/features on mount for every
+// authenticated page. The demo workspace is a fully-featured "business"
+// tier with every capability enabled so the gated admin tabs (CMK, data
+// residency, retention, KChat, …) render in the screenshots. Keys mirror
+// frontend/src/features/featureKeys.ts.
+export const FEATURES_RESPONSE = {
+  tier: "business",
+  features: {
+    folders: true,
+    files: true,
+    share_links: true,
+    basic_search: true,
+    sso: true,
+    audit_log: true,
+    retention_policies: true,
+    onlyoffice: true,
+    client_rooms: true,
+    webhooks: true,
+    kchat: true,
+    strict_zk: true,
+    cmk: true,
+    data_residency: true,
+    ai_summaries: true,
+  },
+};
+
 // ---- Billing usage ----
 export const BILLING_USAGE = {
   tier: "business",
@@ -192,6 +219,22 @@ export async function installDemoMocks(page: Page) {
 
   await page.route("**/api/auth/login", async (route) => {
     await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(authResponse) });
+  });
+
+  // Feature flags: FeaturesProvider fetches this on mount for every
+  // authenticated page. An unmocked 401 here trips the global response
+  // interceptor and redirects to /login, blanking every authenticated
+  // screenshot — so it must return a valid feature map.
+  await page.route("**/api/features", async (route) => {
+    await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(FEATURES_RESPONSE) });
+  });
+
+  // OnlyOffice status: FileBrowserPage probes this on mount to decide
+  // whether to show the office-editing affordance. Like /api/features,
+  // an unmocked 401 here redirects to /login before the page's own
+  // catch can swallow it.
+  await page.route("**/api/onlyoffice/status", async (route) => {
+    await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ enabled: true }) });
   });
 
   // Folders: matches both list (GET /api/folders[?...]) and detail
@@ -330,6 +373,19 @@ export async function installDemoMocks(page: Page) {
   // CMK
   await page.route("**/api/admin/cmk", async (route) => {
     await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(CMK_RESPONSE) });
+  });
+
+  // Workspace default encryption mode (GET current + PUT to change). The
+  // EncryptionPage's DefaultEncryptionModeSection loads this on mount; an
+  // unmocked 401 would bounce /admin/encryption to /login.
+  await page.route("**/api/admin/workspace/default-encryption-mode", async (route) => {
+    const supported = ["managed_encrypted", "strict_zk"];
+    if (route.request().method() === "PUT") {
+      const body = route.request().postDataJSON();
+      await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ mode: body?.mode ?? "managed_encrypted", supported }) });
+    } else {
+      await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ mode: "managed_encrypted", supported }) });
+    }
   });
 
   // KChat rooms
