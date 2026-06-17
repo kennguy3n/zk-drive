@@ -109,13 +109,27 @@ export default function CollabModeSelector({
 
   return (
     <div className="flex flex-col gap-2">
-      <span id={labelId} className="text-sm font-medium text-fg">
-        {t("collab.editorExperience")}
-      </span>
+      <div className="flex items-center justify-between gap-2">
+        <span id={labelId} className="text-sm font-medium text-fg">
+          {t("collab.editorExperience")}
+        </span>
+        {/* When the parent disables the whole group it's because a
+            setCollabMode PATCH is in flight. The cards convey this
+            visually (dimmed + non-interactive), but RadioCard can't carry
+            a native tooltip (pointer-events-none when disabled), so we
+            restore the textual "Saving…" hint here. */}
+        {disabled && (
+          <span className="text-xs font-medium text-muted" role="status">
+            {t("common.saving")}
+          </span>
+        )}
+      </div>
       <div
         id={id}
         role="radiogroup"
         aria-labelledby={labelId}
+        aria-busy={disabled || undefined}
+        title={disabled ? t("common.saving") : undefined}
         className="flex flex-col gap-2"
       >
         {MODES.map((m) => {

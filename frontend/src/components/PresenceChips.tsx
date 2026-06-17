@@ -118,6 +118,7 @@ export default function PresenceChips({
       {overflow > 0 && (
         <span
           title={t("collab.morePeople", { count: overflow })}
+          aria-label={t("collab.morePeople", { count: overflow })}
           className="-ml-1.5 inline-flex h-7 min-w-7 items-center justify-center rounded-full bg-surface-2 px-1.5 text-[11px] font-semibold text-muted ring-2 ring-surface"
         >
           +{overflow}

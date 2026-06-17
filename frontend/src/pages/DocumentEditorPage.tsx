@@ -174,6 +174,11 @@ export default function DocumentEditorPage() {
       // chip remains "disconnected" as the persistent signal that live
       // collaboration is not active.
       toast.error(t("errors.AUTH_MISSING_TOKEN"));
+      // Mirror the normal teardown order (awareness before Y.Doc) so the
+      // awareness listener is torn down explicitly rather than relying on
+      // the Y.Doc.destroy() event cascade — robust against future
+      // y-protocols changes and idempotent.
+      nextAwareness?.destroy();
       nextYDoc.destroy();
       return;
     }
