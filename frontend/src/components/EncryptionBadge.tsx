@@ -1,6 +1,5 @@
 import { Link } from "react-router-dom";
 import { useTranslation } from "react-i18next";
-import { Badge } from "./ui";
 import { cn } from "../lib/cn";
 
 // EncryptionBadge renders the privacy mode of a folder as a small pill
@@ -112,24 +111,44 @@ export default function EncryptionBadge({
   // KChat brand indigo — it is the premium, server-blind mode and the
   // colour signals "this is the strong one" rather than "danger".
   // Confidential (the managed default) wears success green: encrypted at
-  // rest, server-readable. The leading dot makes the two modes scannable
-  // at a glance in dense file lists. Both tones re-theme with the app and
-  // flip correctly in dark mode because they resolve from CSS variables.
-  const tone = isStrict ? "brand" : "success";
+  // rest, server-readable. Both tones re-theme with the app and flip
+  // correctly in dark mode because they resolve from CSS variables.
+  //
+  // The pill is sized for its context. The dense "row" variant sits next
+  // to file/folder names in tight, multi-column lists — e.g. the two-up
+  // subfolder cards in the drive, where a card budgets only ~100px for
+  // name + badge after the Share/Delete actions. It therefore stays
+  // deliberately compact (and `shrink-0`, below) so the sibling name
+  // keeps layout priority and truncates with an ellipsis instead of
+  // collapsing to zero width. The "header" variant sits in the breadcrumb
+  // where there is room to breathe, so it scales up and adds a leading
+  // dot for extra scannability. The shared `Badge` primitive's fixed
+  // footprint (text-xs / px-2.5 / leading dot) overflows the row slot and
+  // can't be trimmed via className (cn is clsx-only, so the larger scale
+  // wins), so the pill is composed locally here from the same tone tokens
+  // — see the PR description's coordinator follow-up proposing a Badge
+  // `size="sm"` variant.
+  const toneClasses = isStrict
+    ? "bg-brand/10 text-brand"
+    : "bg-success/10 text-success";
+  const dotClass = isStrict ? "bg-brand" : "bg-success";
+  const isHeader = size === "header";
   const badge = (
-    <Badge
-      tone={tone}
-      dot
+    <span
       className={cn(
-        "whitespace-nowrap",
-        // The "header" size sits next to the breadcrumb folder name, so it
-        // scales up a notch. Tailwind orders utilities by ascending scale,
-        // so these larger values reliably win over Badge's defaults.
-        size === "header" && "px-3 py-1 text-sm",
+        "inline-flex items-center rounded-full font-medium leading-none whitespace-nowrap",
+        toneClasses,
+        isHeader ? "gap-1.5 px-2.5 py-1 text-xs" : "px-1.5 py-0.5 text-[10px]",
       )}
     >
+      {isHeader && (
+        <span
+          className={cn("h-1.5 w-1.5 shrink-0 rounded-full", dotClass)}
+          aria-hidden="true"
+        />
+      )}
       {label}
-    </Badge>
+    </span>
   );
 
   if (linkToHelp) {
@@ -148,7 +167,7 @@ export default function EncryptionBadge({
         // noise. See the `tabbable` prop comment above.
         tabIndex={tabbable ? undefined : -1}
         aria-label={t("encryption.badgeAria", { label })}
-        className="inline-flex rounded-full no-underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-bg"
+        className="inline-flex shrink-0 rounded-full no-underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-bg"
       >
         {badge}
       </Link>
@@ -160,7 +179,7 @@ export default function EncryptionBadge({
       title={title}
       data-testid="encryption-badge"
       data-mode={dataMode}
-      className="inline-flex"
+      className="inline-flex shrink-0"
     >
       {badge}
     </span>
