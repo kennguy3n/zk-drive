@@ -71,7 +71,14 @@ export default function FolderTree({
       >
         {t("drive.rootFolder")}
       </Link>
-      {loading ? (
+      {/*
+        Stale-while-revalidate: only show the skeleton on the initial load
+        (when there's no prior data to display). On reloadKey/navigation
+        refetches we keep the previously fetched list visible instead of
+        replacing it with a skeleton, so the sidebar never renders a
+        skeleton and a populated list at the same time.
+      */}
+      {loading && rootFolders.length === 0 ? (
         <div className="mt-2">
           <FolderTreeSkeleton />
         </div>
