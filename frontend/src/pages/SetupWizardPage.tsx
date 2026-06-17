@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useState, type ReactNode } from "react";
 import { useNavigate } from "react-router-dom";
 import { useTranslation } from "react-i18next";
 import {
@@ -44,6 +44,11 @@ import { Badge, Button, Field, Input, RadioCard, useToast } from "../components/
 
 type StepId = "admin" | "storage" | "services" | "workspace" | "invite";
 const STEP_ORDER: StepId[] = ["admin", "storage", "services", "workspace", "invite"];
+// Workspace is the commit point: signup() fires here, creating the admin
+// account + workspace. Once that has happened the earlier steps describe
+// data that is already persisted server-side, so navigation back to them
+// is locked to stop the displayed values drifting from what was created.
+const WORKSPACE_INDEX = STEP_ORDER.indexOf("workspace");
 const STEP_ICONS: Record<StepId, ReactNode> = {
   admin: <UserCog className="h-4 w-4" aria-hidden="true" />,
   storage: <Database className="h-4 w-4" aria-hidden="true" />,
@@ -120,18 +125,21 @@ export default function SetupWizardPage() {
   }, []);
   const goBack = useCallback(() => {
     setError(null);
-    setStepIndex((i) => Math.max(i - 1, 0));
-  }, []);
-  // The stepper lets the operator jump back to any already-visited step
-  // to review or correct an entry. Forward jumps stay gated behind each
-  // step's validation, so navigation can't skip a required field.
+    setStepIndex((i) => Math.max(i - 1, signedUp ? WORKSPACE_INDEX : 0));
+  }, [signedUp]);
+  // The stepper lets the operator jump back to any already-visited step to
+  // review or correct an entry. Forward jumps stay gated behind each step's
+  // validation, and once signup has committed (signedUp) the pre-commit
+  // steps are locked so navigation can't surface stale, no-longer-editable
+  // account/workspace data.
   const goToStep = useCallback(
     (i: number) => {
       if (i > stepIndex) return;
+      if (signedUp && i < WORKSPACE_INDEX) return;
       setError(null);
       setStepIndex(i);
     },
-    [stepIndex],
+    [stepIndex, signedUp],
   );
 
   const validateAdmin = useCallback((): boolean => {
@@ -154,6 +162,14 @@ export default function SetupWizardPage() {
   const handleAdminNext = useCallback(() => {
     if (validateAdmin()) goNext();
   }, [validateAdmin, goNext]);
+
+  // updateAdmin writes a field and clears that field's error, so a
+  // corrected value drops its stale message right away while the other
+  // fields keep theirs until the next validation pass.
+  const updateAdmin = useCallback((field: keyof AdminForm, value: string) => {
+    setAdmin((prev) => ({ ...prev, [field]: value }));
+    setAdminErrors((prev) => (prev[field] ? { ...prev, [field]: undefined } : prev));
+  }, []);
 
   // commitWorkspace fires signup() — the admin + workspace creation
   // commit point — then advances. Two guards keep it firing exactly once:
@@ -210,15 +226,6 @@ export default function SetupWizardPage() {
     }
   }, [signedUp, navigate, t]);
 
-  const adminValid = useMemo(
-    () =>
-      admin.email.trim() !== "" &&
-      EMAIL_RE.test(admin.email.trim()) &&
-      admin.name.trim() !== "" &&
-      admin.password.length >= MIN_PASSWORD,
-    [admin],
-  );
-
   if (done) {
     return (
       <Shell>
@@ -250,7 +257,11 @@ export default function SetupWizardPage() {
         </div>
       </header>
 
-      <Stepper current={stepIndex} onStepClick={goToStep} />
+      <Stepper
+        current={stepIndex}
+        lockedBefore={signedUp ? WORKSPACE_INDEX : 0}
+        onStepClick={goToStep}
+      />
 
       <p className="mb-4 text-xs font-medium uppercase tracking-wide text-muted">
         {t("setup.stepLabel", { current: stepIndex + 1, total: STEP_ORDER.length })}
@@ -267,7 +278,7 @@ export default function SetupWizardPage() {
 
       <div className="min-h-[260px]">
         {step === "admin" && (
-          <AdminStep admin={admin} setAdmin={setAdmin} errors={adminErrors} />
+          <AdminStep admin={admin} onChange={updateAdmin} errors={adminErrors} />
         )}
         {step === "storage" && <StorageStep status={status} />}
         {step === "services" && <ServicesStep status={status} />}
@@ -288,7 +299,7 @@ export default function SetupWizardPage() {
         </Button>
         <div className="flex items-center gap-2">
           {step === "admin" && (
-            <Button variant="gradient" onClick={handleAdminNext} disabled={!adminValid}>
+            <Button variant="gradient" onClick={handleAdminNext}>
               {t("setup.next")}
             </Button>
           )}
@@ -302,7 +313,7 @@ export default function SetupWizardPage() {
               variant="gradient"
               onClick={commitWorkspace}
               loading={committing}
-              disabled={workspaceName.trim() === "" || committing}
+              disabled={committing}
             >
               {committing ? t("setup.creating") : t("setup.next")}
             </Button>
@@ -336,9 +347,11 @@ function Shell({ children }: { children: ReactNode }) {
 
 function Stepper({
   current,
+  lockedBefore,
   onStepClick,
 }: {
   current: number;
+  lockedBefore: number;
   onStepClick: (i: number) => void;
 }) {
   const { t } = useTranslation();
@@ -347,7 +360,7 @@ function Stepper({
       <ol className="flex flex-wrap gap-x-5 gap-y-2">
         {STEP_ORDER.map((id, i) => {
           const state = i < current ? "done" : i === current ? "active" : "todo";
-          const clickable = i <= current;
+          const clickable = i <= current && i >= lockedBefore;
           return (
             <li key={id}>
               <button
@@ -406,11 +419,11 @@ function StepHeading({ icon, title, body }: { icon: ReactNode; title: string; bo
 
 function AdminStep({
   admin,
-  setAdmin,
+  onChange,
   errors,
 }: {
   admin: AdminForm;
-  setAdmin: (a: AdminForm) => void;
+  onChange: (field: keyof AdminForm, value: string) => void;
   errors: AdminErrors;
 }) {
   const { t } = useTranslation();
@@ -441,7 +454,7 @@ function AdminStep({
               type="email"
               autoComplete="email"
               value={admin.email}
-              onChange={(e) => setAdmin({ ...admin, email: e.target.value })}
+              onChange={(e) => onChange("email", e.target.value)}
             />
           )}
         </Field>
@@ -451,7 +464,7 @@ function AdminStep({
               {...props}
               autoComplete="name"
               value={admin.name}
-              onChange={(e) => setAdmin({ ...admin, name: e.target.value })}
+              onChange={(e) => onChange("name", e.target.value)}
             />
           )}
         </Field>
@@ -462,7 +475,7 @@ function AdminStep({
               type="password"
               autoComplete="new-password"
               value={admin.password}
-              onChange={(e) => setAdmin({ ...admin, password: e.target.value })}
+              onChange={(e) => onChange("password", e.target.value)}
             />
           )}
         </Field>
@@ -562,7 +575,7 @@ function StorageStep({ status }: { status: SetupStatus | null }) {
             />
           )}
         </Field>
-        <Field label={t("setup.storage.region")} hint={t("setup.storage.testHint")}>
+        <Field label={t("setup.storage.region")} hint={t("setup.storage.regionHint")}>
           {(props) => (
             <Input
               {...props}
@@ -572,7 +585,8 @@ function StorageStep({ status }: { status: SetupStatus | null }) {
           )}
         </Field>
       </div>
-      <div className="mt-4 flex items-center gap-3">
+      <p className="mt-4 text-sm text-muted">{t("setup.storage.testHint")}</p>
+      <div className="mt-3 flex items-center gap-3">
         <Button variant="secondary" onClick={runTest} loading={testing} disabled={!canTest || testing}>
           {testing ? t("setup.storage.testing") : t("setup.storage.test")}
         </Button>

@@ -614,6 +614,7 @@
       "accessKey": "Access key",
       "secretKey": "Secret key",
       "region": "Region (optional)",
+      "regionHint": "Leave blank unless your S3 provider requires a specific region.",
       "testHint": "These values are only used to test the connection now — they are not saved here. Once the test passes, set them in your deployment environment/secrets and restart.",
       "test": "Test connection",
       "testing": "Testing…",

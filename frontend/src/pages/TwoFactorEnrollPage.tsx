@@ -241,7 +241,7 @@ export default function TwoFactorEnrollPage() {
         </div>
       )}
 
-      {!challenge ? (
+      {!challenge && !error && (
         <div
           className="flex flex-col items-center gap-3 py-6 text-sm text-muted"
           role="status"
@@ -250,7 +250,9 @@ export default function TwoFactorEnrollPage() {
           <Loader2 className="h-6 w-6 animate-spin text-brand" aria-hidden="true" />
           {t("common.loading")}
         </div>
-      ) : (
+      )}
+
+      {challenge && (
         <>
           <div className="flex flex-col items-center">
             <div className="rounded-xl border border-border bg-white p-3">
