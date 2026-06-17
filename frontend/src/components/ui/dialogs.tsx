@@ -105,7 +105,10 @@ export function DialogsProvider({ children }: { children: ReactNode }) {
   const nextId = useRef(1);
 
   const enqueue = useCallback((req: Omit<Request, "id">) => {
-    setQueue((prev) => [...prev, { ...req, id: nextId.current++ } as Request]);
+    // Compute the id outside the updater so a double-invoked updater (React 18
+    // concurrent mode) can't bump the ref twice and skip ids.
+    const id = nextId.current++;
+    setQueue((prev) => [...prev, { ...req, id } as Request]);
   }, []);
 
   const dequeue = useCallback(() => {
@@ -160,7 +163,13 @@ function ConfirmDialog({
   onClose: () => void;
 }) {
   const { opts, resolve } = req;
+  // Guard against settle() firing twice (e.g. a button click followed by an
+  // onOpenChange during unmount); the second call must not dequeue the next
+  // dialog. resolve() is already idempotent for promises.
+  const settled = useRef(false);
   const settle = (result: boolean) => {
+    if (settled.current) return;
+    settled.current = true;
     resolve(result);
     onClose();
   };
@@ -201,8 +210,11 @@ function PromptDialog({
   const { opts, resolve } = req;
   const [value, setValue] = useState(opts.defaultValue ?? "");
   const [error, setError] = useState<string | null>(null);
+  const settled = useRef(false);
 
   const settle = (result: string | null) => {
+    if (settled.current) return;
+    settled.current = true;
     resolve(result);
     onClose();
   };
@@ -280,8 +292,11 @@ function PickerDialog({
   const { opts, resolve } = req;
   const [selected, setSelected] = useState<string | null>(null);
   const [query, setQuery] = useState("");
+  const settled = useRef(false);
 
   const settle = (item: PickerItem | null) => {
+    if (settled.current) return;
+    settled.current = true;
     resolve(item);
     onClose();
   };
