@@ -3,6 +3,7 @@ package drive
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -39,16 +40,29 @@ func (f fakeSessionValidator) ValidateSession(_ context.Context, _ uuid.UUID, _,
 	return f.err
 }
 
+// fakeReverifier satisfies middleware.TokenReverifier with a canned
+// answer so the federated-socket reverify step can be exercised
+// without a real iam-core verifier or JWKS endpoint.
+type fakeReverifier struct {
+	err error
+}
+
+func (f fakeReverifier) Reverify(_ context.Context, _ string) error {
+	return f.err
+}
+
 func TestEvaluateCollabAuth(t *testing.T) {
 	future := time.Now().Add(time.Hour)
 	past := time.Now().Add(-time.Hour)
 	withSID := func(st collabAuthState) collabAuthState { st.sessionID = "sid-1"; return st }
+	withToken := func(st collabAuthState) collabAuthState { st.rawToken = "raw-token"; return st }
 
 	cases := []struct {
 		name       string
 		state      collabAuthState
 		checker    *fakeSessionChecker
 		validator  *fakeSessionValidator
+		reverifier *fakeReverifier
 		wantClose  bool
 		wantCode   int
 		wantReason string
@@ -118,6 +132,30 @@ func TestEvaluateCollabAuth(t *testing.T) {
 			name:  "no expiry, no store, stays open",
 			state: collabAuthState{},
 		},
+		{
+			name:       "reverify valid stays open",
+			state:      withToken(collabAuthState{hasExpiry: true, expiresAt: future}),
+			reverifier: &fakeReverifier{},
+		},
+		{
+			name:       "reverify failure closes with retriable code",
+			state:      withToken(collabAuthState{hasExpiry: true, expiresAt: future}),
+			reverifier: &fakeReverifier{err: errors.New("signing key revoked")},
+			wantClose:  true,
+			wantCode:   collabCloseReauthRequired,
+			wantReason: "token reverification failed",
+		},
+		{
+			name:       "reverify unavailable keeps session open",
+			state:      withToken(collabAuthState{hasExpiry: true, expiresAt: future}),
+			reverifier: &fakeReverifier{err: fmt.Errorf("jwks unreachable: %w", middleware.ErrReverifyUnavailable)},
+			wantTrans:  true,
+		},
+		{
+			name:       "reverify skipped without raw token",
+			state:      collabAuthState{hasExpiry: true, expiresAt: future},
+			reverifier: &fakeReverifier{err: errors.New("would close if it ran")},
+		},
 	}
 
 	for _, tc := range cases {
@@ -130,7 +168,11 @@ func TestEvaluateCollabAuth(t *testing.T) {
 			if tc.validator != nil {
 				validator = *tc.validator
 			}
-			d := evaluateCollabAuth(context.Background(), tc.state, checker, validator)
+			var reverifier middleware.TokenReverifier
+			if tc.reverifier != nil {
+				reverifier = *tc.reverifier
+			}
+			d := evaluateCollabAuth(context.Background(), tc.state, checker, validator, reverifier)
 			if (d.transient != nil) != tc.wantTrans {
 				t.Fatalf("transient = %v, want %v", d.transient, tc.wantTrans)
 			}
@@ -152,7 +194,7 @@ func TestEvaluateCollabAuth(t *testing.T) {
 // dialPumpClose stands up a tiny WS server whose only job is to run
 // collabAuthPump over an upgraded connection with the given state, then
 // dials it and returns the close code the server sent (or fails).
-func dialPumpClose(t *testing.T, st collabAuthState, checker middleware.SessionChecker, validator middleware.SessionValidator) int {
+func dialPumpClose(t *testing.T, st collabAuthState, checker middleware.SessionChecker, validator middleware.SessionValidator, reverifier middleware.TokenReverifier) int {
 	t.Helper()
 	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
@@ -162,7 +204,7 @@ func dialPumpClose(t *testing.T, st collabAuthState, checker middleware.SessionC
 			return
 		}
 		client := collab.NewClient(uuid.New(), uuid.New(), uuid.New(), true, collab.Capability{})
-		collabAuthPump(client, conn, st, checker, validator, 2*time.Millisecond, logger)
+		collabAuthPump(client, conn, st, checker, validator, reverifier, 2*time.Millisecond, logger)
 	}))
 	defer srv.Close()
 
@@ -183,7 +225,7 @@ func dialPumpClose(t *testing.T, st collabAuthState, checker middleware.SessionC
 }
 
 func TestCollabAuthPump_ClosesExpiredWithRetriableCode(t *testing.T) {
-	code := dialPumpClose(t, collabAuthState{hasExpiry: true, expiresAt: time.Now().Add(-time.Minute)}, nil, nil)
+	code := dialPumpClose(t, collabAuthState{hasExpiry: true, expiresAt: time.Now().Add(-time.Minute)}, nil, nil, nil)
 	if code != collabCloseReauthRequired {
 		t.Fatalf("close code = %d, want %d (retriable)", code, collabCloseReauthRequired)
 	}
@@ -198,8 +240,24 @@ func TestCollabAuthPump_ClosesExpiredWithRetriableCode(t *testing.T) {
 
 func TestCollabAuthPump_ClosesRevokedWithPermanentCode(t *testing.T) {
 	st := collabAuthState{hasExpiry: true, expiresAt: time.Now().Add(time.Hour)}
-	code := dialPumpClose(t, st, fakeSessionChecker{revoked: true}, nil)
+	code := dialPumpClose(t, st, fakeSessionChecker{revoked: true}, nil, nil)
 	if code != collabCloseSessionRevoked {
 		t.Fatalf("close code = %d, want %d (permanent)", code, collabCloseSessionRevoked)
+	}
+}
+
+func TestCollabAuthPump_ClosesReverifyFailureWithRetriableCode(t *testing.T) {
+	// A federated socket whose token the issuer no longer validates is
+	// torn down with the retriable reauth code so the client reconnects
+	// with a fresh token, exactly as for local expiry.
+	st := collabAuthState{rawToken: "raw-token"}
+	code := dialPumpClose(t, st, nil, nil, fakeReverifier{err: errors.New("signing key revoked")})
+	if code != collabCloseReauthRequired {
+		t.Fatalf("close code = %d, want %d (retriable)", code, collabCloseReauthRequired)
+	}
+	for _, permanent := range []int{1000, 1008, 4001, 4003} {
+		if code == permanent {
+			t.Fatalf("reverify-failure close code %d is permanent; client would not reconnect", code)
+		}
 	}
 }

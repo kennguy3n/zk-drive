@@ -116,6 +116,21 @@ func (h *Handler) WithCollabReauth(checker middleware.SessionChecker, validator 
 	return h
 }
 
+// WithCollabTokenReverifier wires the re-validator for federated
+// (iam-core OIDC) collab sockets. The built-in SessionChecker /
+// SessionValidator consult the zk-drive session store, which has no
+// record of an externally-issued token — so for iam-core connections
+// they are a no-op and only the local expiry check would fire. The
+// reverifier re-runs the issuer's token validation (JWKS signature +
+// expiry) on the same cadence, so a federated socket is also torn down
+// when the IdP rotates out or revokes its signing key, closing the
+// residual gap. nil (the default, and the value passed when iam-core is
+// not configured) leaves collab enforcement exactly as before.
+func (h *Handler) WithCollabTokenReverifier(reverifier middleware.TokenReverifier) *Handler {
+	h.collabReauthReverifier = reverifier
+	return h
+}
+
 // ServeDocumentCollab upgrades an HTTP request to a WebSocket and
 // joins the resulting client to its document's room in the collab
 // hub. The full handshake is:
@@ -214,6 +229,11 @@ func (h *Handler) ServeDocumentCollab(w http.ResponseWriter, r *http.Request) {
 	authClaims, _ := middleware.ClaimsFromContext(r.Context())
 	authUserAgent := r.UserAgent()
 	authClientIP := collabClientIP(r, h.collabTrustedProxyDepth)
+	// The original bearer token, captured for the reverifier (federated
+	// iam-core sockets): the pump re-runs the issuer's validation
+	// against it on each tick. Empty when no token was presented in a
+	// re-verifiable transport, which simply skips the reverify step.
+	authRawToken, _ := middleware.ExtractBearerToken(r)
 
 	// Snapshot bundle: y_state + tail deltas, used as the cold-
 	// open payload pushed to the new client immediately after
@@ -290,6 +310,7 @@ func (h *Handler) ServeDocumentCollab(w http.ResponseWriter, r *http.Request) {
 			sessionID:   authClaims.SessionID,
 			userAgent:   authUserAgent,
 			clientIP:    authClientIP,
+			rawToken:    authRawToken,
 		}
 		if authClaims.IssuedAt != nil {
 			st.issuedAt = authClaims.IssuedAt.Time
@@ -298,8 +319,12 @@ func (h *Handler) ServeDocumentCollab(w http.ResponseWriter, r *http.Request) {
 			st.expiresAt = authClaims.ExpiresAt.Time
 			st.hasExpiry = true
 		}
-		if st.hasExpiry || h.collabReauthChecker != nil || h.collabReauthValidator != nil {
-			go collabAuthPump(client, conn, st, h.collabReauthChecker, h.collabReauthValidator, collabReauthInterval, logger)
+		reverifier := h.collabReauthReverifier
+		if st.rawToken == "" {
+			reverifier = nil
+		}
+		if st.hasExpiry || h.collabReauthChecker != nil || h.collabReauthValidator != nil || reverifier != nil {
+			go collabAuthPump(client, conn, st, h.collabReauthChecker, h.collabReauthValidator, reverifier, collabReauthInterval, logger)
 		}
 	}
 }
@@ -440,6 +465,11 @@ type collabAuthState struct {
 	hasExpiry   bool
 	userAgent   string
 	clientIP    string
+	// rawToken is the original bearer token, replayed by the
+	// TokenReverifier for federated (iam-core) sockets. Empty for
+	// built-in session tokens, which are re-checked via the session
+	// store (checker/validator) instead.
+	rawToken string
 }
 
 // collabAuthDecision is the outcome of one auth re-check. Exactly one
@@ -457,13 +487,14 @@ type collabAuthDecision struct {
 // evaluateCollabAuth re-checks a live collab connection's
 // authorization. The order mirrors AuthMiddleware: expiry first, then
 // the per-user revocation cutoff, then per-session existence + device
-// anomaly. It differs from the HTTP path in one deliberate way — a
-// transient store error returns a non-fatal `transient` rather than
-// failing closed: tearing down an active editing session on a momentary
-// Redis blip is far more disruptive than failing one retriable HTTP
-// request, and token expiry (the core property) is enforced locally
-// above regardless of store health.
-func evaluateCollabAuth(ctx context.Context, st collabAuthState, checker middleware.SessionChecker, validator middleware.SessionValidator) collabAuthDecision {
+// anomaly, then — for federated (iam-core) sockets — an issuer
+// re-validation. It differs from the HTTP path in one deliberate way —
+// a transient store/issuer error returns a non-fatal `transient` rather
+// than failing closed: tearing down an active editing session on a
+// momentary Redis or JWKS blip is far more disruptive than failing one
+// retriable HTTP request, and token expiry (the core property) is
+// enforced locally above regardless of store/issuer health.
+func evaluateCollabAuth(ctx context.Context, st collabAuthState, checker middleware.SessionChecker, validator middleware.SessionValidator, reverifier middleware.TokenReverifier) collabAuthDecision {
 	// 1. Token expiry — local, needs no store, so it holds even during
 	//    a total session-store outage. A socket must not outlive its JWT.
 	if st.hasExpiry && time.Now().After(st.expiresAt) {
@@ -499,6 +530,26 @@ func evaluateCollabAuth(ctx context.Context, st collabAuthState, checker middlew
 			return collabAuthDecision{transient: verr}
 		}
 	}
+	// 4. Issuer re-validation for federated (iam-core) sockets, whose
+	//    token is not backed by the zk-drive session store the checks
+	//    above consult. Re-running the issuer's validation re-checks the
+	//    signature (catching a rotated-out / revoked signing key) and the
+	//    expiry against the live JWKS. An unreachable issuer is transient
+	//    (keep the socket open, like a store blip); any other error is a
+	//    definitive rejection that closes with the retriable reauth code
+	//    so the client reconnects with a fresh token.
+	if reverifier != nil && st.rawToken != "" {
+		rctx, cancel := context.WithTimeout(ctx, middleware.SessionCheckTimeout)
+		rerr := reverifier.Reverify(rctx, st.rawToken)
+		cancel()
+		switch {
+		case rerr == nil:
+		case errors.Is(rerr, middleware.ErrReverifyUnavailable):
+			return collabAuthDecision{transient: rerr}
+		default:
+			return collabAuthDecision{closeConn: true, code: collabCloseReauthRequired, reason: "token reverification failed"}
+		}
+	}
 	return collabAuthDecision{}
 }
 
@@ -510,7 +561,7 @@ func evaluateCollabAuth(ctx context.Context, st collabAuthState, checker middlew
 // Closing the conn unblocks the read pump's ReadMessage, which
 // unregisters the client and lets the write pump exit too. The pump
 // itself exits when the client is unregistered (c.Done()).
-func collabAuthPump(c *collab.DocumentClient, conn *websocket.Conn, st collabAuthState, checker middleware.SessionChecker, validator middleware.SessionValidator, interval time.Duration, logger *slog.Logger) {
+func collabAuthPump(c *collab.DocumentClient, conn *websocket.Conn, st collabAuthState, checker middleware.SessionChecker, validator middleware.SessionValidator, reverifier middleware.TokenReverifier, interval time.Duration, logger *slog.Logger) {
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	for {
@@ -518,7 +569,7 @@ func collabAuthPump(c *collab.DocumentClient, conn *websocket.Conn, st collabAut
 		case <-c.Done():
 			return
 		case <-ticker.C:
-			d := evaluateCollabAuth(context.Background(), st, checker, validator)
+			d := evaluateCollabAuth(context.Background(), st, checker, validator, reverifier)
 			if d.transient != nil {
 				logger.Warn("collab reauth check failed; keeping session open", "err", d.transient)
 				continue
