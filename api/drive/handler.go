@@ -81,8 +81,13 @@ type Handler struct {
 	// not just at upgrade. Wired via WithCollabReauth; nil
 	// checker/validator degrade to expiry-only enforcement
 	// (single-replica / dev mode without Redis).
-	collabReauthChecker     middleware.SessionChecker
-	collabReauthValidator   middleware.SessionValidator
+	collabReauthChecker   middleware.SessionChecker
+	collabReauthValidator middleware.SessionValidator
+	// collabReauthReverifier re-validates federated (iam-core) tokens
+	// against their issuer for the life of a collab socket, since the
+	// checker/validator above only know the zk-drive session store.
+	// Wired via WithCollabTokenReverifier; nil when iam-core is off.
+	collabReauthReverifier  middleware.TokenReverifier
 	collabTrustedProxyDepth int
 	suspension              middleware.WorkspaceSuspensionChecker
 	// suspensionFailClosed mirrors the SuspensionGuard policy for the

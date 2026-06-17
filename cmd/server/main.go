@@ -1000,6 +1000,11 @@ func run() error {
 	// while an external IdP is the source of truth.
 	dataPlaneAuth := middleware.AuthMiddlewareWithSessions(jwtKeyManager, sessionChecker, sessionValidator, cfg.TrustedProxyDepth)
 	var iamCoreClient *iamcore.Client
+	// iamCoreReverifier re-validates federated tokens against iam-core's
+	// JWKS for the life of a collab socket. It stays a genuine nil
+	// interface (not a typed nil) when iam-core is off, so the collab
+	// handler's reverify step is skipped for built-in auth.
+	var iamCoreReverifier middleware.TokenReverifier
 	if cfg.IAMCoreIssuerURL != "" {
 		client, err := iamcore.NewClient(ctx, iamcore.Config{
 			IssuerURL:    cfg.IAMCoreIssuerURL,
@@ -1014,7 +1019,11 @@ func run() error {
 			return fmt.Errorf("iam-core client: %w", err)
 		}
 		iamCoreClient = client
-		iamCoreMW := iamcore.NewMiddleware(client.NewVerifier(), iamcore.NewTenantMapper(pool, wsSvc), userSvc).
+		// One verifier instance backs both the request middleware and
+		// the collab reauth pump, so they share the same JWKS cache.
+		iamCoreVerifier := client.NewVerifier()
+		iamCoreReverifier = iamCoreVerifier
+		iamCoreMW := iamcore.NewMiddleware(iamCoreVerifier, iamcore.NewTenantMapper(pool, wsSvc), userSvc).
 			WithAudit(auditSvc)
 		dataPlaneAuth = iamCoreMW.Handler
 		slog.Info("auth provider: iam-core OIDC", "issuer", client.Discovery().Issuer, "client_id", cfg.IAMCoreClientID)
@@ -1073,6 +1082,7 @@ func run() error {
 		WithDocuments(documentSvc).
 		WithCollab(collabHub).
 		WithCollabReauth(sessionChecker, sessionValidator, cfg.TrustedProxyDepth).
+		WithCollabTokenReverifier(iamCoreReverifier).
 		WithSharing(sharingSvc).
 		WithSearch(searchSvc).
 		WithClientRooms(clientRoomSvc).

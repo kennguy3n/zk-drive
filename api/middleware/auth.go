@@ -254,6 +254,34 @@ type SessionValidator interface {
 	ValidateSession(ctx context.Context, workspaceID uuid.UUID, sessionID, userAgent, clientIP string) error
 }
 
+// TokenReverifier re-validates a long-lived connection's original
+// bearer token out-of-band, after the upgrade that authenticated it.
+// It is the federated-identity analogue of SessionChecker /
+// SessionValidator: where those consult the built-in session store,
+// a TokenReverifier re-checks the token against its issuer (the
+// iam-core OIDC verifier re-runs JWKS signature + expiry validation),
+// so a federated realtime socket is torn down when its access token
+// expires or the issuer rotates out / revokes the signing key — the
+// residual gap left when an external IdP, not the zk-drive session
+// store, is the source of truth.
+//
+// Reverify returns nil while the token remains valid, an error
+// wrapping ErrReverifyUnavailable when the issuing authority could not
+// be reached, and any other error when the token is definitively
+// rejected.
+type TokenReverifier interface {
+	Reverify(ctx context.Context, rawToken string) error
+}
+
+// ErrReverifyUnavailable distinguishes "could not reach the authority
+// to re-validate the token" from "token rejected" for TokenReverifier
+// implementations. The collab reauth pump treats it as transient —
+// keeping an active editing session open through a momentary issuer /
+// JWKS outage rather than tearing it down — exactly as it tolerates a
+// transient session-store error, since token expiry is still enforced
+// locally regardless of issuer reachability.
+var ErrReverifyUnavailable = errors.New("middleware: token reverification unavailable")
+
 // SessionCheckTimeout is the upper bound on how long AuthMiddleware
 // will wait for a SessionChecker.IsRevoked call before giving up and
 // failing closed.
@@ -473,6 +501,37 @@ func WithIdentity(ctx context.Context, userID, workspaceID uuid.UUID, role strin
 			IssuedAt: jwt.NewNumericDate(time.Now()),
 		},
 	})
+}
+
+// WithIdentityClaims is WithIdentity for authenticators that can supply
+// the authenticating token's real temporal claims (and session id) —
+// namely the iam-core OIDC front-end. Recording the token's true
+// issued-at and expiry, rather than synthesizing them, lets downstream
+// consumers that enforce the token lifetime see the same window the
+// token actually carries: the collab reauth pump tears a federated
+// realtime socket down precisely when its access token expires, closing
+// the gap where WithIdentity's expiry-less claims left such sockets
+// running until the client happened to disconnect.
+//
+// A zero issuedAt falls back to now to preserve the non-nil-iat
+// invariant WithIdentity documents; a zero expiresAt records no expiry.
+func WithIdentityClaims(ctx context.Context, userID, workspaceID uuid.UUID, role, sessionID string, issuedAt, expiresAt time.Time) context.Context {
+	if issuedAt.IsZero() {
+		issuedAt = time.Now()
+	}
+	c := &Claims{
+		UserID:      userID,
+		WorkspaceID: workspaceID,
+		Role:        role,
+		SessionID:   sessionID,
+		RegisteredClaims: jwt.RegisteredClaims{
+			IssuedAt: jwt.NewNumericDate(issuedAt),
+		},
+	}
+	if !expiresAt.IsZero() {
+		c.ExpiresAt = jwt.NewNumericDate(expiresAt)
+	}
+	return withClaims(ctx, c)
 }
 
 // ClaimsFromContext returns the parsed JWT claims, if any.
