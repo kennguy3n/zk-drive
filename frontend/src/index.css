@@ -3,7 +3,32 @@
 @tailwind utilities;
 
 /*
- * Design tokens.
+ * KChat-aligned web fonts, self-hosted (no CDN) so the app stays fully
+ * offline/PWA-capable and leaks no requests to a third party — important
+ * for a privacy-first product. Mona Sans is the primary UI typeface and
+ * Sono the monospace accent, matching kchat.com. Both are variable fonts
+ * (a single file covers the whole weight range) under the SIL OFL 1.1
+ * (see /fonts/*-LICENSE.txt). `font-display: swap` shows fallback text
+ * immediately so first paint is never blocked on the font download.
+ */
+@font-face {
+  font-family: "Mona Sans";
+  src: url("/fonts/MonaSans.woff2") format("woff2");
+  font-weight: 200 900;
+  font-stretch: 75% 125%;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: "Sono";
+  src: url("/fonts/Sono.woff2") format("woff2");
+  font-weight: 200 800;
+  font-style: normal;
+  font-display: swap;
+}
+
+/*
+ * Design tokens — KChat theme (https://kchat.com).
  *
  * Every colour the app uses is defined here once, as space-separated RGB
  * channels so both Tailwind utilities (rgb(var(--token) / <alpha>)) and
@@ -12,56 +37,69 @@
  * so the entire app — including legacy inline-styled components — re-themes
  * without touching component code.
  *
+ * Palette: indigo/violet brand (#553BD8), violet accents (#6549F2 /
+ * #8578FF), lavender tints and near-black text — the KChat look & feel.
+ *
  * WCAG AA: brand-on-white and fg-on-surface pairs were chosen to meet the
- * 4.5:1 contrast ratio for normal text in both themes.
+ * 4.5:1 contrast ratio for normal text in both themes (muted text was
+ * darkened from KChat's on-dark #79749C to #645F8C so it stays AA on the
+ * light lavender surfaces).
  */
 :root {
-  /* Brand */
-  --color-brand: 37 99 235; /* #2563eb */
-  --color-brand-hover: 29 78 216; /* #1d4ed8 */
+  /* Brand — KChat indigo/violet */
+  --color-brand: 85 59 216; /* #553BD8 primary CTA */
+  --color-brand-hover: 75 50 199; /* #4B32C7 */
   --color-brand-fg: 255 255 255;
 
-  /* Surfaces & text (light) */
-  --color-bg: 247 248 250; /* app background */
+  /* Violet accents for gradients, glows & highlights */
+  --color-accent: 101 73 242; /* #6549F2 */
+  --color-accent-2: 133 120 255; /* #8578FF */
+
+  /* Surfaces & text (light) — lavender-tinted */
+  --color-bg: 246 245 255; /* #F6F5FF app background */
   --color-surface: 255 255 255; /* cards, panels */
-  --color-surface-2: 243 244 246; /* hover / subtle fills */
+  --color-surface-2: 238 236 255; /* #EEECFF hover / subtle fills */
   --color-overlay: 255 255 255; /* modals, popovers */
-  --color-border: 226 232 240; /* hairlines */
-  --color-fg: 17 24 39; /* primary text #111827 */
-  --color-muted: 100 116 139; /* secondary text #64748b */
+  --color-border: 221 217 255; /* #DDD9FF hairlines */
+  --color-fg: 10 10 10; /* #0A0A0A primary text */
+  --color-muted: 100 95 140; /* #645F8C secondary text (AA on lavender) */
 
   /* Status */
   --color-success: 22 163 74;
   --color-danger: 220 38 38;
   --color-warning: 217 119 6;
 
-  /* Focus ring */
-  --color-ring: 37 99 235;
+  /* Focus ring — violet accent */
+  --color-ring: 101 73 242; /* #6549F2 */
 
   --shadow-card: 0 1px 2px rgb(0 0 0 / 0.04), 0 4px 16px rgb(0 0 0 / 0.06);
 
   color-scheme: light;
-  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  font-family: "Mona Sans", -apple-system, BlinkMacSystemFont, "Segoe UI",
+    Roboto, sans-serif;
 }
 
 .dark {
-  --color-brand: 96 165 250; /* lighter brand for dark surfaces #60a5fa */
-  --color-brand-hover: 147 197 253;
-  --color-brand-fg: 8 15 30;
+  --color-brand: 133 120 255; /* #8578FF lighter on dark surfaces */
+  --color-brand-hover: 154 142 255; /* #9A8EFF */
+  --color-brand-fg: 25 25 25; /* near-black text on the light-violet button */
 
-  --color-bg: 9 11 16; /* near-black app bg */
-  --color-surface: 22 27 34; /* cards */
-  --color-surface-2: 30 37 46; /* hover */
-  --color-overlay: 26 32 40; /* modals */
-  --color-border: 45 52 64;
-  --color-fg: 226 232 240; /* primary text */
-  --color-muted: 148 163 184; /* secondary text */
+  --color-accent: 133 120 255; /* #8578FF */
+  --color-accent-2: 186 178 255; /* #BAB2FF lavender */
+
+  --color-bg: 10 10 10; /* #0A0A0A near-black app bg */
+  --color-surface: 25 25 25; /* #191919 cards (KChat dark surface) */
+  --color-surface-2: 37 36 48; /* #252430 hover */
+  --color-overlay: 30 29 41; /* #1E1D29 modals */
+  --color-border: 51 49 66; /* #333142 */
+  --color-fg: 237 236 245; /* #EDECF5 primary text */
+  --color-muted: 154 149 184; /* #9A95B8 secondary text */
 
   --color-success: 74 222 128;
   --color-danger: 248 113 113;
   --color-warning: 251 191 36;
 
-  --color-ring: 96 165 250;
+  --color-ring: 133 120 255; /* #8578FF */
 
   color-scheme: dark;
 }
