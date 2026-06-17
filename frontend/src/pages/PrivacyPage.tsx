@@ -22,36 +22,43 @@ export default function PrivacyPage() {
   // disabled one reads danger, and "the server can read plaintext" reads as a
   // caution (the honest managed-mode trade-off) rather than a value judgement.
   const rows: Array<{
+    id: string;
     capability: string;
     managed: { icon: ReactNode; text: string; dim?: boolean };
     strict: { icon: ReactNode; text: string; dim?: boolean };
   }> = [
     {
+      id: "serverRead",
       capability: t("privacy.tableServerRead"),
       managed: { icon: <Eye className="h-4 w-4 text-warning" />, text: t("privacy.managedServerRead") },
       strict: { icon: <ShieldCheck className="h-4 w-4 text-success" />, text: t("privacy.strictServerRead") },
     },
     {
+      id: "previews",
       capability: t("privacy.tablePreviews"),
       managed: { icon: <Check className="h-4 w-4 text-success" />, text: t("privacy.available") },
       strict: { icon: <X className="h-4 w-4 text-danger" />, text: t("privacy.strictPreviews"), dim: true },
     },
     {
+      id: "search",
       capability: t("privacy.tableSearch"),
       managed: { icon: <Check className="h-4 w-4 text-success" />, text: t("privacy.available") },
       strict: { icon: <X className="h-4 w-4 text-danger" />, text: t("privacy.strictSearch"), dim: true },
     },
     {
+      id: "virus",
       capability: t("privacy.tableVirus"),
       managed: { icon: <Check className="h-4 w-4 text-success" />, text: t("privacy.available") },
       strict: { icon: <X className="h-4 w-4 text-danger" />, text: t("privacy.strictVirus"), dim: true },
     },
     {
+      id: "adminRecovery",
       capability: t("privacy.tableAdminRecovery"),
       managed: { icon: <Check className="h-4 w-4 text-success" />, text: t("privacy.available") },
       strict: { icon: <X className="h-4 w-4 text-danger" />, text: t("privacy.strictAdminRecovery"), dim: true },
     },
     {
+      id: "atRest",
       capability: t("privacy.tableAtRest"),
       managed: { icon: <Check className="h-4 w-4 text-success" />, text: t("privacy.managedAtRest") },
       strict: { icon: <Check className="h-4 w-4 text-success" />, text: t("privacy.strictAtRest") },
@@ -176,7 +183,7 @@ export default function PrivacyPage() {
               </THead>
               <TBody>
                 {rows.map((row) => (
-                  <Tr key={row.capability}>
+                  <Tr key={row.id}>
                     <Th scope="row" className="font-medium normal-case tracking-normal text-fg">
                       {row.capability}
                     </Th>
