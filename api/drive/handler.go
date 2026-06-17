@@ -76,7 +76,15 @@ type Handler struct {
 	webhooks       WebhookEventPublisher
 	collab         *collab.DocumentHub
 	onlyOffice     *collab.OnlyOfficeService
-	suspension     middleware.WorkspaceSuspensionChecker
+	// collabReauth* enforce a collab WebSocket's authorization for the
+	// full life of the connection (token expiry + session revocation),
+	// not just at upgrade. Wired via WithCollabReauth; nil
+	// checker/validator degrade to expiry-only enforcement
+	// (single-replica / dev mode without Redis).
+	collabReauthChecker     middleware.SessionChecker
+	collabReauthValidator   middleware.SessionValidator
+	collabTrustedProxyDepth int
+	suspension              middleware.WorkspaceSuspensionChecker
 	// suspensionFailClosed mirrors the SuspensionGuard policy for the
 	// ONLYOFFICE save callback (which runs outside the middleware): when
 	// true, a suspension-lookup error rejects the write instead of
