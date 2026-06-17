@@ -90,20 +90,33 @@ func newConnPool(maxIdle int, maxIdleTime, maxLifetime time.Duration) *connPool 
 // socket while it was idle.
 func (p *connPool) get() *pooledConn {
 	now := time.Now()
+	var (
+		live    *pooledConn
+		expired []*pooledConn
+	)
 	p.mu.Lock()
-	defer p.mu.Unlock()
 	for len(p.idle) > 0 {
 		last := len(p.idle) - 1
 		pc := p.idle[last]
 		p.idle[last] = nil
 		p.idle = p.idle[:last]
 		if p.closed || now.Sub(pc.lastUsed) > p.maxIdleTime || now.Sub(pc.createdAt) > p.maxLifetime {
-			pc.close()
+			expired = append(expired, pc)
 			continue
 		}
-		return pc
+		live = pc
+		break
 	}
-	return nil
+	p.mu.Unlock()
+	// Tear evicted connections down after releasing the lock: close
+	// issues a blocking QUIT (bounded by quitTimeout), and holding the
+	// mutex across it would stall concurrent get/put for up to
+	// maxIdle*quitTimeout — the same reason put and close close after
+	// unlocking.
+	for _, pc := range expired {
+		pc.close()
+	}
+	return live
 }
 
 // put returns a connection to the pool after a successful send. The

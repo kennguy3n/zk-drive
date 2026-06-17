@@ -33,6 +33,12 @@ type fakeSMTPServer struct {
 	// first completed DATA, simulating a relay that reaped what it
 	// considered an idle socket while the client kept it pooled.
 	closeAfterFirstData bool
+	// quitStarted, if non-nil, is closed when the server receives
+	// QUIT; quitRelease, if non-nil, gates the 221 response. Together
+	// they let a test hold a connection mid-teardown (close issues a
+	// blocking QUIT) and observe the pool's locking behaviour.
+	quitStarted chan struct{}
+	quitRelease chan struct{}
 }
 
 func (s *fakeSMTPServer) writeLine(line string) {
@@ -95,6 +101,12 @@ func (s *fakeSMTPServer) run() {
 				return
 			}
 		case strings.ToUpper(line) == "QUIT":
+			if s.quitStarted != nil {
+				close(s.quitStarted)
+			}
+			if s.quitRelease != nil {
+				<-s.quitRelease
+			}
 			s.writeLine("221 bye")
 			return
 		case strings.HasPrefix(strings.ToUpper(line), "RSET"):

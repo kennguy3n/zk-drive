@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"net/smtp"
 	"strings"
 	"sync"
 	"testing"
@@ -199,4 +200,94 @@ func idleLen(p *connPool) int {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return len(p.idle)
+}
+
+// newBlockingQuitConn builds a warmed pooledConn (past EHLO, like a
+// real pooled connection) whose close() — the SMTP QUIT — blocks
+// until the returned release func is called. It lets a test pin a
+// connection mid-teardown and observe whether get() keeps the pool
+// mutex held while closing evicted connections. release is also
+// registered as a t.Cleanup so the server goroutine never leaks.
+func newBlockingQuitConn(t *testing.T) (*pooledConn, <-chan struct{}, func()) {
+	t.Helper()
+	clientSide, serverSide := net.Pipe()
+	started := make(chan struct{})
+	rel := make(chan struct{})
+	var once sync.Once
+	release := func() { once.Do(func() { close(rel) }) }
+	t.Cleanup(release)
+
+	srv := &fakeSMTPServer{
+		t:           t,
+		conn:        serverSide,
+		br:          bufio.NewReader(serverSide),
+		bw:          bufio.NewWriter(serverSide),
+		quitStarted: started,
+		quitRelease: rel,
+	}
+	go srv.run()
+
+	cli, err := smtp.NewClient(clientSide, "fake.local")
+	if err != nil {
+		t.Fatalf("smtp.NewClient: %v", err)
+	}
+	if err := cli.Hello("fake.local"); err != nil {
+		t.Fatalf("EHLO: %v", err)
+	}
+	now := time.Now()
+	return &pooledConn{cli: cli, conn: clientSide, createdAt: now, lastUsed: now}, started, release
+}
+
+// TestConnPool_GetEvictsExpiredWithoutHoldingLock pins the fix for
+// the get()-under-lock concurrency bug: evicting an expired idle
+// connection must close it AFTER releasing the pool mutex, because
+// close performs a blocking QUIT (bounded by quitTimeout). If get
+// held the lock across close, a burst of expired connections would
+// stall every concurrent get/put for up to maxIdle*quitTimeout.
+func TestConnPool_GetEvictsExpiredWithoutHoldingLock(t *testing.T) {
+	pc, quitStarted, release := newBlockingQuitConn(t)
+	// Force eviction on the next get: idle far past any sane window.
+	stale := time.Now().Add(-time.Hour)
+	pc.createdAt = stale
+	pc.lastUsed = stale
+
+	p := newConnPool(2, 15*time.Second, 5*time.Minute)
+	p.idle = append(p.idle, pc)
+
+	got := make(chan *pooledConn, 1)
+	go func() { got <- p.get() }()
+
+	// get() pops the stale conn, releases the lock, then blocks in
+	// close() (the QUIT awaits release). Wait until close is in
+	// flight before probing the lock.
+	select {
+	case <-quitStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("evicted connection's QUIT never started")
+	}
+
+	// With the lock released, idleLen (which takes p.mu) must return
+	// promptly even though close() is still blocked. Under the old
+	// code, get held p.mu across close and this would block.
+	lockFree := make(chan int, 1)
+	go func() { lockFree <- idleLen(p) }()
+	select {
+	case n := <-lockFree:
+		if n != 0 {
+			t.Fatalf("idle len = %d, want 0 (the stale conn was popped)", n)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("idleLen blocked >1s: get() held the pool mutex while closing an evicted connection")
+	}
+
+	release() // let the blocking QUIT finish
+
+	select {
+	case c := <-got:
+		if c != nil {
+			t.Fatalf("get returned a connection, want nil (the only idle conn was stale)")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("get did not return after the evicted connection closed")
+	}
 }
