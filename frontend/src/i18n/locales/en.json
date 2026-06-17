@@ -73,7 +73,28 @@
     "mfaRecoveryCodesRemaining_other": "{{count}} recovery codes remaining.",
     "mfaRecoveryCodesLowWarning": "You are running low on recovery codes. Disable and re-enroll to generate a fresh set.",
     "mfaReEnrollInstruction": "To replace your authenticator or generate new recovery codes, disable 2FA first.",
-    "mfaDisable": "Disable two-factor"
+    "mfaDisable": "Disable two-factor",
+    "loginSubtitle": "Welcome back. Sign in to your workspace.",
+    "signupSubtitle": "Create a workspace to start storing files securely.",
+    "ssoPrompt": "Your organization uses single sign-on.",
+    "signInWithSso": "Sign in with SSO",
+    "orContinueWith": "or",
+    "ssoSignInFailed": "Sign-in failed",
+    "ssoSignInFailedBody": "We couldn't complete single sign-on. Please try again.",
+    "backToLogin": "Back to sign in",
+    "completingSignIn": "Signing you in…",
+    "completingSignInBody": "Hang tight while we finish setting up your session.",
+    "mfaEnrolledSubtitle": "Save your recovery codes before you continue.",
+    "mfaAlreadyEnrolledSubtitle": "Your account is protected with two-factor authentication.",
+    "mfaEnrolledOnLabel": "Enrolled",
+    "mfaRecoveryCodesLabel": "Recovery codes",
+    "mfaCodeInputHint": "Enter the 6-digit code from your authenticator app.",
+    "mfaCopySecret": "Copy secret",
+    "mfaSecretCopied": "Secret copied to clipboard",
+    "mfaCopyCodes": "Copy codes",
+    "mfaCodesCopied": "Recovery codes copied to clipboard",
+    "mfaCodesDownloaded": "Recovery codes downloaded",
+    "mfaCopyFailed": "Couldn't copy to clipboard. Copy it manually instead."
   },
   "nav": {
     "drive": "Drive",
@@ -562,6 +583,7 @@
     "done": "Setup complete",
     "doneBody": "Your workspace is ready. Taking you to your drive…",
     "goToDrive": "Go to drive",
+    "progressLabel": "Setup progress",
     "step": {
       "admin": "Admin account",
       "storage": "Storage",
@@ -575,7 +597,12 @@
       "email": "Email",
       "name": "Your name",
       "password": "Password",
-      "passwordHint": "Use at least 12 characters."
+      "passwordHint": "Use at least 12 characters.",
+      "passwordOk": "Looks good — this password meets the minimum length.",
+      "errorEmailRequired": "Enter an email address.",
+      "errorEmailInvalid": "Enter a valid email address.",
+      "errorNameRequired": "Enter your name.",
+      "errorPasswordShort": "Use at least 12 characters."
     },
     "storage": {
       "title": "Connect object storage",
@@ -587,6 +614,7 @@
       "accessKey": "Access key",
       "secretKey": "Secret key",
       "region": "Region (optional)",
+      "regionHint": "Leave blank unless your S3 provider requires a specific region.",
       "testHint": "These values are only used to test the connection now — they are not saved here. Once the test passes, set them in your deployment environment/secrets and restart.",
       "test": "Test connection",
       "testing": "Testing…",
@@ -607,7 +635,9 @@
       "title": "Name your workspace",
       "body": "Your workspace is created together with your admin account. Pick a name your team will recognize.",
       "name": "Workspace name",
-      "creating": "Creating workspace…"
+      "creating": "Creating workspace…",
+      "errorRequired": "Enter a workspace name.",
+      "createdNote": "Your workspace has been created."
     },
     "invite": {
       "title": "Invite your first teammate",
@@ -618,6 +648,8 @@
       "role": "Role",
       "roleMember": "Member",
       "roleAdmin": "Admin",
+      "roleMemberDesc": "Can upload, view and manage their own files.",
+      "roleAdminDesc": "Full access, including workspace settings and members.",
       "send": "Send invite",
       "sending": "Sending…",
       "sent": "Invite sent to {{email}}."

@@ -25,30 +25,26 @@ export default function LoginPage() {
   // by iam-core during that flow, so there is no MFA UI here.
   if (config && config.auth_mode === "iam-core") {
     return (
-      <div className="auth-form" style={{ maxWidth: 360, margin: "4rem auto", textAlign: "center" }}>
-        <h1>{t("auth.loginPageTitle")}</h1>
-        <p>{t("auth.ssoPrompt", "Your organization uses single sign-on.")}</p>
-        {error && <p style={{ color: "var(--color-danger, #b00020)" }}>{error}</p>}
-        <button
-          type="button"
-          onClick={async () => {
-            try {
-              setError(null);
-              await beginLogin(config);
-            } catch (e) {
-              setError(e instanceof Error ? e.message : String(e));
-            }
-          }}
-        >
-          {t("auth.signInWithSso", "Sign in with SSO")}
-        </button>
-      </div>
+      <AuthForm
+        title={t("auth.loginPageTitle")}
+        subtitle={t("auth.ssoPrompt")}
+        error={error}
+        onSSO={async () => {
+          try {
+            setError(null);
+            await beginLogin(config);
+          } catch (e) {
+            setError(e instanceof Error ? e.message : String(e));
+          }
+        }}
+      />
     );
   }
 
   return (
     <AuthForm
       title={t("auth.loginPageTitle")}
+      subtitle={t("auth.loginSubtitle")}
       submitLabel={t("auth.login")}
       fields={[
         { name: "email", label: t("auth.email"), type: "email", autoComplete: "email" },

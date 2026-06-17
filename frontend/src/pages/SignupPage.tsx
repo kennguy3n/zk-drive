@@ -13,6 +13,7 @@ export default function SignupPage() {
   return (
     <AuthForm
       title={t("auth.signupPageTitle")}
+      subtitle={t("auth.signupSubtitle")}
       submitLabel={t("auth.signup")}
       fields={[
         { name: "workspace_name", label: t("auth.workspaceName") },
