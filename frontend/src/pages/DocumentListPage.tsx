@@ -283,6 +283,21 @@ function CreateDocumentDialog({
   const [submitting, setSubmitting] = useState(false);
   const [dialogError, setDialogError] = useState<string | null>(null);
 
+  // Reset the form every time the dialog opens. The parent mounts this
+  // dialog persistently (so the Modal can animate its exit), which means
+  // name / mode / error would otherwise survive a close→reopen and show
+  // the previous attempt's values. Keying the reset on `open` gives each
+  // open a clean slate without remounting (remounting would cut the exit
+  // animation). `allowed` is recomputed each render but is stable for a
+  // given folder.encryption_mode, so depending only on `open` is correct.
+  useEffect(() => {
+    if (!open) return;
+    setName(t("docs.untitled"));
+    setMode(allowed[allowed.length - 1] ?? "markdown");
+    setDialogError(null);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open]);
+
   const submit = useCallback(
     async (e: React.FormEvent) => {
       e.preventDefault();

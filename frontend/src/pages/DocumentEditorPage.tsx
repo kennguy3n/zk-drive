@@ -166,7 +166,14 @@ export default function DocumentEditorPage() {
     const nextAwareness = presenceAllowed ? new Awareness(nextYDoc) : null;
     const token = currentToken();
     if (!token) {
-      setLoadError(t("errors.AUTH_MISSING_TOKEN"));
+      // Surface via toast rather than loadError: the page's loadError
+      // EmptyState is gated on `!doc`, but reaching this branch requires
+      // collabMode !== "disabled" which in turn requires a loaded doc, so a
+      // loadError set here would never paint. The toast keeps the auth
+      // failure visible while the editor stays mounted, and the connection
+      // chip remains "disconnected" as the persistent signal that live
+      // collaboration is not active.
+      toast.error(t("errors.AUTH_MISSING_TOKEN"));
       nextYDoc.destroy();
       return;
     }
@@ -302,9 +309,7 @@ export default function DocumentEditorPage() {
       setDoc(updated);
       toast.success(t("docs.renamed", { name: trimmed }));
     } catch (err) {
-      const msg = translateApiError(err, t);
-      setLoadError(msg);
-      toast.error(msg);
+      toast.error(translateApiError(err, t));
     }
   }, [doc, id, prompt, t, toast]);
 
@@ -407,7 +412,13 @@ export default function DocumentEditorPage() {
           </button>
         }
         actions={
-          <Button variant="secondary" onClick={() => setModeSwitchOpen(true)}>
+          <Button
+            variant="secondary"
+            onClick={() => {
+              setModeSwitchError(null);
+              setModeSwitchOpen(true);
+            }}
+          >
             {t("docs.changeMode")}
           </Button>
         }
@@ -456,6 +467,9 @@ export default function DocumentEditorPage() {
         open={modeSwitchOpen}
         onOpenChange={(next) => {
           if (modeSwitching) return;
+          // Clear any prior switch error when the modal closes so the next
+          // open starts clean (the dialog is controlled, not remounted).
+          if (!next) setModeSwitchError(null);
           setModeSwitchOpen(next);
         }}
         title={t("docs.changeExperience")}
@@ -469,7 +483,10 @@ export default function DocumentEditorPage() {
         footer={
           <Button
             variant="secondary"
-            onClick={() => setModeSwitchOpen(false)}
+            onClick={() => {
+              setModeSwitchError(null);
+              setModeSwitchOpen(false);
+            }}
             disabled={modeSwitching}
           >
             {t("common.close")}
