@@ -29,6 +29,10 @@ type fakeSMTPServer struct {
 	dataBody  string
 	supportSTARTTLS bool
 	closed    bool
+	// closeAfterFirstData makes the server hang up right after the
+	// first completed DATA, simulating a relay that reaped what it
+	// considered an idle socket while the client kept it pooled.
+	closeAfterFirstData bool
 }
 
 func (s *fakeSMTPServer) writeLine(line string) {
@@ -87,6 +91,9 @@ func (s *fakeSMTPServer) run() {
 			}
 			s.dataBody = body.String()
 			s.writeLine("250 ok")
+			if s.closeAfterFirstData {
+				return
+			}
 		case strings.ToUpper(line) == "QUIT":
 			s.writeLine("221 bye")
 			return
