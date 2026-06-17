@@ -1,8 +1,11 @@
 import { useState, useEffect } from "react";
 import { useNavigate, useLocation } from "react-router-dom";
 import { useTranslation } from "react-i18next";
+import { KeyRound } from "lucide-react";
 import { totpVerifyWithChallenge } from "../api/client";
 import { translateApiError } from "../api/errors";
+import { AuthLayout } from "../components/AuthForm";
+import { Button, Field, Input } from "../components/ui";
 
 // MfaChallengePage is the second-factor step after a successful
 // password login. The /auth/login handler returned a short-lived
@@ -48,10 +51,22 @@ export default function MfaChallengePage() {
   }
 
   return (
-    <div className="auth-page">
-      <h1>{t("auth.mfaTitle")}</h1>
-      <p>{t("auth.mfaPrompt")}</p>
+    <AuthLayout
+      title={t("auth.mfaTitle")}
+      subtitle={t("auth.mfaPrompt")}
+      icon={<KeyRound className="h-7 w-7" aria-hidden="true" />}
+      footer={
+        <button
+          type="button"
+          className="font-medium text-brand hover:underline"
+          onClick={() => nav("/login", { replace: true })}
+        >
+          {t("auth.mfaCancelAndSignIn")}
+        </button>
+      }
+    >
       <form
+        className="flex flex-col gap-4"
         onSubmit={async (e) => {
           e.preventDefault();
           if (busy) return;
@@ -67,32 +82,31 @@ export default function MfaChallengePage() {
           }
         }}
       >
-        <label htmlFor="mfa-code">{t("auth.mfaCodeLabel")}</label>
-        <input
-          id="mfa-code"
-          type="text"
-          inputMode="text"
-          autoComplete="one-time-code"
-          autoFocus
-          value={code}
-          onChange={(e) => setCode(e.target.value)}
-          placeholder={t("auth.mfaCodePlaceholder")}
-        />
-        <button type="submit" disabled={busy || code.trim() === ""}>
-          {busy ? t("common.verifying") : t("auth.mfaVerify")}
-        </button>
-      </form>
-      {error && <p className="auth-error">{error}</p>}
-      <p className="auth-footer">
-        <button
-          type="button"
-          className="link-button"
-          onClick={() => nav("/login", { replace: true })}
+        <Field label={t("auth.mfaCodeLabel")} error={error ?? undefined}>
+          {(props) => (
+            <Input
+              {...props}
+              type="text"
+              inputMode="text"
+              autoComplete="one-time-code"
+              autoFocus
+              value={code}
+              onChange={(e) => setCode(e.target.value)}
+              placeholder={t("auth.mfaCodePlaceholder")}
+              className="h-12 text-center font-mono text-lg tracking-[0.3em]"
+            />
+          )}
+        </Field>
+        <Button
+          type="submit"
+          className="w-full"
+          loading={busy}
+          disabled={busy || code.trim() === ""}
         >
-          {t("auth.mfaCancelAndSignIn")}
-        </button>
-      </p>
-    </div>
+          {busy ? t("common.verifying") : t("auth.mfaVerify")}
+        </Button>
+      </form>
+    </AuthLayout>
   );
 }
 

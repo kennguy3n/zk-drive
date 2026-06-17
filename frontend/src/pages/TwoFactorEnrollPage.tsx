@@ -1,6 +1,7 @@
 import { useEffect, useState, type FormEvent } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 import { useTranslation } from "react-i18next";
+import { Copy, Download, KeyRound, Loader2, ShieldCheck } from "lucide-react";
 import {
   totpEnrollBegin,
   totpEnrollBeginRequired,
@@ -11,6 +12,8 @@ import {
   type TOTPStatus,
 } from "../api/client";
 import { translateApiError } from "../api/errors";
+import { AuthLayout } from "../components/AuthForm";
+import { Badge, Button, Field, Input, useToast } from "../components/ui";
 
 // TwoFactorEnrollPage handles BOTH:
 //
@@ -29,6 +32,7 @@ export default function TwoFactorEnrollPage() {
   const nav = useNavigate();
   const loc = useLocation();
   const { t } = useTranslation();
+  const toast = useToast();
   const enrollState = (loc.state as EnrollState | null) ?? null;
   const enrollToken = enrollState?.enrollToken ?? null;
 
@@ -96,36 +100,72 @@ export default function TwoFactorEnrollPage() {
     }
   };
 
+  const copySecret = async () => {
+    if (!challenge) return;
+    try {
+      await navigator.clipboard.writeText(challenge.secret);
+      toast.success(t("auth.mfaSecretCopied"));
+    } catch {
+      setError(t("auth.mfaCopyFailed"));
+    }
+  };
+
+  const copyRecovery = async () => {
+    if (!recovery) return;
+    try {
+      await navigator.clipboard.writeText(recovery.join("\n"));
+      toast.success(t("auth.mfaCodesCopied"));
+    } catch {
+      setError(t("auth.mfaCopyFailed"));
+    }
+  };
+
+  const downloadRecovery = () => {
+    if (!recovery) return;
+    const blob = new Blob([recovery.join("\n") + "\n"], { type: "text/plain" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = "zk-drive-recovery-codes.txt";
+    a.click();
+    URL.revokeObjectURL(url);
+    toast.success(t("auth.mfaCodesDownloaded"));
+  };
+
   // Recovery codes screen: shown exactly once after a successful
   // finalize. The user MUST download / copy / print before
   // dismissing — server-side they exist only as bcrypt hashes from
   // this point forward.
   if (recovery) {
     return (
-      <div className="auth-page">
-        <h1>{t("auth.mfaEnrolledTitle")}</h1>
-        <p className="recovery-warning">
-          <strong>{t("auth.mfaRecoveryWarning")}</strong>
-        </p>
-        <pre className="recovery-codes">{recovery.join("\n")}</pre>
-        <button
-          type="button"
-          onClick={() => {
-            const blob = new Blob([recovery.join("\n") + "\n"], {
-              type: "text/plain",
-            });
-            const url = URL.createObjectURL(blob);
-            const a = document.createElement("a");
-            a.href = url;
-            a.download = "zk-drive-recovery-codes.txt";
-            a.click();
-            URL.revokeObjectURL(url);
-          }}
-        >
-          {t("auth.mfaDownloadCodes")}
-        </button>
-        <button
-          type="button"
+      <AuthLayout
+        title={t("auth.mfaEnrolledTitle")}
+        subtitle={t("auth.mfaEnrolledSubtitle")}
+        icon={<ShieldCheck className="h-7 w-7" aria-hidden="true" />}
+        width="md"
+      >
+        <div className="mb-4 rounded-lg border border-warning/30 bg-warning/10 px-3 py-2 text-sm text-warning">
+          {t("auth.mfaRecoveryWarning")}
+        </div>
+        <ul className="mb-4 grid grid-cols-2 gap-2 rounded-lg border border-border bg-surface-2 p-4 font-mono text-sm text-fg">
+          {recovery.map((c) => (
+            <li key={c} className="text-center tracking-wide">
+              {c}
+            </li>
+          ))}
+        </ul>
+        <div className="flex flex-col gap-2 sm:flex-row">
+          <Button variant="secondary" className="flex-1" onClick={downloadRecovery}>
+            <Download className="h-4 w-4" aria-hidden="true" />
+            {t("auth.mfaDownloadCodes")}
+          </Button>
+          <Button variant="secondary" className="flex-1" onClick={copyRecovery}>
+            <Copy className="h-4 w-4" aria-hidden="true" />
+            {t("auth.mfaCopyCodes")}
+          </Button>
+        </div>
+        <Button
+          className="mt-3 w-full"
           onClick={() => {
             if (enrollToken) {
               // After forced enrollment the user must complete the
@@ -137,80 +177,139 @@ export default function TwoFactorEnrollPage() {
               nav("/drive", { replace: true });
             }
           }}
-          style={{ marginLeft: "1rem" }}
         >
           {enrollToken ? t("auth.signInAgain") : t("common.done")}
-        </button>
-      </div>
+        </Button>
+      </AuthLayout>
     );
   }
 
   if (status?.enabled && !enrollToken) {
     return (
-      <div className="auth-page">
-        <h1>{t("auth.mfaAlreadyEnrolled")}</h1>
-        {status.activated_at && (
-          <p>
-            {t("auth.mfaEnrolledAt", {
-              date: new Date(status.activated_at).toLocaleString(),
-            })}
+      <AuthLayout
+        title={t("auth.mfaAlreadyEnrolled")}
+        subtitle={t("auth.mfaAlreadyEnrolledSubtitle")}
+        icon={<ShieldCheck className="h-7 w-7" aria-hidden="true" />}
+        width="md"
+      >
+        <dl className="flex flex-col gap-3 text-sm">
+          {status.activated_at && (
+            <div className="flex items-center justify-between gap-3">
+              <dt className="text-muted">{t("auth.mfaEnrolledOnLabel")}</dt>
+              <dd className="font-medium text-fg">
+                {new Date(status.activated_at).toLocaleString()}
+              </dd>
+            </div>
+          )}
+          <div className="flex items-center justify-between gap-3">
+            <dt className="text-muted">{t("auth.mfaRecoveryCodesLabel")}</dt>
+            <dd>
+              <Badge tone={status.recovery_codes_remaining <= 2 ? "warning" : "success"}>
+                {t("auth.mfaRecoveryCodesRemaining", {
+                  count: status.recovery_codes_remaining,
+                })}
+              </Badge>
+            </dd>
+          </div>
+        </dl>
+        {status.recovery_codes_remaining <= 2 && (
+          <p className="mt-3 rounded-lg border border-warning/30 bg-warning/10 px-3 py-2 text-sm text-warning">
+            {t("auth.mfaRecoveryCodesLowWarning")}
           </p>
         )}
-        <p>
-          {t("auth.mfaRecoveryCodesRemaining", {
-            count: status.recovery_codes_remaining,
-          })}
-        </p>
-        {status.recovery_codes_remaining <= 2 && (
-          <p className="warning">{t("auth.mfaRecoveryCodesLowWarning")}</p>
-        )}
-        <p>{t("auth.mfaReEnrollInstruction")}</p>
-        <button type="button" onClick={() => nav("/drive")}>
+        <p className="mt-4 text-sm text-muted">{t("auth.mfaReEnrollInstruction")}</p>
+        <Button variant="secondary" className="mt-4 w-full" onClick={() => nav("/drive")}>
           {t("common.back")}
-        </button>
-      </div>
+        </Button>
+      </AuthLayout>
     );
   }
 
   return (
-    <div className="auth-page">
-      <h1>{t("auth.mfaEnrollTitle")}</h1>
-      {enrollToken && <p>{t("auth.mfaForcedEnrollmentExplanation")}</p>}
-      {!challenge && <p>{t("common.loading")}</p>}
-      {challenge && (
+    <AuthLayout
+      title={t("auth.mfaEnrollTitle")}
+      subtitle={enrollToken ? t("auth.mfaForcedEnrollmentExplanation") : t("auth.mfaEnrollPrompt")}
+      icon={<KeyRound className="h-7 w-7" aria-hidden="true" />}
+      width="md"
+    >
+      {error && (
+        <div
+          role="alert"
+          className="mb-4 rounded-lg border border-danger/30 bg-danger/10 px-3 py-2 text-sm text-danger"
+        >
+          {error}
+        </div>
+      )}
+
+      {!challenge ? (
+        <div
+          className="flex flex-col items-center gap-3 py-6 text-sm text-muted"
+          role="status"
+          aria-live="polite"
+        >
+          <Loader2 className="h-6 w-6 animate-spin text-brand" aria-hidden="true" />
+          {t("common.loading")}
+        </div>
+      ) : (
         <>
-          <p>{t("auth.mfaEnrollPrompt")}</p>
-          <img
-            src={`data:image/png;base64,${challenge.qr_code_png}`}
-            alt={t("auth.mfaQrAlt")}
-            width={200}
-            height={200}
-          />
-          <p>
-            <small>{t("auth.mfaSecretLabel")}</small>
-            <br />
-            <code>{challenge.secret}</code>
-          </p>
-          <form onSubmit={onFinalize}>
-            <label htmlFor="totp-code">{t("auth.mfaCodeInput")}</label>
-            <input
-              id="totp-code"
-              type="text"
-              inputMode="numeric"
-              autoComplete="one-time-code"
-              autoFocus
-              value={code}
-              onChange={(e) => setCode(e.target.value)}
-              placeholder="123456"
-            />
-            <button type="submit" disabled={busy || code.trim() === ""}>
+          <div className="flex flex-col items-center">
+            <div className="rounded-xl border border-border bg-white p-3">
+              <img
+                src={`data:image/png;base64,${challenge.qr_code_png}`}
+                alt={t("auth.mfaQrAlt")}
+                width={180}
+                height={180}
+              />
+            </div>
+          </div>
+
+          <div className="mt-4">
+            <p className="mb-1.5 text-sm font-medium text-fg">{t("auth.mfaSecretLabel")}</p>
+            <div className="flex items-center gap-2 rounded-lg border border-border bg-surface-2 p-2">
+              <code className="flex-1 break-all px-1 font-mono text-sm text-fg">
+                {challenge.secret}
+              </code>
+              <Button
+                type="button"
+                variant="ghost"
+                size="sm"
+                onClick={copySecret}
+                aria-label={t("auth.mfaCopySecret")}
+              >
+                <Copy className="h-4 w-4" aria-hidden="true" />
+                {t("common.copy")}
+              </Button>
+            </div>
+          </div>
+
+          <form onSubmit={onFinalize} className="mt-5 flex flex-col gap-4">
+            <Field label={t("auth.mfaCodeInput")} hint={t("auth.mfaCodeInputHint")}>
+              {(props) => (
+                <Input
+                  {...props}
+                  type="text"
+                  inputMode="numeric"
+                  autoComplete="one-time-code"
+                  autoFocus
+                  value={code}
+                  onChange={(e) => setCode(e.target.value)}
+                  placeholder="123456"
+                  className="h-12 text-center font-mono text-lg tracking-[0.3em]"
+                />
+              )}
+            </Field>
+            <Button
+              type="submit"
+              className="w-full"
+              loading={busy}
+              disabled={busy || code.trim() === ""}
+            >
               {busy ? t("common.verifying") : t("auth.mfaEnable")}
-            </button>
+            </Button>
           </form>
         </>
       )}
-      {error && <p className="auth-error">{error}</p>}
-    </div>
+    </AuthLayout>
   );
 }
 
