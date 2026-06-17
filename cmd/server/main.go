@@ -920,6 +920,7 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("build email service: %w", err)
 	}
+	defer emailSvc.Close()
 	emailSvc.LogStartup(ctx)
 
 	previewRepo := preview.NewPostgresRepository(pool)

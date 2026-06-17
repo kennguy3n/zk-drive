@@ -3,6 +3,7 @@ package email
 import (
 	"context"
 	"errors"
+	"io"
 	"log/slog"
 	"strings"
 	"time"
@@ -112,6 +113,18 @@ func (s *Service) WithMetrics(m MetricsRecorder) *Service {
 // IsConfigured reports whether the underlying Sender will attempt
 // delivery. False when running on NoopClient.
 func (s *Service) IsConfigured() bool { return s.sender.IsConfigured() }
+
+// Close releases any resources held by the underlying Sender — for
+// the production SMTPClient this drains its connection pool. Senders
+// that hold nothing (NoopClient) are a no-op. Returns no error (the
+// pool drain has none worth acting on at shutdown), matching the
+// void Close of the sibling activity/audit services it is deferred
+// alongside in cmd/server.
+func (s *Service) Close() {
+	if closer, ok := s.sender.(io.Closer); ok {
+		_ = closer.Close()
+	}
+}
 
 // LogStartup writes a single slog.Info / slog.Warn line at boot so
 // operators can see the transactional-email mode without grepping
