@@ -8,9 +8,10 @@
 //     per-document rooms and fans out incoming frames to other
 //     room members, gated by the folder's collab capability.
 //   - fold.go      — FoldFunc implementations that satisfy
-//     internal/document.FoldFunc. P2b ships OpaqueConcatFold;
-//     a future drop-in YjsMergeFold will land when the WASM
-//     bridge is wired (managed_encrypted folders).
+//     internal/document.FoldFunc. YjsMergeFold (merge_fold.go,
+//     backed by the yrs WASM runtime in yjswasm.go) is the
+//     primary fold for managed_encrypted folders; OpaqueConcatFold
+//     is the strict_zk strategy and the degraded-mode fallback.
 //
 // The package is HTTP-agnostic: it has no knowledge of
 // chi / middleware / *http.Request. The drive package
