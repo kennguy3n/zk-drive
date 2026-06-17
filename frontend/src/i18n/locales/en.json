@@ -522,7 +522,7 @@
     "auditEmptyTitle": "No activity yet",
     "retentionFormHeading": "Add or update a policy",
     "retentionFormDescription": "Leave a field blank to leave that limit unset. Policies apply to a folder and its descendants; the workspace default applies everywhere else.",
-    "retentionScopeFolder": "Folder {{id}}",
+    "retentionScopeFolder": "Folder",
     "colScope": "Scope",
     "colLimits": "Limits",
     "policySaved": "Retention policy saved.",
