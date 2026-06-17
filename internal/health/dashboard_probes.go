@@ -14,6 +14,7 @@ import (
 	"github.com/nats-io/nats.go"
 	"github.com/redis/go-redis/v9"
 
+	"github.com/kennguy3n/zk-drive/internal/ai"
 	"github.com/kennguy3n/zk-drive/internal/heartbeat"
 	"github.com/kennguy3n/zk-drive/internal/storage"
 )
@@ -617,6 +618,72 @@ func workerColor(h heartbeat.WorkerHealth, now time.Time) Color {
 	default:
 		return ColorGreen
 	}
+}
+
+// ---------------------------------------------------------------------------
+// AI local LLM (Ollama)
+// ---------------------------------------------------------------------------
+
+// aiLLMProbe is the contract the AI-LLM dashboard probe needs from the
+// Ollama client; an interface so tests can supply a fake without a live
+// daemon.
+type aiLLMProbe interface {
+	Model() string
+	Health(ctx context.Context) error
+}
+
+// AILLMDashboardProbe reports whether the optional local LLM (Ollama)
+// is wired and reachable. The LLM is the one genuinely config-gated AI
+// capability (OLLAMA_URL): when it is unset the AI features fall back
+// to the deterministic rule-based path, so a disabled LLM is reported
+// as ColorUnknown ("not configured") rather than an error. When it is
+// wired, the probe issues a cheap liveness check (GET /api/tags, no
+// inference) so a misconfigured or down daemon surfaces as red instead
+// of silently degrading every summary / tag-suggestion / query-
+// expansion request to the fallback.
+type AILLMDashboardProbe struct {
+	llm aiLLMProbe
+}
+
+// NewAILLMDashboardProbe wraps the Ollama client. It deliberately takes
+// the concrete *ai.OllamaClient (not the interface) so a nil client —
+// the common path when OLLAMA_URL is unset — normalises to a nil probe
+// field and the "not configured" branch fires, avoiding the typed-nil-
+// interface trap (same rationale as NewStorageDashboardProbe).
+func NewAILLMDashboardProbe(client *ai.OllamaClient) *AILLMDashboardProbe {
+	if client == nil {
+		return &AILLMDashboardProbe{llm: nil}
+	}
+	return &AILLMDashboardProbe{llm: client}
+}
+
+// newAILLMDashboardProbeWithProbe is a test seam that accepts the
+// interface directly (so a fake can stand in for *ai.OllamaClient).
+func newAILLMDashboardProbeWithProbe(p aiLLMProbe) *AILLMDashboardProbe {
+	return &AILLMDashboardProbe{llm: p}
+}
+
+// SubsystemName implements DashboardProbe.
+func (a *AILLMDashboardProbe) SubsystemName() string { return "ai_llm" }
+
+// Probe implements DashboardProbe.
+func (a *AILLMDashboardProbe) Probe(ctx context.Context) Subsystem {
+	out := Subsystem{Name: a.SubsystemName()}
+	if a == nil || a.llm == nil {
+		out.Status = ColorUnknown
+		out.Detail = map[string]any{"configured": false, "mode": "rule-based fallback"}
+		return out
+	}
+	detail := map[string]any{"configured": true, "model": a.llm.Model()}
+	if err := a.llm.Health(ctx); err != nil {
+		out.Status = ColorRed
+		out.Error = "llm daemon unreachable"
+		out.Detail = detail
+		return out
+	}
+	out.Status = ColorGreen
+	out.Detail = detail
+	return out
 }
 
 // ---------------------------------------------------------------------------

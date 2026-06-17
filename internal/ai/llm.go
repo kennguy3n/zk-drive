@@ -175,6 +175,29 @@ func (c *OllamaClient) Generate(ctx context.Context, prompt string) (string, err
 	return out, nil
 }
 
+// Health performs a cheap liveness probe against the Ollama daemon by
+// issuing GET /api/tags (the local model-list endpoint), which returns
+// 200 without running inference. Any transport error or non-200 status
+// is returned so the admin health dashboard can distinguish a wired
+// daemon that is actually reachable from one that is down or
+// misconfigured. ctx bounds the call (the dashboard supplies its
+// per-probe timeout); inference is never triggered.
+func (c *OllamaClient) Health(ctx context.Context) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.endpoint+"/api/tags", nil)
+	if err != nil {
+		return fmt.Errorf("ai/ollama: build health request: %w", err)
+	}
+	resp, err := c.httpc.Do(req)
+	if err != nil {
+		return fmt.Errorf("ai/ollama: health: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("ai/ollama: health status %d", resp.StatusCode)
+	}
+	return nil
+}
+
 // assertLocalEndpoint refuses any URL whose host resolves outside
 // loopback or RFC1918 / RFC4193 / link-local space. The check is
 // deliberately conservative: hostnames that don't resolve at config
