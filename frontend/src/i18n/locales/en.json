@@ -401,6 +401,8 @@
     "checkoutSuccessTitle": "Checkout complete",
     "checkoutCancelTitle": "Checkout cancelled",
     "checkoutHint": "You'll be sent to Stripe's secure checkout, where you can review everything before paying.",
+    "checkoutFailedDesc": "We couldn't start Stripe checkout. Please check your connection and try again.",
+    "portalFailedDesc": "We couldn't open the Stripe customer portal. Please check your connection and try again.",
     "tier": {
       "starter": {
         "label": "Starter",

@@ -99,7 +99,10 @@ export default function BillingPage() {
       window.location.assign(url);
     } catch (e) {
       setBusy(null);
-      toast.error(t("billing.checkoutFailed"), translateApiError(e, t));
+      toast.error(
+        t("billing.checkoutFailed"),
+        translateApiError(e, t, { fallback: t("billing.checkoutFailedDesc") }),
+      );
     }
   }
 
@@ -111,7 +114,10 @@ export default function BillingPage() {
       window.location.assign(url);
     } catch (e) {
       setBusy(null);
-      toast.error(t("billing.portalFailed"), translateApiError(e, t));
+      toast.error(
+        t("billing.portalFailed"),
+        translateApiError(e, t, { fallback: t("billing.portalFailedDesc") }),
+      );
     }
   }
 
