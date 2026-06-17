@@ -113,6 +113,33 @@ func TestVerifierReverify(t *testing.T) {
 		}
 	})
 
+	t.Run("rotated-out kid on a warm cache is a definitive rejection", func(t *testing.T) {
+		v := NewVerifier("", "", j.jwksURI(), nil)
+		// Warm the cache and stamp lastFetch ~now by reverifying a
+		// valid token first. This reproduces the shared-Verifier setup
+		// in production: HTTP request traffic keeps the JWKS cache warm,
+		// so the collab reauth pump's Reverify of a now-rotated key
+		// hits the minRefreshInterval throttle instead of a fresh fetch.
+		if err := v.Reverify(context.Background(), j.mint(t, j.kid, time.Hour)); err != nil {
+			t.Fatalf("warm-up Reverify(valid) = %v, want nil", err)
+		}
+		// The kid is absent from the recently-fetched, still-valid key
+		// set, so refresh is throttled. That must remain a definitive
+		// rejection, not a transient outage — otherwise a federated
+		// collab socket signed by a rotated-out key would survive until
+		// the throttle window lapses (~minRefreshInterval).
+		err := v.Reverify(context.Background(), j.mint(t, "rotated-out-kid", time.Hour))
+		if err == nil {
+			t.Fatal("Reverify(throttled rotated-out kid) = nil, want error")
+		}
+		if errors.Is(err, apimw.ErrReverifyUnavailable) {
+			t.Fatalf("throttled rotated-out kid classified as transient: %v", err)
+		}
+		if !errors.Is(err, ErrTokenInvalid) {
+			t.Fatalf("throttled rotated-out kid not wrapped in ErrTokenInvalid: %v", err)
+		}
+	})
+
 	t.Run("unreachable JWKS is transient", func(t *testing.T) {
 		dead := httptest.NewServer(http.NotFoundHandler())
 		deadURI := dead.URL + "/jwks"
