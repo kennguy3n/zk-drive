@@ -1,7 +1,7 @@
 import { forwardRef, type ButtonHTMLAttributes } from "react";
 import { cn } from "../../lib/cn";
 
-type Variant = "primary" | "secondary" | "ghost" | "danger";
+type Variant = "primary" | "secondary" | "ghost" | "danger" | "gradient";
 type Size = "sm" | "md" | "lg";
 
 export interface ButtonProps extends ButtonHTMLAttributes<HTMLButtonElement> {
@@ -11,18 +11,21 @@ export interface ButtonProps extends ButtonHTMLAttributes<HTMLButtonElement> {
   loading?: boolean;
 }
 
+// KChat buttons are fully-rounded pills (rounded-full) with a 500 weight.
 const base =
-  "inline-flex items-center justify-center gap-2 rounded-lg font-medium " +
-  "transition-colors focus-visible:outline-none focus-visible:ring-2 " +
+  "inline-flex items-center justify-center gap-2 rounded-full font-medium " +
+  "transition-[color,background-color,box-shadow,opacity] focus-visible:outline-none focus-visible:ring-2 " +
   "focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-bg " +
   "disabled:opacity-50 disabled:pointer-events-none select-none";
 
 const variants: Record<Variant, string> = {
-  primary: "bg-brand text-brand-fg hover:bg-brand-hover",
-  secondary:
-    "bg-surface text-fg border border-border hover:bg-surface-2",
+  primary: "bg-brand text-brand-fg hover:bg-brand-hover hover:shadow-glow",
+  secondary: "bg-surface text-fg border border-border hover:bg-surface-2",
   ghost: "bg-transparent text-fg hover:bg-surface-2",
   danger: "bg-danger text-white hover:opacity-90",
+  // KChat's signature violet gradient CTA.
+  gradient:
+    "bg-brand-gradient text-white shadow-glow hover:opacity-95 border-0",
 };
 
 const sizes: Record<Size, string> = {

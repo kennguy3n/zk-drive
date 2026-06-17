@@ -26,7 +26,7 @@ export default defineConfig({
         name: "ZK Drive",
         short_name: "ZK Drive",
         description: "Secure file storage and collaboration",
-        theme_color: "#2563eb",
+        theme_color: "#553BD8",
         background_color: "#ffffff",
         display: "standalone",
         start_url: "/drive",
@@ -53,7 +53,7 @@ export default defineConfig({
         // Hence: shell only, no runtime API caching. The navigateFallback
         // denylist on `^/api/` belt-and-braces this against a misconfigured
         // Workbox runtime caching rule that might be added later.
-        globPatterns: ["**/*.{js,css,html,ico,png,svg}"],
+        globPatterns: ["**/*.{js,css,html,ico,png,svg,woff2}"],
         navigateFallback: "/index.html",
         navigateFallbackDenylist: [/^\/api\//],
         // Pull the Web Push handlers (push / notificationclick) into the

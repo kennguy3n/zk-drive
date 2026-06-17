@@ -15,11 +15,29 @@ export default {
   content: ["./index.html", "./src/**/*.{ts,tsx}"],
   theme: {
     extend: {
+      // KChat uses Mona Sans for UI and Sono as the monospace accent.
+      // Both are self-hosted variable fonts (see src/index.css @font-face).
+      fontFamily: {
+        sans: [
+          "Mona Sans",
+          "-apple-system",
+          "BlinkMacSystemFont",
+          "Segoe UI",
+          "Roboto",
+          "sans-serif",
+        ],
+        mono: ["Sono", "ui-monospace", "SFMono-Regular", "Menlo", "monospace"],
+      },
       colors: {
         brand: {
           DEFAULT: "rgb(var(--color-brand) / <alpha-value>)",
           fg: "rgb(var(--color-brand-fg) / <alpha-value>)",
           hover: "rgb(var(--color-brand-hover) / <alpha-value>)",
+        },
+        // Violet accents for gradients, glows and highlights.
+        accent: {
+          DEFAULT: "rgb(var(--color-accent) / <alpha-value>)",
+          2: "rgb(var(--color-accent-2) / <alpha-value>)",
         },
         // Semantic surface / text tokens.
         bg: "rgb(var(--color-bg) / <alpha-value>)",
@@ -37,9 +55,22 @@ export default {
       borderRadius: {
         card: "12px",
       },
+      // KChat's signature violet gradients/glows, exposed as named
+      // background-image utilities (bg-brand-gradient / bg-brand-glow) so
+      // workstreams reference one source instead of re-deriving hex stops.
+      backgroundImage: {
+        "brand-gradient":
+          "linear-gradient(90deg, #382887 0%, #4B32C7 100%)",
+        "brand-gradient-soft":
+          "linear-gradient(180deg, #8578FF 0%, #6549F2 100%)",
+        "brand-glow":
+          "radial-gradient(84.18% 59.84% at 50% 100%, rgb(101 73 242) 0%, rgb(25 25 25) 100%)",
+      },
       boxShadow: {
         card: "0 1px 2px rgb(0 0 0 / 0.04), 0 4px 16px rgb(0 0 0 / 0.06)",
         overlay: "0 10px 38px rgb(0 0 0 / 0.18), 0 2px 8px rgb(0 0 0 / 0.10)",
+        // Violet focus/hover glow for primary CTAs (KChat accent).
+        glow: "0 8px 24px rgb(101 73 242 / 0.35)",
       },
       keyframes: {
         "fade-in": {
