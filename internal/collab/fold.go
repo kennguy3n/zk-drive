@@ -20,15 +20,18 @@ import (
 // individual delta tail (it's been folded into y_state and
 // trimmed).
 //
-// For managed_encrypted folders, OpaqueConcatFold is a TEMPORARY
-// placeholder until a Yjs WASM (or CGo) bridge ships in a follow-
-// up PR. The bridge will provide a YjsMergeFold that produces a
-// compact single-update y_state via Y.mergeUpdates. Replacing this
-// implementation with the merge fold is a drop-in swap — the
-// FoldFunc signature is unchanged and the client side is no-op
-// (apply-update on a single optimal update vs a sequence of
-// length-prefixed updates is equivalent from the editor's point
-// of view).
+// For managed_encrypted folders the primary fold is YjsMergeFold
+// (see merge_fold.go), backed by the yrs WASM runtime in
+// yjswasm.go: it produces a compact single-update y_state via the
+// CRDT merge. OpaqueConcatFold remains the degraded-mode fallback
+// for those folders — FoldFor returns it only when the runtime is
+// unavailable (rt == nil), a branch cmd/server/main.go treats as a
+// hard boot error today but which a future opt-out flag could
+// enable. The two folds emit different output shapes (a compact
+// update vs this length-prefixed bundle); the client decoder in
+// frontend/src/collab/provider.ts distinguishes them by the
+// SyncStepUpdates sub-type, so the fallback is transparent to the
+// editor.
 //
 // Output:
 //   - newState:       length-prefix(currentState) || length-prefix(tail[0].Payload) || ... || length-prefix(tail[N-1].Payload)
