@@ -116,7 +116,7 @@ export default function TwoFactorEnrollPage() {
       await navigator.clipboard.writeText(recovery.join("\n"));
       toast.success(t("auth.mfaCodesCopied"));
     } catch {
-      setError(t("auth.mfaCopyFailed"));
+      toast.error(t("auth.mfaCopyFailed"));
     }
   };
 
