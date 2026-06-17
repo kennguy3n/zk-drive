@@ -15,6 +15,7 @@ import (
 	"github.com/kennguy3n/zk-drive/internal/collab"
 	"github.com/kennguy3n/zk-drive/internal/document"
 	"github.com/kennguy3n/zk-drive/internal/permission"
+	"github.com/kennguy3n/zk-drive/internal/session"
 )
 
 // Read/write pump tunables for collab connections. Larger
@@ -26,6 +27,41 @@ const (
 	collabPongWait       = 60 * time.Second
 	collabPingPeriod     = (collabPongWait * 9) / 10
 	collabMaxMessageSize = collab.MaxFrameBytes
+)
+
+// collabReauthInterval bounds how often a live collab connection
+// re-checks its authorization (token expiry + session revocation).
+//
+// A collab WebSocket is authenticated exactly once — by AuthMiddleware,
+// before the upgrade — and is then long-lived (a single editing
+// session can stay open for hours). Without a periodic re-check the
+// socket would keep relaying edits long after its JWT expired or its
+// session was revoked. 30s keeps the post-revocation exposure window
+// small while adding only two bounded store reads per connection per
+// interval (negligible next to the per-request checks AuthMiddleware
+// already runs on the HTTP plane). Expiry is also enforced within this
+// window — acceptable overrun against a multi-hour token TTL.
+const collabReauthInterval = 30 * time.Second
+
+// Collab connection close codes for server-side auth-lifetime
+// enforcement (see collabAuthPump). The frontend CollabProvider treats
+// a fixed set of codes as PERMANENT (it will not reconnect) and every
+// other code as RETRIABLE (exponential-backoff reconnect, which
+// re-runs tokenProvider() to fetch a fresh JWT). We pick codes
+// deliberately on each side of that line:
+//
+//   - collabCloseReauthRequired (4002) is NOT in the client's
+//     PermanentCloseCodes, so an expired-but-otherwise-valid session is
+//     closed and the client transparently reconnects with a freshly
+//     minted token. No frontend change is required: the existing
+//     reconnect path already calls tokenProvider() on every connect.
+//   - collabCloseSessionRevoked (4001) IS in the client's
+//     PermanentCloseCodes ("auth failed / token rejected"), so a
+//     revoked session, a vanished session record, or a device anomaly
+//     tears the socket down for good and the client does not reconnect.
+const (
+	collabCloseReauthRequired = 4002
+	collabCloseSessionRevoked = 4001
 )
 
 // collabUpgrader mirrors api/ws/handler.go's DefaultUpgrader. Auth
@@ -57,6 +93,26 @@ var collabUpgrader = websocket.Upgrader{
 // so collab clients receive a clean close frame.
 func (h *Handler) WithCollab(hub *collab.DocumentHub) *Handler {
 	h.collab = hub
+	return h
+}
+
+// WithCollabReauth wires the session checker + validator used to
+// enforce a collab WebSocket's authorization for the full life of the
+// connection (collabAuthPump). The same store backs AuthMiddleware's
+// per-request revocation and per-session existence/device checks, so
+// passing it here makes those guarantees hold on already-open sockets
+// too — not just on the upgrade request.
+//
+// nil checker/validator (single-replica / dev mode without Redis)
+// degrade to expiry-only enforcement: the socket is still torn down
+// once its JWT expires (a local check needing no store), but
+// out-of-band revocations are not observed mid-session. trustedProxyDepth
+// must match AuthMiddleware's so the device-anomaly fingerprint IP is
+// read from the same proxy hop.
+func (h *Handler) WithCollabReauth(checker middleware.SessionChecker, validator middleware.SessionValidator, trustedProxyDepth int) *Handler {
+	h.collabReauthChecker = checker
+	h.collabReauthValidator = validator
+	h.collabTrustedProxyDepth = trustedProxyDepth
 	return h
 }
 
@@ -150,6 +206,15 @@ func (h *Handler) ServeDocumentCollab(w http.ResponseWriter, r *http.Request) {
 	}
 	canWrite := h.assertResourceAccess(r.Context(), permission.ResourceFolder, doc.FolderID, permission.RoleEditor) == nil
 
+	// Snapshot the authorization facts BEFORE the upgrade hijacks the
+	// connection: the JWT claims (expiry + sid) and the device-
+	// fingerprint inputs (UA + proxy-resolved client IP). collabAuthPump
+	// uses these to keep enforcing the authorization AuthMiddleware
+	// checked once at upgrade, for the full life of the socket.
+	authClaims, _ := middleware.ClaimsFromContext(r.Context())
+	authUserAgent := r.UserAgent()
+	authClientIP := collabClientIP(r, h.collabTrustedProxyDepth)
+
 	// Snapshot bundle: y_state + tail deltas, used as the cold-
 	// open payload pushed to the new client immediately after
 	// the upgrade succeeds. We fetch BEFORE the upgrade so a
@@ -212,6 +277,31 @@ func (h *Handler) ServeDocumentCollab(w http.ResponseWriter, r *http.Request) {
 	// client.
 	go collabWritePump(client, conn, logger)
 	go collabReadPump(h.collab, client, conn, logger)
+
+	// Enforce the connection's authorization for its full lifetime.
+	// Without this, the socket outlives its JWT and survives session
+	// revocation. Started only when there is something to enforce:
+	// always when the token carries an expiry, plus whenever a
+	// revocation checker/validator is wired.
+	if authClaims != nil {
+		st := collabAuthState{
+			workspaceID: workspaceID,
+			userID:      userID,
+			sessionID:   authClaims.SessionID,
+			userAgent:   authUserAgent,
+			clientIP:    authClientIP,
+		}
+		if authClaims.IssuedAt != nil {
+			st.issuedAt = authClaims.IssuedAt.Time
+		}
+		if authClaims.ExpiresAt != nil {
+			st.expiresAt = authClaims.ExpiresAt.Time
+			st.hasExpiry = true
+		}
+		if st.hasExpiry || h.collabReauthChecker != nil || h.collabReauthValidator != nil {
+			go collabAuthPump(client, conn, st, h.collabReauthChecker, h.collabReauthValidator, collabReauthInterval, logger)
+		}
+	}
 }
 
 // collabReadPump pulls binary frames off the connection, decodes
@@ -333,4 +423,127 @@ func collabWritePump(c *collab.DocumentClient, conn *websocket.Conn, logger *slo
 			}
 		}
 	}
+}
+
+// collabAuthState is the immutable snapshot of a collab connection's
+// authorization, captured at upgrade time. The connection was
+// authenticated once by AuthMiddleware before the upgrade;
+// collabAuthPump replays these facts against the token clock and the
+// session store to keep enforcing that authorization for the life of
+// the (otherwise indefinitely long-lived) socket.
+type collabAuthState struct {
+	workspaceID uuid.UUID
+	userID      uuid.UUID
+	sessionID   string
+	issuedAt    time.Time
+	expiresAt   time.Time
+	hasExpiry   bool
+	userAgent   string
+	clientIP    string
+}
+
+// collabAuthDecision is the outcome of one auth re-check. Exactly one
+// of {closeConn, transient!=nil, zero-value} is meaningful: closeConn
+// means tear the socket down with code/reason; a non-nil transient is
+// a store error that must NOT close the connection (logged, retried);
+// the zero value means the authorization still holds.
+type collabAuthDecision struct {
+	closeConn bool
+	code      int
+	reason    string
+	transient error
+}
+
+// evaluateCollabAuth re-checks a live collab connection's
+// authorization. The order mirrors AuthMiddleware: expiry first, then
+// the per-user revocation cutoff, then per-session existence + device
+// anomaly. It differs from the HTTP path in one deliberate way — a
+// transient store error returns a non-fatal `transient` rather than
+// failing closed: tearing down an active editing session on a momentary
+// Redis blip is far more disruptive than failing one retriable HTTP
+// request, and token expiry (the core property) is enforced locally
+// above regardless of store health.
+func evaluateCollabAuth(ctx context.Context, st collabAuthState, checker middleware.SessionChecker, validator middleware.SessionValidator) collabAuthDecision {
+	// 1. Token expiry — local, needs no store, so it holds even during
+	//    a total session-store outage. A socket must not outlive its JWT.
+	if st.hasExpiry && time.Now().After(st.expiresAt) {
+		return collabAuthDecision{closeConn: true, code: collabCloseReauthRequired, reason: "token expired"}
+	}
+	// 2. Out-of-band revocation (logout, password reset, admin force-
+	//    sign-out) via the per-user issued-at cutoff.
+	if checker != nil {
+		cctx, cancel := context.WithTimeout(ctx, middleware.SessionCheckTimeout)
+		revoked, err := checker.IsRevoked(cctx, st.workspaceID, st.userID, st.issuedAt)
+		cancel()
+		switch {
+		case err != nil:
+			return collabAuthDecision{transient: err}
+		case revoked:
+			return collabAuthDecision{closeConn: true, code: collabCloseSessionRevoked, reason: "session revoked"}
+		}
+	}
+	// 3. Per-session existence + device anomaly (6.2) for tokens that
+	//    carry a sid. ErrSessionNotFound is the per-session revocation
+	//    signal (DELETE /sessions/:id, logout, natural expiry).
+	if validator != nil && st.sessionID != "" {
+		vctx, cancel := context.WithTimeout(ctx, middleware.SessionCheckTimeout)
+		verr := validator.ValidateSession(vctx, st.workspaceID, st.sessionID, st.userAgent, st.clientIP)
+		cancel()
+		switch {
+		case verr == nil:
+		case errors.Is(verr, session.ErrSessionNotFound):
+			return collabAuthDecision{closeConn: true, code: collabCloseSessionRevoked, reason: "session revoked"}
+		case errors.Is(verr, session.ErrSessionAnomaly):
+			return collabAuthDecision{closeConn: true, code: collabCloseSessionRevoked, reason: "device changed"}
+		default:
+			return collabAuthDecision{transient: verr}
+		}
+	}
+	return collabAuthDecision{}
+}
+
+// collabAuthPump enforces the connection's authorization for the life
+// of the socket. It runs as a third goroutine alongside the read/write
+// pumps; gorilla/websocket documents Close and WriteControl as safe to
+// call concurrently with all other methods, which is what we rely on
+// here (the read pump's close-frame paths rely on the same guarantee).
+// Closing the conn unblocks the read pump's ReadMessage, which
+// unregisters the client and lets the write pump exit too. The pump
+// itself exits when the client is unregistered (c.Done()).
+func collabAuthPump(c *collab.DocumentClient, conn *websocket.Conn, st collabAuthState, checker middleware.SessionChecker, validator middleware.SessionValidator, interval time.Duration, logger *slog.Logger) {
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-c.Done():
+			return
+		case <-ticker.C:
+			d := evaluateCollabAuth(context.Background(), st, checker, validator)
+			if d.transient != nil {
+				logger.Warn("collab reauth check failed; keeping session open", "err", d.transient)
+				continue
+			}
+			if d.closeConn {
+				logger.Info("collab authorization no longer valid, closing", "code", d.code, "reason", d.reason)
+				_ = conn.WriteControl(
+					websocket.CloseMessage,
+					websocket.FormatCloseMessage(d.code, d.reason),
+					time.Now().Add(collabWriteWait),
+				)
+				_ = conn.Close()
+				return
+			}
+		}
+	}
+}
+
+// collabClientIP resolves the client IP for the collab device-anomaly
+// fingerprint from the same proxy hop AuthMiddleware uses, returning ""
+// when it cannot be determined (the validator treats "" as "skip the
+// IP half of the fingerprint").
+func collabClientIP(r *http.Request, trustedProxyDepth int) string {
+	if ip := middleware.ClientIPFromRequest(r, trustedProxyDepth); ip != nil {
+		return ip.String()
+	}
+	return ""
 }

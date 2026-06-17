@@ -1072,6 +1072,7 @@ func run() error {
 		WithResponseCache(respCache).
 		WithDocuments(documentSvc).
 		WithCollab(collabHub).
+		WithCollabReauth(sessionChecker, sessionValidator, cfg.TrustedProxyDepth).
 		WithSharing(sharingSvc).
 		WithSearch(searchSvc).
 		WithClientRooms(clientRoomSvc).
