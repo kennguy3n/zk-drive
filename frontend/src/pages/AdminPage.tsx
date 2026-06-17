@@ -146,7 +146,7 @@ export default function AdminPage() {
         </div>
       )}
 
-      <div role="tabpanel">
+      <div role="tabpanel" aria-label={t(`admin.tab.${activeTab}`)}>
         {activeTab === "users" && <UsersTab />}
         {activeTab === "audit" && <AuditTab />}
         {activeTab === "retention" && <RetentionTab />}

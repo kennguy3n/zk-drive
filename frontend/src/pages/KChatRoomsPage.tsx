@@ -257,6 +257,7 @@ const MEMBER_ROLES = ["viewer", "editor", "admin"] as const;
 function SyncMembersModal({ room, onClose }: { room: KChatRoom; onClose: () => void }) {
   const { t } = useTranslation();
   const toast = useToast();
+  const confirm = useConfirm();
   const [users, setUsers] = useState<AdminUser[]>([]);
   const [loadingUsers, setLoadingUsers] = useState(true);
   const [usersError, setUsersError] = useState<string | null>(null);
@@ -293,6 +294,17 @@ function SyncMembersModal({ room, onClose }: { room: KChatRoom; onClose: () => v
     const payload: KChatMemberSync[] = members
       .filter((m) => m.user_id)
       .map((m) => ({ user_id: m.user_id, role: m.role }));
+    // An empty snapshot is a valid request that revokes every grant, so guard
+    // against an accidental wipe when no members are selected.
+    if (payload.length === 0) {
+      const ok = await confirm({
+        title: t("kchat.syncEmptyTitle"),
+        description: t("kchat.syncEmptyDescription"),
+        confirmLabel: t("kchat.syncEmptyConfirm"),
+        tone: "danger",
+      });
+      if (!ok) return;
+    }
     setSyncing(true);
     try {
       const r = await syncKChatMembers(room.id, payload);
