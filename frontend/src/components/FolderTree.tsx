@@ -10,7 +10,16 @@ import { cn } from "../lib/cn";
 // FolderTree is a one-level tree: it shows the workspace root plus
 // direct children of the current folder. A full recursive tree is a
 // follow-up enhancement.
-export default function FolderTree({ currentFolderID }: { currentFolderID: string | null }) {
+export default function FolderTree({
+  currentFolderID,
+  reloadKey = 0,
+}: {
+  currentFolderID: string | null;
+  // Incremented by the parent after a root-level folder mutation so the
+  // tree refetches even when currentFolderID is unchanged (e.g. creating
+  // or deleting a folder without navigating away from the current view).
+  reloadKey?: number;
+}) {
   const { t } = useTranslation();
   const [rootFolders, setRootFolders] = useState<Folder[]>([]);
   const [error, setError] = useState<string | null>(null);
@@ -19,6 +28,10 @@ export default function FolderTree({ currentFolderID }: { currentFolderID: strin
   useEffect(() => {
     let cancelled = false;
     setLoading(true);
+    // Clear any prior error at the start of the (re-)fetch so a stale
+    // failure message can't render alongside the loading skeleton during
+    // a navigation- or reloadKey-driven refetch.
+    setError(null);
     listFolders(null)
       .then((list) => {
         if (!cancelled) {
@@ -35,7 +48,7 @@ export default function FolderTree({ currentFolderID }: { currentFolderID: strin
     return () => {
       cancelled = true;
     };
-  }, [currentFolderID, t]);
+  }, [currentFolderID, reloadKey, t]);
 
   const rowBase =
     "flex items-center rounded-lg text-sm transition-colors hover:bg-surface-2";

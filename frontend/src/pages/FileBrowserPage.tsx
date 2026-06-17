@@ -162,6 +162,13 @@ export default function FileBrowserPage() {
   const [selectedFiles, setSelectedFiles] = useState<Set<string>>(new Set());
   const [createFolderOpen, setCreateFolderOpen] = useState(false);
   const [templateDialogOpen, setTemplateDialogOpen] = useState(false);
+  // Bumped after a mutation that changes the set of root-level folders
+  // (create / delete) so the sidebar FolderTree — which lists root folders
+  // independently of the main view — refetches and stays in sync even when
+  // the current folder (and thus its own navigation-keyed effect) is
+  // unchanged. Plain folder navigation already refreshes the tree via
+  // currentFolderID, so this only covers the same-view mutation case.
+  const [treeReloadKey, setTreeReloadKey] = useState(0);
   // Disables the bulk-action buttons while a move/copy/delete/download is in
   // flight (including while the destination picker is open) so the user
   // can't fire a second mutation against a selection that's about to clear.
@@ -264,6 +271,7 @@ export default function FileBrowserPage() {
     try {
       await deleteFolder(target.id);
       await refresh();
+      setTreeReloadKey((k) => k + 1);
       toast.success(t("drive.folderDeleted", { name: target.name }));
     } catch (e) {
       toast.error(translateApiError(e, t));
@@ -424,7 +432,7 @@ export default function FileBrowserPage() {
 
   return (
     <div className="flex min-h-screen bg-bg">
-      <FolderTree currentFolderID={currentFolderID} />
+      <FolderTree currentFolderID={currentFolderID} reloadKey={treeReloadKey} />
       <main className="min-w-0 flex-1 px-6 py-6">
         <header className="mb-6 flex flex-wrap items-center justify-between gap-3">
           <Breadcrumb folder={folder} />
@@ -725,6 +733,7 @@ export default function FileBrowserPage() {
           onCreated={() => {
             setCreateFolderOpen(false);
             refresh();
+            setTreeReloadKey((k) => k + 1);
           }}
         />
       ) : null}
