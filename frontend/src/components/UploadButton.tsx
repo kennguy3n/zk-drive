@@ -1,7 +1,9 @@
 import { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
+import { Upload } from "lucide-react";
 import { uploadFile, type FileItem } from "../api/client";
 import { translateApiError } from "../api/errors";
+import { Button } from "./ui";
 
 export interface UploadButtonProps {
   folderID: string | null;
@@ -10,12 +12,21 @@ export interface UploadButtonProps {
   // (e.g. the onboarding "Upload your first file" card). Optional so
   // existing callers are unaffected.
   openRef?: React.MutableRefObject<(() => void) | null>;
+  /** Button variant — defaults to the brand gradient primary CTA. */
+  variant?: "primary" | "gradient" | "secondary" | "ghost";
+  size?: "sm" | "md" | "lg";
 }
 
 // UploadButton hides the file input behind a styled button and runs the
 // three-step presigned-URL flow defined in api/client.ts. Errors bubble
 // up through an inline message so the user isn't left guessing.
-export default function UploadButton({ folderID, onUploaded, openRef }: UploadButtonProps) {
+export default function UploadButton({
+  folderID,
+  onUploaded,
+  openRef,
+  variant = "gradient",
+  size = "md",
+}: UploadButtonProps) {
   const { t } = useTranslation();
   const inputRef = useRef<HTMLInputElement>(null);
   const [busy, setBusy] = useState(false);
@@ -48,31 +59,22 @@ export default function UploadButton({ folderID, onUploaded, openRef }: UploadBu
   };
 
   return (
-    <div style={{ display: "inline-block" }}>
-      <button
+    <div className="inline-flex items-center gap-2">
+      <Button
         type="button"
+        variant={variant}
+        size={size}
+        loading={busy}
         onClick={() => inputRef.current?.click()}
-        disabled={busy}
-        style={{
-          padding: "8px 14px",
-          background: "#2563eb",
-          color: "white",
-          border: "none",
-          borderRadius: 4,
-          fontSize: 13,
-          opacity: busy ? 0.6 : 1,
-        }}
       >
+        {!busy && <Upload className="h-4 w-4" aria-hidden="true" />}
         {busy ? t("drive.uploading") : t("drive.uploadFile")}
-      </button>
-      <input
-        ref={inputRef}
-        type="file"
-        onChange={handleChange}
-        style={{ display: "none" }}
-      />
+      </Button>
+      <input ref={inputRef} type="file" onChange={handleChange} className="hidden" />
       {error ? (
-        <span style={{ marginLeft: 12, color: "#b91c1c", fontSize: 12 }}>{error}</span>
+        <span role="alert" className="text-xs text-danger">
+          {error}
+        </span>
       ) : null}
     </div>
   );

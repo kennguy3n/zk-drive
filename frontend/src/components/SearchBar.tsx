@@ -1,8 +1,10 @@
 import { useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { useTranslation } from "react-i18next";
+import { Search } from "lucide-react";
 import { searchFiles, type SearchHit } from "../api/client";
 import { translateApiError } from "../api/errors";
+import { cn } from "../lib/cn";
 
 // SearchBar is a header-mounted FTS input that queries the backend's
 // /api/search endpoint. Results are rendered in a dropdown anchored to
@@ -17,6 +19,11 @@ export default function SearchBar() {
   const [hits, setHits] = useState<SearchHit[]>([]);
   const [open, setOpen] = useState(false);
   const [loading, setLoading] = useState(false);
+  // `searched` flips true once a query's response has resolved so the
+  // dropdown can show an explicit "no matches" state. Without it a
+  // zero-result query would simply render nothing, leaving the user
+  // unsure whether the search ran at all.
+  const [searched, setSearched] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const wrapRef = useRef<HTMLDivElement>(null);
 
@@ -37,6 +44,7 @@ export default function SearchBar() {
       setHits([]);
       setError(null);
       setLoading(false);
+      setSearched(false);
       return;
     }
     // A new query supersedes the previous one, so drop the previous
@@ -45,6 +53,7 @@ export default function SearchBar() {
     // until this query's response arrives.
     setHits([]);
     setError(null);
+    setSearched(false);
     // 250 ms is a comfortable compromise: fast enough to feel live,
     // slow enough to skip intermediate keystrokes on fast typists.
     //
@@ -65,6 +74,7 @@ export default function SearchBar() {
         if (cancelled) return;
         setHits(resp.hits);
         setError(null);
+        setSearched(true);
         setOpen(true);
       } catch (err) {
         if (cancelled) return;
@@ -92,10 +102,17 @@ export default function SearchBar() {
     }
   };
 
+  const showDropdown = open && (loading || !!error || hits.length > 0 || searched);
+
   return (
-    <div ref={wrapRef} style={wrap}>
+    <div ref={wrapRef} className="relative w-full sm:w-80">
+      <Search
+        aria-hidden="true"
+        className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted"
+      />
       <input
         type="search"
+        aria-label={t("search.ariaLabel")}
         placeholder={t("search.placeholder")}
         value={query}
         onFocus={() => query && setOpen(true)}
@@ -103,97 +120,48 @@ export default function SearchBar() {
         onKeyDown={(e) => {
           if (e.key === "Escape") setOpen(false);
         }}
-        style={input}
+        className="h-9 w-full rounded-lg border border-border bg-surface pl-9 pr-3 text-sm text-fg shadow-sm transition-colors placeholder:text-muted focus-visible:border-brand focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
       />
-      {open && (hits.length > 0 || error || loading) ? (
-        <div style={dropdown} role="listbox">
-          {loading ? <div style={statusRow}>{t("search.searching")}</div> : null}
-          {error ? <div style={{ ...statusRow, color: "#b91c1c" }}>{error}</div> : null}
+      {showDropdown ? (
+        <div
+          role="listbox"
+          aria-label={t("search.resultsAria")}
+          className="absolute left-0 right-0 top-[calc(100%+4px)] z-20 max-h-80 overflow-y-auto rounded-lg border border-border bg-overlay shadow-overlay animate-fade-in"
+        >
+          {loading ? (
+            <div className="px-3 py-2 text-xs text-muted">{t("search.searching")}</div>
+          ) : null}
+          {error ? (
+            <div role="alert" className="px-3 py-2 text-xs text-danger">
+              {error}
+            </div>
+          ) : null}
           {hits.map((hit) => (
             <button
               key={`${hit.type}:${hit.id}`}
               onClick={() => pick(hit)}
-              style={hitRow}
               role="option"
+              className="grid w-full grid-cols-[auto_1fr] gap-x-2 border-b border-border px-3 py-2 text-left transition-colors last:border-b-0 hover:bg-surface-2 focus-visible:bg-surface-2 focus-visible:outline-none"
             >
-              <span style={typeBadge(hit.type)}>
+              <span
+                className={cn(
+                  "row-span-2 inline-flex h-5 w-12 items-center justify-center self-center rounded-full text-[10px] font-semibold uppercase tracking-wide",
+                  hit.type === "folder"
+                    ? "bg-warning/15 text-warning"
+                    : "bg-brand/10 text-brand",
+                )}
+              >
                 {hit.type === "folder" ? t("search.typeFolder") : t("search.typeFile")}
               </span>
-              <span style={{ fontWeight: 500 }}>{hit.name}</span>
-              <span style={{ color: "#6b7280", fontSize: 11 }}>{hit.path}</span>
+              <span className="truncate text-sm font-medium text-fg">{hit.name}</span>
+              <span className="truncate text-xs text-muted">{hit.path}</span>
             </button>
           ))}
-          {!loading && !error && hits.length === 0 ? (
-            <div style={statusRow}>{t("search.noResults")}</div>
+          {!loading && !error && hits.length === 0 && searched ? (
+            <div className="px-3 py-2 text-xs text-muted">{t("search.noResults")}</div>
           ) : null}
         </div>
       ) : null}
     </div>
   );
-}
-
-const wrap: React.CSSProperties = {
-  position: "relative",
-  width: 320,
-};
-
-const input: React.CSSProperties = {
-  width: "100%",
-  padding: "8px 10px",
-  border: "1px solid #d1d5db",
-  borderRadius: 4,
-  fontSize: 13,
-  boxSizing: "border-box",
-};
-
-const dropdown: React.CSSProperties = {
-  position: "absolute",
-  top: "calc(100% + 4px)",
-  left: 0,
-  right: 0,
-  background: "white",
-  border: "1px solid #e5e7eb",
-  borderRadius: 4,
-  boxShadow: "0 10px 20px rgba(0,0,0,0.08)",
-  maxHeight: 320,
-  overflowY: "auto",
-  zIndex: 20,
-};
-
-const hitRow: React.CSSProperties = {
-  display: "grid",
-  gridTemplateColumns: "auto 1fr",
-  gridTemplateRows: "auto auto",
-  columnGap: 8,
-  padding: "8px 10px",
-  border: "none",
-  background: "transparent",
-  width: "100%",
-  textAlign: "left",
-  cursor: "pointer",
-  fontSize: 13,
-  borderBottom: "1px solid #f3f4f6",
-};
-
-const statusRow: React.CSSProperties = {
-  padding: "8px 10px",
-  fontSize: 12,
-  color: "#6b7280",
-};
-
-function typeBadge(type: "file" | "folder"): React.CSSProperties {
-  return {
-    gridRow: "1 / span 2",
-    display: "inline-flex",
-    alignItems: "center",
-    justifyContent: "center",
-    width: 48,
-    height: 20,
-    borderRadius: 10,
-    fontSize: 10,
-    fontWeight: 600,
-    textTransform: "uppercase",
-    background: type === "folder" ? "#fef3c7" : "#dbeafe",
-    color: type === "folder" ? "#92400e" : "#1e40af",
-  };
 }
