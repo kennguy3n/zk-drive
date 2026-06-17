@@ -3,6 +3,7 @@ package drive
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"time"
@@ -128,6 +129,23 @@ func (h *Handler) WithCollabReauth(checker middleware.SessionChecker, validator 
 // not configured) leaves collab enforcement exactly as before.
 func (h *Handler) WithCollabTokenReverifier(reverifier middleware.TokenReverifier) *Handler {
 	h.collabReauthReverifier = reverifier
+	return h
+}
+
+// WithCollabTokenRefresher wires the in-band re-authenticator for
+// built-in (session-JWT) collab sockets. When a client pushes a fresh
+// bearer token in a MessageAuth frame on a live connection, the read
+// pump validates it through this refresher and — if it authenticates
+// the SAME principal as the socket — hands the refreshed expiry to the
+// auth pump, advancing the connection's enforced lifetime without a
+// reconnect. This lets a long editing session ride through a silent
+// client-side token refresh instead of being torn down at expiry.
+//
+// nil (the default, and the value used for federated iam-core auth,
+// whose tokens are not zk-drive session JWTs) disables the path: a
+// MessageAuth frame is then ignored, exactly as before.
+func (h *Handler) WithCollabTokenRefresher(refresher middleware.CollabTokenRefresher) *Handler {
+	h.collabReauthRefresher = refresher
 	return h
 }
 
@@ -295,14 +313,29 @@ func (h *Handler) ServeDocumentCollab(w http.ResponseWriter, r *http.Request) {
 	// the close-frame paths in collabReadPump. Both pumps exit
 	// when the connection closes or the hub unregisters the
 	// client.
+	// In-band auth refresh: when a refresher is wired (built-in session
+	// auth only — federated iam-core tokens are not zk-drive session
+	// JWTs), the read pump validates a fresh token a client pushes in a
+	// MessageAuth frame and hands the refreshed expiry to the auth pump
+	// over this buffered, latest-wins channel. A nil refresher disables
+	// the path: the read pump then ignores MessageAuth frames, as
+	// before. The read pump is the sole producer, the auth pump the sole
+	// consumer.
+	refresher := h.collabReauthRefresher
+	var refreshCh chan collabAuthRefresh
+	if refresher != nil {
+		refreshCh = make(chan collabAuthRefresh, 1)
+	}
+
 	go collabWritePump(client, conn, logger)
-	go collabReadPump(h.collab, client, conn, logger)
+	go collabReadPump(h.collab, client, conn, refresher, refreshCh, logger)
 
 	// Enforce the connection's authorization for its full lifetime.
 	// Without this, the socket outlives its JWT and survives session
 	// revocation. Started only when there is something to enforce:
 	// always when the token carries an expiry, plus whenever a
-	// revocation checker/validator is wired.
+	// revocation checker/validator, issuer reverifier, or in-band
+	// refresher is wired.
 	if authClaims != nil {
 		st := collabAuthState{
 			workspaceID: workspaceID,
@@ -323,8 +356,8 @@ func (h *Handler) ServeDocumentCollab(w http.ResponseWriter, r *http.Request) {
 		if st.rawToken == "" {
 			reverifier = nil
 		}
-		if st.hasExpiry || h.collabReauthChecker != nil || h.collabReauthValidator != nil || reverifier != nil {
-			go collabAuthPump(client, conn, st, h.collabReauthChecker, h.collabReauthValidator, reverifier, collabReauthInterval, logger)
+		if st.hasExpiry || h.collabReauthChecker != nil || h.collabReauthValidator != nil || reverifier != nil || refresher != nil {
+			go collabAuthPump(client, conn, st, h.collabReauthChecker, h.collabReauthValidator, reverifier, refreshCh, collabReauthInterval, logger)
 		}
 	}
 }
@@ -342,7 +375,7 @@ func (h *Handler) ServeDocumentCollab(w http.ResponseWriter, r *http.Request) {
 //     never become useful; for the other two we just drop the
 //     frame and keep listening (a viewer-only client may still
 //     receive peer updates).
-func collabReadPump(hub *collab.DocumentHub, c *collab.DocumentClient, conn *websocket.Conn, logger *slog.Logger) {
+func collabReadPump(hub *collab.DocumentHub, c *collab.DocumentClient, conn *websocket.Conn, refresher middleware.CollabTokenRefresher, refreshCh chan collabAuthRefresh, logger *slog.Logger) {
 	defer func() {
 		hub.Unregister(c)
 		_ = conn.Close()
@@ -382,6 +415,35 @@ func collabReadPump(hub *collab.DocumentHub, c *collab.DocumentClient, conn *web
 				time.Now().Add(collabWriteWait),
 			)
 			return
+		}
+		if frame.Type == collab.MessageAuth {
+			// In-band re-auth: the client pushed a fresh token to extend
+			// the socket's enforced lifetime without reconnecting. Only
+			// honored when a refresher is wired (built-in session auth);
+			// otherwise ignored, exactly as the hub did before. A bad
+			// token is logged and dropped — it never closes the socket,
+			// so a malformed or foreign token cannot evict a valid editor.
+			if refresher != nil {
+				rctx, cancel := context.WithTimeout(context.Background(), middleware.SessionCheckTimeout)
+				refresh, rerr := evaluateCollabRefresh(rctx, refresher, c.WorkspaceID, c.UserID, string(frame.Payload))
+				cancel()
+				if rerr != nil {
+					logger.Warn("collab in-band auth refresh rejected", "err", rerr)
+				} else {
+					// Latest-wins hand-off to the auth pump. The read
+					// pump is the sole producer, so draining any stale
+					// pending refresh then sending never blocks.
+					select {
+					case <-refreshCh:
+					default:
+					}
+					select {
+					case refreshCh <- refresh:
+					default:
+					}
+				}
+			}
+			continue
 		}
 		if err := hub.Handle(context.Background(), c, frame); err != nil {
 			switch {
@@ -470,6 +532,59 @@ type collabAuthState struct {
 	// built-in session tokens, which are re-checked via the session
 	// store (checker/validator) instead.
 	rawToken string
+}
+
+// collabAuthRefresh is the in-band hand-off from the read pump to the
+// auth pump: the validated, same-principal authorization facts a client
+// pushed in a MessageAuth frame, plus the raw token they were parsed
+// from (so a socket that also reverifies against an issuer replays the
+// fresh token rather than the stale upgrade-time one). The auth pump
+// applies these over its existing state, advancing the enforced token
+// lifetime without touching the immutable principal (workspace/user) or
+// the device fingerprint (UA/IP) validated once at upgrade.
+type collabAuthRefresh struct {
+	issuedAt  time.Time
+	expiresAt time.Time
+	hasExpiry bool
+	sessionID string
+	rawToken  string
+}
+
+// applyRefresh advances the connection's enforced token lifetime from
+// an in-band refresh, leaving the principal and device fingerprint
+// untouched.
+func (st *collabAuthState) applyRefresh(r collabAuthRefresh) {
+	st.issuedAt = r.issuedAt
+	st.expiresAt = r.expiresAt
+	st.hasExpiry = r.hasExpiry
+	st.sessionID = r.sessionID
+	st.rawToken = r.rawToken
+}
+
+// evaluateCollabRefresh validates an in-band bearer token and confirms
+// it re-authenticates the SAME principal as the live socket. On success
+// it returns the refresh facts to hand to the auth pump. On any failure
+// it returns an error for the caller to log: a bad in-band refresh is
+// always ignored and never closes the socket, so a malformed or foreign
+// token cannot evict an otherwise-valid editing session.
+func evaluateCollabRefresh(ctx context.Context, refresher middleware.CollabTokenRefresher, workspaceID, userID uuid.UUID, rawToken string) (collabAuthRefresh, error) {
+	if rawToken == "" {
+		return collabAuthRefresh{}, errors.New("empty in-band token")
+	}
+	vr, err := refresher.RefreshCollabAuth(ctx, rawToken)
+	if err != nil {
+		return collabAuthRefresh{}, err
+	}
+	if vr.WorkspaceID != workspaceID || vr.UserID != userID {
+		return collabAuthRefresh{}, fmt.Errorf("principal mismatch: token ws=%s user=%s, socket ws=%s user=%s", vr.WorkspaceID, vr.UserID, workspaceID, userID)
+	}
+	return collabAuthRefresh{
+		issuedAt:  vr.IssuedAt,
+		expiresAt: vr.ExpiresAt,
+		hasExpiry: vr.HasExpiry,
+		sessionID: vr.SessionID,
+		rawToken:  rawToken,
+	}, nil
 }
 
 // collabAuthDecision is the outcome of one auth re-check. Exactly one
@@ -561,13 +676,19 @@ func evaluateCollabAuth(ctx context.Context, st collabAuthState, checker middlew
 // Closing the conn unblocks the read pump's ReadMessage, which
 // unregisters the client and lets the write pump exit too. The pump
 // itself exits when the client is unregistered (c.Done()).
-func collabAuthPump(c *collab.DocumentClient, conn *websocket.Conn, st collabAuthState, checker middleware.SessionChecker, validator middleware.SessionValidator, reverifier middleware.TokenReverifier, interval time.Duration, logger *slog.Logger) {
+func collabAuthPump(c *collab.DocumentClient, conn *websocket.Conn, st collabAuthState, checker middleware.SessionChecker, validator middleware.SessionValidator, reverifier middleware.TokenReverifier, refreshCh <-chan collabAuthRefresh, interval time.Duration, logger *slog.Logger) {
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	for {
 		select {
 		case <-c.Done():
 			return
+		case r := <-refreshCh:
+			// A nil refreshCh (no refresher wired) blocks forever, so this
+			// case is simply never selected then. The next tick evaluates
+			// against the advanced expiry, so no immediate re-check here.
+			st.applyRefresh(r)
+			logger.Debug("collab in-band auth refresh applied", "has_expiry", st.hasExpiry)
 		case <-ticker.C:
 			d := evaluateCollabAuth(context.Background(), st, checker, validator, reverifier)
 			if d.transient != nil {

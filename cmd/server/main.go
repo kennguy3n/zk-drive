@@ -1006,6 +1006,13 @@ func run() error {
 	// interface (not a typed nil) when iam-core is off, so the collab
 	// handler's reverify step is skipped for built-in auth.
 	var iamCoreReverifier middleware.TokenReverifier
+	// collabRefresher enables in-band MessageAuth refresh on built-in
+	// session-JWT collab sockets only. It stays a genuine nil interface
+	// under iam-core, whose tokens are externally issued (not zk-drive
+	// session JWTs the built-in Signer can validate), so the in-band
+	// refresh path is built-in-auth only — mirroring the reverifier,
+	// which is iam-core only.
+	var collabRefresher middleware.CollabTokenRefresher
 	if cfg.IAMCoreIssuerURL != "" {
 		client, err := iamcore.NewClient(ctx, iamcore.Config{
 			IssuerURL:    cfg.IAMCoreIssuerURL,
@@ -1034,6 +1041,7 @@ func run() error {
 			slog.Warn("iam-core IAM_CORE_AUDIENCE not set: access-token audience validation is DISABLED — a token minted for another relying party in the same iam-core tenant could be replayed against zk-drive; set IAM_CORE_AUDIENCE in production")
 		}
 	} else {
+		collabRefresher = middleware.NewSessionTokenRefresher(jwtKeyManager)
 		slog.Info("auth provider: built-in (password + optional Google/Microsoft SSO)")
 	}
 
@@ -1084,6 +1092,7 @@ func run() error {
 		WithCollab(collabHub).
 		WithCollabReauth(sessionChecker, sessionValidator, cfg.TrustedProxyDepth).
 		WithCollabTokenReverifier(iamCoreReverifier).
+		WithCollabTokenRefresher(collabRefresher).
 		WithSharing(sharingSvc).
 		WithSearch(searchSvc).
 		WithClientRooms(clientRoomSvc).

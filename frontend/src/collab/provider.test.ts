@@ -346,3 +346,66 @@ describe("CollabProvider token refresh", () => {
     });
   });
 });
+
+describe("CollabProvider in-band auth refresh", () => {
+  // Capture frames the provider pushes on the live socket. refreshAuth
+  // only sends when readyState === OPEN, mirroring sendFrame.
+  class FakeSocket {
+    readyState = 1; // OPEN
+    sent: Uint8Array[] = [];
+    send(data: ArrayBuffer | ArrayBufferView) {
+      if (data instanceof ArrayBuffer) {
+        this.sent.push(new Uint8Array(data));
+      } else if (ArrayBuffer.isView(data)) {
+        this.sent.push(new Uint8Array(data.buffer, data.byteOffset, data.byteLength));
+      }
+    }
+    close() {}
+  }
+
+  it("sends a MessageAuth frame carrying the freshest token", () => {
+    let current = "rotated-token";
+    const doc = new Y.Doc();
+    const provider = new CollabProvider({
+      url: "ws://127.0.0.1:1/api/documents/x/ws",
+      token: "stale-token",
+      tokenProvider: () => current,
+      doc,
+    });
+    const sock = new FakeSocket();
+    (provider as unknown as { ws: unknown }).ws = sock;
+
+    provider.refreshAuth();
+
+    // Exactly one frame: byte0 = 0x02 (MESSAGE_AUTH), payload = token.
+    expect(sock.sent.length).toBe(1);
+    const frame = sock.sent[0];
+    expect(frame[0]).toBe(0x02);
+    expect(new TextDecoder().decode(frame.subarray(1))).toBe("rotated-token");
+
+    // A second refresh after another rotation carries the new token.
+    current = "rotated-again";
+    provider.refreshAuth();
+    expect(sock.sent.length).toBe(2);
+    expect(new TextDecoder().decode(sock.sent[1].subarray(1))).toBe("rotated-again");
+
+    provider.destroy();
+  });
+
+  it("is a no-op when the socket is not OPEN", () => {
+    const doc = new Y.Doc();
+    const provider = new CollabProvider({
+      url: "ws://127.0.0.1:1/api/documents/x/ws",
+      token: "tok",
+      tokenProvider: () => "tok",
+      doc,
+    });
+    const sock = new FakeSocket();
+    sock.readyState = 0; // CONNECTING
+    (provider as unknown as { ws: unknown }).ws = sock;
+
+    provider.refreshAuth();
+    expect(sock.sent).toEqual([]);
+    provider.destroy();
+  });
+});

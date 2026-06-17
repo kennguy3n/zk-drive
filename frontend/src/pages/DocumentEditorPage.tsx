@@ -37,6 +37,7 @@ import StarterKit from "@tiptap/starter-kit";
 import Collaboration from "@tiptap/extension-collaboration";
 import CollaborationCursor from "@tiptap/extension-collaboration-cursor";
 import {
+  AUTH_CHANGE_EVENT,
   currentToken,
   currentUserID,
   documentCollabURL,
@@ -184,7 +185,15 @@ export default function DocumentEditorPage() {
     });
     providerRef.current = provider;
     provider.connect();
+    // Push the freshest token in-band when auth state changes in this
+    // tab (e.g. a silent token refresh) so the live socket's enforced
+    // expiry advances without a reconnect. AUTH_CHANGE_EVENT is the
+    // same signal useAuth listens to; refreshAuth() re-reads the token
+    // via tokenProvider and no-ops when the socket is not open.
+    const onAuthChange = () => providerRef.current?.refreshAuth();
+    window.addEventListener(AUTH_CHANGE_EVENT, onAuthChange);
     return () => {
+      window.removeEventListener(AUTH_CHANGE_EVENT, onAuthChange);
       // Teardown order matches the y-protocols canonical lifecycle:
       //   1. provider.destroy() — detaches WS, removes our awareness
       //      slot via removeAwarenessStates so peers see us disappear.

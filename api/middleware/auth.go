@@ -3,6 +3,7 @@ package middleware
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"strings"
 	"time"
@@ -281,6 +282,88 @@ type TokenReverifier interface {
 // transient session-store error, since token expiry is still enforced
 // locally regardless of issuer reachability.
 var ErrReverifyUnavailable = errors.New("middleware: token reverification unavailable")
+
+// CollabAuthRefresh carries the authorization facts a
+// CollabTokenRefresher extracts from a fresh bearer token a client
+// pushes in-band on a live collab socket. The collab reauth pump
+// applies these to the connection's auth state, advancing the enforced
+// token lifetime (issued/expiry) without a reconnect.
+//
+// WorkspaceID and UserID identify the principal the new token
+// authenticates. The read pump rejects any refresh whose principal
+// differs from the socket's original, so an in-band refresh can only
+// ever extend the SAME user's session on the SAME workspace — it can
+// never swap identities on an already-open document.
+type CollabAuthRefresh struct {
+	WorkspaceID uuid.UUID
+	UserID      uuid.UUID
+	SessionID   string
+	IssuedAt    time.Time
+	ExpiresAt   time.Time
+	// HasExpiry reports whether the refreshed token carried an exp
+	// claim. False leaves the socket on expiry-only-disabled
+	// enforcement (matching a no-exp token at upgrade time).
+	HasExpiry bool
+}
+
+// CollabTokenRefresher validates a bearer token presented in-band on a
+// live collab WebSocket — a MessageAuth frame — and projects it into a
+// CollabAuthRefresh. It is the in-band analogue of upgrade-time auth:
+// where AuthMiddleware authenticates the token that opens the socket, a
+// CollabTokenRefresher re-authenticates a fresh token the client pushes
+// mid-session (e.g. after a silent token refresh) so the socket's
+// enforced expiry advances without tearing down the editing session.
+//
+// It returns an error when the token is invalid (bad signature,
+// expired, wrong purpose); the read pump logs and ignores the frame,
+// leaving the authorization captured at upgrade in force.
+type CollabTokenRefresher interface {
+	RefreshCollabAuth(ctx context.Context, rawToken string) (CollabAuthRefresh, error)
+}
+
+// SessionTokenRefresher is the built-in CollabTokenRefresher: it
+// validates the in-band token with the same Signer that mints session
+// JWTs and rejects purpose-scoped tokens, exactly as AuthMiddleware
+// does on the HTTP path. Federated (iam-core) sockets leave the
+// refresher nil — their tokens are externally issued, not zk-drive
+// session JWTs — so the in-band refresh path is built-in-auth only,
+// mirroring how the reverifier is iam-core only.
+type SessionTokenRefresher struct {
+	signer Signer
+}
+
+// NewSessionTokenRefresher constructs a SessionTokenRefresher over the
+// JWT signer used to mint and validate session tokens.
+func NewSessionTokenRefresher(signer Signer) *SessionTokenRefresher {
+	return &SessionTokenRefresher{signer: signer}
+}
+
+// RefreshCollabAuth validates the in-band token and projects its claims
+// into a CollabAuthRefresh. A non-empty Purpose is rejected: an
+// mfa-challenge / enroll token must never (re-)authorize a data-plane
+// socket, exactly as AuthMiddleware refuses one on the HTTP path.
+func (r *SessionTokenRefresher) RefreshCollabAuth(_ context.Context, rawToken string) (CollabAuthRefresh, error) {
+	claims, err := ParseTokenWith(r.signer, rawToken)
+	if err != nil {
+		return CollabAuthRefresh{}, err
+	}
+	if claims.Purpose != "" {
+		return CollabAuthRefresh{}, fmt.Errorf("collab refresh: token has purpose %q", claims.Purpose)
+	}
+	out := CollabAuthRefresh{
+		WorkspaceID: claims.WorkspaceID,
+		UserID:      claims.UserID,
+		SessionID:   claims.SessionID,
+	}
+	if claims.IssuedAt != nil {
+		out.IssuedAt = claims.IssuedAt.Time
+	}
+	if claims.ExpiresAt != nil {
+		out.ExpiresAt = claims.ExpiresAt.Time
+		out.HasExpiry = true
+	}
+	return out, nil
+}
 
 // SessionCheckTimeout is the upper bound on how long AuthMiddleware
 // will wait for a SessionChecker.IsRevoked call before giving up and
