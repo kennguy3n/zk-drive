@@ -85,7 +85,8 @@
     "billing": "Billing",
     "kchatRooms": "KChat rooms",
     "placement": "Placement",
-    "settings": "Settings"
+    "settings": "Settings",
+    "breadcrumb": "Breadcrumb"
   },
   "drive": {
     "newFolder": "New folder",
@@ -131,7 +132,42 @@
     "targetFolderIdPrompt": "Target folder id:",
     "bulkDeleteConfirm_one": "Delete {{count}} file?",
     "bulkDeleteConfirm_other": "Delete {{count}} files?",
-    "clientNamePrompt": "Client name for this room:"
+    "clientNamePrompt": "Client name for this room:",
+    "new": "New",
+    "moreActions": "More actions",
+    "renameFileTitle": "Rename file",
+    "deleteFileTitle": "Delete file?",
+    "fileRenamed": "File renamed",
+    "fileDeleted": "File deleted",
+    "deleteFolderTitle": "Delete folder?",
+    "deleteFolderConfirmNamed": "Delete \"{{name}}\" and everything inside it? This cannot be undone.",
+    "folderDeleted": "Deleted \"{{name}}\"",
+    "bulkDeleteTitle": "Delete files?",
+    "movePickerTitle": "Move to folder",
+    "copyPickerTitle": "Copy to folder",
+    "movePickerDescription_one": "Choose where to move {{count}} file.",
+    "movePickerDescription_other": "Choose where to move {{count}} files.",
+    "copyPickerDescription_one": "Choose where to copy {{count}} file.",
+    "copyPickerDescription_other": "Choose where to copy {{count}} files.",
+    "movePickerSearchPlaceholder": "Search folders…",
+    "movePickerEmpty": "No other folders yet — create one first.",
+    "moveSuccess_one": "Moved {{count}} item.",
+    "moveSuccess_other": "Moved {{count}} items.",
+    "copySuccess_one": "Copied {{count}} item.",
+    "copySuccess_other": "Copied {{count}} items.",
+    "deleteSuccess_one": "Deleted {{count}} item.",
+    "deleteSuccess_other": "Deleted {{count}} items.",
+    "bulkSomeFailed": "{{ok}} succeeded, {{failed}} failed.",
+    "onboardingWelcome": "Welcome to {{workspaceName}}",
+    "onboardingWelcomeDefault": "Welcome to ZK Drive",
+    "onboardingSubtitle": "Your private, end-to-end encrypted workspace. Let's get your first files in — it only takes a moment.",
+    "onboardingUploadTitle": "Upload your first file",
+    "onboardingUploadDesc": "Encrypted before it ever leaves your device.",
+    "onboardingCreateTitle": "Create a folder",
+    "onboardingCreateDesc": "Organise your work into folders and subfolders.",
+    "onboardingInviteTitle": "Invite a teammate",
+    "onboardingInviteDesc": "Collaborate securely with your team.",
+    "onboardingDragHint": "Tip: you can drag and drop files anywhere to upload them."
   },
   "folder": {
     "createTitle": "New folder",
@@ -160,7 +196,14 @@
     "cmpMetadataOnly": "Metadata only",
     "cmpNoYouHoldKeys": "No (you hold the keys)",
     "cmpInMemoryOnly": "In memory only",
-    "cmpNever": "Never"
+    "cmpNever": "Never",
+    "managedTitle": "Confidential managed",
+    "managedCardDesc": "Encrypted at rest, processed in memory so you get previews, search, and virus scanning.",
+    "strictTitle": "Strict zero-knowledge",
+    "strictCardDesc": "Encrypted on your device. We can never read these files — no previews, search, or scanning.",
+    "recommended": "Recommended",
+    "namePlaceholder": "e.g. Q3 Contracts",
+    "nameRequired": "Please enter a folder name."
   },
   "collab": {
     "editorExperience": "Editor experience",
@@ -234,7 +277,9 @@
     "fieldContent": "content",
     "fieldTags": "tags",
     "typeFile": "file",
-    "typeFolder": "folder"
+    "typeFolder": "folder",
+    "ariaLabel": "Search files and folders",
+    "resultsAria": "Search results"
   },
   "encryption": {
     "title": "Encryption",

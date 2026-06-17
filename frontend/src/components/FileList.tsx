@@ -14,6 +14,7 @@ import { getDownloadURL, type FileItem } from "../api/client";
 import { isOfficeDocument } from "../collab/office";
 import FilePreview from "./FilePreview";
 import { EmptyState } from "./ui/EmptyState";
+import { useConfirm, usePrompt } from "./ui";
 import { cn } from "../lib/cn";
 
 export interface FileListProps {
@@ -100,6 +101,8 @@ function FileRow({
   onFocusRow,
 }: FileRowProps) {
   const { t } = useTranslation();
+  const confirm = useConfirm();
+  const prompt = usePrompt();
   return (
     <div
       role="row"
@@ -156,8 +159,14 @@ function FileRow({
         )}
         <button
           type="button"
-          onClick={() => {
-            const name = prompt(t("drive.renamePrompt"), f.name);
+          onClick={async () => {
+            const name = await prompt({
+              title: t("drive.renameFileTitle"),
+              label: t("common.name"),
+              defaultValue: f.name,
+              confirmLabel: t("common.rename"),
+              required: true,
+            });
             if (name && name.trim()) onRename(f.id, name.trim());
           }}
           className={actionBtnCls}
@@ -179,8 +188,15 @@ function FileRow({
         )}
         <button
           type="button"
-          onClick={() => {
-            if (confirm(t("drive.deleteFilePrompt", { name: f.name }))) onDelete(f.id);
+          onClick={async () => {
+            const ok = await confirm({
+              title: t("drive.deleteFileTitle"),
+              description: t("drive.deleteFilePrompt", { name: f.name }),
+              confirmLabel: t("common.delete"),
+              cancelLabel: t("common.cancel"),
+              tone: "danger",
+            });
+            if (ok) onDelete(f.id);
           }}
           className={cn(actionBtnCls, "hover:text-danger")}
           aria-label={t("common.delete")}
@@ -209,6 +225,7 @@ export default function FileList({
   onToggleSelect,
 }: FileListProps) {
   const { t } = useTranslation();
+  const confirm = useConfirm();
   const [sortKey, setSortKey] = useState<SortKey>("name");
   const [sortDir, setSortDir] = useState<SortDir>("asc");
   const [activeIndex, setActiveIndex] = useState(0);
@@ -288,7 +305,21 @@ export default function FileList({
       if (f) void handleDownload(f.id);
     } else if (e.key === "Delete") {
       const f = sorted[activeIndex];
-      if (f && confirm(t("drive.deleteFilePrompt", { name: f.name }))) onDelete(f.id);
+      if (f) {
+        // useConfirm is promise-based; the key handler can't be async
+        // itself (it must stay sync to call preventDefault on other
+        // keys), so fire the confirm flow in a detached async IIFE.
+        void (async () => {
+          const ok = await confirm({
+            title: t("drive.deleteFileTitle"),
+            description: t("drive.deleteFilePrompt", { name: f.name }),
+            confirmLabel: t("common.delete"),
+            cancelLabel: t("common.cancel"),
+            tone: "danger",
+          });
+          if (ok) onDelete(f.id);
+        })();
+      }
     } else if (e.key === " " && showSelection) {
       e.preventDefault();
       const f = sorted[activeIndex];
