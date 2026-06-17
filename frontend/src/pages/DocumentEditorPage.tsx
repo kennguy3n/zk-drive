@@ -9,7 +9,7 @@
 //   3. TipTap with capability-gated extensions — StarterKit always,
 //      plus tables / image / link in rich modes, plus
 //      CollaborationCursor in rich+presence modes.
-//   4. The editor header — encryption-mode badge + collab-mode pill
+//   4. The editor chrome — encryption-mode badge + collab-mode pill
 //      + connection-status chip + presence chips.
 //
 // CAPABILITY MATRIX (matches internal/document/capability.go):
@@ -30,6 +30,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import { Trans, useTranslation } from "react-i18next";
 import type { TFunction } from "i18next";
+import { ArrowLeft, Lock, Pencil } from "lucide-react";
 import * as Y from "yjs";
 import { Awareness } from "y-protocols/awareness";
 import { useEditor, EditorContent, type AnyExtension } from "@tiptap/react";
@@ -52,6 +53,19 @@ import EncryptionBadge from "../components/EncryptionBadge";
 import ConnectionStatusChip from "../components/ConnectionStatusChip";
 import PresenceChips from "../components/PresenceChips";
 import CollabModeSelector from "../components/CollabModeSelector";
+import {
+  AppShell,
+  Badge,
+  Button,
+  EmptyState,
+  Modal,
+  PageHeader,
+  Skeleton,
+  usePrompt,
+  useToast,
+} from "../components/ui";
+
+type BadgeTone = "neutral" | "brand" | "success" | "danger" | "warning";
 
 // userPresenceColor deterministically picks a hue from a user id so
 // the same user gets the same cursor color across reconnects and
@@ -80,12 +94,12 @@ export default function DocumentEditorPage() {
   const { id } = useParams<{ id: string }>();
   const nav = useNavigate();
   const { t } = useTranslation();
+  const prompt = usePrompt();
+  const toast = useToast();
 
   const [doc, setDoc] = useState<Document | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [status, setStatus] = useState<ConnectionStatus>("disconnected");
-  const [renameValue, setRenameValue] = useState<string>("");
-  const [renaming, setRenaming] = useState(false);
   const [modeSwitchOpen, setModeSwitchOpen] = useState(false);
   const [modeSwitching, setModeSwitching] = useState(false);
   const [modeSwitchError, setModeSwitchError] = useState<string | null>(null);
@@ -110,7 +124,6 @@ export default function DocumentEditorPage() {
       .then((d) => {
         if (cancelled) return;
         setDoc(d);
-        setRenameValue(d.name);
       })
       .catch((e) => {
         if (cancelled) return;
@@ -153,7 +166,14 @@ export default function DocumentEditorPage() {
     const nextAwareness = presenceAllowed ? new Awareness(nextYDoc) : null;
     const token = currentToken();
     if (!token) {
-      setLoadError(t("errors.AUTH_MISSING_TOKEN"));
+      // Surface via toast rather than loadError: the page's loadError
+      // EmptyState is gated on `!doc`, but reaching this branch requires
+      // collabMode !== "disabled" which in turn requires a loaded doc, so a
+      // loadError set here would never paint. The toast keeps the auth
+      // failure visible while the editor stays mounted, and the connection
+      // chip remains "disconnected" as the persistent signal that live
+      // collaboration is not active.
+      toast.error(t("errors.AUTH_MISSING_TOKEN"));
       nextYDoc.destroy();
       return;
     }
@@ -213,7 +233,7 @@ export default function DocumentEditorPage() {
   // hasDoc=false and yDoc=null — and ProseMirror refuses to
   // compile a schema that lacks a top-level "doc" node type
   // (RangeError: Schema is missing its top node type 'doc').
-  // The "Loading…" early-return below means the empty
+  // The skeleton early-return below means the empty
   // StarterKit editor never paints, so the cost is one
   // editor instantiation that's torn down + recreated when
   // yDoc arrives. Collaboration / CollaborationCursor stay
@@ -268,50 +288,30 @@ export default function DocumentEditorPage() {
     if (editor) editor.setEditable(writable);
   }, [editor, writable]);
 
-  // renameSubmitted dedupes the commit path of the rename input. The
-  // <input> wires both onSubmit (Enter key) AND onBlur to the same
-  // handler so a click-outside also commits; pressing Enter then fires
-  // submit, which sets renaming=false in finally, which unmounts the
-  // input, which fires the blur synchronously during DOM detach. The
-  // previous "renameInFlight reset in finally" guard was insufficient:
-  // by the time React commits the unmount the ref has already flipped
-  // back to false, so the blur-triggered second invocation sailed past
-  // the in-flight check and sent a duplicate PATCH (Devin Review
-  // BUG_pr-review-job-d387c.._0001).
-  //
-  // The correct shape is to gate on "has this rename attempt already
-  // dispatched a commit" rather than "is the network call still in
-  // flight". renameSubmitted is set to true on the first invocation
-  // and stays true until the user re-opens the rename input (the
-  // useEffect below clears it on the renaming=true edge), so the
-  // synchronous unmount-blur cycle is a no-op.
-  const renameSubmitted = useRef(false);
-  useEffect(() => {
-    if (renaming) renameSubmitted.current = false;
-  }, [renaming]);
-  const onRenameSubmit = useCallback(
-    async (e: React.FormEvent) => {
-      e.preventDefault();
-      if (renameSubmitted.current) return;
-      if (!doc || !id) return;
-      const next = renameValue.trim();
-      if (!next || next === doc.name) {
-        renameSubmitted.current = true;
-        setRenaming(false);
-        return;
-      }
-      renameSubmitted.current = true;
-      try {
-        const updated = await renameDocument(id, next);
-        setDoc(updated);
-      } catch (err) {
-        setLoadError(translateApiError(err, t));
-      } finally {
-        setRenaming(false);
-      }
-    },
-    [doc, id, renameValue, t],
-  );
+  // Rename flows through the shared usePrompt dialog: a single
+  // promise resolution commits exactly once, so there's no
+  // double-submit window (the previous inline <input> wired both
+  // Enter and blur and needed a dedup guard).
+  const onRename = useCallback(async () => {
+    if (!doc || !id) return;
+    const next = await prompt({
+      title: t("docs.renameTitle"),
+      label: t("collab.documentName"),
+      defaultValue: doc.name,
+      confirmLabel: t("common.rename"),
+      required: true,
+    });
+    if (next === null) return;
+    const trimmed = next.trim();
+    if (!trimmed || trimmed === doc.name) return;
+    try {
+      const updated = await renameDocument(id, trimmed);
+      setDoc(updated);
+      toast.success(t("docs.renamed", { name: trimmed }));
+    } catch (err) {
+      toast.error(translateApiError(err, t));
+    }
+  }, [doc, id, prompt, t, toast]);
 
   const onChangeMode = useCallback(
     async (next: CollabMode) => {
@@ -336,178 +336,207 @@ export default function DocumentEditorPage() {
   );
 
   if (!id) {
-    return <div style={pageStyle}>{t("docs.missingDocumentId")}</div>;
-  }
-  if (loadError) {
     return (
-      <div style={pageStyle}>
-        <p style={{ color: "#991b1b" }}>{loadError}</p>
-        <Link to="/drive">{t("admin.backToDrive")}</Link>
-      </div>
+      <AppShell maxWidth="lg">
+        <EmptyState
+          title={t("docs.missingDocumentId")}
+          action={
+            <Button onClick={() => nav("/drive")}>{t("admin.backToDrive")}</Button>
+          }
+        />
+      </AppShell>
+    );
+  }
+  if (loadError && !doc) {
+    return (
+      <AppShell maxWidth="lg">
+        <EmptyState
+          title={loadError}
+          action={
+            <Button onClick={() => nav("/drive")}>{t("admin.backToDrive")}</Button>
+          }
+        />
+      </AppShell>
     );
   }
   if (!doc) {
-    return <div style={pageStyle}>{t("common.loading")}</div>;
+    return (
+      <AppShell maxWidth="lg">
+        <EditorSkeleton />
+      </AppShell>
+    );
   }
 
   return (
-    <div style={pageStyle}>
-      <header
-        style={{
-          display: "flex",
-          alignItems: "center",
-          justifyContent: "space-between",
-          padding: "16px 24px",
-          borderBottom: "1px solid #e5e7eb",
-          gap: 12,
-          flexWrap: "wrap",
-        }}
-      >
-        <div style={{ display: "flex", alignItems: "center", gap: 12, flex: 1, minWidth: 0 }}>
-          <button
-            onClick={() => nav(`/drive/folder/${doc.folder_id}`)}
-            style={backBtn}
-            aria-label={t("docs.backToFolderAria")}
-          >
-            ←
-          </button>
-          {renaming ? (
-            <form onSubmit={onRenameSubmit} style={{ flex: 1 }}>
-              <input
-                autoFocus
-                value={renameValue}
-                onChange={(e) => setRenameValue(e.target.value)}
-                onBlur={onRenameSubmit}
-                style={{
-                  fontSize: 20,
-                  fontWeight: 600,
-                  border: "1px solid #d1d5db",
-                  borderRadius: 4,
-                  padding: "4px 8px",
-                  width: "100%",
-                  maxWidth: 500,
-                }}
-              />
-            </form>
-          ) : (
-            <h1
-              style={{ fontSize: 20, fontWeight: 600, margin: 0, cursor: "text" }}
-              onClick={() => {
-                // Reset to the current name so a previous cancelled
-                // rename (e.g. user cleared the input then blurred to
-                // cancel) doesn't leave the next session pre-filled
-                // with a stale / empty value.
-                setRenameValue(doc.name);
-                setRenaming(true);
-              }}
-              title={t("docs.clickToRename")}
-            >
-              {doc.name}
-            </h1>
-          )}
-          <EncryptionBadge mode={doc.encryption_mode} size="row" />
-          <CollabModeBadge mode={doc.collab_mode} />
+    <AppShell
+      maxWidth="lg"
+      nav={
+        <Link
+          to={`/drive/folder/${doc.folder_id}`}
+          aria-label={t("docs.backToFolderAria")}
+          className="inline-flex items-center gap-1.5 rounded-full px-3 py-1.5 text-sm font-medium text-muted transition-colors hover:bg-surface-2 hover:text-fg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+        >
+          <ArrowLeft className="h-4 w-4" aria-hidden="true" />
+          {t("docs.backToFolder")}
+        </Link>
+      }
+      actions={
+        <>
           <ConnectionStatusChip status={status} readOnly={!writable} />
-        </div>
-        <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
           <PresenceChips
             awareness={awareness}
             localClientID={yDoc?.clientID ?? null}
           />
-          <button onClick={() => setModeSwitchOpen(true)} style={modeBtn}>
-            {t("docs.changeMode")}
-          </button>
-        </div>
-      </header>
-
-      <div
-        style={{
-          padding: 24,
-          maxWidth: 880,
-          margin: "0 auto",
-          width: "100%",
-          boxSizing: "border-box",
-        }}
-      >
-        {collabMode === "disabled" && (
-          <div
-            style={{
-              padding: 12,
-              background: "#fee2e2",
-              border: "1px solid #fecaca",
-              color: "#991b1b",
-              borderRadius: 4,
-              marginBottom: 16,
-            }}
+        </>
+      }
+    >
+      <PageHeader
+        eyebrow={
+          <span className="inline-flex flex-wrap items-center gap-2">
+            <EncryptionBadge mode={doc.encryption_mode} size="row" />
+            <CollabModeBadge mode={doc.collab_mode} />
+          </span>
+        }
+        title={
+          <button
+            type="button"
+            onClick={onRename}
+            title={t("docs.clickToRename")}
+            className="group -ml-1 inline-flex max-w-full items-center gap-2 rounded-lg px-1 text-left transition-colors hover:bg-surface-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
           >
-            <Trans i18nKey="docs.disabledBanner" components={{ code: <code /> }} />
-          </div>
-        )}
-        {editor ? (
-          <EditorContent
-            editor={editor}
-            style={{
-              minHeight: 400,
-              padding: 16,
-              border: "1px solid #e5e7eb",
-              borderRadius: 4,
-              outline: "none",
-              fontSize: 15,
-              lineHeight: 1.6,
-            }}
-          />
-        ) : (
-          <div style={{ color: "#6b7280" }}>{t("docs.initializing")}</div>
-        )}
-      </div>
-
-      {modeSwitchOpen && (
-        <div
-          role="dialog"
-          aria-modal="true"
-          style={modalBackdrop}
-          onClick={() => !modeSwitching && setModeSwitchOpen(false)}
-        >
-          <div
-            style={modalCard}
-            onClick={(e) => e.stopPropagation()}
-          >
-            <h2 style={{ margin: 0, fontSize: 18 }}>{t("docs.changeExperience")}</h2>
-            <p style={{ color: "#4b5563", fontSize: 13, marginTop: 4 }}>
-              {t("docs.modeFolderHint", {
-                mode:
-                  doc.encryption_mode === "strict_zk"
-                    ? t("encryption.zeroKnowledge")
-                    : t("encryption.confidential"),
-              })}
-            </p>
-            <CollabModeSelector
-              value={doc.collab_mode}
-              onChange={onChangeMode}
-              allowedModes={doc.allowed_collab_modes}
-              encryptionMode={doc.encryption_mode}
-              disabled={modeSwitching}
+            <span className="truncate">{doc.name}</span>
+            <Pencil
+              className="h-4 w-4 shrink-0 text-muted opacity-0 transition-opacity group-hover:opacity-100"
+              aria-hidden="true"
             />
-            {modeSwitchError && (
-              <p style={{ color: "#991b1b", fontSize: 13 }}>{modeSwitchError}</p>
-            )}
-            <div style={{ display: "flex", justifyContent: "flex-end", gap: 8 }}>
-              <button
-                onClick={() => setModeSwitchOpen(false)}
-                disabled={modeSwitching}
-                style={modeBtn}
-              >
-                {t("common.close")}
-              </button>
-            </div>
+          </button>
+        }
+        actions={
+          <Button
+            variant="secondary"
+            onClick={() => {
+              setModeSwitchError(null);
+              setModeSwitchOpen(true);
+            }}
+          >
+            {t("docs.changeMode")}
+          </Button>
+        }
+      />
+
+      {collabMode === "disabled" && (
+        <div
+          role="status"
+          className="mb-4 flex items-start gap-2 rounded-card border border-warning/30 bg-warning/10 px-4 py-3 text-sm text-warning"
+        >
+          <Lock className="mt-0.5 h-4 w-4 shrink-0" aria-hidden="true" />
+          <span>
+            <Trans
+              i18nKey="docs.disabledBanner"
+              components={{
+                code: (
+                  <code className="rounded bg-warning/20 px-1 py-0.5 font-mono text-xs" />
+                ),
+              }}
+            />
+          </span>
+        </div>
+      )}
+
+      {editor ? (
+        <EditorContent
+          editor={editor}
+          className="rounded-card border border-border bg-surface px-6 py-5 text-fg shadow-card [&_.ProseMirror]:min-h-[55vh] [&_.ProseMirror]:leading-relaxed [&_.ProseMirror]:outline-none"
+        />
+      ) : (
+        <div
+          className="rounded-card border border-border bg-surface px-6 py-5 shadow-card"
+          role="status"
+          aria-label={t("docs.initializing")}
+        >
+          <div className="flex flex-col gap-3">
+            <Skeleton className="h-6 w-1/2" />
+            <Skeleton className="h-4 w-full" />
+            <Skeleton className="h-4 w-5/6" />
+            <Skeleton className="h-4 w-2/3" />
           </div>
         </div>
       )}
+
+      <Modal
+        open={modeSwitchOpen}
+        onOpenChange={(next) => {
+          if (modeSwitching) return;
+          // Clear any prior switch error when the modal closes so the next
+          // open starts clean (the dialog is controlled, not remounted).
+          if (!next) setModeSwitchError(null);
+          setModeSwitchOpen(next);
+        }}
+        title={t("docs.changeExperience")}
+        size="lg"
+        description={t("docs.modeFolderHint", {
+          mode:
+            doc.encryption_mode === "strict_zk"
+              ? t("encryption.zeroKnowledge")
+              : t("encryption.confidential"),
+        })}
+        footer={
+          <Button
+            variant="secondary"
+            onClick={() => {
+              setModeSwitchError(null);
+              setModeSwitchOpen(false);
+            }}
+            disabled={modeSwitching}
+          >
+            {t("common.close")}
+          </Button>
+        }
+      >
+        <div className="flex flex-col gap-3">
+          <CollabModeSelector
+            value={doc.collab_mode}
+            onChange={onChangeMode}
+            allowedModes={doc.allowed_collab_modes}
+            encryptionMode={doc.encryption_mode}
+            disabled={modeSwitching}
+          />
+          {modeSwitchError && (
+            <p className="text-sm text-danger" role="alert">
+              {modeSwitchError}
+            </p>
+          )}
+        </div>
+      </Modal>
+    </AppShell>
+  );
+}
+
+// EditorSkeleton mirrors the loaded layout (header block + document
+// surface) so the page doesn't jump when the document metadata and
+// editor finish loading.
+function EditorSkeleton() {
+  const { t } = useTranslation();
+  return (
+    <div role="status" aria-label={t("docs.initializing")}>
+      <div className="mb-6 flex flex-col gap-3">
+        <Skeleton className="h-5 w-40" />
+        <Skeleton className="h-8 w-64" />
+      </div>
+      <div className="rounded-card border border-border bg-surface px-6 py-5 shadow-card">
+        <div className="flex flex-col gap-3">
+          <Skeleton className="h-6 w-1/2" />
+          <Skeleton className="h-4 w-full" />
+          <Skeleton className="h-4 w-full" />
+          <Skeleton className="h-4 w-5/6" />
+          <Skeleton className="h-4 w-2/3" />
+        </div>
+      </div>
     </div>
   );
 }
 
-// CollabModeBadge renders the active collab mode as a small pill
+// CollabModeBadge renders the active collab mode as a small Badge
 // next to the encryption badge. The two badges together describe
 // the (privacy boundary, editor experience) tuple that governs
 // every collab feature on the page.
@@ -519,71 +548,20 @@ function CollabModeBadge({ mode }: { mode: CollabMode }) {
     rich_presence: t("collab.richPresence"),
     disabled: t("collab.disabled"),
   };
-  const colors: Record<CollabMode, { bg: string; fg: string }> = {
-    markdown: { bg: "#eff6ff", fg: "#1d4ed8" },
-    rich: { bg: "#ecfdf5", fg: "#065f46" },
-    rich_presence: { bg: "#f5f3ff", fg: "#5b21b6" },
-    disabled: { bg: "#f3f4f6", fg: "#374151" },
+  const tones: Record<CollabMode, BadgeTone> = {
+    markdown: "neutral",
+    rich: "brand",
+    rich_presence: "brand",
+    disabled: "warning",
   };
-  const c = colors[mode];
   return (
     <span
       title={t("docs.editorModeTooltip", { mode: labels[mode].toLowerCase() })}
-      style={{
-        display: "inline-flex",
-        alignItems: "center",
-        padding: "2px 8px",
-        borderRadius: 9999,
-        background: c.bg,
-        color: c.fg,
-        fontSize: 12,
-        fontWeight: 500,
-      }}
+      className="inline-flex"
     >
-      {labels[mode]}
+      <Badge tone={tones[mode]} dot={mode === "rich_presence"}>
+        {labels[mode]}
+      </Badge>
     </span>
   );
 }
-
-const pageStyle: React.CSSProperties = {
-  minHeight: "100vh",
-  background: "#f9fafb",
-};
-
-const backBtn: React.CSSProperties = {
-  background: "white",
-  border: "1px solid #d1d5db",
-  borderRadius: 4,
-  padding: "4px 10px",
-  fontSize: 16,
-  cursor: "pointer",
-};
-
-const modeBtn: React.CSSProperties = {
-  padding: "6px 12px",
-  background: "white",
-  border: "1px solid #d1d5db",
-  borderRadius: 4,
-  fontSize: 13,
-  cursor: "pointer",
-};
-
-const modalBackdrop: React.CSSProperties = {
-  position: "fixed",
-  inset: 0,
-  background: "rgba(0,0,0,0.4)",
-  display: "flex",
-  alignItems: "center",
-  justifyContent: "center",
-  zIndex: 100,
-};
-
-const modalCard: React.CSSProperties = {
-  background: "white",
-  borderRadius: 8,
-  padding: 24,
-  width: "min(480px, 90vw)",
-  display: "flex",
-  flexDirection: "column",
-  gap: 12,
-};
