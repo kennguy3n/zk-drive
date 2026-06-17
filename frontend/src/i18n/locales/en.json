@@ -345,7 +345,26 @@
     "linkPasswordHint": "Recipients must enter this password before opening the link.",
     "addExternal": "Add external recipient",
     "send": "Send",
-    "sentAt": "Sent {{at}}"
+    "sentAt": "Sent {{at}}",
+    "tabsAria": "Sharing method",
+    "roleViewerDesc": "Can view and download.",
+    "roleCommenterDesc": "Can view, download and comment.",
+    "roleEditorDesc": "Can view, edit and manage.",
+    "moreOptions": "More options",
+    "fewerOptions": "Fewer options",
+    "passwordHint": "Recipients must enter this password before the link opens.",
+    "privacyConfidentialNote": "This folder is Confidential — the server can generate link previews and thumbnails for the people you share with.",
+    "privacyStrictNote": "This folder is Zero-knowledge — recipients get the encrypted file, but the server can't generate previews, thumbnails, or search results for it.",
+    "privacyFileNote": "Recipients get access according to the parent folder's privacy mode.",
+    "copied": "Link copied to clipboard",
+    "copyFailed": "Couldn't copy the link",
+    "linkUrlLabel": "Shareable link",
+    "expiresBadge": "Expires {{date}}",
+    "noExpiryBadge": "No expiry",
+    "passwordProtectedBadge": "Password protected",
+    "maxDownloadsBadge": "Max {{count}} downloads",
+    "maxDownloadsError": "Enter a whole number of 1 or more.",
+    "emailInvalid": "Enter a valid email address."
   },
   "billing": {
     "title": "Billing",
@@ -536,7 +555,11 @@
     "unavailable": "Preview unavailable",
     "tooLarge": "File too large for preview",
     "encryptedNoPreview": "Preview unavailable for end-to-end encrypted files",
-    "openOriginal": "Open original"
+    "openOriginal": "Open original",
+    "untitled": "Untitled file",
+    "download": "Download",
+    "share": "Share",
+    "downloadFailed": "Couldn't start the download. Please try again."
   },
   "install": {
     "title": "Install zk-drive",

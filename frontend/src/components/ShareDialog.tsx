@@ -1,5 +1,14 @@
-import { useState } from "react";
+import { useState, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
+import {
+  ChevronDown,
+  Copy,
+  Eye,
+  Link2,
+  Mail,
+  MessageSquare,
+  Pencil,
+} from "lucide-react";
 import {
   createGuestInvite,
   createShareLink,
@@ -9,14 +18,27 @@ import {
   type GuestInvite,
 } from "../api/client";
 import { translateApiError } from "../api/errors";
+import {
+  Badge,
+  Button,
+  Field,
+  Input,
+  Modal,
+  RadioCard,
+  Tabs,
+  useToast,
+  type TabItem,
+} from "./ui";
+import { cn } from "../lib/cn";
 
 // ShareDialog is the single entry point for sharing a file or folder.
 // It intentionally keeps both share-link and guest-invite flows in one
 // modal because from the end-user's perspective these are two
 // renderings of the same intent ("give this resource to someone") and
-// switching modals mid-flow is jarring. Existing links and invites are
-// rendered below the forms so the user can audit what they've already
-// handed out without a separate "manage" surface.
+// switching modals mid-flow is jarring. The default path stays simple —
+// pick a permission, create a link, copy it — while password / expiry /
+// download-cap controls are progressively disclosed so they never clutter
+// the common case.
 interface Props {
   resource:
     | { type: "folder"; value: Folder }
@@ -25,10 +47,14 @@ interface Props {
 }
 
 type Role = "viewer" | "commenter" | "editor";
+type Tab = "link" | "invite";
+
+const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
 export default function ShareDialog({ resource, onClose }: Props) {
   const { t } = useTranslation();
-  const [tab, setTab] = useState<"link" | "invite">("link");
+  const toast = useToast();
+  const [tab, setTab] = useState<Tab>("link");
   const [error, setError] = useState<string | null>(null);
   const [link, setLink] = useState<ShareLink | null>(null);
   const [invite, setInvite] = useState<GuestInvite | null>(null);
@@ -38,19 +64,44 @@ export default function ShareDialog({ resource, onClose }: Props) {
   const [linkPassword, setLinkPassword] = useState("");
   const [linkExpiresAt, setLinkExpiresAt] = useState("");
   const [linkMaxDownloads, setLinkMaxDownloads] = useState("");
+  const [linkAdvanced, setLinkAdvanced] = useState(false);
+  const [maxDownloadsError, setMaxDownloadsError] = useState<string | null>(null);
+  const [linkSubmitting, setLinkSubmitting] = useState(false);
 
   // Guest invite form state
   const [inviteEmail, setInviteEmail] = useState("");
   const [inviteRole, setInviteRole] = useState<Role>("viewer");
   const [inviteExpiresAt, setInviteExpiresAt] = useState("");
+  const [inviteAdvanced, setInviteAdvanced] = useState(false);
+  const [emailError, setEmailError] = useState<string | null>(null);
+  const [inviteSubmitting, setInviteSubmitting] = useState(false);
+
+  const kind =
+    resource.type === "folder" ? t("search.typeFolder") : t("search.typeFile");
+
+  const switchTab = (next: Tab) => {
+    setTab(next);
+    setError(null);
+  };
 
   const submitLink = async (e: React.FormEvent) => {
     e.preventDefault();
     setError(null);
+
+    let maxDownloads: number | undefined;
+    if (linkMaxDownloads.trim()) {
+      const parsed = Number.parseInt(linkMaxDownloads, 10);
+      if (!Number.isFinite(parsed) || parsed < 1) {
+        setMaxDownloadsError(t("share.maxDownloadsError"));
+        setLinkAdvanced(true);
+        return;
+      }
+      maxDownloads = parsed;
+    }
+    setMaxDownloadsError(null);
+
+    setLinkSubmitting(true);
     try {
-      const maxDownloads = linkMaxDownloads
-        ? Number.parseInt(linkMaxDownloads, 10)
-        : undefined;
       const created = await createShareLink({
         resource_type: resource.type,
         resource_id: resource.value.id,
@@ -60,14 +111,13 @@ export default function ShareDialog({ resource, onClose }: Props) {
         // timezone; rely on the backend's permissive RFC3339 parser to
         // treat these as local-time ISO strings.
         expires_at: linkExpiresAt || undefined,
-        max_downloads:
-          Number.isFinite(maxDownloads) && (maxDownloads as number) > 0
-            ? maxDownloads
-            : undefined,
+        max_downloads: maxDownloads,
       });
       setLink(created);
     } catch (err) {
       setError(translateApiError(err, t));
+    } finally {
+      setLinkSubmitting(false);
     }
   };
 
@@ -86,182 +136,330 @@ export default function ShareDialog({ resource, onClose }: Props) {
   const submitInvite = async (e: React.FormEvent) => {
     e.preventDefault();
     setError(null);
+
+    if (!EMAIL_RE.test(inviteEmail.trim())) {
+      setEmailError(t("share.emailInvalid"));
+      return;
+    }
+    setEmailError(null);
+
     if (!inviteFolderID) {
       setError(t("share.fileNoParent"));
       return;
     }
+
+    setInviteSubmitting(true);
     try {
       const created = await createGuestInvite({
         folder_id: inviteFolderID,
-        email: inviteEmail,
+        email: inviteEmail.trim(),
         role: inviteRole,
         expires_at: inviteExpiresAt || undefined,
       });
       setInvite(created);
     } catch (err) {
       setError(translateApiError(err, t));
+    } finally {
+      setInviteSubmitting(false);
     }
   };
 
+  const copyLink = async (url: string) => {
+    try {
+      await navigator.clipboard.writeText(url);
+      toast.success(t("share.copied"));
+    } catch {
+      toast.error(t("share.copyFailed"));
+    }
+  };
+
+  const tabs: TabItem<Tab>[] = [
+    { value: "link", label: t("share.tabLink"), icon: <Link2 className="h-4 w-4" /> },
+    { value: "invite", label: t("share.tabInvite"), icon: <Mail className="h-4 w-4" /> },
+  ];
+
   return (
-    <div style={overlay} onClick={onClose}>
-      <div style={modal} onClick={(e) => e.stopPropagation()}>
-        <header style={header}>
-          <div>
-            <div style={{ fontSize: 12, color: "#6b7280", textTransform: "uppercase" }}>
-              {t("share.headingFor", {
-                kind: resource.type === "folder" ? t("search.typeFolder") : t("search.typeFile"),
-              })}
-            </div>
-            <div style={{ fontSize: 16, fontWeight: 600 }}>{resource.value.name}</div>
-          </div>
-          <button onClick={onClose} style={closeBtn} aria-label={t("common.close")}>×</button>
-        </header>
+    <Modal
+      open
+      onOpenChange={(o) => !o && onClose()}
+      title={t("share.headingFor", { kind })}
+      description={resource.value.name}
+      size="md"
+      className="max-h-[88vh] overflow-y-auto"
+    >
+      <div className="flex flex-col gap-5">
+        <Tabs
+          tabs={tabs}
+          value={tab}
+          onChange={switchTab}
+          variant="pill"
+          aria-label={t("share.tabsAria")}
+        />
 
-        <nav style={tabs}>
-          <TabButton active={tab === "link"} onClick={() => setTab("link")}>
-            {t("share.tabLink")}
-          </TabButton>
-          <TabButton active={tab === "invite"} onClick={() => setTab("invite")}>
-            {t("share.tabInvite")}
-          </TabButton>
-        </nav>
+        <PrivacyNote resource={resource} />
 
-        {error ? <div style={errorBox}>{error}</div> : null}
+        {error && (
+          <Callout tone="danger" role="alert">
+            {error}
+          </Callout>
+        )}
 
         {tab === "link" ? (
-          <form onSubmit={submitLink} style={form}>
-            <Field label={t("share.role")}>
-              <select
-                value={linkRole}
-                onChange={(e) => setLinkRole(e.target.value as Role)}
-                style={input}
+          <form onSubmit={submitLink} className="flex flex-col gap-5">
+            <RoleSelector value={linkRole} onChange={setLinkRole} label={t("share.role")} />
+
+            <div className="flex flex-col gap-3">
+              <button
+                type="button"
+                onClick={() => setLinkAdvanced((v) => !v)}
+                aria-expanded={linkAdvanced}
+                className="inline-flex items-center gap-1.5 self-start text-sm font-medium text-brand hover:text-brand-hover focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-bg rounded"
               >
-                <option value="viewer">{t("share.roleViewer")}</option>
-                <option value="commenter">{t("share.roleCommenter")}</option>
-                <option value="editor">{t("share.roleEditor")}</option>
-              </select>
-            </Field>
-            <Field label={t("share.passwordOptional")}>
-              <input
-                type="password"
-                value={linkPassword}
-                onChange={(e) => setLinkPassword(e.target.value)}
-                style={input}
-                placeholder={t("share.passwordPlaceholder")}
-              />
-            </Field>
-            <Field label={t("share.expiresOptional")}>
-              <input
-                type="datetime-local"
-                value={linkExpiresAt}
-                onChange={(e) => setLinkExpiresAt(e.target.value)}
-                style={input}
-              />
-            </Field>
-            <Field label={t("share.maxDownloadsOptional")}>
-              <input
-                type="number"
-                min={1}
-                value={linkMaxDownloads}
-                onChange={(e) => setLinkMaxDownloads(e.target.value)}
-                style={input}
-                placeholder={t("share.unlimitedPlaceholder")}
-              />
-            </Field>
-            <button type="submit" style={submitBtn}>{t("share.createLink")}</button>
-            {link ? <ShareLinkCard link={link} /> : null}
+                <ChevronDown
+                  className={cn(
+                    "h-4 w-4 transition-transform",
+                    linkAdvanced && "rotate-180",
+                  )}
+                  aria-hidden="true"
+                />
+                {linkAdvanced ? t("share.fewerOptions") : t("share.moreOptions")}
+              </button>
+
+              {linkAdvanced && (
+                <div className="flex flex-col gap-4 rounded-card border border-border bg-surface-2/50 p-4">
+                  <Field label={t("share.passwordOptional")} hint={t("share.passwordHint")}>
+                    {(p) => (
+                      <Input
+                        {...p}
+                        type="password"
+                        autoComplete="new-password"
+                        value={linkPassword}
+                        onChange={(e) => setLinkPassword(e.target.value)}
+                        placeholder={t("share.passwordPlaceholder")}
+                      />
+                    )}
+                  </Field>
+                  <Field label={t("share.expiresOptional")}>
+                    {(p) => (
+                      <Input
+                        {...p}
+                        type="datetime-local"
+                        value={linkExpiresAt}
+                        onChange={(e) => setLinkExpiresAt(e.target.value)}
+                      />
+                    )}
+                  </Field>
+                  <Field
+                    label={t("share.maxDownloadsOptional")}
+                    error={maxDownloadsError ?? undefined}
+                  >
+                    {(p) => (
+                      <Input
+                        {...p}
+                        type="number"
+                        min={1}
+                        value={linkMaxDownloads}
+                        onChange={(e) => {
+                          setLinkMaxDownloads(e.target.value);
+                          if (maxDownloadsError) setMaxDownloadsError(null);
+                        }}
+                        placeholder={t("share.unlimitedPlaceholder")}
+                      />
+                    )}
+                  </Field>
+                </div>
+              )}
+            </div>
+
+            <Button
+              type="submit"
+              variant="gradient"
+              size="lg"
+              loading={linkSubmitting}
+              className="w-full"
+            >
+              <Link2 className="h-4 w-4" aria-hidden="true" />
+              {t("share.createLink")}
+            </Button>
+
+            {link && <ShareLinkCard link={link} onCopy={copyLink} />}
           </form>
         ) : (
-          <form onSubmit={submitInvite} style={form}>
-            <Field label={t("share.emailLabel")}>
-              <input
-                type="email"
-                required
-                value={inviteEmail}
-                onChange={(e) => setInviteEmail(e.target.value)}
-                style={input}
-                placeholder={t("share.emailPlaceholder")}
-              />
+          <form onSubmit={submitInvite} className="flex flex-col gap-5">
+            <Field
+              label={t("share.emailLabel")}
+              error={emailError ?? undefined}
+              required
+            >
+              {(p) => (
+                <Input
+                  {...p}
+                  type="email"
+                  value={inviteEmail}
+                  onChange={(e) => {
+                    setInviteEmail(e.target.value);
+                    if (emailError) setEmailError(null);
+                  }}
+                  placeholder={t("share.emailPlaceholder")}
+                />
+              )}
             </Field>
-            <Field label={t("share.role")}>
-              <select
-                value={inviteRole}
-                onChange={(e) => setInviteRole(e.target.value as Role)}
-                style={input}
+
+            <RoleSelector value={inviteRole} onChange={setInviteRole} label={t("share.role")} />
+
+            <div className="flex flex-col gap-3">
+              <button
+                type="button"
+                onClick={() => setInviteAdvanced((v) => !v)}
+                aria-expanded={inviteAdvanced}
+                className="inline-flex items-center gap-1.5 self-start text-sm font-medium text-brand hover:text-brand-hover focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-bg rounded"
               >
-                <option value="viewer">{t("share.roleViewer")}</option>
-                <option value="commenter">{t("share.roleCommenter")}</option>
-                <option value="editor">{t("share.roleEditor")}</option>
-              </select>
-            </Field>
-            <Field label={t("share.expiresOptional")}>
-              <input
-                type="datetime-local"
-                value={inviteExpiresAt}
-                onChange={(e) => setInviteExpiresAt(e.target.value)}
-                style={input}
-              />
-            </Field>
-            <button type="submit" style={submitBtn}>{t("share.sendInvite")}</button>
-            {invite ? <GuestInviteCard invite={invite} /> : null}
+                <ChevronDown
+                  className={cn(
+                    "h-4 w-4 transition-transform",
+                    inviteAdvanced && "rotate-180",
+                  )}
+                  aria-hidden="true"
+                />
+                {inviteAdvanced ? t("share.fewerOptions") : t("share.moreOptions")}
+              </button>
+
+              {inviteAdvanced && (
+                <div className="rounded-card border border-border bg-surface-2/50 p-4">
+                  <Field label={t("share.expiresOptional")}>
+                    {(p) => (
+                      <Input
+                        {...p}
+                        type="datetime-local"
+                        value={inviteExpiresAt}
+                        onChange={(e) => setInviteExpiresAt(e.target.value)}
+                      />
+                    )}
+                  </Field>
+                </div>
+              )}
+            </div>
+
+            <Button
+              type="submit"
+              variant="gradient"
+              size="lg"
+              loading={inviteSubmitting}
+              className="w-full"
+            >
+              <Mail className="h-4 w-4" aria-hidden="true" />
+              {t("share.sendInvite")}
+            </Button>
+
+            {invite && <GuestInviteCard invite={invite} />}
           </form>
         )}
+      </div>
+    </Modal>
+  );
+}
+
+const ROLE_ICONS: Record<Role, ReactNode> = {
+  viewer: <Eye className="h-5 w-5" />,
+  commenter: <MessageSquare className="h-5 w-5" />,
+  editor: <Pencil className="h-5 w-5" />,
+};
+
+function RoleSelector({
+  value,
+  onChange,
+  label,
+}: {
+  value: Role;
+  onChange: (role: Role) => void;
+  label: string;
+}) {
+  const { t } = useTranslation();
+  const roles: { role: Role; title: string; description: string }[] = [
+    { role: "viewer", title: t("share.roleViewer"), description: t("share.roleViewerDesc") },
+    {
+      role: "commenter",
+      title: t("share.roleCommenter"),
+      description: t("share.roleCommenterDesc"),
+    },
+    { role: "editor", title: t("share.roleEditor"), description: t("share.roleEditorDesc") },
+  ];
+  return (
+    <div className="flex flex-col gap-1.5">
+      <span className="text-sm font-medium text-fg" id="share-role-label">
+        {label}
+      </span>
+      <div
+        role="radiogroup"
+        aria-labelledby="share-role-label"
+        className="flex flex-col gap-2"
+      >
+        {roles.map((r) => (
+          <RadioCard
+            key={r.role}
+            selected={value === r.role}
+            onSelect={() => onChange(r.role)}
+            title={r.title}
+            description={r.description}
+            icon={ROLE_ICONS[r.role]}
+          />
+        ))}
       </div>
     </div>
   );
 }
 
-function TabButton({
-  active,
-  children,
-  onClick,
+function ShareLinkCard({
+  link,
+  onCopy,
 }: {
-  active: boolean;
-  children: React.ReactNode;
-  onClick: () => void;
+  link: ShareLink;
+  onCopy: (url: string) => void;
 }) {
-  return (
-    <button
-      onClick={onClick}
-      style={{
-        padding: "8px 12px",
-        border: "none",
-        borderBottom: active ? "2px solid #2563eb" : "2px solid transparent",
-        background: "transparent",
-        fontSize: 13,
-        color: active ? "#2563eb" : "#6b7280",
-        cursor: "pointer",
-      }}
-    >
-      {children}
-    </button>
-  );
-}
-
-function Field({ label, children }: { label: string; children: React.ReactNode }) {
-  return (
-    <label style={{ display: "grid", gap: 4, fontSize: 12, color: "#374151" }}>
-      <span>{label}</span>
-      {children}
-    </label>
-  );
-}
-
-function ShareLinkCard({ link }: { link: ShareLink }) {
   const { t } = useTranslation();
   const url = `${window.location.origin}/share/${link.token}`;
   return (
-    <div style={resultBox}>
-      <div style={{ fontSize: 12, color: "#065f46" }}>{t("share.linkCreated")}</div>
-      <div style={{ wordBreak: "break-all", fontFamily: "monospace", fontSize: 12 }}>{url}</div>
-      <button
-        type="button"
-        onClick={() => navigator.clipboard?.writeText(url)}
-        style={{ ...submitBtn, marginTop: 8, background: "#ecfdf5", color: "#065f46" }}
-      >
-        {t("share.copyToClipboard")}
-      </button>
+    <div className="flex flex-col gap-3 rounded-card border border-success/30 bg-success/10 p-4">
+      <div className="flex items-center gap-2 text-sm font-semibold text-success">
+        <Link2 className="h-4 w-4" aria-hidden="true" />
+        {t("share.linkCreated")}
+      </div>
+
+      <div className="flex gap-2">
+        <Input
+          readOnly
+          value={url}
+          aria-label={t("share.linkUrlLabel")}
+          onFocus={(e) => e.currentTarget.select()}
+          className="font-mono text-xs"
+        />
+        <Button
+          type="button"
+          variant="primary"
+          onClick={() => onCopy(url)}
+          className="shrink-0"
+        >
+          <Copy className="h-4 w-4" aria-hidden="true" />
+          {t("share.linkCopy")}
+        </Button>
+      </div>
+
+      <div className="flex flex-wrap gap-1.5">
+        <Badge tone="brand">{t(`share.role${capitalize(link.role)}`)}</Badge>
+        <Badge tone={link.expires_at ? "warning" : "neutral"}>
+          {link.expires_at
+            ? t("share.expiresBadge", { date: formatDate(link.expires_at) })
+            : t("share.noExpiryBadge")}
+        </Badge>
+        {link.password_protected && (
+          <Badge tone="neutral">{t("share.passwordProtectedBadge")}</Badge>
+        )}
+        {link.max_downloads != null && (
+          <Badge tone="neutral">
+            {t("share.maxDownloadsBadge", { count: link.max_downloads })}
+          </Badge>
+        )}
+      </div>
     </div>
   );
 }
@@ -269,96 +467,62 @@ function ShareLinkCard({ link }: { link: ShareLink }) {
 function GuestInviteCard({ invite }: { invite: GuestInvite }) {
   const { t } = useTranslation();
   return (
-    <div style={resultBox}>
-      <div style={{ fontSize: 12, color: "#065f46" }}>{t("share.inviteSent")}</div>
-      <div>
-        <strong>{invite.email}</strong> {t("share.as")} <em>{invite.role}</em>
+    <div className="flex flex-col gap-2 rounded-card border border-success/30 bg-success/10 p-4">
+      <div className="flex items-center gap-2 text-sm font-semibold text-success">
+        <Mail className="h-4 w-4" aria-hidden="true" />
+        {t("share.inviteSent")}
       </div>
+      <p className="text-sm text-fg">
+        <strong className="font-semibold">{invite.email}</strong>{" "}
+        <span className="text-muted">{t("share.as")}</span>{" "}
+        <Badge tone="brand">{t(`share.role${capitalize(invite.role)}`)}</Badge>
+      </p>
     </div>
   );
 }
 
-const overlay: React.CSSProperties = {
-  position: "fixed",
-  inset: 0,
-  background: "rgba(17, 24, 39, 0.5)",
-  display: "flex",
-  alignItems: "center",
-  justifyContent: "center",
-  zIndex: 50,
-};
+// PrivacyNote explains, in plain language, what sharing means under the
+// resource's privacy mode — most importantly that a zero-knowledge
+// (strict_zk) folder can't be server-previewed for recipients.
+function PrivacyNote({ resource }: { resource: Props["resource"] }) {
+  const { t } = useTranslation();
+  if (resource.type === "file") {
+    return <Callout tone="info">{t("share.privacyFileNote")}</Callout>;
+  }
+  const isStrict = resource.value.encryption_mode === "strict_zk";
+  return (
+    <Callout tone={isStrict ? "warning" : "info"}>
+      {isStrict ? t("share.privacyStrictNote") : t("share.privacyConfidentialNote")}
+    </Callout>
+  );
+}
 
-const modal: React.CSSProperties = {
-  width: 420,
-  background: "white",
-  borderRadius: 8,
-  boxShadow: "0 20px 40px rgba(0,0,0,0.2)",
-  padding: 20,
-};
+function Callout({
+  tone,
+  role,
+  children,
+}: {
+  tone: "info" | "warning" | "danger";
+  role?: string;
+  children: ReactNode;
+}) {
+  const tones: Record<typeof tone, string> = {
+    info: "border-border bg-surface-2 text-muted",
+    warning: "border-warning/30 bg-warning/10 text-fg",
+    danger: "border-danger/30 bg-danger/10 text-danger",
+  };
+  return (
+    <div role={role} className={cn("rounded-card border px-3 py-2.5 text-sm", tones[tone])}>
+      {children}
+    </div>
+  );
+}
 
-const header: React.CSSProperties = {
-  display: "flex",
-  justifyContent: "space-between",
-  alignItems: "flex-start",
-  marginBottom: 12,
-};
+function capitalize(s: string): string {
+  return s.charAt(0).toUpperCase() + s.slice(1);
+}
 
-const closeBtn: React.CSSProperties = {
-  background: "transparent",
-  border: "none",
-  fontSize: 24,
-  lineHeight: 1,
-  cursor: "pointer",
-  color: "#6b7280",
-};
-
-const tabs: React.CSSProperties = {
-  display: "flex",
-  gap: 8,
-  borderBottom: "1px solid #e5e7eb",
-  marginBottom: 12,
-};
-
-const form: React.CSSProperties = {
-  display: "grid",
-  gap: 10,
-};
-
-const input: React.CSSProperties = {
-  padding: "6px 8px",
-  border: "1px solid #d1d5db",
-  borderRadius: 4,
-  fontSize: 13,
-  width: "100%",
-  boxSizing: "border-box",
-};
-
-const submitBtn: React.CSSProperties = {
-  padding: "8px 12px",
-  background: "#2563eb",
-  color: "white",
-  border: "none",
-  borderRadius: 4,
-  fontSize: 13,
-  cursor: "pointer",
-};
-
-const errorBox: React.CSSProperties = {
-  padding: "8px 10px",
-  background: "#fef2f2",
-  color: "#b91c1c",
-  border: "1px solid #fecaca",
-  borderRadius: 4,
-  fontSize: 12,
-  marginBottom: 10,
-};
-
-const resultBox: React.CSSProperties = {
-  padding: 10,
-  background: "#ecfdf5",
-  border: "1px solid #a7f3d0",
-  borderRadius: 4,
-  fontSize: 12,
-  display: "grid",
-  gap: 4,
-};
+function formatDate(iso: string): string {
+  const d = new Date(iso);
+  return Number.isNaN(d.getTime()) ? iso : d.toLocaleDateString();
+}

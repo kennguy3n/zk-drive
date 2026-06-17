@@ -1,5 +1,7 @@
 import { Link } from "react-router-dom";
 import { useTranslation } from "react-i18next";
+import { Badge } from "./ui";
+import { cn } from "../lib/cn";
 
 // EncryptionBadge renders the privacy mode of a folder as a small pill
 // next to its name. Mode strings come from the API (`encryption_mode`
@@ -104,22 +106,31 @@ export default function EncryptionBadge({
   const title = linkToHelp
     ? `${body} ${t("encryption.clickToLearnMore")}`
     : body;
-  const padding = size === "header" ? "2px 10px" : "1px 6px";
-  const fontSize = size === "header" ? 12 : 10;
-  const style = {
-    fontSize,
-    padding,
-    borderRadius: 999,
-    background: isStrict ? "#fee2e2" : "#dcfce7",
-    color: isStrict ? "#991b1b" : "#166534",
-    whiteSpace: "nowrap" as const,
-    // border on the badge makes both variants legible against the
-    // page background even in high-contrast / forced-colors mode.
-    border: `1px solid ${isStrict ? "#fca5a5" : "#86efac"}`,
-    textDecoration: "none",
-    display: "inline-block",
-  };
   const dataMode = isStrict ? "strict_zk" : "managed_encrypted";
+
+  // Tokenised tones (no hard-coded hex): strict zero-knowledge wears the
+  // KChat brand indigo — it is the premium, server-blind mode and the
+  // colour signals "this is the strong one" rather than "danger".
+  // Confidential (the managed default) wears success green: encrypted at
+  // rest, server-readable. The leading dot makes the two modes scannable
+  // at a glance in dense file lists. Both tones re-theme with the app and
+  // flip correctly in dark mode because they resolve from CSS variables.
+  const tone = isStrict ? "brand" : "success";
+  const badge = (
+    <Badge
+      tone={tone}
+      dot
+      className={cn(
+        "whitespace-nowrap",
+        // The "header" size sits next to the breadcrumb folder name, so it
+        // scales up a notch. Tailwind orders utilities by ascending scale,
+        // so these larger values reliably win over Badge's defaults.
+        size === "header" && "px-3 py-1 text-sm",
+      )}
+    >
+      {label}
+    </Badge>
+  );
 
   if (linkToHelp) {
     return (
@@ -137,9 +148,9 @@ export default function EncryptionBadge({
         // noise. See the `tabbable` prop comment above.
         tabIndex={tabbable ? undefined : -1}
         aria-label={t("encryption.badgeAria", { label })}
-        style={style}
+        className="inline-flex rounded-full no-underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-bg"
       >
-        {label}
+        {badge}
       </Link>
     );
   }
@@ -149,9 +160,9 @@ export default function EncryptionBadge({
       title={title}
       data-testid="encryption-badge"
       data-mode={dataMode}
-      style={style}
+      className="inline-flex"
     >
-      {label}
+      {badge}
     </span>
   );
 }
