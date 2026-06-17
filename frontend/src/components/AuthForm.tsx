@@ -100,7 +100,7 @@ export interface AuthFormProps {
   /** Optional social sign-in buttons (Google/Microsoft via iam-core). */
   socialProviders?: SocialProvider[];
   /** Optional "Sign in with SSO" primary CTA handler. */
-  onSSO?: () => void;
+  onSSO?: () => void | Promise<void>;
 }
 
 // AuthForm is the branded login/signup surface. Pages pass the fields they
@@ -125,9 +125,20 @@ export default function AuthForm({
     Object.fromEntries(fields.map((f) => [f.name, ""])),
   );
   const [busy, setBusy] = useState(false);
+  const [ssoBusy, setSsoBusy] = useState(false);
 
   const handleChange = (name: string, value: string) => {
     setValues((prev) => ({ ...prev, [name]: value }));
+  };
+
+  const handleSSO = async () => {
+    if (!onSSO) return;
+    setSsoBusy(true);
+    try {
+      await onSSO();
+    } finally {
+      setSsoBusy(false);
+    }
   };
 
   const handleSubmit = async (e: FormEvent) => {
@@ -147,7 +158,14 @@ export default function AuthForm({
   return (
     <AuthLayout title={title} subtitle={subtitle} footer={footer}>
       {onSSO && (
-        <Button type="button" variant="gradient" className="w-full" onClick={onSSO}>
+        <Button
+          type="button"
+          variant="gradient"
+          className="w-full"
+          onClick={handleSSO}
+          loading={ssoBusy}
+          disabled={ssoBusy}
+        >
           {t("auth.signInWithSso")}
         </Button>
       )}

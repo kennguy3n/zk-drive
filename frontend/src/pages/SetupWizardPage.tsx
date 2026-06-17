@@ -294,7 +294,11 @@ export default function SetupWizardPage() {
       </div>
 
       <footer className="mt-8 flex items-center justify-between gap-3 border-t border-border pt-5">
-        <Button variant="ghost" onClick={goBack} disabled={stepIndex === 0 || finishing}>
+        <Button
+          variant="ghost"
+          onClick={goBack}
+          disabled={stepIndex <= (signedUp ? WORKSPACE_INDEX : 0) || finishing}
+        >
           {t("setup.back")}
         </Button>
         <div className="flex items-center gap-2">
