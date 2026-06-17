@@ -2,6 +2,7 @@ import {
   createContext,
   useCallback,
   useContext,
+  useEffect,
   useMemo,
   useRef,
   useState,
@@ -51,7 +52,11 @@ export interface PromptOptions {
   inputType?: "text" | "email" | "password" | "url" | "number";
   /** Reject an empty value. */
   required?: boolean;
-  /** Return an error string to block submission, or null/undefined to allow. */
+  /**
+   * Return an error string to block submission, or null/undefined to allow.
+   * Receives the raw, untrimmed value (not the trimmed value used for the
+   * `required` check), so trim inside the callback if whitespace matters.
+   */
   validate?: (value: string) => string | null | undefined;
 }
 
@@ -282,17 +287,27 @@ function PickerDialog({
   };
 
   const showSearch = opts.searchable ?? opts.items.length >= 8;
-  const filtered = query.trim()
-    ? opts.items.filter((it) => {
-        const hay = (
-          it.searchText ?? (typeof it.label === "string" ? it.label : "")
-        ).toLowerCase();
-        return hay.includes(query.trim().toLowerCase());
-      })
-    : opts.items;
+  const filtered = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    if (!q) return opts.items;
+    return opts.items.filter((it) => {
+      const hay = (
+        it.searchText ?? (typeof it.label === "string" ? it.label : "")
+      ).toLowerCase();
+      return hay.includes(q);
+    });
+  }, [opts.items, query]);
+
+  // If the active search hides the currently selected item, drop the
+  // selection so the confirm button can't submit something off-screen.
+  useEffect(() => {
+    if (selected && !filtered.some((it) => it.id === selected)) {
+      setSelected(null);
+    }
+  }, [filtered, selected]);
 
   const choose = () => {
-    const item = opts.items.find((it) => it.id === selected);
+    const item = filtered.find((it) => it.id === selected);
     if (item) settle(item);
   };
 
@@ -394,7 +409,15 @@ export function useConfirm() {
   return useDialogs().confirm;
 }
 
-/** Returns an async prompt() that resolves the entered string or null. */
+/**
+ * Returns an async prompt() that resolves the entered string, or null if
+ * cancelled.
+ *
+ * Whitespace contract: the `required` check rejects whitespace-only input,
+ * but `validate` and the resolved value receive the RAW, untrimmed string
+ * (so inputs where spaces are meaningful — passwords, display names — are
+ * preserved). Trim inside your own `validate`/handler when you need to.
+ */
 export function usePrompt() {
   return useDialogs().prompt;
 }

@@ -139,6 +139,17 @@ export interface RadioCardProps {
 // RadioCard is a large, clickable selection card (privacy mode, billing
 // tier, storage backend…). It behaves as a radio: arrow/space/enter
 // activate it and the selected state is announced via aria-checked.
+//
+// ACCESSIBILITY CONTRACT: this renders a single role="radio" cell and does
+// NOT provide its own group. Consumers MUST wrap a set of RadioCards in a
+// container with role="radiogroup" and an accessible name, e.g.
+//
+//   <div role="radiogroup" aria-label="Privacy mode">
+//     <RadioCard selected={…} onSelect={…} title="Managed" />
+//     <RadioCard selected={…} onSelect={…} title="Strict ZK" />
+//   </div>
+//
+// Without a radiogroup parent, assistive tech may misrepresent the widget.
 export function RadioCard({
   selected,
   onSelect,
