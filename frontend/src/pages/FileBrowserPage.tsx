@@ -1,13 +1,9 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
-import * as DropdownMenu from "@radix-ui/react-dropdown-menu";
 import {
   Search as SearchIcon,
-  Plus,
-  ChevronDown,
   FolderPlus,
   LayoutTemplate,
-  MoreHorizontal,
   FileText,
   Shield,
   ShieldCheck,
@@ -62,7 +58,6 @@ import {
   FileListSkeleton,
   Input,
   Modal,
-  RadioCard,
   useConfirm,
   usePrompt,
   useResourcePicker,
@@ -77,13 +72,6 @@ type ShareTarget =
   | { type: "folder"; value: Folder }
   | { type: "file"; value: FileItem };
 
-// Shared class strings for the Radix dropdown menus in the toolbar
-// (the "New" and "More" overflow menus). They mirror ThemeToggle so the
-// three menus in the top bar feel identical.
-const menuContentCls =
-  "z-50 min-w-[200px] rounded-lg border border-border bg-overlay p-1 shadow-overlay animate-scale-in";
-const menuItemCls =
-  "flex cursor-pointer items-center gap-2 rounded-md px-2.5 py-2 text-sm text-fg outline-none transition-colors data-[highlighted]:bg-surface-2";
 const iconBtnCls =
   "inline-flex h-9 w-9 items-center justify-center rounded-lg text-fg transition-colors hover:bg-surface-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring";
 const rowIconBtnCls =
@@ -448,104 +436,92 @@ export default function FileBrowserPage() {
               <SearchIcon className="h-4 w-4" aria-hidden="true" />
               <kbd className="rounded border border-border px-1.5 text-xs">⌘K</kbd>
             </button>
+            {/* Navigation: ghost icon buttons with tooltips, kept visible
+                (not hidden behind an overflow menu) so every action is one
+                click away and reachable by keyboard / screen reader. */}
+            <div className="flex items-center gap-1">
+              {currentFolderID ? (
+                <Link
+                  to={`/drive/folder/${currentFolderID}/documents`}
+                  aria-label={t("nav.documents")}
+                  title={t("nav.documents")}
+                  className={iconBtnCls}
+                >
+                  <FileText className="h-5 w-5" aria-hidden="true" />
+                </Link>
+              ) : null}
+              <Link
+                to="/drive/privacy"
+                aria-label={t("nav.privacy")}
+                title={t("nav.privacy")}
+                className={iconBtnCls}
+              >
+                <ShieldCheck className="h-5 w-5" aria-hidden="true" />
+              </Link>
+              {isAdmin ? (
+                <>
+                  <Link
+                    to="/admin"
+                    aria-label={t("nav.admin")}
+                    title={t("nav.admin")}
+                    className={iconBtnCls}
+                  >
+                    <Settings className="h-5 w-5" aria-hidden="true" />
+                  </Link>
+                  <Link
+                    to="/billing"
+                    aria-label={t("nav.billing")}
+                    title={t("nav.billing")}
+                    className={iconBtnCls}
+                  >
+                    <CreditCard className="h-5 w-5" aria-hidden="true" />
+                  </Link>
+                </>
+              ) : null}
+            </div>
+
             <ThemeToggle />
             <EnableNotificationsButton style={notifBtnStyle} />
 
-            {/* Create menu: groups every "make something new" action behind
-                one secondary pill so the primary Upload CTA stands alone. */}
-            <DropdownMenu.Root>
-              <DropdownMenu.Trigger asChild>
-                <Button variant="secondary">
-                  <Plus className="h-4 w-4" aria-hidden="true" />
-                  {t("drive.new")}
-                  <ChevronDown className="h-4 w-4 text-muted" aria-hidden="true" />
-                </Button>
-              </DropdownMenu.Trigger>
-              <DropdownMenu.Portal>
-                <DropdownMenu.Content align="end" sideOffset={6} className={menuContentCls}>
-                  <DropdownMenu.Item onSelect={handleCreateFolder} className={menuItemCls}>
-                    <FolderPlus className="h-4 w-4 text-muted" aria-hidden="true" />
-                    <span className="flex-1">{t("drive.newFolder")}</span>
-                  </DropdownMenu.Item>
-                  {isAdmin && isEnabled(Feature.ClientRooms) ? (
-                    <DropdownMenu.Item
-                      onSelect={() => setTemplateDialogOpen(true)}
-                      className={menuItemCls}
-                    >
-                      <LayoutTemplate className="h-4 w-4 text-muted" aria-hidden="true" />
-                      <span className="flex-1">{t("drive.createFromTemplate")}</span>
-                    </DropdownMenu.Item>
-                  ) : null}
-                </DropdownMenu.Content>
-              </DropdownMenu.Portal>
-            </DropdownMenu.Root>
+            <button
+              type="button"
+              onClick={() => {
+                logout();
+                nav("/login", { replace: true });
+              }}
+              aria-label={t("auth.logout")}
+              title={t("auth.logout")}
+              className={iconBtnCls}
+            >
+              <LogOut className="h-5 w-5" aria-hidden="true" />
+            </button>
 
-            {/* Primary CTA — the one brand-filled action in the toolbar. */}
+            {/* Creation actions. Upload is the single brand-filled primary
+                CTA; "Create from template" is an admin power-feature shown as
+                a compact ghost icon button; "New folder" stays a labelled
+                secondary pill as the common create action. */}
+            {isAdmin && isEnabled(Feature.ClientRooms) ? (
+              <button
+                type="button"
+                onClick={() => setTemplateDialogOpen(true)}
+                aria-label={t("drive.createFromTemplate")}
+                title={t("drive.createFromTemplate")}
+                className={iconBtnCls}
+              >
+                <LayoutTemplate className="h-5 w-5" aria-hidden="true" />
+              </button>
+            ) : null}
+
+            <Button variant="secondary" onClick={handleCreateFolder}>
+              <FolderPlus className="h-4 w-4" aria-hidden="true" />
+              {t("drive.newFolder")}
+            </Button>
+
             <UploadButton
               folderID={currentFolderID}
               onUploaded={() => refresh()}
               openRef={uploadOpenRef}
             />
-
-            {/* Overflow menu: navigation + account actions that don't need to
-                be one-click. Keeps the toolbar uncluttered and responsive. */}
-            <DropdownMenu.Root>
-              <DropdownMenu.Trigger asChild>
-                <button
-                  type="button"
-                  aria-label={t("drive.moreActions")}
-                  title={t("drive.moreActions")}
-                  className={iconBtnCls}
-                >
-                  <MoreHorizontal className="h-5 w-5" aria-hidden="true" />
-                </button>
-              </DropdownMenu.Trigger>
-              <DropdownMenu.Portal>
-                <DropdownMenu.Content align="end" sideOffset={6} className={menuContentCls}>
-                  {currentFolderID ? (
-                    <DropdownMenu.Item asChild className={menuItemCls}>
-                      <Link to={`/drive/folder/${currentFolderID}/documents`}>
-                        <FileText className="h-4 w-4 text-muted" aria-hidden="true" />
-                        <span className="flex-1">{t("nav.documents")}</span>
-                      </Link>
-                    </DropdownMenu.Item>
-                  ) : null}
-                  <DropdownMenu.Item asChild className={menuItemCls}>
-                    <Link to="/drive/privacy">
-                      <ShieldCheck className="h-4 w-4 text-muted" aria-hidden="true" />
-                      <span className="flex-1">{t("nav.privacy")}</span>
-                    </Link>
-                  </DropdownMenu.Item>
-                  {isAdmin ? (
-                    <>
-                      <DropdownMenu.Item asChild className={menuItemCls}>
-                        <Link to="/admin">
-                          <Settings className="h-4 w-4 text-muted" aria-hidden="true" />
-                          <span className="flex-1">{t("nav.admin")}</span>
-                        </Link>
-                      </DropdownMenu.Item>
-                      <DropdownMenu.Item asChild className={menuItemCls}>
-                        <Link to="/billing">
-                          <CreditCard className="h-4 w-4 text-muted" aria-hidden="true" />
-                          <span className="flex-1">{t("nav.billing")}</span>
-                        </Link>
-                      </DropdownMenu.Item>
-                    </>
-                  ) : null}
-                  <DropdownMenu.Separator className="my-1 h-px bg-border" />
-                  <DropdownMenu.Item
-                    onSelect={() => {
-                      logout();
-                      nav("/login", { replace: true });
-                    }}
-                    className={menuItemCls}
-                  >
-                    <LogOut className="h-4 w-4 text-muted" aria-hidden="true" />
-                    <span className="flex-1">{t("auth.logout")}</span>
-                  </DropdownMenu.Item>
-                </DropdownMenu.Content>
-              </DropdownMenu.Portal>
-            </DropdownMenu.Root>
           </div>
         </header>
 
@@ -733,7 +709,6 @@ export default function FileBrowserPage() {
           onCreated={() => {
             setCreateFolderOpen(false);
             refresh();
-            setTreeReloadKey((k) => k + 1);
           }}
         />
       ) : null}
@@ -818,7 +793,7 @@ function CreateFolderDialog({
         }}
         className="grid gap-5"
       >
-        <Field label={t("common.name")} required error={nameError ?? undefined}>
+        <Field label={t("common.name")} error={nameError ?? undefined}>
           {(props) => (
             <Input
               {...props}
@@ -840,21 +815,55 @@ function CreateFolderDialog({
             aria-label={t("folder.privacyMode")}
             className="grid gap-3 sm:grid-cols-2"
           >
-            <RadioCard
-              selected={mode === "managed_encrypted"}
-              onSelect={() => setMode("managed_encrypted")}
-              title={t("folder.managedTitle")}
-              description={t("folder.managedCardDesc")}
-              icon={<Shield className="h-5 w-5" aria-hidden="true" />}
-              badge={t("folder.recommended")}
-            />
-            <RadioCard
-              selected={mode === "strict_zk"}
-              onSelect={() => setMode("strict_zk")}
-              title={t("folder.strictTitle")}
-              description={t("folder.strictCardDesc")}
-              icon={<ShieldCheck className="h-5 w-5" aria-hidden="true" />}
-            />
+            <label
+              className={`relative flex cursor-pointer items-start gap-3 rounded-card border p-4 transition-colors ${
+                mode === "managed_encrypted"
+                  ? "border-brand bg-brand/5 ring-1 ring-brand"
+                  : "border-border bg-surface hover:bg-surface-2"
+              }`}
+            >
+              <input
+                type="radio"
+                name="encmode"
+                value="managed_encrypted"
+                checked={mode === "managed_encrypted"}
+                onChange={() => setMode("managed_encrypted")}
+                className="mt-1 h-4 w-4 shrink-0 accent-brand"
+              />
+              <span className="grid gap-1">
+                <span className="flex flex-wrap items-center gap-2">
+                  <Shield className="h-5 w-5 text-brand" aria-hidden="true" />
+                  <span className="text-sm font-medium text-fg">{t("folder.managedTitle")}</span>
+                  <span className="rounded-full bg-brand/10 px-2 py-0.5 text-xs font-medium text-brand">
+                    {t("folder.recommended")}
+                  </span>
+                </span>
+                <span className="text-xs text-muted">{t("folder.managedCardDesc")}</span>
+              </span>
+            </label>
+            <label
+              className={`relative flex cursor-pointer items-start gap-3 rounded-card border p-4 transition-colors ${
+                mode === "strict_zk"
+                  ? "border-brand bg-brand/5 ring-1 ring-brand"
+                  : "border-border bg-surface hover:bg-surface-2"
+              }`}
+            >
+              <input
+                type="radio"
+                name="encmode"
+                value="strict_zk"
+                checked={mode === "strict_zk"}
+                onChange={() => setMode("strict_zk")}
+                className="mt-1 h-4 w-4 shrink-0 accent-brand"
+              />
+              <span className="grid gap-1">
+                <span className="flex flex-wrap items-center gap-2">
+                  <ShieldCheck className="h-5 w-5 text-brand" aria-hidden="true" />
+                  <span className="text-sm font-medium text-fg">{t("folder.strictTitle")}</span>
+                </span>
+                <span className="text-xs text-muted">{t("folder.strictCardDesc")}</span>
+              </span>
+            </label>
           </div>
 
           {/*
