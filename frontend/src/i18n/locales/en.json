@@ -194,7 +194,10 @@
     "untitled": "Untitled",
     "documentName": "Document name",
     "documentDeleteConfirm": "Delete this document?",
-    "disabled": "Disabled"
+    "disabled": "Disabled",
+    "recommended": "Recommended",
+    "morePeople_one": "{{count}} more collaborator",
+    "morePeople_other": "{{count}} more collaborators"
   },
   "docs": {
     "newDocument": "New document",
@@ -218,7 +221,18 @@
     "disabledBanner": "This document's collab mode is <code>disabled</code> — editing is locked.",
     "initializing": "Initializing editor…",
     "clickToRename": "Click to rename",
-    "editorModeTooltip": "Editor mode: {{mode}}"
+    "editorModeTooltip": "Editor mode: {{mode}}",
+    "backToFolder": "Back to folder",
+    "eyebrow": "Documents",
+    "pageDescription": "Create and edit documents together, in real time.",
+    "emptyTitle": "No documents yet",
+    "emptyDescription": "Create your first document to start writing and editing together in real time.",
+    "namePlaceholder": "Untitled document",
+    "deleteTitle": "Delete document?",
+    "deleteAria": "Delete {{name}}",
+    "deleted": "Deleted \"{{name}}\".",
+    "renameTitle": "Rename document",
+    "renamed": "Renamed to \"{{name}}\"."
   },
   "search": {
     "placeholder": "Search files and folders…",
@@ -680,6 +694,7 @@
     "editAria": "Open {{name}} in the office editor",
     "unavailable": "The office document editor is not available.",
     "editorError": "The office document editor encountered an error.",
-    "title": "Office editor"
+    "title": "Office editor",
+    "loading": "Loading the editor…"
   }
 }
