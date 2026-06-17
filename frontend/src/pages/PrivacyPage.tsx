@@ -1,6 +1,9 @@
+import { type ReactNode } from "react";
 import { Link } from "react-router-dom";
 import { Trans, useTranslation } from "react-i18next";
+import { ArrowLeft, Check, Eye, ShieldCheck, X } from "lucide-react";
 import EncryptionBadge from "../components/EncryptionBadge";
+import { AppShell, Badge, PageHeader, Table, THead, TBody, Tr, Th, Td } from "../components/ui";
 
 // PrivacyPage is the customer-facing explainer for ZK Drive's two
 // per-folder privacy modes. All long-form copy is sourced from the
@@ -10,167 +13,263 @@ import EncryptionBadge from "../components/EncryptionBadge";
 // with named slot placeholders for translator-safe interpolation.
 export default function PrivacyPage() {
   const { t } = useTranslation();
+
+  const strong = <strong className="font-semibold text-fg" />;
+  const em = <em />;
+
+  // One symmetric comparison matrix instead of two stacked tables. The icon
+  // tone is the semantic signal: a working capability reads success, a
+  // disabled one reads danger, and "the server can read plaintext" reads as a
+  // caution (the honest managed-mode trade-off) rather than a value judgement.
+  const rows: Array<{
+    capability: string;
+    managed: { icon: ReactNode; text: string; dim?: boolean };
+    strict: { icon: ReactNode; text: string; dim?: boolean };
+  }> = [
+    {
+      capability: t("privacy.tableServerRead"),
+      managed: { icon: <Eye className="h-4 w-4 text-warning" />, text: t("privacy.managedServerRead") },
+      strict: { icon: <ShieldCheck className="h-4 w-4 text-success" />, text: t("privacy.strictServerRead") },
+    },
+    {
+      capability: t("privacy.tablePreviews"),
+      managed: { icon: <Check className="h-4 w-4 text-success" />, text: t("privacy.available") },
+      strict: { icon: <X className="h-4 w-4 text-danger" />, text: t("privacy.strictPreviews"), dim: true },
+    },
+    {
+      capability: t("privacy.tableSearch"),
+      managed: { icon: <Check className="h-4 w-4 text-success" />, text: t("privacy.available") },
+      strict: { icon: <X className="h-4 w-4 text-danger" />, text: t("privacy.strictSearch"), dim: true },
+    },
+    {
+      capability: t("privacy.tableVirus"),
+      managed: { icon: <Check className="h-4 w-4 text-success" />, text: t("privacy.available") },
+      strict: { icon: <X className="h-4 w-4 text-danger" />, text: t("privacy.strictVirus"), dim: true },
+    },
+    {
+      capability: t("privacy.tableAdminRecovery"),
+      managed: { icon: <Check className="h-4 w-4 text-success" />, text: t("privacy.available") },
+      strict: { icon: <X className="h-4 w-4 text-danger" />, text: t("privacy.strictAdminRecovery"), dim: true },
+    },
+    {
+      capability: t("privacy.tableAtRest"),
+      managed: { icon: <Check className="h-4 w-4 text-success" />, text: t("privacy.managedAtRest") },
+      strict: { icon: <Check className="h-4 w-4 text-success" />, text: t("privacy.strictAtRest") },
+    },
+  ];
+
+  const brand = (
+    <Link
+      to="/drive"
+      className="rounded-full px-1 text-base font-semibold tracking-tight text-fg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-surface"
+    >
+      <span className="text-brand">ZK</span> Drive
+    </Link>
+  );
+  const backToDrive = (
+    <Link
+      to="/drive"
+      className="inline-flex items-center gap-1.5 rounded-full px-3 py-1.5 text-sm font-medium text-muted transition-colors hover:bg-surface-2 hover:text-fg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-surface"
+    >
+      <ArrowLeft className="h-4 w-4" aria-hidden="true" />
+      {t("privacy.backToDrive")}
+    </Link>
+  );
+
   return (
-    <div style={{ maxWidth: 880, margin: "0 auto", padding: 24, fontSize: 15, lineHeight: 1.55 }}>
-      <header style={{ marginBottom: 16, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-        <h1 style={{ fontSize: 24, margin: 0 }}>{t("privacy.pageTitle")}</h1>
-        <Link to="/drive" style={backLink}>&larr; {t("privacy.backToDrive")}</Link>
-      </header>
+    <AppShell brand={brand} actions={backToDrive} maxWidth="lg">
+      <PageHeader
+        eyebrow={t("privacy.eyebrow")}
+        title={t("privacy.pageTitle")}
+        description={t("privacy.subtitle")}
+      />
 
-      <p style={{ color: "#374151" }}>
-        <Trans
-          i18nKey="privacy.intro"
-          components={{
-            badgeManaged: <EncryptionBadge mode="managed_encrypted" linkToHelp={false} />,
-            badgeStrict: <EncryptionBadge mode="strict_zk" linkToHelp={false} />,
-          }}
-        />
-      </p>
+      <div className="flex flex-col gap-6">
+        <section className="rounded-card border border-border bg-surface p-6">
+          <p className="text-base leading-relaxed text-fg">
+            <Trans
+              i18nKey="privacy.intro"
+              components={{
+                badgeManaged: <EncryptionBadge mode="managed_encrypted" linkToHelp={false} />,
+                badgeStrict: <EncryptionBadge mode="strict_zk" linkToHelp={false} />,
+              }}
+            />
+          </p>
+        </section>
 
-      <section style={section} aria-labelledby="brand-heading">
-        <h2 id="brand-heading" style={h2}>
-          {t("privacy.brandHeading")}
-        </h2>
-        <p>{t("privacy.brandBody")}</p>
-        <ul style={{ paddingLeft: 20, margin: "8px 0 0" }}>
-          <li>
-            <Trans i18nKey="privacy.brandPointManaged" components={{ strong: <strong />, em: <em /> }} />
-          </li>
-          <li>
-            <Trans i18nKey="privacy.brandPointStrict" components={{ strong: <strong /> }} />
-          </li>
-        </ul>
-      </section>
+        <section className="rounded-card border border-border bg-surface p-6" aria-labelledby="privacy-brand-heading">
+          <h2 id="privacy-brand-heading" className="text-lg font-semibold text-fg">
+            {t("privacy.brandHeading")}
+          </h2>
+          <p className="mt-2 text-sm leading-relaxed text-muted">{t("privacy.brandBody")}</p>
+          <ul className="mt-3 space-y-2 text-sm leading-relaxed text-muted">
+            <li className="flex gap-2">
+              <span className="mt-2 h-1.5 w-1.5 shrink-0 rounded-full bg-brand" aria-hidden="true" />
+              <span>
+                <Trans i18nKey="privacy.brandPointManaged" components={{ strong, em }} />
+              </span>
+            </li>
+            <li className="flex gap-2">
+              <span className="mt-2 h-1.5 w-1.5 shrink-0 rounded-full bg-brand" aria-hidden="true" />
+              <span>
+                <Trans i18nKey="privacy.brandPointStrict" components={{ strong }} />
+              </span>
+            </li>
+          </ul>
+        </section>
 
-      <section style={section} aria-labelledby="managed-heading">
-        <h2 id="managed-heading" style={h2}>
-          <EncryptionBadge mode="managed_encrypted" size="header" linkToHelp={false} /> {t("privacy.managedHeading")}
-          <span style={muted}> &nbsp;&middot;&nbsp; {t("privacy.theDefault")}</span>
-        </h2>
-        <p>
-          <Trans i18nKey="privacy.managedBody" components={{ strong: <strong />, em: <em /> }} />
+        <div className="grid gap-4 lg:grid-cols-2">
+          <section
+            className="flex flex-col rounded-card border border-border bg-surface p-6"
+            aria-labelledby="privacy-managed-heading"
+          >
+            <div className="flex flex-wrap items-center gap-2">
+              <EncryptionBadge mode="managed_encrypted" size="header" linkToHelp={false} />
+              <h2 id="privacy-managed-heading" className="text-lg font-semibold text-fg">
+                {t("privacy.managedHeading")}
+              </h2>
+              <Badge tone="brand">{t("privacy.theDefault")}</Badge>
+            </div>
+            <p className="mt-3 text-sm leading-relaxed text-muted">
+              <Trans i18nKey="privacy.managedBody" components={{ strong, em }} />
+            </p>
+            <div className="mt-4 rounded-card border border-border bg-surface-2/40 p-3 text-sm text-muted">
+              <span className="font-medium text-fg">{t("privacy.tableHonestName")}: </span>
+              <Trans i18nKey="privacy.managedHonestName" components={{ strong }} />
+            </div>
+          </section>
+
+          <section
+            className="flex flex-col rounded-card border border-border bg-surface p-6"
+            aria-labelledby="privacy-strict-heading"
+          >
+            <div className="flex flex-wrap items-center gap-2">
+              <EncryptionBadge mode="strict_zk" size="header" linkToHelp={false} />
+              <h2 id="privacy-strict-heading" className="text-lg font-semibold text-fg">
+                {t("privacy.strictHeading")}
+              </h2>
+              <Badge tone="neutral">{t("privacy.optInPerFolder")}</Badge>
+            </div>
+            <p className="mt-3 text-sm leading-relaxed text-muted">
+              <Trans i18nKey="privacy.strictBody" components={{ strong }} />
+            </p>
+            <div className="mt-4 rounded-card border border-border bg-surface-2/40 p-3 text-sm text-muted">
+              <span className="font-medium text-fg">{t("privacy.tableReversibility")}: </span>
+              {t("privacy.strictReversibility")}
+            </div>
+          </section>
+        </div>
+
+        <section className="rounded-card border border-border bg-surface p-6" aria-labelledby="privacy-comparison-heading">
+          <h2 id="privacy-comparison-heading" className="text-lg font-semibold text-fg">
+            {t("privacy.comparisonHeading")}
+          </h2>
+          <div className="mt-4">
+            <Table>
+              <caption className="sr-only">{t("privacy.comparisonCaption")}</caption>
+              <THead>
+                <Tr>
+                  <Th scope="col">{t("privacy.colCapability")}</Th>
+                  <Th scope="col">{t("privacy.managedHeading")}</Th>
+                  <Th scope="col">{t("privacy.strictHeading")}</Th>
+                </Tr>
+              </THead>
+              <TBody>
+                {rows.map((row) => (
+                  <Tr key={row.capability}>
+                    <Th scope="row" className="font-medium normal-case tracking-normal text-fg">
+                      {row.capability}
+                    </Th>
+                    <Td>
+                      <ComparisonCell icon={row.managed.icon} dim={row.managed.dim}>
+                        {row.managed.text}
+                      </ComparisonCell>
+                    </Td>
+                    <Td>
+                      <ComparisonCell icon={row.strict.icon} dim={row.strict.dim}>
+                        {row.strict.text}
+                      </ComparisonCell>
+                    </Td>
+                  </Tr>
+                ))}
+              </TBody>
+            </Table>
+          </div>
+        </section>
+
+        <section className="rounded-card border border-border bg-surface p-6" aria-labelledby="privacy-picking-heading">
+          <h2 id="privacy-picking-heading" className="text-lg font-semibold text-fg">
+            {t("privacy.pickingHeading")}
+          </h2>
+          <ul className="mt-3 space-y-2 text-sm leading-relaxed text-muted">
+            <li className="flex gap-2">
+              <span className="mt-2 h-1.5 w-1.5 shrink-0 rounded-full bg-brand" aria-hidden="true" />
+              <span>
+                <Trans i18nKey="privacy.pickingDefault" components={{ strong }} />
+              </span>
+            </li>
+            <li className="flex gap-2">
+              <span className="mt-2 h-1.5 w-1.5 shrink-0 rounded-full bg-brand" aria-hidden="true" />
+              <span>
+                <Trans i18nKey="privacy.pickingStrict" components={{ strong }} />
+              </span>
+            </li>
+            <li className="flex gap-2">
+              <span className="mt-2 h-1.5 w-1.5 shrink-0 rounded-full bg-brand" aria-hidden="true" />
+              <span>
+                <Trans i18nKey="privacy.pickingPerFolder" components={{ strong }} />
+              </span>
+            </li>
+          </ul>
+        </section>
+
+        <section className="rounded-card border border-border bg-surface p-6" aria-labelledby="privacy-audit-heading">
+          <h2 id="privacy-audit-heading" className="text-lg font-semibold text-fg">
+            {t("privacy.auditHeading")}
+          </h2>
+          <p className="mt-2 text-sm leading-relaxed text-muted">
+            <Trans i18nKey="privacy.auditBody" components={{ em }} />
+          </p>
+        </section>
+
+        <p className="text-xs leading-relaxed text-muted">
+          <Trans
+            i18nKey="privacy.operatorNote"
+            components={{
+              fabricLink: (
+                <a
+                  href="https://github.com/kennguy3n/zk-object-fabric"
+                  rel="noreferrer"
+                  className="text-brand underline underline-offset-2 hover:text-brand-hover"
+                />
+              ),
+              code: <code className="rounded bg-surface-2 px-1 py-0.5 font-mono text-[0.85em] text-fg" />,
+            }}
+          />
         </p>
-        <table style={table}>
-          <tbody>
-            <tr><th style={th}>{t("privacy.tableServerRead")}</th><td style={td}>{t("privacy.managedServerRead")}</td></tr>
-            <tr><th style={th}>{t("privacy.tablePreviews")}</th><td style={td}>{t("privacy.available")}</td></tr>
-            <tr><th style={th}>{t("privacy.tableSearch")}</th><td style={td}>{t("privacy.available")}</td></tr>
-            <tr><th style={th}>{t("privacy.tableVirus")}</th><td style={td}>{t("privacy.available")}</td></tr>
-            <tr><th style={th}>{t("privacy.tableAdminRecovery")}</th><td style={td}>{t("privacy.available")}</td></tr>
-            <tr><th style={th}>{t("privacy.tableAtRest")}</th><td style={td}>{t("privacy.managedAtRest")}</td></tr>
-            <tr><th style={th}>{t("privacy.tableHonestName")}</th><td style={td}>
-              <Trans i18nKey="privacy.managedHonestName" components={{ strong: <strong /> }} />
-            </td></tr>
-          </tbody>
-        </table>
-      </section>
-
-      <section style={section} aria-labelledby="strict-heading">
-        <h2 id="strict-heading" style={h2}>
-          <EncryptionBadge mode="strict_zk" size="header" linkToHelp={false} /> {t("privacy.strictHeading")}
-          <span style={muted}> &nbsp;&middot;&nbsp; {t("privacy.optInPerFolder")}</span>
-        </h2>
-        <p>
-          <Trans i18nKey="privacy.strictBody" components={{ strong: <strong /> }} />
-        </p>
-        <table style={table}>
-          <tbody>
-            <tr><th style={th}>{t("privacy.tableServerRead")}</th><td style={td}>{t("privacy.strictServerRead")}</td></tr>
-            <tr><th style={th}>{t("privacy.tablePreviews")}</th><td style={td}>{t("privacy.strictPreviews")}</td></tr>
-            <tr><th style={th}>{t("privacy.tableSearch")}</th><td style={td}>{t("privacy.strictSearch")}</td></tr>
-            <tr><th style={th}>{t("privacy.tableVirus")}</th><td style={td}>{t("privacy.strictVirus")}</td></tr>
-            <tr><th style={th}>{t("privacy.tableAdminRecovery")}</th><td style={td}>{t("privacy.strictAdminRecovery")}</td></tr>
-            <tr><th style={th}>{t("privacy.tableAtRest")}</th><td style={td}>{t("privacy.strictAtRest")}</td></tr>
-            <tr><th style={th}>{t("privacy.tableReversibility")}</th><td style={td}>{t("privacy.strictReversibility")}</td></tr>
-          </tbody>
-        </table>
-      </section>
-
-      <section style={section} aria-labelledby="picking-heading">
-        <h2 id="picking-heading" style={h2}>{t("privacy.pickingHeading")}</h2>
-        <ul style={{ paddingLeft: 20 }}>
-          <li>
-            <Trans i18nKey="privacy.pickingDefault" components={{ strong: <strong /> }} />
-          </li>
-          <li>
-            <Trans i18nKey="privacy.pickingStrict" components={{ strong: <strong /> }} />
-          </li>
-          <li>
-            <Trans i18nKey="privacy.pickingPerFolder" components={{ strong: <strong /> }} />
-          </li>
-        </ul>
-      </section>
-
-      <section style={section} aria-labelledby="audit-heading">
-        <h2 id="audit-heading" style={h2}>{t("privacy.auditHeading")}</h2>
-        <p>
-          <Trans i18nKey="privacy.auditBody" components={{ em: <em /> }} />
-        </p>
-      </section>
-
-      <p style={{ color: "#6b7280", fontSize: 13, marginTop: 24 }}>
-        <Trans
-          i18nKey="privacy.operatorNote"
-          components={{
-            fabricLink: (
-              <a href="https://github.com/kennguy3n/zk-object-fabric" rel="noreferrer" />
-            ),
-            code: <code />,
-          }}
-        />
-      </p>
-    </div>
+      </div>
+    </AppShell>
   );
 }
 
-const backLink: React.CSSProperties = {
-  fontSize: 13,
-  color: "#374151",
-  textDecoration: "none",
-};
-
-const section: React.CSSProperties = {
-  border: "1px solid #e5e7eb",
-  borderRadius: 8,
-  padding: 16,
-  marginTop: 16,
-  background: "white",
-};
-
-const h2: React.CSSProperties = {
-  margin: "0 0 8px",
-  fontSize: 18,
-  display: "flex",
-  alignItems: "center",
-  gap: 8,
-};
-
-const muted: React.CSSProperties = {
-  fontSize: 13,
-  fontWeight: 400,
-  color: "#6b7280",
-};
-
-const table: React.CSSProperties = {
-  width: "100%",
-  borderCollapse: "collapse",
-  fontSize: 14,
-  marginTop: 8,
-};
-
-const th: React.CSSProperties = {
-  textAlign: "left",
-  padding: "6px 8px",
-  borderTop: "1px solid #f3f4f6",
-  color: "#374151",
-  width: "40%",
-  verticalAlign: "top",
-  fontWeight: 500,
-};
-
-const td: React.CSSProperties = {
-  padding: "6px 8px",
-  borderTop: "1px solid #f3f4f6",
-  verticalAlign: "top",
-  color: "#1f2937",
-};
+// ComparisonCell pairs a tokenised status icon with its descriptive text so
+// the managed/strict matrix is scannable at a glance and still readable to
+// screen readers (the icon is decorative; the text carries the meaning).
+function ComparisonCell({
+  icon,
+  dim,
+  children,
+}: {
+  icon: ReactNode;
+  dim?: boolean;
+  children: ReactNode;
+}) {
+  return (
+    <span className="flex items-start gap-2">
+      <span className="mt-0.5 shrink-0" aria-hidden="true">
+        {icon}
+      </span>
+      <span className={dim ? "text-muted" : "text-fg"}>{children}</span>
+    </span>
+  );
+}
