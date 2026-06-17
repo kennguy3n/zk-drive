@@ -1132,6 +1132,20 @@ func run() error {
 	}
 	ipAllowSvc := workspace.NewIPAllowService(workspace.NewPostgresIPAllowStore(pool), ipAllowRedis)
 
+	// Construct the optional local LLM client (Ollama) once, here, so
+	// both the health dashboard's ai_llm readiness probe below and the
+	// AI services block further down share a single instance. When
+	// OLLAMA_URL is unset aiLLM stays nil and every consumer degrades
+	// to the deterministic rule-based path.
+	var aiLLM *ai.OllamaClient
+	if cfg.OllamaURL != "" {
+		llm, err := ai.NewOllamaClient(cfg.OllamaURL, cfg.OllamaModel)
+		if err != nil {
+			return fmt.Errorf("ai/ollama: %w", err)
+		}
+		aiLLM = llm
+	}
+
 	// Comprehensive admin health dashboard (WS8). Each probe is given
 	// the live dependency handle the server already holds; nil handles
 	// (Redis / NATS / storage / ClamAV / ONLYOFFICE not configured)
@@ -1147,6 +1161,7 @@ func run() error {
 		health.NewOnlyOfficeDashboardProbe(cfg.OnlyOfficeURL, nil),
 		health.NewStorageDashboardProbe(storageClient),
 		health.NewWorkerDashboardProbe(heartbeat.NewStore(pool)),
+		health.NewAILLMDashboardProbe(aiLLM),
 	}, health.DefaultDashboardTimeout)
 
 	adminHandler := admin.NewHandler(pool, userSvc, auditSvc, retentionSvc).
@@ -1249,15 +1264,11 @@ func run() error {
 	// summarisation, tagging, and expansion within a workspace.
 	tagSuggestSvc := ai.NewSuggestionService(pool).WithLanguageResolver(wsSvc)
 	queryExpandSvc := ai.NewExpansionService(pool).WithLanguageResolver(wsSvc)
-	if cfg.OllamaURL != "" {
-		llm, err := ai.NewOllamaClient(cfg.OllamaURL, cfg.OllamaModel)
-		if err != nil {
-			return fmt.Errorf("ai/ollama: %w", err)
-		}
-		summarySvc = summarySvc.WithLLM(llm)
-		tagSuggestSvc = tagSuggestSvc.WithLLM(llm)
-		queryExpandSvc = queryExpandSvc.WithLLM(llm)
-		slog.Info("ai local LLM enabled", "endpoint", cfg.OllamaURL, "model", llm.Model())
+	if aiLLM != nil {
+		summarySvc = summarySvc.WithLLM(aiLLM)
+		tagSuggestSvc = tagSuggestSvc.WithLLM(aiLLM)
+		queryExpandSvc = queryExpandSvc.WithLLM(aiLLM)
+		slog.Info("ai local LLM enabled", "endpoint", cfg.OllamaURL, "model", aiLLM.Model())
 	} else {
 		slog.Info("ai OLLAMA_URL not set, AI summaries / tag suggestions / query expansion use rule-based scaffold (no external API calls)")
 	}
