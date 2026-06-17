@@ -1,4 +1,4 @@
-import { useState, type FormEvent, type ReactNode } from "react";
+import { useEffect, useState, type FormEvent, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 import { ShieldCheck } from "lucide-react";
 import { Button, Field, Input } from "./ui";
@@ -127,6 +127,24 @@ export default function AuthForm({
   const [busy, setBusy] = useState(false);
   const [ssoBusy, setSsoBusy] = useState(false);
 
+  // Keep `values` in sync if the `fields` prop gains entries after mount.
+  // The initializer above only runs once, so without this a dynamically
+  // added field would have no backing state key. Returning the previous
+  // reference when nothing changed avoids needless re-renders.
+  useEffect(() => {
+    setValues((prev) => {
+      let changed = false;
+      const next = { ...prev };
+      for (const f of fields) {
+        if (!(f.name in next)) {
+          next[f.name] = "";
+          changed = true;
+        }
+      }
+      return changed ? next : prev;
+    });
+  }, [fields]);
+
   const handleChange = (name: string, value: string) => {
     setValues((prev) => ({ ...prev, [name]: value }));
   };
@@ -136,6 +154,10 @@ export default function AuthForm({
     setSsoBusy(true);
     try {
       await onSSO();
+    } catch {
+      // The caller owns SSO error display (it sets the `error` prop before
+      // the redirect). We still swallow here so a caller that forgets to
+      // catch can never surface an unhandled promise rejection.
     } finally {
       setSsoBusy(false);
     }
@@ -157,6 +179,15 @@ export default function AuthForm({
 
   return (
     <AuthLayout title={title} subtitle={subtitle} footer={footer}>
+      {error && (
+        <div
+          role="alert"
+          className="mb-4 rounded-lg border border-danger/30 bg-danger/10 px-3 py-2 text-sm text-danger"
+        >
+          {error}
+        </div>
+      )}
+
       {onSSO && (
         <Button
           type="button"
@@ -192,15 +223,6 @@ export default function AuthForm({
           <span className="h-px flex-1 bg-border" />
           {t("auth.orContinueWith")}
           <span className="h-px flex-1 bg-border" />
-        </div>
-      )}
-
-      {error && (
-        <div
-          role="alert"
-          className="mb-4 rounded-lg border border-danger/30 bg-danger/10 px-3 py-2 text-sm text-danger"
-        >
-          {error}
         </div>
       )}
 
