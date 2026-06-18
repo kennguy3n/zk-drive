@@ -367,6 +367,7 @@ function CreateDocumentDialog({
           allowedModes={allowed}
           encryptionMode={folder.encryption_mode}
           disabled={submitting}
+          busyLabel={t("docs.creating")}
         />
       </form>
     </Modal>

@@ -73,6 +73,11 @@ export interface CollabModeSelectorProps {
   // ANALYSIS_pr-review-job-d387c.._0004). Defaults to false so
   // existing call sites (new-doc dialog) are unaffected.
   disabled?: boolean;
+  // busyLabel overrides the textual hint shown while `disabled` is true.
+  // The editor's mode-switch (a PATCH) keeps the default "Saving…", but
+  // the new-document dialog passes "Creating…" since no document exists
+  // yet to save. Defaults to t("common.saving") when omitted.
+  busyLabel?: string;
 }
 
 // disabledExplanation returns the text shown when a mode is greyed
@@ -97,9 +102,11 @@ export default function CollabModeSelector({
   encryptionMode,
   id,
   disabled = false,
+  busyLabel,
 }: CollabModeSelectorProps) {
   const { t } = useTranslation();
   const labelId = useId();
+  const busyText = busyLabel ?? t("common.saving");
   // The richest allowed mode (last in MODES order) is the recommended
   // default — surface a "Recommended" badge so non-technical users
   // pick the best collaborative experience without reading every line.
@@ -114,13 +121,15 @@ export default function CollabModeSelector({
           {t("collab.editorExperience")}
         </span>
         {/* When the parent disables the whole group it's because a
-            setCollabMode PATCH is in flight. The cards convey this
-            visually (dimmed + non-interactive), but RadioCard can't carry
-            a native tooltip (pointer-events-none when disabled), so we
-            restore the textual "Saving…" hint here. */}
+            network mutation is in flight (mode-switch PATCH, or document
+            creation). The cards convey this visually (dimmed +
+            non-interactive), but RadioCard can't carry a native tooltip
+            (pointer-events-none when disabled), so we restore the textual
+            busy hint here — "Saving…" by default, "Creating…" for the
+            new-doc dialog. */}
         {disabled && (
           <span className="text-xs font-medium text-muted" role="status">
-            {t("common.saving")}
+            {busyText}
           </span>
         )}
       </div>
@@ -129,7 +138,7 @@ export default function CollabModeSelector({
         role="radiogroup"
         aria-labelledby={labelId}
         aria-busy={disabled || undefined}
-        title={disabled ? t("common.saving") : undefined}
+        title={disabled ? busyText : undefined}
         className="flex flex-col gap-2"
       >
         {MODES.map((m) => {

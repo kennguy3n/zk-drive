@@ -124,4 +124,23 @@ describe("CollabModeSelector", () => {
       "true",
     );
   });
+
+  it("uses a custom busyLabel over the default Saving… hint when provided", () => {
+    render(
+      <CollabModeSelector
+        value="markdown"
+        onChange={() => undefined}
+        allowedModes={["markdown", "rich", "rich_presence"]}
+        encryptionMode="managed_encrypted"
+        disabled
+        busyLabel="Creating…"
+      />,
+    );
+    // The new-document dialog passes "Creating…" since there's no document
+    // to save yet; the hint and the radiogroup title reflect that label.
+    expect(screen.getByRole("status").textContent).toBe("Creating…");
+    expect(screen.getByRole("radiogroup").getAttribute("title")).toBe(
+      "Creating…",
+    );
+  });
 });
