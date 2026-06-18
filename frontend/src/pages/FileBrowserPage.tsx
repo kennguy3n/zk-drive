@@ -150,16 +150,12 @@ export default function FileBrowserPage() {
   const [selectedFiles, setSelectedFiles] = useState<Set<string>>(new Set());
   const [createFolderOpen, setCreateFolderOpen] = useState(false);
   const [templateDialogOpen, setTemplateDialogOpen] = useState(false);
-  // Bumped after a delete that removes a root-level folder so the sidebar
-  // FolderTree — which lists root folders independently of the main view —
-  // refetches and stays in sync even when the current folder (and thus its
-  // own navigation-keyed effect) is unchanged. Plain folder navigation
-  // already refreshes the tree via currentFolderID. Folder *creation*
-  // deliberately does NOT bump this: a freshly created root folder already
-  // shows in the main list, and refreshing the sidebar too would render the
-  // same folder as a second, same-named <Link>, which the file-upload e2e
-  // spec (which clicks a link by name without .first()) treats as a
-  // strict-mode violation.
+  // Bumped after a mutation that changes the set of root-level folders
+  // (create / delete) so the sidebar FolderTree — which lists root folders
+  // independently of the main view — refetches and stays in sync even when
+  // the current folder (and thus its own navigation-keyed effect) is
+  // unchanged. Plain folder navigation already refreshes the tree via
+  // currentFolderID, so this only covers the same-view mutation case.
   const [treeReloadKey, setTreeReloadKey] = useState(0);
   // Disables the bulk-action buttons while a move/copy/delete/download is in
   // flight (including while the destination picker is open) so the user
@@ -263,7 +259,10 @@ export default function FileBrowserPage() {
     try {
       await deleteFolder(target.id);
       await refresh();
-      setTreeReloadKey((k) => k + 1);
+      // The deleted folder is a child of the current view, so the sidebar
+      // (root folders only) is affected only when deleting at the root.
+      // Mirrors the create path; subfolder deletes leave the root unchanged.
+      if (currentFolderID === null) setTreeReloadKey((k) => k + 1);
       toast.success(t("drive.folderDeleted", { name: target.name }));
     } catch (e) {
       toast.error(translateApiError(e, t));
@@ -713,6 +712,11 @@ export default function FileBrowserPage() {
           onCreated={() => {
             setCreateFolderOpen(false);
             refresh();
+            // The sidebar lists only root folders, so it only needs to
+            // refetch when the newly created folder is itself root-level
+            // (i.e. created from the workspace root). Creating a subfolder
+            // leaves the root list unchanged, so skip the redundant fetch.
+            if (currentFolderID === null) setTreeReloadKey((k) => k + 1);
           }}
         />
       ) : null}
