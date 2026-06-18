@@ -54,7 +54,9 @@ jobs:
       # project file format".
       - name: Select newest stable Xcode
         run: |
-          latest="$(ls -d /Applications/Xcode_*.app | sort -V | tail -n1)"
+          # Exclude beta / release-candidate Xcodes (present on runners during
+          # Apple's summer seeding) so we always build with a GA toolchain.
+          latest="$(ls -d /Applications/Xcode_*.app | grep -v -iE 'beta|release.candidate|_rc' | sort -V | tail -n1)"
           echo "Selecting ${latest}"
           sudo xcode-select -switch "${latest}"
           xcodebuild -version
@@ -79,7 +81,9 @@ jobs:
           # hardcoding a device name. Each Xcode pre-creates the simulators
           # for its own release (e.g. the iPhone 16 family), so a fixed
           # "iPhone 15" can vanish when the runner's Xcode moves forward.
-          device="$(xcrun simctl list devices available | grep -Eo 'iPhone [0-9]+( Pro( Max)?)?' | head -n1)"
+          # Take the first available iPhone's full name (so "iPhone 16 Plus"
+          # isn't truncated to a model that may not exist) up to its UUID.
+          device="$(xcrun simctl list devices available | sed -nE 's/^[[:space:]]+(iPhone [^(]*[^ (]) \([0-9A-Fa-f-]+\) \(.+\)$/\1/p' | head -n1)"
           device="${device:-iPhone 15}"
           echo "Using simulator: ${device}"
           xcodebuild \

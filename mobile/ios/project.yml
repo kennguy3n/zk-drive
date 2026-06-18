@@ -14,8 +14,13 @@ options:
   bundleIdPrefix: com.zkdrive
   deploymentTarget:
     iOS: "15.0"
-  createIntermediateGroups: true
   groupSortPosition: top
+  # createIntermediateGroups is intentionally left off. The generated Swift
+  # bindings below live outside the project root (referenced via `..`) and
+  # carry a custom `group:`; with intermediate groups enabled XcodeGen also
+  # parents that leaf group under an auto-built `..`/rust-bridge/build/ios
+  # breadcrumb, re-applying the full relative path on top of itself and
+  # producing a doubled, non-existent source path that fails the build.
 
 settings:
   base:
@@ -41,7 +46,7 @@ targets:
       # so the Swift contract can never drift from the shipped binary.
       - path: ../rust-bridge/build/ios/Sources/ZkMobileBridge
         optional: true
-        group: Generated/ZkMobileBridge
+        group: Generated/ZkMobileBridge  # see createIntermediateGroups note above
     dependencies:
       # Device arm64 + fat simulator slice of the Rust bridge. Produced by
       # build-ios.sh on the macOS runner before xcodebuild runs.
