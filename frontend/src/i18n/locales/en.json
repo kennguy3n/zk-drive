@@ -165,6 +165,8 @@
     "deleteFolderDescription": "\"{{name}}\" and everything inside it will be permanently deleted. This can't be undone.",
     "deleteFolderConfirmNamed": "Delete \"{{name}}\" and everything inside it? This cannot be undone.",
     "folderDeleted": "Deleted \"{{name}}\"",
+    "renameFolderTitle": "Rename folder",
+    "folderRenamed": "Renamed to \"{{name}}\"",
     "bulkDeleteTitle": "Delete files?",
     "bulkActionsAria": "Actions for selected files",
     "movePickerTitle": "Move to folder",

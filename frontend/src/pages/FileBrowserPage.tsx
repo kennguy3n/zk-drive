@@ -11,6 +11,7 @@ import {
   LogOut,
   Folder as FolderIcon,
   Share2,
+  Pencil,
   Trash2,
   Move,
   Copy,
@@ -41,6 +42,7 @@ import {
   getOnlyOfficeStatus,
   listFolders,
   renameFile,
+  renameFolder,
   type BulkResponse,
   type ClientRoomTemplate,
   type FileItem,
@@ -92,6 +94,7 @@ export default function FileBrowserPage() {
   const { isEnabled } = useFeatures();
   const palette = useCommandPalette();
   const confirm = useConfirm();
+  const prompt = usePrompt();
   const pickResource = useResourcePicker();
   const toast = useToast();
   // openRef lets the onboarding "Upload your first file" card trigger the
@@ -252,6 +255,32 @@ export default function FileBrowserPage() {
       // (root folders only) is affected only when deleting at the root.
       if (currentFolderID === null) setTreeReloadKey((k) => k + 1);
       toast.success(t("drive.folderDeleted", { name: target.name }));
+    } catch (e) {
+      toast.error(translateApiError(e, t));
+    }
+  };
+
+  // A rename changes a folder's name/path, so the cached destination list the
+  // move/copy picker serves would show stale labels until the TTL — invalidate
+  // it here alongside the create/delete hooks.
+  const handleRenameFolder = async (target: Folder) => {
+    const name = await prompt({
+      title: t("drive.renameFolderTitle"),
+      label: t("common.name"),
+      defaultValue: target.name,
+      confirmLabel: t("common.rename"),
+      required: true,
+    });
+    const next = name?.trim();
+    if (!next || next === target.name) return;
+    try {
+      await renameFolder(target.id, next);
+      invalidateFolderCache();
+      await refresh();
+      // Root folders are mirrored in the sidebar, so reload it when renaming
+      // at the root.
+      if (currentFolderID === null) setTreeReloadKey((k) => k + 1);
+      toast.success(t("drive.folderRenamed", { name: next }));
     } catch (e) {
       toast.error(translateApiError(e, t));
     }
@@ -629,6 +658,15 @@ export default function FileBrowserPage() {
                         title={t("common.share")}
                       >
                         <Share2 className="h-4 w-4" aria-hidden="true" />
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => handleRenameFolder(f)}
+                        className="inline-flex h-8 w-8 items-center justify-center rounded-md text-muted transition-colors hover:bg-surface hover:text-fg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                        aria-label={t("common.rename")}
+                        title={t("common.rename")}
+                      >
+                        <Pencil className="h-4 w-4" aria-hidden="true" />
                       </button>
                       <button
                         type="button"
