@@ -181,6 +181,10 @@ function PanelViewer({
     !!onOpenEditor && !!onlyOfficeEnabled && isOfficeDocument(fileName);
 
   const handleDownload = async () => {
+    // The Button is disabled via loading={downloading}, but a keyboard
+    // activation (Enter/Space) can fire before that re-render lands, so guard
+    // against a second in-flight getDownloadURL call here too.
+    if (downloading) return;
     setDownloading(true);
     try {
       const downloadURL = await getDownloadURL(fileID);

@@ -198,7 +198,13 @@ export default function EncryptionBadge({
         // noise. See the `tabbable` prop comment above.
         tabIndex={tabbable ? undefined : -1}
         aria-label={t("encryption.badgeAria", { label })}
-        className="inline-flex shrink-0 rounded-full no-underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-bg"
+        className={cn(
+          "inline-flex shrink-0 no-underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-bg",
+          // Match the focus ring to the content shape: the pill variants are
+          // genuinely round, but the icon-only density is a square glyph, so a
+          // rounded-full ring around it would read as an odd floating circle.
+          isIcon ? "rounded-md" : "rounded-full",
+        )}
       >
         {badge}
       </Link>

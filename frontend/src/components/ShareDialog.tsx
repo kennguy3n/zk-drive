@@ -1,4 +1,4 @@
-import { useId, useState, type ReactNode } from "react";
+import { useId, useRef, useState, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 import {
   ChevronDown,
@@ -79,9 +79,20 @@ export default function ShareDialog({ resource, onClose }: Props) {
   const kind =
     resource.type === "folder" ? t("search.typeFolder") : t("search.typeFile");
 
+  // Tracks the tab a submission belongs to so a request that resolves after
+  // the user has switched tabs can't paint its error on the other tab's form
+  // (the error Callout is shared between both flows). switchTab is the only
+  // place `tab` changes, so updating the ref here keeps it in sync.
+  const tabRef = useRef<Tab>(tab);
+
   const switchTab = (next: Tab) => {
+    tabRef.current = next;
     setTab(next);
+    // Clear both the shared error and the per-form field errors so a stale
+    // message from the tab being left never lingers on the tab being shown.
     setError(null);
+    setEmailError(null);
+    setMaxDownloadsError(null);
   };
 
   const submitLink = async (e: React.FormEvent) => {
@@ -132,7 +143,7 @@ export default function ShareDialog({ resource, onClose }: Props) {
       });
       setLink(created);
     } catch (err) {
-      setError(translateApiError(err, t));
+      if (tabRef.current === "link") setError(translateApiError(err, t));
     } finally {
       setLinkSubmitting(false);
     }
@@ -178,7 +189,7 @@ export default function ShareDialog({ resource, onClose }: Props) {
       });
       setInvite(created);
     } catch (err) {
-      setError(translateApiError(err, t));
+      if (tabRef.current === "invite") setError(translateApiError(err, t));
     } finally {
       setInviteSubmitting(false);
     }
