@@ -78,9 +78,13 @@ func (p *Publisher) Publish(ctx context.Context, ev Event) error {
 		span.SetStatus(codes.Error, "marshal event")
 		return fmt.Errorf("marshal webhook event: %w", err)
 	}
+	// No nats.Context option is passed to the async publish: JetStream
+	// rejects a per-call context when the JetStream context already
+	// carries a default request timeout ("context and timeout can not
+	// both be set"). Trace context propagates via the headers above.
 	msg := &nats.Msg{Subject: SubjectEvents, Data: body, Header: nats.Header{}}
 	otel.GetTextMapPropagator().Inject(ctx, tracing.NATSHeaderCarrier(msg.Header))
-	if _, err := p.js.PublishMsgAsync(msg, nats.Context(ctx)); err != nil {
+	if _, err := p.js.PublishMsgAsync(msg); err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "publish failed")
 		return fmt.Errorf("publish webhook event: %w", err)
