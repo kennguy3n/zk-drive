@@ -23,8 +23,8 @@ struct NotificationsView: View {
         .listStyle(.plain)
         .navigationTitle("Alerts")
         .toolbar {
-            if viewModel.unreadCount > 0 {
-                ToolbarItem(placement: .navigationBarTrailing) {
+            ToolbarItem(placement: .navigationBarTrailing) {
+                if viewModel.unreadCount > 0 {
                     Button("Mark all read") { Task { await viewModel.markAllRead() } }.font(Theme.Typography.caption)
                 }
             }

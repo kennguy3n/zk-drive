@@ -29,7 +29,7 @@ permissions:
 jobs:
   build-and-test:
     name: Build XCFramework + app (iOS Simulator)
-    runs-on: macos-14
+    runs-on: macos-15
     env:
       # Disable code signing for the simulator build/test — no provisioning
       # profile is needed and none is available on the runner.
@@ -46,8 +46,25 @@ jobs:
         with:
           workspaces: mobile/rust-bridge
 
-      - name: Select Xcode
-        run: sudo xcode-select -switch /Applications/Xcode_15.4.app
+      # Select the newest stable Xcode installed on the runner rather than
+      # pinning a specific version. xcodegen (installed unpinned via Homebrew
+      # below) emits whatever .xcodeproj object-version the current Xcode era
+      # uses, so the toolchain that consumes the generated project must be at
+      # least as new — otherwise xcodebuild rejects it as a "future Xcode
+      # project file format".
+      - name: Select newest stable Xcode
+        run: |
+          # Exclude beta / release-candidate Xcodes (present on runners during
+          # Apple's summer seeding) so we always build with a GA toolchain.
+          latest="$(ls -d /Applications/Xcode_*.app 2>/dev/null | grep -v -iE 'beta|release.candidate|_rc' | sort -V | tail -n1)"
+          if [ -z "${latest}" ]; then
+            echo "No stable (non-beta) Xcode found on this runner:"
+            ls -d /Applications/Xcode*.app 2>/dev/null || echo "(none)"
+            exit 1
+          fi
+          echo "Selecting ${latest}"
+          sudo xcode-select -switch "${latest}"
+          xcodebuild -version
 
       # Builds the per-arch staticlibs, assembles ZkMobileBridge.xcframework,
       # and emits the generated Swift bindings the app target compiles in.
@@ -65,11 +82,31 @@ jobs:
       - name: Build & test on iOS Simulator
         working-directory: mobile/ios
         run: |
+          # Select an available simulator by UDID rather than by model name.
+          # The runner image doesn't guarantee any specific device is
+          # pre-created for the installed Xcode — e.g. macos-15 + Xcode 26
+          # ships only iPad simulators, no iPhones — so resolve whatever iOS
+          # simulator actually exists (preferring an iPhone, then an iPad) and
+          # address it by its stable UDID, which sidesteps device-name and
+          # OS-version drift across runner-image updates entirely.
+          udid="$(xcrun simctl list devices available --json | python3 -c 'import json,sys
+          data=json.load(sys.stdin)
+          devs=[d for rt,lst in data["devices"].items() if "iOS" in rt for d in lst if d.get("isAvailable")]
+          order={"iPhone":0,"iPad":1}
+          devs.sort(key=lambda d:(order.get(d["name"].split()[0],2), d["name"]))
+          print(devs[0]["udid"] if devs else "")')"
+          if [ -z "${udid}" ]; then
+            echo "No available iOS simulator on this runner:"
+            xcrun simctl list devices available
+            exit 1
+          fi
+          echo "Using simulator UDID: ${udid}"
+          xcrun simctl boot "${udid}" 2>/dev/null || true
           xcodebuild \
             -project ZkDrive.xcodeproj \
             -scheme ZkDrive \
             -configuration Debug \
-            -destination 'platform=iOS Simulator,name=iPhone 15,OS=latest' \
+            -destination "platform=iOS Simulator,id=${udid}" \
             -derivedDataPath build/DerivedData \
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO \

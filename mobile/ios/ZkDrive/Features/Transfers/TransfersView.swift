@@ -32,8 +32,8 @@ struct TransfersView: View {
         }
         .navigationTitle("Transfers")
         .toolbar {
-            if transfers.jobs.contains(where: { !$0.isActive }) {
-                ToolbarItem(placement: .navigationBarTrailing) {
+            ToolbarItem(placement: .navigationBarTrailing) {
+                if transfers.jobs.contains(where: { !$0.isActive }) {
                     Button("Clear") { transfers.clearFinished() }.font(Theme.Typography.caption)
                 }
             }

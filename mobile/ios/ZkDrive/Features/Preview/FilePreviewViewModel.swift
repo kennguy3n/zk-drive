@@ -96,7 +96,7 @@ final class FilePreviewViewModel: ObservableObject {
     // MARK: Helpers
 
     private func writeOfflineToTemp() async -> URL? {
-        guard let data = try? await offline.load(fileID: file.id), let data else { return nil }
+        guard let data = try? await offline.load(fileID: file.id) else { return nil }
         let dest = FileManager.default.temporaryDirectory.appendingPathComponent(file.name)
         try? FileManager.default.removeItem(at: dest)
         do {
