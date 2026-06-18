@@ -297,8 +297,14 @@ human-readable detail. Subsystems probed:
 | `nats`       | connected; per-subject stream depth reported       | reconnecting (exponential backoff in progress)              | disconnected                         |
 | `clamav`     | connected; definition date reported                | not configured / auto-disabled (scanning skipped)          | configured but unreachable           |
 | `onlyoffice` | connected                                          | not configured (collaborative editing off)                  | configured but unreachable           |
+| `ai_llm`     | wired (`OLLAMA_URL`) and daemon reachable          | not configured (deterministic rule-based fallback active)   | configured but daemon unreachable    |
 | `fabric` / S3| connected; recent error rate low                   | elevated recent error rate                                  | unreachable                          |
 | `workers`    | every worker type beat within `StaleAfter` (45s)   | a worker type is stale or reports `degraded`                | a worker type silent past `DeadAfter` (120s) |
+
+Optional subsystems that are simply not configured (e.g. `redis`,
+`onlyoffice`, `ai_llm`) report `unknown` rather than a failure colour,
+so an SME running the minimal profile sees an informational state, not
+a red alert.
 
 Each probe runs under a bounded timeout and recovers from panics, so a
 single wedged dependency degrades only its own row — the endpoint
@@ -484,6 +490,17 @@ When email is enabled (all three of `PUBLIC_URL`, `SMTP_HOST`,
 templated HTML / text messages. Delivery is best-effort: a relay
 outage does **not** roll back the invite row. The HTTP response is
 the same either way (`201 Created`).
+
+Sends reuse a small pool of warm SMTP connections (default: up to 2
+idle) so a burst of invites pays the TLS handshake + AUTH once rather
+than per message. A connection is returned to the pool only after a
+fully successful send — a send that errors mid-protocol closes its
+connection rather than risk reusing a dirty one — and pooled
+connections are evicted once they have been idle past ~15s or have
+lived longer than ~5min, comfortably under the idle window most relays
+use to reap connections. A send that finds no warm connection simply
+dials a fresh one, so pooling is a latency optimization, never a
+correctness dependency.
 
 Outcomes per attempt are recorded under the
 `sharing.guest_invite_emailed` audit action with one of `ok`,

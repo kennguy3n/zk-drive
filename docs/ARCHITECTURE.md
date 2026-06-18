@@ -385,6 +385,59 @@ pre-configured sub-folder structure.
 - `POST /api/notifications/read-all` — mark every notification
   for the current user read.
 
+### 3.13 Collaborative Document Editing
+
+ZK Drive ships real-time collaborative editing for managed documents
+on top of a [Yjs](https://yjs.dev/) CRDT, served over a dedicated
+WebSocket. Office formats are handled separately by the OnlyOffice
+integration (see [`CONFIGURATION.md`](CONFIGURATION.md)).
+
+- `GET /api/documents/{id}/ws` — WebSocket upgrade for a live editing
+  session. `AuthMiddleware` populates `(workspaceID, userID)` from the
+  JWT before the upgrade. The handler then runs a **two-level
+  permission check** on the parent folder: `RoleViewer` to join the
+  room (observe peer edits), `RoleEditor` to write — a viewer-only
+  client joins but the hub silently drops its update/awareness frames.
+- `PATCH /api/documents/{id}/collab-mode` — flip a document's collab
+  mode. When collab is disabled the upgrade is refused with `409` so
+  the client gets an explicit reason rather than an opaque rejection.
+
+On connect, the server pushes a **snapshot bundle** (`y_state` plus any
+tail deltas) so the client's `Y.Doc` is initialized before it sees peer
+updates; the snapshot is read *before* the upgrade so a transient DB
+error surfaces as a clean HTTP `5xx` instead of a half-open socket. A
+background **compaction** step folds the delta tail back into `y_state`:
+`YjsMergeFold` (a real CRDT merge via the embedded `yrs` WASM runtime)
+for managed-encrypted folders, and `OpaqueConcatFold` (a
+length-prefixed concatenation the client splits and replays) for
+strict-ZK folders, where the server cannot decrypt payloads. In a
+multi-replica deployment, edits fan out across replicas through a Redis
+collab relay (`internal/collab/redis_relay.go`).
+
+**Auth lifecycle on the long-lived socket.** A collab socket is
+authenticated once at upgrade but can stay open for hours, so a
+per-connection auth pump re-checks authorization every 30s and enforces
+it for the life of the socket:
+
+- **Token expiry + session revocation** are re-evaluated each tick; an
+  expired token closes the socket with a *retriable* code (`4002`,
+  `reauth required`) so the client transparently reconnects with a
+  freshly minted JWT, while a revoked session closes with a *permanent*
+  code (`4001`) the client does not retry.
+- **Federated (iam-core) sockets** are re-verified against the issuer's
+  JWKS on each tick. A rotated-out signing key on a warm JWKS cache is
+  treated as a *definitive* rejection (not a transient outage), as is a
+  definitive issuer `4xx`; genuine `5xx`/network blips stay transient so
+  a hiccup never mass-drops live sockets.
+- **In-band refresh** lets a client re-authenticate a live socket with a
+  fresh JWT via a `MessageAuth` frame **without reconnecting**,
+  advancing the socket's enforced identity and lifetime in place.
+
+The built-in session reverifier and the iam-core token reverifier are
+mutually exclusive and the server fails fast at startup if both are
+wired, so a refreshed built-in JWT is never replayed against the
+iam-core issuer. See `api/drive/collab.go` and `internal/collab/`.
+
 ---
 
 ## 4. Upload and Download Flows
@@ -459,32 +512,6 @@ stdlib defaults:
 
 These are set in `fabric.newDefaultTransport()`; a caller may still
 inject its own `*http.Client` via `ClientConfig.HTTPClient` to override.
-
-#### Optional gRPC metadata channel (forward-looking)
-
-For deployments where the metadata RPC volume (presigned-URL generation,
-permission checks) outgrows JSON-over-HTTP, zk-object-fabric can expose
-an **optional internal gRPC metadata service** while the **data plane
-stays on S3** (bytes never transit ZK Drive). The intended contract:
-
-```proto
-service FabricMetadata {
-  // Mint a presigned GET/PUT URL for an object key (replaces the
-  // S3-SDK presign round-trip on the hot download/upload path).
-  rpc PresignURL(PresignRequest) returns (PresignResponse);
-  // Resolve whether a (tenant, principal, object) tuple is permitted —
-  // a server-side permission check colocated with placement metadata.
-  rpc CheckPermission(PermissionRequest) returns (PermissionResponse);
-}
-```
-
-gRPC is the right fit here because it pins HTTP/2 multiplexing, gives a
-typed contract for the two hottest metadata RPCs, and supports
-streaming/deadline propagation natively. It is **opt-in** behind a
-`FABRIC_GRPC_ENDPOINT` config (HTTP/JSON remains the default and the
-fallback) so a deployment adopts it only when the HTTP/2 control plane
-above is no longer sufficient. The S3 data plane is unchanged either
-way.
 
 ---
 

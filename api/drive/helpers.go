@@ -99,8 +99,8 @@ func sameFolderEncryptionMode(a, b string) bool {
 // permission packages, plus the badRequestErr / forbiddenErr
 // dynamic-type carve-outs used inside drive handlers.
 //
-// The default branch — unrecognised error type — was the codebase's
-// biggest err.Error() leak vector before PR #83: every database
+// The default branch — unrecognised error type — is the codebase's
+// biggest err.Error() leak vector: every database
 // failure, context-timeout, or upstream panic that bubbled up to a
 // drive handler landed in a 500 response with the raw Go error
 // string in the JSON `message` field. The helper now takes
@@ -108,10 +108,10 @@ func sameFolderEncryptionMode(a, b string) bool {
 // middleware.RespondInternalError, which logs the underlying err
 // to the request-scoped slog logger (operators get the diagnostic)
 // and writes a sanitised 500 envelope (clients see just
-// "drive service error"). Devin Review BUG_0002 on commit a2e52fb
-// flagged this — the new helper had to be threaded through the
-// helper rather than added as a one-line replacement because
-// writeServiceError previously had no access to *http.Request.
+// "drive service error"). The *http.Request had to be threaded
+// through the helper because writeServiceError previously had no
+// access to it, so routing the default branch through
+// middleware.RespondInternalError was not a one-line replacement.
 func writeServiceError(w http.ResponseWriter, r *http.Request, err error) {
 	switch {
 	case errors.Is(err, folder.ErrNotFound),

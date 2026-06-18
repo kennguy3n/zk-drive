@@ -11,7 +11,7 @@
 // today — those tend to fight with React Router and the auth
 // cookie, respectively, and the workspace admin will eventually
 // drive the default via the workspace.search_language column
-// (WS1) anyway.
+// anyway.
 //
 // Adding a new locale: drop a JSON next to `en.json`, import it
 // here, and add it to the `resources` map. Keys must be a

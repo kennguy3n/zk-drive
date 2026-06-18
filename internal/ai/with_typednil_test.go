@@ -16,9 +16,9 @@ import (
 // receiver so a typed-nil that slipped past the guard would NPE
 // here — making the test fail loudly instead of silently.
 //
-// Pinning Devin Review ANALYSIS_0006 on commit 348b13d: before the
-// fix, all three services accepted typed-nil LLM clients and would
-// NPE at Generate() inside Suggest/Expand/Summarize.
+// Before the typed-nil guard, all three services accepted typed-nil
+// LLM clients and would NPE at Generate() inside
+// Suggest/Expand/Summarize.
 type nilLLMClient struct{}
 
 func (c *nilLLMClient) Generate(_ context.Context, _ string) (string, error) {

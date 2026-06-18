@@ -56,8 +56,7 @@ func (h *Handler) SuggestFileTags(w http.ResponseWriter, r *http.Request) {
 	// implementation could legally return (nil, nil), which would
 	// serialise as {"suggestions": null} instead of the documented
 	// {"suggestions": []}. Same rationale as the ExpandResult nil-
-	// coalesce at internal/ai/queryexp.go:194-196. Devin Review
-	// ANALYSIS_0003 on commit b4b41dd.
+	// coalesce at internal/ai/queryexp.go:194-196.
 	if suggestions == nil {
 		suggestions = []string{}
 	}
@@ -99,7 +98,7 @@ func (h *Handler) ExpandSearchQuery(w http.ResponseWriter, r *http.Request) {
 		// + method but the response body never carries the raw
 		// Go error string. Same redaction contract as the
 		// writeServiceError default branch and the kchat
-		// RoomSummary default arm fixed in 8d0f38e.
+		// RoomSummary default arm.
 		middleware.RespondInternalError(w, r, "expand search query", err)
 		return
 	}
@@ -109,8 +108,7 @@ func (h *Handler) ExpandSearchQuery(w http.ResponseWriter, r *http.Request) {
 	// the QueryExpander interface — a third-party implementation could
 	// return (nil, false, "", nil) and we'd serialise `"terms": null`
 	// instead of the documented `"terms": []`. Both sibling handlers in
-	// this file now apply the same guard. Devin Review BUG_0001 on
-	// commit 744909a.
+	// this file now apply the same guard.
 	if terms == nil {
 		terms = []string{}
 	}
@@ -126,8 +124,7 @@ func (h *Handler) ExpandSearchQuery(w http.ResponseWriter, r *http.Request) {
 	// but inappropriate at the JSON-response boundary because third-
 	// party API consumers expect a stable language token. Aligning
 	// here keeps the two endpoints' "language" semantics identical
-	// without changing the prompt-resolution path. Devin Review
-	// ANALYSIS_0002 on commit de78db5.
+	// without changing the prompt-resolution path.
 	if language == "" {
 		language = workspace.DefaultSearchLanguage
 	}

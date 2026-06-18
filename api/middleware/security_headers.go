@@ -145,7 +145,7 @@ type SecurityHeadersOptions struct {
 //     translates to attribute styles which CSP3 governs via
 //     style-src-attr (defaulting to inheriting style-src);
 //     refactoring every component to CSS classes is a separate
-//     workstream.
+//     effort.
 //
 //   - Strict-Transport-Security (skipped when DisableHSTS)
 //     max-age=31536000 (1 year), includeSubDomains, preload.

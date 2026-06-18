@@ -17,9 +17,8 @@ import (
 // configured. The rule-based scaffold must always succeed and
 // return at least the extension-derived doc-type tag — that's the
 // "deterministic floor" the SuggestionService contract promises.
-// Devin Review ANALYSIS_0002 on PR #85 flagged that without an
-// integration test here, the handler → service → DB pipeline was
-// only covered by unit tests in internal/ai.
+// Without this integration test, the handler → service → DB
+// pipeline would be covered only by unit tests in internal/ai.
 func TestTagSuggestionsRuleBasedScaffold(t *testing.T) {
 	env := setupEnv(t)
 	tok := env.signupAndLogin("Acme", "admin@acme.test", "Alice", "pw")
@@ -73,7 +72,7 @@ func TestTagSuggestionsRuleBasedScaffold(t *testing.T) {
 // for strict-ZK content: the server has no plaintext to analyse,
 // so the endpoint must short-circuit with 409 Conflict (which the
 // frontend uses to hide the "Suggest tags" affordance for strict-
-// ZK files). Devin Review ANALYSIS_0002 on PR #85.
+// ZK files).
 func TestTagSuggestionsStrictZKReturns409(t *testing.T) {
 	env := setupEnv(t)
 	tok := env.signupAndLogin("Acme", "admin@acme.test", "Alice", "pw")
@@ -99,7 +98,7 @@ func TestTagSuggestionsStrictZKReturns409(t *testing.T) {
 // TestSearchExpansionRuleBasedScaffold exercises the /search/expand
 // endpoint without any LLM configured. The rule-based pass must
 // surface workspace tags whose hyphen-bounded segments match the
-// query token. Devin Review ANALYSIS_0002 on PR #85.
+// query token.
 func TestSearchExpansionRuleBasedScaffold(t *testing.T) {
 	env := setupEnv(t)
 	tok := env.signupAndLogin("Acme", "admin@acme.test", "Alice", "pw")
@@ -153,7 +152,7 @@ func TestSearchExpansionRuleBasedScaffold(t *testing.T) {
 
 // TestSearchExpansionRequiresQueryParam pins the 400 path: empty
 // q must reject up front (we don't want to round-trip to Postgres
-// for an empty query). Devin Review ANALYSIS_0002 on PR #85.
+// for an empty query).
 func TestSearchExpansionRequiresQueryParam(t *testing.T) {
 	env := setupEnv(t)
 	tok := env.signupAndLogin("Acme", "admin@acme.test", "Alice", "pw")
@@ -171,15 +170,14 @@ func TestSearchExpansionRequiresQueryParam(t *testing.T) {
 }
 
 // TestTagSuggestionsLocalisesPromptByWorkspaceSearchLanguage
-// completes the WS6 multilingual coverage matrix: in addition to
+// completes the multilingual coverage matrix: in addition to
 // the summary endpoint locked in by
 // TestThreadSummaryLocalisesPromptByWorkspaceSearchLanguage, the
 // tag-suggestion endpoint must also localise its prompt by
 // workspace.SearchLanguage. The integration harness now wires
 // WithLanguageResolver on tagSuggestSvc (mirroring production
 // wiring at cmd/server/main.go:629), so this test confirms the
-// resolver is actually consulted at request time. Devin Review
-// ANALYSIS_0002 on PR #85.
+// resolver is actually consulted at request time.
 func TestTagSuggestionsLocalisesPromptByWorkspaceSearchLanguage(t *testing.T) {
 	// Capture every prompt the fake daemon receives. Reuses the
 	// promptCapturingOllamaServer helper defined in

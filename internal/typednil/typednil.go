@@ -15,16 +15,13 @@
 // nil and the typed-nil cases to a plain nil field.
 //
 // The helper used to live as an unexported `isTypedNil` inside
-// api/drive (added per Devin Review on commit 9b22f97), but the
-// AI services in internal/ai have the same setter pattern (six
-// With* setters across SummaryService, SuggestionService, and
-// ExpansionService) and api/drive imports internal/ai, not the
-// other way around. Extracting to this neutral package lets both
-// import sites share a single source of truth for what "typed nil"
-// means — same Kind switch, same edge cases, same future
-// extensions. Devin Review ANALYSIS_0006 on commit 348b13d flagged
-// the asymmetry; the architecturally correct fix was extracting
-// rather than copy-pasting the helper.
+// api/drive, but the AI services in internal/ai have the same
+// setter pattern (six With* setters across SummaryService,
+// SuggestionService, and ExpansionService) and api/drive imports
+// internal/ai, not the other way around. Extracting to this
+// neutral package lets both import sites share a single source of
+// truth for what "typed nil" means — same Kind switch, same edge
+// cases, same future extensions.
 package typednil
 
 import "reflect"
@@ -43,9 +40,7 @@ import "reflect"
 // kinds count. The reflect.Interface case used to appear in the
 // switch defensively but it was dead code: reflect.ValueOf on an
 // `any` parameter unwraps one level of interface, so rv.Kind()
-// can never be reflect.Interface here. Devin Review ANALYSIS_0003
-// on commit b6164c0 flagged that dead arm; we preserve the
-// trimmed-down behavior here.
+// can never be reflect.Interface here, so that arm is omitted.
 func IsTypedNil(v any) bool {
 	if v == nil {
 		return true

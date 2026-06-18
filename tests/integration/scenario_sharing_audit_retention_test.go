@@ -62,7 +62,7 @@ func TestSharingAuditRetentionScenario(t *testing.T) {
 		"file_id":    urlResp.UploadID.String(),
 		"object_key": urlResp.ObjectKey,
 		"size_bytes": 4096,
-		"checksum":   "sha256:phase3gate",
+		"checksum":   "sha256:testgate",
 	})
 	if status != http.StatusOK {
 		t.Fatalf("confirm-upload: status=%d body=%s", status, string(body))

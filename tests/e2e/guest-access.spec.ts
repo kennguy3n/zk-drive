@@ -18,8 +18,8 @@ test("create a guest invite and accept it", async ({ page }) => {
   page.once("dialog", (d) => d.accept("Guest Folder"));
   await page.getByRole("button", { name: /new folder/i }).click();
   await page.getByRole("link", { name: "Guest Folder" }).click();
-  // Placeholder: the UI for guest invites is exercised indirectly
-  // through the API; the end-to-end surface will land together with
-  // the invite dialog in a follow-up sprint.
+  // The UI for guest invites is exercised indirectly
+  // through the API; the end-to-end surface is covered together with
+  // the invite dialog separately.
   await expect(page.getByText(/guest folder/i)).toBeVisible();
 });

@@ -31,7 +31,7 @@ func (fakeQueryExpander) Expand(ctx context.Context, workspaceID uuid.UUID, quer
 // reflect-based guard inside WithTagSuggester. A regular `s == nil`
 // comparison against the interface returns false here because the
 // type slot is set even though the value slot is nil — exactly the
-// failure mode the bot's edited finding flagged on PR #85.
+// failure mode the guard exists to catch.
 type nilSuggester struct{}
 
 func (*nilSuggester) Suggest(ctx context.Context, workspaceID, fileID uuid.UUID) ([]string, error) {
@@ -48,9 +48,8 @@ func (*nilExpander) Expand(ctx context.Context, workspaceID uuid.UUID, query str
 
 // nilPreviewRepo is a typed-nil concrete pointer satisfying
 // preview.Repository used to exercise the WithPreviews guard.
-// Defined as part of Devin Review ANALYSIS_0002 on commit 10bd9b9
-// which flagged WithPreviews as the last interface-taking With*
-// setter without the isTypedNil guard.
+// WithPreviews was the last interface-taking With* setter to gain
+// the isTypedNil guard.
 type nilPreviewRepo struct{}
 
 func (*nilPreviewRepo) Upsert(ctx context.Context, p *preview.Preview) error { return nil }
@@ -66,7 +65,7 @@ func (*nilPreviewRepo) SetStatus(ctx context.Context, versionID uuid.UUID, statu
 
 // nilWebhookPublisher is the WithWebhooks analogue — pinning the
 // refactor from the old `p.(*webhooks.Publisher)` type-assertion
-// guard to the isTypedNil-based one (same Devin Review finding).
+// guard to the isTypedNil-based one.
 type nilWebhookPublisher struct{}
 
 func (*nilWebhookPublisher) PublishFileEvent(ctx context.Context, t webhooks.EventType, workspaceID uuid.UUID, actorID *uuid.UUID, data webhooks.FileEventData) error {
@@ -89,10 +88,9 @@ func (c *nilSuspensionChecker) WorkspaceSuspension(ctx context.Context, workspac
 }
 
 // TestIsTypedNil pins the reflect-based detection for nil concrete
-// pointers wrapped in non-nil interface values. Added as part of
-// Devin Review's elevated finding on api/drive/handler.go:203 that
-// flagged WithTagSuggester/WithQueryExpander as missing the typed-
-// nil guard WithWebhooks already has.
+// pointers wrapped in non-nil interface values. WithTagSuggester
+// and WithQueryExpander share the same typed-nil guard that
+// WithWebhooks has.
 func TestIsTypedNil(t *testing.T) {
 	cases := []struct {
 		name string
@@ -165,9 +163,8 @@ func TestWithQueryExpanderNormalisesTypedNil(t *testing.T) {
 	}
 }
 
-// TestWithPreviewsNormalisesTypedNil pins the WithPreviews guard
-// added per Devin Review ANALYSIS_0002 on commit 10bd9b9. Without
-// the guard, a (*preview.PostgresRepository)(nil) wrapped in
+// TestWithPreviewsNormalisesTypedNil pins the WithPreviews guard.
+// Without the guard, a (*preview.PostgresRepository)(nil) wrapped in
 // preview.Repository would slip past h.previews == nil and NPE
 // inside handlePreviewURL on first method call.
 func TestWithPreviewsNormalisesTypedNil(t *testing.T) {
@@ -190,8 +187,7 @@ func TestWithPreviewsNormalisesTypedNil(t *testing.T) {
 
 // TestWithWebhooksNormalisesTypedNil pins the WithWebhooks refactor
 // from the old `p.(*webhooks.Publisher)` type-assertion guard to the
-// isTypedNil-based one. Same Devin Review finding (ANALYSIS_0002 on
-// commit 10bd9b9). The new guard works for any concrete pointer
+// isTypedNil-based one. The new guard works for any concrete pointer
 // satisfying WebhookEventPublisher, not just the *webhooks.Publisher
 // the old assertion was hard-coded to recognise.
 func TestWithWebhooksNormalisesTypedNil(t *testing.T) {

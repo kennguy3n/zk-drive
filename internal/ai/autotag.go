@@ -78,7 +78,7 @@ const tagSuggestMaxFile = 4 * 1024
 // for the 4 KiB file body preview (tagSuggestMaxFile) plus the
 // system prompt half. Tags above the cap are dropped on a rune
 // boundary (truncatePreview) so multi-byte tags don't get sliced
-// into invalid UTF-8. Devin Review BUG_0001 on PR #85.
+// into invalid UTF-8.
 const tagSuggestMaxTagPreview = 1024
 
 // tagSuggestMaxOutput is the upper bound on suggestions returned to
@@ -164,15 +164,13 @@ func NewSuggestionService(pool *pgxpool.Pool) *SuggestionService {
 // keywords, and zero overlap with the workspace's existing tag
 // vocabulary. The handler doc at api/drive/ai.go:24 documents
 // this empty-slice case and the frontend handles it gracefully.
-// Devin Review ANALYSIS_0004 on PR #85 flagged the earlier 'never
-// empty' claim as an overstatement — see the longer comment at
-// the call site below for the precondition list.
+// The scaffold output is not "never empty" — see the longer
+// comment at the call site below for the precondition list.
 //
 // The typed-nil guard mirrors the handler-level With* setters in
 // api/drive and SummaryService.WithLLM. A (*OllamaClient)(nil)
 // wrapped in LLMClient would slip past the s.llm != nil check
-// inside Suggest and NPE at Generate(). Devin Review
-// ANALYSIS_0006 on commit 348b13d.
+// inside Suggest and NPE at Generate().
 func (s *SuggestionService) WithLLM(c LLMClient) *SuggestionService {
 	if typednil.IsTypedNil(c) {
 		s.llm = nil
@@ -187,7 +185,7 @@ func (s *SuggestionService) WithLLM(c LLMClient) *SuggestionService {
 // Same typed-nil guard rationale — a typed-nil concrete resolver
 // wrapped in WorkspaceLanguageResolver would pass
 // resolveWorkspaceLanguage's nil-check and NPE on
-// GetSearchLanguage. Devin Review ANALYSIS_0006 on commit 348b13d.
+// GetSearchLanguage.
 func (s *SuggestionService) WithLanguageResolver(r WorkspaceLanguageResolver) *SuggestionService {
 	if typednil.IsTypedNil(r) {
 		s.languageResolver = nil
@@ -235,8 +233,7 @@ WHERE f.id = $1 AND f.workspace_id = $2 AND f.deleted_at IS NULL AND fo.deleted_
 		// pgx.ErrNoRows maps to a not-found sentinel; everything
 		// else propagates as a generic wrapped error which
 		// writeTagSuggestError's default arm renders as 500.
-		// Devin Review BUG_0001 on PR #85 caught the prior
-		// unconditional wrap masking DB failures as 404.
+		// A prior unconditional wrap masked DB failures as 404.
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, fmt.Errorf("%w: %v", ErrTagSuggestFileNotFound, err)
 		}
@@ -271,8 +268,7 @@ WHERE f.id = $1 AND f.workspace_id = $2 AND f.deleted_at IS NULL AND fo.deleted_
 	// tag query at internal/ai/queryexp.go (alphabetical DISTINCT,
 	// LIMIT 512). The shape mismatch is by design: see the long
 	// comment in queryexp.go above its `SELECT DISTINCT tag …`
-	// query for the full rationale. Devin Review ANALYSIS_0005
-	// on PR #85 flagged the divergence as worth documenting.
+	// query for the full rationale.
 	tagRows, err := s.pool.Query(ctx, `
 SELECT tag FROM (
 	SELECT tag, MAX(created_at) AS last_used
@@ -319,8 +315,7 @@ LIMIT 256`, workspaceID)
 	// the empty slice. This is documented behaviour at
 	// api/drive/ai.go:24 ('may be empty list for a file with no
 	// extracted content + no overlapping tags') and the frontend
-	// handles it as a no-op (no chips rendered). Devin Review
-	// ANALYSIS_0004 on PR #85.
+	// handles it as a no-op (no chips rendered).
 	suggestions := ruleBasedSuggestions(name, preview, workspaceTags)
 
 	// LLM refinement — best-effort, never blocks. A failure logs a
@@ -456,9 +451,7 @@ func ruleBasedSuggestions(fileName, contentPreview string, workspaceTags []strin
 	//     positives on short hyphenated tags (e.g. body "iq40-survey"
 	//     contained "q4" as a non-hyphen-bounded substring); see the
 	//     longer comment on the part-matching loop below for the
-	//     full rationale. Devin Review ANALYSIS_0005 on commit
-	//     348b13d flagged the "with a single comparison" phrasing
-	//     here as documentation drift.
+	//     full rationale.
 	corpus := strings.ToLower(fileName + " " + contentPreview)
 	// Lazily-built word-set for the corpus, used to validate
 	// short (≤ shortPartLimit byte) tag segments as standalone
@@ -506,8 +499,7 @@ func ruleBasedSuggestions(fileName, contentPreview string, workspaceTags []strin
 		// lowercase strings (Go's strings.ToLower returns the
 		// original string when no transformation is needed via
 		// the ASCII fast path), so the overhead on the common
-		// case is negligible. Devin Review ANALYSIS_0004 on
-		// commit 9b22f97.
+		// case is negligible.
 		t = strings.ToLower(t)
 		// Reject degenerate tags up front: a tag with no
 		// letter or digit rune (e.g. "-", "---", "--") is
@@ -546,8 +538,7 @@ func ruleBasedSuggestions(fileName, contentPreview string, workspaceTags []strin
 		// "x-y", "a-b") as workspaces accrue tag vocabulary.
 		// Removing it costs at most N extra strings.Contains per
 		// tag (N = segment count, typically 2-3) — negligible vs.
-		// the 256-tag LIMIT cap on workspaceTags. Devin Review
-		// ANALYSIS_0003 on commit 020f71d.
+		// the 256-tag LIMIT cap on workspaceTags.
 		parts := strings.Split(t, "-")
 		allPresent := true
 		// matchedAnyPart guards against tags whose split is
@@ -697,7 +688,7 @@ func canonicalTag(raw string) string {
 	// fail AddTag (180 bytes > 64), violating this function's
 	// documented contract that the suggest endpoint cannot ever
 	// return a value that AddTag would later reject. Particularly
-	// relevant now that WS6 ships multilingual prompting — non-ASCII
+	// relevant because the service supports multilingual prompting — non-ASCII
 	// suggestions are expected, not exceptional.
 	if len(t) > file.MaxTagLength {
 		return ""

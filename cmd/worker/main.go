@@ -71,7 +71,7 @@ const (
 	defaultNATS = "nats://localhost:4222"
 	ackWait     = 5 * time.Minute
 	// clamAVHealthInterval is the cadence of the worker's ClamAV
-	// self-healing probe (WS8 8.4 specifies a 60s re-check).
+	// self-healing probe (60s re-check cadence).
 	clamAVHealthInterval = 60 * time.Second
 	// clamAVPingTimeout bounds a single clamd PING round-trip so a
 	// hung clamd socket cannot stall the health loop for a full
@@ -406,7 +406,7 @@ func run() error {
 		nats.Name("zk-drive-worker"),
 		nats.MaxReconnects(-1),
 		// CustomReconnectDelay supersedes ReconnectWait with an
-		// exponential backoff + jitter (WS8 8.4): a NATS outage no
+		// exponential backoff + jitter: a NATS outage no
 		// longer hammers the broker with a fixed 2s retry storm from
 		// every worker, and the jitter de-syncs the fleet so they
 		// don't reconnect in a thundering herd. Disconnect/reconnect
@@ -457,7 +457,7 @@ func run() error {
 	}()
 	defer unsubscribeAll(subs)
 
-	// ClamAV self-healing loop (WS8 8.4). Only runs when a clamd
+	// ClamAV self-healing loop. Only runs when a clamd
 	// address is configured; a permissive (scanning-disabled) worker
 	// has nothing to heal. The loop probes clamd every 60s and flips
 	// the scan service's availability flag, so a clamd outage degrades
@@ -474,7 +474,7 @@ func run() error {
 		slog.Info("worker clamav self-healing loop enabled", "interval", clamAVHealthInterval.String())
 	}
 
-	// Worker heartbeat (WS8 8.1). Every worker process writes a
+	// Worker heartbeat. Every worker process writes a
 	// liveness row per logical worker type it runs to the
 	// worker_heartbeats table; the admin health dashboard aggregates
 	// these into a per-type traffic light. This is a pull-based signal
@@ -734,7 +734,7 @@ func subscribeAll(ctx context.Context, wg *sync.WaitGroup, js nats.JetStreamCont
 		// just decode failures (see preview.QueueMaxDeliver).
 		{jobs.SubjectPreviewPriority, "drive-preview-priority", m.InstrumentJob(ctx, jobs.SubjectPreviewPriority, traceJob(jobs.SubjectPreviewPriority, previewHandler(pool, previewSvc))), []nats.SubOpt{nats.MaxDeliver(preview.QueueMaxDeliver)}, previewPriorityWorkers, false},
 		{jobs.SubjectPreviewStandard, "drive-preview-standard", m.InstrumentJob(ctx, jobs.SubjectPreviewStandard, traceJob(jobs.SubjectPreviewStandard, previewHandler(pool, previewSvc))), []nats.SubOpt{nats.MaxDeliver(preview.QueueMaxDeliver)}, previewStandardWorkers, false},
-		// Weight-tiered preview subjects (workstream 5.4). The
+		// Weight-tiered preview subjects. The
 		// lightweight subject carries pure-Go renders and binds on slim
 		// pods; the heavy subject carries subprocess renders and binds
 		// only on heavy worker pods. Both are optional: a pod with the
@@ -947,7 +947,7 @@ func previewHandler(pool *pgxpool.Pool, svc *preview.Service) metrics.JobHandler
 				_ = msg.NakWithDelay(delay)
 				return metrics.JobResultError
 			}
-			// Genuine render / IO failure. Self-healing (WS8 8.4): give
+			// Genuine render / IO failure. Self-healing: give
 			// transient faults (storage blip, brief decode contention)
 			// a few cycles to recover, but once a job has failed
 			// PreviewMaxAttempts times treat it as a poison payload —
@@ -990,8 +990,8 @@ func deliveryAttempt(msg *nats.Msg) int {
 	return int(md.NumDelivered)
 }
 
-// runClamAVHealthLoop is the worker's ClamAV self-healing loop (WS8
-// 8.4). It probes clamd on a fixed cadence and toggles the scan
+// runClamAVHealthLoop is the worker's ClamAV self-healing loop.
+// It probes clamd on a fixed cadence and toggles the scan
 // service's availability flag, logging only on state transitions so a
 // prolonged outage does not spam the log every interval. While clamd
 // is down the scan handler degrades to "skip + mark clean" rather than

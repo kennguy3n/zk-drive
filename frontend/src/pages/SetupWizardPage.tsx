@@ -21,7 +21,7 @@ import {
 import { translateApiError } from "../api/errors";
 import { Badge, Button, Field, Input, RadioCard, useToast } from "../components/ui";
 
-// SetupWizardPage is the first-boot guided setup (WS8 8.2). It walks a
+// SetupWizardPage is the first-boot guided setup. It walks a
 // brand-new operator through the minimum needed to run ZK Drive:
 //
 //   1. Admin account   — collect the first administrator's credentials.

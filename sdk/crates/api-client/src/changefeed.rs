@@ -226,7 +226,7 @@ impl<'c> ChangefeedClient<'c> {
 /// shape can be tested without standing up a real WebSocket server.
 ///
 /// `since = None` omits the query parameter entirely, leaving the
-/// URL unchanged from the original PR3 contract. A server that
+/// URL unchanged from the baseline contract. A server that
 /// hasn't yet implemented gap-replay sees the same URL it saw
 /// before (forward-compat) and a server that has will fall back to
 /// its own default ("from the beginning"). `since = Some(seq)`
@@ -253,7 +253,7 @@ mod tests {
 
     #[test]
     fn stream_url_includes_since_when_provided() {
-        // R13 #3: closes the gap between catch-up completion and
+        // Closes the gap between catch-up completion and
         // WebSocket handshake. The server contract is "replay
         // anything with sequence > since before going live"; this
         // test pins the wire shape we send so a future refactor of
@@ -274,7 +274,7 @@ mod tests {
         // None is the "fresh agent, no cursor yet" signal. We
         // omit the query parameter entirely rather than sending
         // `?since=0` so an older server that hasn't picked up the
-        // gap-replay contract sees exactly the URL it saw in PR3
+        // gap-replay contract sees exactly the URL it saw before
         // and can't accidentally 400 on an unrecognized query key.
         let base = url::Url::parse("https://api.example.test/").unwrap();
         let ws_id = uuid::uuid!("22222222-2222-2222-2222-222222222222");
@@ -300,8 +300,8 @@ mod tests {
 
     #[test]
     fn mutation_round_trips_through_canonical_json() {
-        // Sample matches the wire format produced by
-        // changefeed.Mutation in PR #73. Adding a key here that the
+        // Sample matches the wire format produced by the server's
+        // changefeed.Mutation. Adding a key here that the
         // Rust side doesn't know about must NOT fail decoding — the
         // metadata blob carries forward-compat data.
         let raw = r#"{

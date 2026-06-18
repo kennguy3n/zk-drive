@@ -1,4 +1,4 @@
--- Worker liveness heartbeats (WS8 Observability & NoOps).
+-- Worker liveness heartbeats.
 --
 -- The API server has no NATS-level visibility into whether the
 -- background worker fleet is actually consuming jobs: a worker can be

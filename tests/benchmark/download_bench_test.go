@@ -7,7 +7,7 @@ import (
 	"github.com/kennguy3n/zk-drive/internal/storage"
 )
 
-// downloadURLTarget is the workstream goal: 5000 presigned download-URL
+// downloadURLTarget is the performance goal: 5000 presigned download-URL
 // generations per second. Presigning is a local HMAC-SHA256 signing
 // operation (no gateway round-trip), so this benchmark isolates the CPU
 // cost of the signer — exactly the work an API pod does per download

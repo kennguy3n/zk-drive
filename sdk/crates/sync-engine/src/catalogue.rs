@@ -32,7 +32,7 @@ pub enum SyncStatus {
     LocalDeleted,
     /// Remote change waiting to be downloaded (content update,
     /// rename, or move). Kept distinct from [`SyncStatus::RemoteDeleted`]
-    /// so the downloader (PR5) does not have to re-fetch the file's
+    /// so the downloader does not have to re-fetch the file's
     /// metadata to discover whether the remote-side change was an
     /// update or a tombstone -- a critical disambiguation, because
     /// for a deletion it must unlink the local file rather than
@@ -178,7 +178,7 @@ impl SyncStatus {
 
     /// Catalogue status to persist when the change feed announces a
     /// remote *tombstone* (file/folder deleted on the server). The
-    /// downloader (PR5) must consume this distinctly from
+    /// downloader must consume this distinctly from
     /// [`SyncStatus::RemoteDirty`] because the action is to unlink
     /// the local file, not to fetch new content -- without this
     /// split, [`RemoteEvent::FileDeleted`] and [`RemoteEvent::FileUpdated`]

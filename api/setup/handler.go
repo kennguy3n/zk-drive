@@ -1,5 +1,4 @@
-// Package setup serves the first-boot guided setup wizard endpoints
-// (WS8 8.2):
+// Package setup serves the first-boot guided setup wizard endpoints:
 //
 //	GET  /api/setup/status        — what is configured / still missing
 //	POST /api/setup/test-storage  — validate S3 credentials before save

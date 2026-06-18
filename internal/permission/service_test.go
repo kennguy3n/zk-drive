@@ -149,10 +149,10 @@ const expectedResourceTypeCount = 2
 // cache. If AllResourceTypes silently drifts from the const
 // block, that downstream enforcement gets bypassed.
 //
-// Per Devin Review ANALYSIS_0003 (escalated): the previous
-// failure mode was that adding e.g. ResourceDocument here would
-// create a stale-cache risk in the permission cache without any
-// test catching it, because the changefeed already had a
+// The failure mode this guards against: adding e.g.
+// ResourceDocument here would create a stale-cache risk in the
+// permission cache without any test catching it, because the
+// changefeed already had a
 // KindDocument that wasn't audited against the resource-type
 // vocabulary. This test (combined with the cross-package
 // coupling test) closes that gap.

@@ -204,7 +204,7 @@ func TestFullStackScenario(t *testing.T) {
 		// file row and verify the file metadata API returns the
 		// supported mime type so the preview worker would pick it
 		// up.
-		fold := createFolder(t, env, admin.Token, nil, "Phase5 PDFs")
+		fold := createFolder(t, env, admin.Token, nil, "Sample PDFs")
 		f := createFile(t, env, admin.Token, fold.ID.String(), "fullstack.pdf", "application/pdf")
 		status, body := env.httpRequest(http.MethodGet, "/api/files/"+f.ID.String(), admin.Token, nil)
 		if status != http.StatusOK {

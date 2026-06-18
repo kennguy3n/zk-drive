@@ -102,10 +102,10 @@ func TestRenderTextToImage_ShortHeaderUnchanged(t *testing.T) {
 // rune count is internally subtracted from the cut point). This
 // is the invariant the header-truncation comment in
 // renderTextToImage refers to — if it ever regresses, the header
-// will be one cell short of the canvas budget (the off-by-one
-// originally caught on PR #84). The body-truncation path in the
-// same function uses an empty suffix and appends "…" manually,
-// which is a different code path covered by the existing tests.
+// will be one cell short of the canvas budget. The body-truncation
+// path in the same function uses an empty suffix and appends "…"
+// manually, which is a different code path covered by the existing
+// tests.
 func TestTruncateRunes_HeaderSuffixBudgetMath(t *testing.T) {
 	t.Parallel()
 	// 32 ASCII runes — well over any plausible canvas budget for

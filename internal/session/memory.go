@@ -43,7 +43,7 @@ var (
 )
 
 // MemoryStore is a process-local implementation of Store used as the
-// seamless fallback when Redis is unreachable (WS8 8.4 server
+// seamless fallback when Redis is unreachable (server
 // self-healing) and as the primary store for single-replica
 // deployments that run without Redis at all.
 //

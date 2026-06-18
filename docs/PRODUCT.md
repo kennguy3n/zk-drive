@@ -132,11 +132,13 @@ companies that need file storage first and chat later.
 > for teams, clients, and partners.
 
 The positioning is deliberately narrow. ZK Drive is **not** a
-Google Workspace competitor; it does not ship an office suite or a
-real-time collaborative editor. It is a **file collaboration**
-product for organisations that already have (or do not need) a
-productivity suite, and that care about privacy, residency, and
-governance.
+Google Workspace competitor: it does not build its own office suite
+(Docs / Sheets / Slides). It **does** ship real-time collaborative
+editing — a Yjs CRDT engine (`internal/collab/`) for managed
+documents and an OnlyOffice integration for office formats — but it
+remains a **file collaboration** product for organisations that
+already have (or do not need) a full productivity suite, and that
+care about privacy, residency, and governance.
 
 ### 3.2 Feature set
 

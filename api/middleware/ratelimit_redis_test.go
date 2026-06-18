@@ -144,7 +144,7 @@ func TestRateLimitAcrossReplicas(t *testing.T) {
 
 // TestRateLimitFallsBackToMemoryOnRedisDown — when Redis is
 // unreachable the middleware must NOT 429 every caller; it falls back
-// to the per-replica in-memory token bucket (WS8 8.4). A first request
+// to the per-replica in-memory token bucket. A first request
 // from a fresh user/workspace therefore still passes. This is a
 // fallback-to-local-limiting behaviour, NOT unlimited fail-open: the
 // in-memory bucket still enforces a budget (covered by the in-memory

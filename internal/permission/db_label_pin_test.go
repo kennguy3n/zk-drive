@@ -28,10 +28,9 @@ import (
 // compile, and runtime; only a manual Prometheus query would
 // surface it. This pin closes that gap at compile-time.
 //
-// Devin Review ANALYSIS_0006 flagged the missing pin; the doc
-// comment in repository.go:96 had previously claimed "the test
-// in cache_test.go pins the canonical strings" but no such test
-// existed. This file backs that claim.
+// The doc comment in repository.go:96 had previously claimed "the
+// test in cache_test.go pins the canonical strings" but no such
+// test existed. This file backs that claim.
 func TestDBOpLabelsMirrorMetricsPackage(t *testing.T) {
 	t.Parallel()
 	cases := []struct {

@@ -131,7 +131,7 @@ func parseODFContent(r io.Reader) (string, error) {
 		// the next cell's tab. Multi-paragraph cells are rare;
 		// emitting a single space keeps FTS phrase boundaries
 		// honoured without producing the cosmetically odd
-		// "value\n\t" sequence Devin Review flagged.
+		// "value\n\t" sequence.
 		cellDepth int
 		// rowDirty tracks whether the in-progress table row has
 		// emitted any cell content. Empty rows are dropped to

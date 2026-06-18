@@ -14,8 +14,8 @@ export interface AuthFormField {
 }
 
 // SocialProvider describes an optional third-party sign-in button. The
-// actual OIDC redirect is owned by the iam-core workstream; AuthForm only
-// renders the button and calls back, so wiring is a one-line prop later.
+// actual OIDC redirect is owned by iam-core; AuthForm only
+// renders the button and calls back, so wiring is a one-line prop.
 export interface SocialProvider {
   id: string;
   label: string;
@@ -49,10 +49,9 @@ const widths: Record<NonNullable<AuthLayoutProps["width"]>, string> = {
 // gradient brand tile and Mona Sans headline, so the whole auth surface is
 // visually consistent and re-themes (incl. dark mode) from tokens alone.
 //
-// NOTE (cross-workstream): this lives in AuthForm.tsx — an owned file —
-// rather than components/ui so the auth pages can share it without touching
-// the frozen Phase-0 primitives. It is a good candidate for the coordinator
-// to promote into components/ui later.
+// NOTE: this lives in AuthForm.tsx rather than components/ui so the
+// auth pages can share it without touching the base UI primitives. It
+// is a good candidate to promote into components/ui later.
 export function AuthLayout({
   title,
   subtitle,

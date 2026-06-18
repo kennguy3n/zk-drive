@@ -25,8 +25,8 @@ import { OfflineIndicator } from "./components/OfflineIndicator";
 //   FeaturesProvider       — fetches /api/features on login for gating.
 //   CommandPaletteProvider — global Cmd+K palette (needs the router +
 //                            auth + features above it).
-// These are mounted here rather than inside App.tsx so the iam-core
-// workstream's edits to App.tsx merge cleanly.
+// These are mounted here rather than inside App.tsx to keep App.tsx
+// focused on routing and providers.
 ReactDOM.createRoot(document.getElementById("root")!).render(
   <React.StrictMode>
     <BrowserRouter>

@@ -731,13 +731,12 @@ func TestCachedRepository_GenerationCounterLocalCacheStale(t *testing.T) {
 // just GET'd), loadGeneration MUST return the fresher local
 // value, not the stale Redis value.
 //
-// Devin Review BUG_0001 was the original race fix (don't
-// clobber a fresher local cache); ANALYSIS_0001 was the
-// follow-on observation that the function STILL returned the
-// stale Redis-fetched value to the caller. That meant a single
-// in-flight request could compose a cache key with the old
-// generation and serve a pre-bust entry — narrow window but
-// real. Fix: also return the fresher local value.
+// The original race fix avoided clobbering a fresher local cache,
+// but the function STILL returned the stale Redis-fetched value to
+// the caller. That meant a single in-flight request could compose
+// a cache key with the old generation and serve a pre-bust entry —
+// narrow window but real. The fix also returns the fresher local
+// value.
 //
 // Test strategy: pre-poison the local cache with gen=42, force
 // a re-fetch (age the entry past staleness), Redis has no

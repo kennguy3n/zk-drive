@@ -8,7 +8,7 @@ import {
 } from "react";
 import { cn } from "../../lib/cn";
 
-// Shared, fully tokenised form controls. Every workstream builds its forms
+// Shared, fully tokenised form controls. Forms across the app are built
 // from these so inputs look identical, respond to the dark-mode toggle and
 // the KChat re-theme, and carry the same focus ring + invalid styling
 // without re-deriving Tailwind classes (or falling back to inline styles).

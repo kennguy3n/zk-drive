@@ -24,11 +24,10 @@ const (
 // listed in AllResourceTypes below. Downstream consumers
 // (notably the changefeed cache-invalidation matrix in
 // internal/changefeed/service.go's shouldBustForMutation)
-// iterate AllResourceTypes to enforce audit coverage. Per Devin
-// Review ANALYSIS_0003: the previous failure mode was that
-// adding a new resource type here without updating the bust
-// matrix would leave stale cache entries when that resource's
-// container changed — caught now by
+// iterate AllResourceTypes to enforce audit coverage. The failure
+// mode this guards against: adding a new resource type here
+// without updating the bust matrix would leave stale cache
+// entries when that resource's container changed — caught by
 // TestPermissionResourceTypesCoupleToChangefeedKinds in
 // internal/changefeed/permission_coupling_test.go.
 const (

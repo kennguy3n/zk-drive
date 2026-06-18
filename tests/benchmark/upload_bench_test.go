@@ -9,7 +9,7 @@ import (
 	"github.com/google/uuid"
 )
 
-// uploadThroughputTarget is the workstream goal: sustain 1000 upload
+// uploadThroughputTarget is the performance goal: sustain 1000 upload
 // metadata commits per second. The "upload" hot path on the API server
 // is the metadata INSERT that registers a file row before the client
 // streams bytes straight to the gateway — that DB write, not the byte

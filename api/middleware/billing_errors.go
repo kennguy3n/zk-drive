@@ -41,9 +41,8 @@ func WriteBillingError(w http.ResponseWriter, err error) bool {
 		// extra context (e.g. fmt.Errorf("storage: %w",
 		// billing.ErrQuotaExceeded)). errors.Is still matches a
 		// wrapped sentinel, but err.Error() on the wrap leaks
-		// the wrapping context into the response body. Devin
-		// Review ANALYSIS_0002 on commit 8d0f38e flagged this
-		// as the one place a fmt.Errorf wrap could exfiltrate
+		// the wrapping context into the response body. This is
+		// the one place a fmt.Errorf wrap could exfiltrate
 		// path/driver/SQL hints through what is otherwise the
 		// safe, locale-translated 402 message.
 		RespondError(w, http.StatusPaymentRequired, ErrCodeQuotaExceeded, billing.ErrQuotaExceeded.Error())

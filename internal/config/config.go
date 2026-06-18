@@ -175,7 +175,7 @@ type Config struct {
 	PreviewPriorityWorkers        int
 	PreviewStandardWorkers        int
 
-	// Preview worker fleet tiering (workstream 5.4). Preview jobs are
+	// Preview worker fleet tiering. Preview jobs are
 	// routed by renderer weight to two pod tiers: the slim "lightweight"
 	// pods run pure-Go renderers, the "heavy" pods run subprocess
 	// renderers (LibreOffice / FFmpeg / ImageMagick / poppler / librsvg).
@@ -633,7 +633,7 @@ type Config struct {
 	// straight into a presigned PUT), so it is intentionally NOT bounded
 	// by the memory-derived OnlyOfficeMaxConcurrentSaves gate that
 	// protects the buffered fallback. That makes concurrent streaming
-	// saves effectively unlimited — exactly the WS5 goal — but a burst of
+	// saves effectively unlimited — by design — but a burst of
 	// editors closing documents at once can still translate into many
 	// simultaneous PUTs to the storage gateway and GETs to the Document
 	// Server cache. This knob lets an operator put a high-watermark cap

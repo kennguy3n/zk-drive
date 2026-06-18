@@ -1,6 +1,6 @@
 # Performance benchmark suite (`tests/benchmark`)
 
-Real, DB-backed Go benchmarks for the Workstream-5 scaling targets. Each
+Real, DB-backed Go benchmarks for the platform's scaling targets. Each
 benchmark drives the **production** service/repository layer (the same
 code the HTTP handlers call), against a live Postgres reached through
 `TEST_DATABASE_URL`, with row-level security enforced exactly as in
