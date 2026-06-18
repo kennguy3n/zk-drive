@@ -165,6 +165,11 @@ function PanelViewer({
   const { t } = useTranslation();
   const toast = useToast();
   const [downloading, setDownloading] = useState(false);
+  // The `downloading` state drives the Button's loading affordance, but a
+  // closure read of it isn't a reliable re-entrancy guard: two key activations
+  // dispatched in the same tick both see the pre-render value. This ref flips
+  // synchronously, so it's the actual single-flight guard.
+  const downloadingRef = useRef(false);
 
   // Track mount so the async download can't setState after the panel unmounts
   // (it remounts via key={fileID} when the file changes). Harmless in React 18
@@ -181,10 +186,8 @@ function PanelViewer({
     !!onOpenEditor && !!onlyOfficeEnabled && isOfficeDocument(fileName);
 
   const handleDownload = async () => {
-    // The Button is disabled via loading={downloading}, but a keyboard
-    // activation (Enter/Space) can fire before that re-render lands, so guard
-    // against a second in-flight getDownloadURL call here too.
-    if (downloading) return;
+    if (downloadingRef.current) return;
+    downloadingRef.current = true;
     setDownloading(true);
     try {
       const downloadURL = await getDownloadURL(fileID);
@@ -198,6 +201,7 @@ function PanelViewer({
     } catch {
       if (mounted.current) toast.error(t("preview.downloadFailed"));
     } finally {
+      downloadingRef.current = false;
       if (mounted.current) setDownloading(false);
     }
   };

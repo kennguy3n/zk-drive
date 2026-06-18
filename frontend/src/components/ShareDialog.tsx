@@ -85,6 +85,13 @@ export default function ShareDialog({ resource, onClose }: Props) {
   // place `tab` changes, so updating the ref here keeps it in sync.
   const tabRef = useRef<Tab>(tab);
 
+  // The *Submitting state flags drive the submit Button's loading affordance,
+  // but reading them in the handler is a stale-closure guard: two Enter
+  // activations in the same tick both observe the pre-render value. These refs
+  // flip synchronously, so they are the real single-flight guards.
+  const linkSubmittingRef = useRef(false);
+  const inviteSubmittingRef = useRef(false);
+
   const switchTab = (next: Tab) => {
     tabRef.current = next;
     setTab(next);
@@ -100,7 +107,7 @@ export default function ShareDialog({ resource, onClose }: Props) {
     // Pressing Enter in a field submits the form even while the submit Button
     // is visually disabled, so guard here too: a rapid double-Enter would
     // otherwise dispatch two identical createShareLink calls.
-    if (linkSubmitting) return;
+    if (linkSubmittingRef.current) return;
     setError(null);
 
     let maxDownloads: number | undefined;
@@ -128,6 +135,7 @@ export default function ShareDialog({ resource, onClose }: Props) {
     }
     setMaxDownloadsError(null);
 
+    linkSubmittingRef.current = true;
     setLinkSubmitting(true);
     try {
       const created = await createShareLink({
@@ -145,6 +153,7 @@ export default function ShareDialog({ resource, onClose }: Props) {
     } catch (err) {
       if (tabRef.current === "link") setError(translateApiError(err, t));
     } finally {
+      linkSubmittingRef.current = false;
       setLinkSubmitting(false);
     }
   };
@@ -165,7 +174,7 @@ export default function ShareDialog({ resource, onClose }: Props) {
     e.preventDefault();
     // See submitLink: Enter-to-submit bypasses the disabled Button, so guard
     // against a double-dispatch of createGuestInvite here.
-    if (inviteSubmitting) return;
+    if (inviteSubmittingRef.current) return;
     setError(null);
 
     if (!EMAIL_RE.test(inviteEmail.trim())) {
@@ -179,6 +188,7 @@ export default function ShareDialog({ resource, onClose }: Props) {
       return;
     }
 
+    inviteSubmittingRef.current = true;
     setInviteSubmitting(true);
     try {
       const created = await createGuestInvite({
@@ -191,6 +201,7 @@ export default function ShareDialog({ resource, onClose }: Props) {
     } catch (err) {
       if (tabRef.current === "invite") setError(translateApiError(err, t));
     } finally {
+      inviteSubmittingRef.current = false;
       setInviteSubmitting(false);
     }
   };
