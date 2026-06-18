@@ -64,10 +64,12 @@ targets:
         # Headers/module.modulemap, so no extra search paths are needed.
         OTHER_LDFLAGS: ["-ObjC"]
         SWIFT_OBJC_BRIDGING_HEADER: ""
-    info:
-      path: ZkDrive/Resources/Info.plist
-    entitlements:
-      path: ZkDrive/Resources/ZkDrive.entitlements
+    # No `info:`/`entitlements:` generator blocks here on purpose. Those make
+    # XcodeGen *regenerate* (overwrite) the file at their `path`, which would
+    # clobber the hand-maintained Info.plist (ZKDriveConfig, usage strings, URL
+    # types, background modes) and entitlements with a bare default stub. The
+    # committed files are the source of truth and are wired in directly via the
+    # INFOPLIST_FILE / CODE_SIGN_ENTITLEMENTS build settings above.
 
   ZkDriveTests:
     type: bundle.unit-test
