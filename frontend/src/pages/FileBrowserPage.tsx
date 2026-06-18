@@ -709,7 +709,11 @@ export default function FileBrowserPage() {
           onCreated={() => {
             setCreateFolderOpen(false);
             refresh();
-            setTreeReloadKey((k) => k + 1);
+            // The sidebar lists only root folders, so it only needs to
+            // refetch when the newly created folder is itself root-level
+            // (i.e. created from the workspace root). Creating a subfolder
+            // leaves the root list unchanged, so skip the redundant fetch.
+            if (currentFolderID === null) setTreeReloadKey((k) => k + 1);
           }}
         />
       ) : null}
