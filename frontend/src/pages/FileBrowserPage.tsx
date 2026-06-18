@@ -484,7 +484,7 @@ export default function FileBrowserPage() {
               }}
             >
               <LogOut className="h-4 w-4" aria-hidden="true" />
-              <span className="hidden sm:inline">{t("auth.logout")}</span>
+              <span className="sr-only sm:not-sr-only sm:inline">{t("auth.logout")}</span>
             </Button>
           </div>
         </header>
@@ -729,7 +729,9 @@ function NavPill({
       className="inline-flex h-9 items-center gap-2 rounded-lg px-3 text-sm font-medium text-muted no-underline transition-colors hover:bg-surface-2 hover:text-fg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
     >
       {icon}
-      <span className="hidden md:inline">{children}</span>
+      {/* sr-only (not `hidden`) below md so the link keeps an accessible
+          name when the icon-only label is the only visible content. */}
+      <span className="sr-only md:not-sr-only md:inline">{children}</span>
     </Link>
   );
 }
@@ -750,12 +752,18 @@ function CreateFolderDialog({
   // share a single source of truth. A typo like setMode("strict_z") is
   // a TS error here, not a silent server-side rejection.
   const [mode, setMode] = useState<EncryptionMode>("managed_encrypted");
+  const [nameError, setNameError] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
   const submit = async () => {
     setError(null);
-    if (!name.trim()) return;
+    // `required` on the Input only rejects the empty string; a whitespace-only
+    // name passes native validation, so guard it explicitly and tell the user.
+    if (!name.trim()) {
+      setNameError(t("folder.nameRequired"));
+      return;
+    }
     setBusy(true);
     try {
       await createFolder({
@@ -799,12 +807,15 @@ function CreateFolderDialog({
         }}
         className="grid gap-4"
       >
-        <Field label={t("common.name")}>
+        <Field label={t("common.name")} error={nameError ?? undefined}>
           {(p) => (
             <Input
               {...p}
               value={name}
-              onChange={(e) => setName(e.target.value)}
+              onChange={(e) => {
+                setName(e.target.value);
+                if (nameError) setNameError(null);
+              }}
               placeholder={t("drive.folderNamePrompt")}
               autoFocus
               required
@@ -1069,7 +1080,7 @@ function Breadcrumb({ folder }: { folder: Folder | null }) {
   const parts = folder?.path?.split("/").filter(Boolean) ?? [];
   return (
     <nav
-      aria-label={t("drive.rootBreadcrumb")}
+      aria-label={t("nav.breadcrumb")}
       className="flex min-w-0 items-center gap-1.5 text-sm"
     >
       <Link
