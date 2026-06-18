@@ -17,7 +17,7 @@ members = [
 # via UniFFI in a follow-up PR; for now the binding layer is
 # internal.
 #
-# `desktop-shell` (WS7) is the embedding-friendly harness that wraps
+# `desktop-shell` is the embedding-friendly harness that wraps
 # the engine in a multi-workspace lifecycle, a JSON-RPC-shaped
 # Command surface, and a broadcast event bus. The Tauri / Electron
 # main binary is intentionally NOT in this workspace — it pulls

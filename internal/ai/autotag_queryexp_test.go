@@ -50,8 +50,8 @@ func TestCanonicalTag(t *testing.T) {
 		// 22 CJK characters = 66 bytes (3 bytes per char) — must
 		// be rejected because file.Service.AddTag would reject
 		// 66 > 64 even though the rune count is 22 ≤ 64. The
-		// rune-vs-byte mismatch on this very line was the bug
-		// caught by Devin Review on PR #85.
+		// rune-vs-byte mismatch on this very line is the case this
+		// row pins.
 		{strings.Repeat("文", 22), ""},
 		// 21 CJK characters = 63 bytes — fits within 64-byte
 		// budget so should pass. Note: we lowercase via
@@ -85,7 +85,7 @@ func TestParseTagLines(t *testing.T) {
 		{"reject invalid", "alpha\nfoo/bar\nbeta", []string{"alpha", "beta"}},
 		{"quoted", "\"alpha\"\n'beta'", []string{"alpha", "beta"}},
 		{"empty lines + trailing comma", "alpha,\n\nbeta,", []string{"alpha", "beta"}},
-		// Devin Review ANALYSIS_0003: a model that emits
+		// A model that emits
 		// "alpha,#beta" on one line — the previous parseTagLines
 		// implementation trimmed only at line edges, so the "#"
 		// in front of "beta" leaked through to canonicalTag
@@ -218,11 +218,11 @@ func TestBuildTagSuggestPromptLocalisesInstruction(t *testing.T) {
 // tagSuggestMaxTagPreview budget for the workspace-tag half of the
 // prompt. Without truncation, a workspace with hundreds of tags
 // could push the prompt past small-model context windows and the
-// LLM call would fail silently. Devin Review BUG_0001 on PR #85
-// flagged that BuildQueryExpansionPrompt truncates via
-// truncatePreview but BuildTagSuggestPrompt did not — the comment
-// at queryexp.go:271 references "same rationale as the autotag
-// prompt builder" so this test locks in the parity it claims.
+// LLM call would fail silently. BuildQueryExpansionPrompt truncates
+// via truncatePreview and BuildTagSuggestPrompt must match — the
+// comment at queryexp.go:271 references "same rationale as the
+// autotag prompt builder" so this test locks in the parity it
+// claims.
 func TestBuildTagSuggestPromptTruncatesWorkspaceTags(t *testing.T) {
 	// Build a workspace tag list large enough to exceed
 	// tagSuggestMaxTagPreview (1 KiB). Each tag is ~22 bytes
@@ -341,8 +341,7 @@ func TestRuleBasedExpansion(t *testing.T) {
 	})
 
 	t.Run("case-variant tags dedup to single result", func(t *testing.T) {
-		// Devin Review ANALYSIS_0003 on commit de78db5 flagged
-		// that two case-variant DB rows (possible via raw-SQL
+		// Two case-variant DB rows (possible via raw-SQL
 		// insert or migration bug bypassing file.Service.AddTag's
 		// lowercase invariant) would each get a scores[]
 		// entry, both canonicalTag to the same lowercase string,
@@ -487,8 +486,8 @@ func TestRuleBasedSuggestionsShortPartUsesWordBoundary(t *testing.T) {
 		}
 	}
 
-	// Single-segment short tag — regression for Devin Review
-	// BUG_0001 on commit b6164c0. Before the fix, the literal
+	// Single-segment short tag — regression guard. Before the fix,
+	// the literal
 	// strings.Contains fast path at the top of the workspace-tag
 	// loop short-circuited past partMatches for tags without a
 	// hyphen, so a tag like "ai" would match corpora containing
@@ -525,9 +524,8 @@ func TestRuleBasedSuggestionsShortPartUsesWordBoundary(t *testing.T) {
 		t.Fatalf("single-segment tag 'ai' should match body with standalone 'ai' token; got suggestions %v", suggestionsSinglePos)
 	}
 
-	// Short multi-segment tag false positive — regression for
-	// Devin Review ANALYSIS_0003 on commit 020f71d. Before the
-	// fast-path removal, tag "a-b" against body "data-base"
+	// Short multi-segment tag false positive — regression guard.
+	// Before the fast-path removal, tag "a-b" against body "data-base"
 	// would match via the literal strings.Contains fast path
 	// (the substring "a-b" appears at index 3-5 within
 	// "dat[a-b]ase") even though neither "a" nor "b" is a
@@ -584,9 +582,9 @@ func TestRuleBasedSuggestionsShortPartUsesWordBoundary(t *testing.T) {
 		t.Fatalf("tag 'x-y' should match body containing 'x-y' as a hyphen-joined phrase; got %v", suggestionsLiteralHyphen)
 	}
 
-	// Mixed-case workspace tag — regression for Devin Review
-	// ANALYSIS_0004 on commit 9b22f97. file.Service.AddTag
-	// normalises tags to lowercase, but a migration / raw-SQL
+	// Mixed-case workspace tag — regression guard.
+	// file.Service.AddTag normalises tags to lowercase, but a
+	// migration / raw-SQL
 	// insert / admin repair script could bypass that. The
 	// workspace-tag loop must normalise to lowercase before
 	// matching against the lowercased corpus, otherwise the
@@ -611,7 +609,7 @@ func TestRuleBasedSuggestionsShortPartUsesWordBoundary(t *testing.T) {
 }
 
 func TestRuleBasedSuggestionsRejectsAllEmptyPartsTag(t *testing.T) {
-	// Devin Review ANALYSIS_0005: a workspace tag composed entirely
+	// A workspace tag composed entirely
 	// of separator runs (e.g. "---" or "-") splits into all-empty
 	// parts. The empty-part skip means the inner loop never fails
 	// allPresent, so before this fix the tag was suggested for

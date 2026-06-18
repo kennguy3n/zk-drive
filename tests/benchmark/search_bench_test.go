@@ -7,7 +7,7 @@ import (
 	"github.com/kennguy3n/zk-drive/internal/search"
 )
 
-// searchP95Target is the workstream latency budget: p95 of a full-text
+// searchP95Target is the latency budget: p95 of a full-text
 // query under 500ms at 1M files. The seed size defaults to a modest
 // number so the benchmark is runnable on a laptop / CI box; set
 // BENCH_SEARCH_FILES=1000000 on a perf rig to measure the spec scale.

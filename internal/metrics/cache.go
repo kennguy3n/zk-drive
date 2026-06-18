@@ -8,8 +8,7 @@ import (
 // Cache layer labels. Closed set — adding a new cache layer means
 // adding a constant here, NOT free-form label strings at the call
 // site. Today only the permission cache exists (CacheLayerPerm);
-// the listing cache lands in a follow-up PR after we measure
-// permission-cache hit rate in production.
+// a listing cache is a possible future layer.
 const (
 	// CacheLayerPerm is the permission resolution read-through
 	// cache implemented in internal/permission.CachedRepository.
@@ -91,6 +90,6 @@ func (m *Metrics) registerCacheMetrics(reg prometheus.Registerer) {
 
 	m.cacheOpsTotal = auto.NewCounterVec(prometheus.CounterOpts{
 		Name: "zkdrive_cache_ops_total",
-		Help: "Total operations against the application-level caches in front of Postgres, partitioned by layer ('perm' = permission resolution cache; listing caches arrive in a follow-up), op ('read' = lookup attempt; 'write' = cache-fill after miss; 'bust' = proactive invalidation), and result ('hit' = positive cache hit; 'miss' = no entry, delegated to repo; 'negative_hit' = cached negative result served without DB; 'bust' = invalidation succeeded; 'error' = Redis-side failure, fell through to repo).",
+		Help: "Total operations against the application-level caches in front of Postgres, partitioned by layer ('perm' = permission resolution cache), op ('read' = lookup attempt; 'write' = cache-fill after miss; 'bust' = proactive invalidation), and result ('hit' = positive cache hit; 'miss' = no entry, delegated to repo; 'negative_hit' = cached negative result served without DB; 'bust' = invalidation succeeded; 'error' = Redis-side failure, fell through to repo).",
 	}, []string{"layer", "op", "result"})
 }

@@ -1,5 +1,5 @@
 // Package heartbeat gives the API server a pull-based liveness signal
-// for the background worker fleet (WS8 Observability & NoOps).
+// for the background worker fleet.
 //
 // The worker process and the API server are decoupled over JetStream
 // and never talk directly, so the server historically had no way to

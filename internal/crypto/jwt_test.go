@@ -369,7 +369,7 @@ func TestKeyManager_ReloadPropagatesRotationAcrossReplicas(t *testing.T) {
 	}
 
 	// Before B reloads, it has never seen the new kid → verification
-	// fails (this is exactly the 401 the review flagged).
+	// fails (this is exactly the 401 this test pins).
 	if _, err := replicaB.Parse(tokenFromA, &jwt.RegisteredClaims{}); err == nil {
 		t.Fatal("expected replicaB to reject token from new key before reload")
 	}

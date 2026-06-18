@@ -102,7 +102,7 @@ func NewExpansionService(pool *pgxpool.Pool) *ExpansionService {
 // api/drive and the sibling SummaryService/SuggestionService
 // setters. A (*OllamaClient)(nil) wrapped in LLMClient would slip
 // past the s.llm != nil check inside ExpandResult and NPE at
-// Generate(). Devin Review ANALYSIS_0006 on commit 348b13d.
+// Generate().
 func (s *ExpansionService) WithLLM(c LLMClient) *ExpansionService {
 	if typednil.IsTypedNil(c) {
 		s.llm = nil
@@ -119,7 +119,7 @@ func (s *ExpansionService) WithLLM(c LLMClient) *ExpansionService {
 // Same typed-nil guard rationale as WithLLM above. A typed-nil
 // resolver wrapped in WorkspaceLanguageResolver would pass
 // resolveWorkspaceLanguage's nil-check and NPE on
-// GetSearchLanguage. Devin Review ANALYSIS_0006 on commit 348b13d.
+// GetSearchLanguage.
 func (s *ExpansionService) WithLanguageResolver(r WorkspaceLanguageResolver) *ExpansionService {
 	if typednil.IsTypedNil(r) {
 		s.languageResolver = nil
@@ -152,16 +152,14 @@ func (s *ExpansionService) ExpandResult(ctx context.Context, workspaceID uuid.UU
 		// two AI endpoints stay JSON-shape-consistent for any
 		// third-party API consumers — the frontend's
 		// `data.terms ?? []` safety net only covers the React
-		// path. Devin Review ANALYSIS_0001 on commit b6164c0
-		// flagged the divergence.
+		// path.
 		return &ExpansionResult{Terms: []string{}}, nil
 	}
 
 	// Workspace tag vocabulary for the rule-based expansion pass.
-	// Deliberate divergences from SuggestionService.Suggest's tag
-	// query at internal/ai/autotag.go (the "recency-biased GROUP BY"
-	// query) — flagged by Devin Review ANALYSIS_0005 as inconsistent
-	// and worth documenting:
+	// Divergences from SuggestionService.Suggest's tag query at
+	// internal/ai/autotag.go (the "recency-biased GROUP BY" query)
+	// are deliberate and worth documenting:
 	//
 	//  - Ordering: alphabetical here vs. recency there. Query
 	//    expansion does NOT bias toward recently-used tags because a
@@ -210,7 +208,7 @@ LIMIT 512`, workspaceID)
 	// See the empty-query branch above for why we coalesce nil to
 	// an empty slice here — keep ExpandSearchQuery's JSON output
 	// shape stable across the rule-based, LLM-merged, and empty-
-	// result paths. Devin Review ANALYSIS_0001 on commit b6164c0.
+	// result paths.
 	terms := ruleBasedExpansion(query, workspaceTags)
 	if terms == nil {
 		terms = []string{}
@@ -342,7 +340,7 @@ func ruleBasedExpansion(query string, workspaceTags []string) []string {
 	// depth pattern matches autotag.go's workspace-tag loop (where
 	// t = strings.ToLower(t) is applied for the same reason) and the
 	// downstream canonicalTag is a backstop, not the primary
-	// invariant. Devin Review ANALYSIS_0003 on commit de78db5.
+	// invariant.
 	scores := make(map[string]int, len(workspaceTags))
 	for _, tag := range workspaceTags {
 		if tag == "" {

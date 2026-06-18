@@ -1,4 +1,4 @@
--- Guided setup wizard completion flag (WS8 8.2 Observability & NoOps).
+-- Guided setup wizard completion flag.
 --
 -- A fresh SME deployment boots with an empty database and no operator
 -- knowledge. The frontend drives a first-boot wizard (admin account →

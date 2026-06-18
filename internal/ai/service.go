@@ -106,12 +106,12 @@ type WorkspaceLanguageResolver interface {
 // distinguishable in operator logs while sharing a single
 // implementation.
 //
-// Devin Review ANALYSIS_0005 on commit b4b41dd flagged the
-// previous per-service duplication (SummaryService.resolveLanguage,
-// SuggestionService.resolveLanguage, ExpansionService.resolveLanguage
-// all had identical bodies). Extracting here collapses three
-// near-copies into one canonical implementation; the call sites
-// pass their own resolver and log scope.
+// This replaces the previous per-service duplication
+// (SummaryService.resolveLanguage, SuggestionService.resolveLanguage,
+// ExpansionService.resolveLanguage all had identical bodies).
+// Extracting here collapses three near-copies into one canonical
+// implementation; the call sites pass their own resolver and log
+// scope.
 func resolveWorkspaceLanguage(ctx context.Context, resolver WorkspaceLanguageResolver, workspaceID uuid.UUID, logScope string) string {
 	if resolver == nil {
 		return ""
@@ -145,11 +145,9 @@ func NewSummaryService(pool *pgxpool.Pool) *SummaryService {
 // and NPE at first Generate() call. Production wires from
 // cmd/server/main.go after a successful NewOllamaClient that
 // guarantees non-nil, but the guard keeps the contract honest for
-// future wiring sites (alt deployments, test fakes). Devin Review
-// ANALYSIS_0006 on commit 348b13d flagged the asymmetry; the
-// architecturally correct fix was extracting isTypedNil to
-// internal/typednil so both api/drive and internal/ai share one
-// guard.
+// future wiring sites (alt deployments, test fakes). isTypedNil is
+// extracted to internal/typednil so both api/drive and internal/ai
+// share one guard.
 func (s *SummaryService) WithLLM(c LLMClient) *SummaryService {
 	if typednil.IsTypedNil(c) {
 		s.llm = nil
@@ -169,7 +167,7 @@ func (s *SummaryService) WithLLM(c LLMClient) *SummaryService {
 // concrete resolver wrapped in the WorkspaceLanguageResolver
 // interface would pass resolveWorkspaceLanguage's `if resolver ==
 // nil` check at internal/ai/service.go:115 and NPE on
-// GetSearchLanguage. Devin Review ANALYSIS_0006 on commit 348b13d.
+// GetSearchLanguage.
 func (s *SummaryService) WithLanguageResolver(r WorkspaceLanguageResolver) *SummaryService {
 	if typednil.IsTypedNil(r) {
 		s.languageResolver = nil
@@ -202,11 +200,9 @@ func (s *SummaryService) Summarize(ctx context.Context, workspaceID, folderID uu
 		// trouble doesn't masquerade as 'folder not found' to the
 		// client. Standard repository pattern — see e.g.
 		// internal/workspace/repository.go:65,
-		// internal/sharing/repository.go:66. Devin Review
-		// ANALYSIS_0003 on PR #85 flagged this pre-existing
-		// pattern (it was first introduced before WS6 landed but
-		// fixing it alongside the autotag.go change keeps the two
-		// QueryRow call sites consistent).
+		// internal/sharing/repository.go:66. Only pgx.ErrNoRows
+		// maps to not-found here, keeping the two QueryRow call
+		// sites consistent.
 		if errors.Is(err, pgx.ErrNoRows) {
 			return "", fmt.Errorf("%w: %v", ErrFolderNotFound, err)
 		}
@@ -271,7 +267,7 @@ func (s *SummaryService) gatherFileContext(ctx context.Context, workspaceID, fol
 		if content != "" {
 			// truncatePreview cuts on a rune boundary so a multi-byte
 			// glyph at the byte boundary can't become invalid UTF-8
-			// in the LLM prompt — relevant now that WS6 ships
+			// in the LLM prompt — relevant because the service supports
 			// multilingual prompting and non-ASCII content_text is
 			// expected on French/German/Chinese/etc. workspaces.
 			previewBuf.WriteString(truncatePreview(content, previewBytesPerFile))

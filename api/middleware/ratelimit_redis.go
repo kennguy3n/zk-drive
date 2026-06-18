@@ -90,8 +90,8 @@ func RedisRateLimiter(ctx context.Context, client redis.UniversalClient, cfg Red
 	if wsRate <= 0 {
 		wsRate = DefaultWorkspaceRate
 	}
-	// In-memory fallback enforced when Redis is unreachable (WS8 8.4
-	// server self-healing). Previously a Redis outage failed fully
+	// In-memory fallback enforced when Redis is unreachable
+	// (server self-healing). Previously a Redis outage failed fully
 	// open — every request was allowed — which left the node with no
 	// flood protection at exactly the moment a dependency was already
 	// struggling. The fallback is the same per-replica token bucket

@@ -149,8 +149,7 @@ type Handler struct {
 // the sentinels could move to a shared sub-package
 // (e.g. internal/ai/aierr) — but a pure interface boundary at the
 // cost of a third package would be over-engineering for two error
-// constants. Devin Review ANALYSIS_0001 on PR #85 flagged the
-// earlier "no direct dependency" wording as overclaiming.
+// constants.
 type TagSuggester interface {
 	Suggest(ctx context.Context, workspaceID, fileID uuid.UUID) ([]string, error)
 }
@@ -230,11 +229,9 @@ func (h *Handler) WithWebhooks(p WebhookEventPublisher) *Handler {
 	// nil check at the boundary where it's obvious. Using isTypedNil
 	// rather than a `p.(*webhooks.Publisher)` type assertion avoids
 	// coupling this setter to the concrete type, matching the same
-	// pattern as WithTagSuggester / WithQueryExpander / WithPreviews
-	// — Devin Review ANALYSIS_0002 on commit 10bd9b9 noted the
-	// divergence (three interface-taking setters had been aligned on
-	// isTypedNil and two were stragglers). Now all four are
-	// consistent.
+	// pattern as WithTagSuggester / WithQueryExpander / WithPreviews.
+	// All four interface-taking setters guard with isTypedNil so they
+	// stay consistent.
 	if isTypedNil(p) {
 		h.webhooks = nil
 		return h
@@ -293,9 +290,8 @@ func (h *Handler) WithResponseCache(c *responsecache.Cache) *Handler {
 // readable (without renaming every With* setter call); the helper
 // itself lives in internal/typednil so the AI services in
 // internal/ai can share the same implementation via the same
-// guard semantics. Devin Review ANALYSIS_0006 on commit 348b13d
-// flagged the asymmetry between this package's handler-level
-// guards and internal/ai's service-level WithLLM /
+// guard semantics. This keeps this package's handler-level
+// guards symmetric with internal/ai's service-level WithLLM /
 // WithLanguageResolver setters — extracting was the
 // architecturally correct fix because api/drive imports
 // internal/ai (not the other way around) so the helper had to
@@ -419,9 +415,8 @@ func (h *Handler) WithEmail(s *email.Service) *Handler {
 // The typed-nil guard matches WithWebhooks / WithTagSuggester /
 // WithQueryExpander: a (*preview.PostgresRepository)(nil) wrapped
 // in preview.Repository would compare != nil under the interface
-// comparison and then NPE in handlePreviewURL's repo call. Devin
-// Review ANALYSIS_0002 on commit 10bd9b9 flagged this setter as
-// the last interface-taking setter without the guard.
+// comparison and then NPE in handlePreviewURL's repo call. This
+// setter takes the same interface-typed-nil guard as its siblings.
 func (h *Handler) WithPreviews(r preview.Repository) *Handler {
 	if isTypedNil(r) {
 		h.previews = nil

@@ -113,13 +113,13 @@ export interface TranslateApiErrorOptions {
 //   3. Otherwise return options.fallback if provided, else
 //      the generic "Something went wrong" copy.
 //
-// Devin Review BUG_0001 on commit bb909a1: the prior shape always
-// returned a non-empty string (last fallback `t("common.error")`),
-// so callers writing `translateApiError(e, t) || t("billing.X")`
-// at BillingPage.tsx:59/72 saw the right-hand side become dead
-// code. The fallback parameter replaces the generic slot directly,
-// keeping a single source of truth for the "no code, no message"
-// case while letting the call site provide page-specific copy.
+// A prior shape always returned a non-empty string (last fallback
+// `t("common.error")`), so callers writing
+// `translateApiError(e, t) || t("billing.X")` at BillingPage.tsx:59/72
+// saw the right-hand side become dead code. The fallback parameter
+// replaces the generic slot directly, keeping a single source of
+// truth for the "no code, no message" case while letting the call
+// site provide page-specific copy.
 export function translateApiError(
   err: unknown,
   t: TFunction,

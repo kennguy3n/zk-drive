@@ -1,5 +1,5 @@
 // Package natsutil holds the NATS reconnect policy shared by the
-// server and worker binaries (WS8 8.4 auto-healing). Both connect to
+// server and worker binaries (auto-healing). Both connect to
 // the same JetStream and must back off identically during a shared
 // outage; keeping the schedule in one place makes that consistency a
 // compile-time fact instead of a comment asking two files to be kept

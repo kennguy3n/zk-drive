@@ -1,6 +1,6 @@
 name: Security
 
-# Supply-chain and secret-hygiene gates (Workstream 6.7). Kept in a
+# Supply-chain and secret-hygiene gates. Kept in a
 # dedicated workflow rather than folded into ci.yml so the security
 # jobs evolve independently of the build/test pipeline and stay easy
 # to read as a single "what protects us" surface.

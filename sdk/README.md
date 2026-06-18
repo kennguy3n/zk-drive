@@ -10,7 +10,7 @@ eventual collab editor.
 | Crate             | Purpose                                                                                                                                                                  |
 | ----------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | `zk-sync-crypto`  | XChaCha20-Poly1305 envelope that is byte-for-byte compatible with `zk-object-fabric/encryption/client_sdk` (Go). Per-chunk AAD, convergent nonce option.                 |
-| `zk-sync-api`     | Typed HTTP / WebSocket client against ZK Drive: presigned upload/download, workspace change feed (built on PR #73), folder & file metadata.                              |
+| `zk-sync-api`     | Typed HTTP / WebSocket client against ZK Drive: presigned upload/download, workspace change feed, folder & file metadata.                              |
 | `zk-sync-auth`    | OAuth2 PKCE (RFC 7636) + a coalescing `TokenSource` backed by the OS keychain (`keyring` crate).                                                                         |
 | `zk-sync-engine`  | Local SQLite catalogue, cross-platform filesystem watcher (`notify`), remote poller (cursor + WebSocket), reconciliation loop, last-writer-wins conflict policy.         |
 | `zk-sync-shell`   | Embedding-friendly multi-workspace harness. Owns the registry of bindings, persists it as a JSON sidecar, exposes a serde-shaped `Command` / `ShellEvent` IPC surface, derives a cross-workspace tray state. Any GUI host (Tauri, Electron, native) drives the engine through this crate. |

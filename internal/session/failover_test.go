@@ -325,8 +325,8 @@ func TestFailoverFlushesRevocationsOnRecovery(t *testing.T) {
 }
 
 // TestFailoverValidateSessionDegradesOpenForUnknownSession is the
-// availability regression for the device-aware session gate (6.2)
-// under a Redis outage (WS8 8.4). A token whose session lives only in
+// availability regression for the device-aware session gate
+// under a Redis outage. A token whose session lives only in
 // Redis (created before the outage) must NOT be hard-401'd while
 // degraded: doing so would turn a transient Redis blip into a
 // fleet-wide forced re-login and contradict the IsRevoked hot path,

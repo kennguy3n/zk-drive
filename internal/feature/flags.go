@@ -111,7 +111,7 @@ func (s featureSet) with(keys ...string) featureSet {
 
 // Baseline features for Free/Starter: folders, files, share links and
 // basic search only — everything else is hidden until the workspace
-// upgrades. (Workstream 4.3.)
+// upgrades.
 var baselineFeatures = setOf(
 	FeatureFolders,
 	FeatureFiles,
@@ -143,8 +143,8 @@ var secureBusinessFeatures = businessFeatures.with(
 )
 
 // tierDefaults maps a billing tier to the feature set it enables by
-// default. Free and Starter share the same baseline (the workstream
-// groups them together as "Free/Starter").
+// default. Free and Starter share the same baseline (grouped
+// together as "Free/Starter").
 var tierDefaults = map[string]featureSet{
 	billing.TierFree:           baselineFeatures,
 	billing.TierStarter:        baselineFeatures,

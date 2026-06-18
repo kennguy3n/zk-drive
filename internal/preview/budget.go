@@ -33,8 +33,7 @@ const DefaultBudgetWindow = time.Hour
 const budgetBackoffBase = 15 * time.Second
 
 // MaxBudgetBackoff caps the exponential redelivery delay for a
-// budget-deferred preview job, per the task's "exponential backoff up
-// to 5 minutes" requirement.
+// budget-deferred preview job at 5 minutes.
 const MaxBudgetBackoff = 5 * time.Minute
 
 // QueueMaxDeliver is the JetStream redelivery cap for every preview

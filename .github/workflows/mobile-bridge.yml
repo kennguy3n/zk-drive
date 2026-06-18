@@ -4,8 +4,8 @@ name: Mobile Bridge
 # architecture and generates the Swift + Kotlin bindings from the single
 # proc-macro source of truth.
 #
-# This workflow is SCAFFOLDING for the follow-up native iOS / Android app
-# workstreams — it is intentionally NOT a merge gate. It runs only when
+# This workflow supports the native iOS / Android apps that consume the
+# bridge — it is intentionally NOT a merge gate. It runs only when
 # the bridge, the SDK crates it bridges, or this workflow change.
 on:
   push:

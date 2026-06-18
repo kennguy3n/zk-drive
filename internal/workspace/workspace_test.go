@@ -209,7 +209,7 @@ func TestServiceGetSearchLanguage_FallbackOnEmpty(t *testing.T) {
 }
 
 // TestServiceGetSearchLanguage_UsesHotPathQuery pins the hot-path
-// optimisation Devin Review surfaced: the search handler invokes
+// optimisation: the search handler invokes
 // GetSearchLanguage on every search request, so the service MUST
 // dispatch to the dedicated single-column GetSearchLanguageByID
 // helper (a one-column projection) and NOT to GetByID (a ten-

@@ -223,8 +223,8 @@ func (h *Handler) snapshotDocumentsForFolderSubtreeDelete(ctx context.Context, w
 // folders.Delete, emit after. Delegates to the same batch builder
 // used by the bulk handler so per-document changefeed writes flush
 // in ONE Postgres round-trip (multi-row INSERT) instead of N
-// sequential round-trips. Mirrors the same batching pattern PR73
-// applied to bulk file/folder mutations: deleting a project folder
+// sequential round-trips. Mirrors the same batching pattern used
+// for bulk file/folder mutations: deleting a project folder
 // with 50 documents previously cost 50 changefeed INSERTs; now it
 // costs 1.
 //

@@ -147,9 +147,8 @@ func TestErrorCodes_DistinctValues(t *testing.T) {
 // TestRespondInternalError_RedactsErr verifies that the underlying
 // err.Error() string is NEVER included in the JSON response body
 // — only the sanitised op label is exposed to the client. The
-// helper was introduced specifically to plug the err.Error() leak
-// flagged by Devin Review on PR #83 commit 97679c2; this test
-// ensures a future refactor can't accidentally reintroduce the
+// helper was introduced specifically to plug an err.Error() leak;
+// this test ensures a future refactor can't accidentally reintroduce the
 // leak. Run with `go test -run TestRespondInternalError_RedactsErr
 // ./api/middleware` after any change to RespondInternalError.
 func TestRespondInternalError_RedactsErr(t *testing.T) {

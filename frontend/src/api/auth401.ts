@@ -22,10 +22,10 @@
 // the canonical backend code list in i18n/errors.test.ts.
 //
 // This module is the single source of truth for the
-// frontend-backend 401-semantics contract. Earlier the soft-401
-// set lived inline in client.ts with only a comment for guidance;
-// PR #83 review flagged that the comment is not enforced. The
-// dedicated module + test fixes that.
+// frontend-backend 401-semantics contract. A soft-401 set living
+// inline in client.ts with only a comment for guidance is not
+// enforced; the dedicated module + test makes the contract
+// testable.
 
 // SESSION_DEAD_401_CODES — the JWT is dead. Clearing localStorage
 // and redirecting to /login is the correct interceptor behaviour.
@@ -52,7 +52,7 @@ export const SESSION_DEAD_401_CODES = new Set<string>([
   "AUTH_REVOCATION_CHECK_FAILED",
   // Session device fingerprint (User-Agent + IP network) no longer
   // matches the one captured at login — the token was replayed from
-  // a different browser or network (6.2 anomaly detection). The
+  // a different browser or network (session anomaly detection). The
   // session must be re-established, so clear it and route to /login;
   // the en.json copy already tells the user to sign in again.
   "AUTH_SESSION_ANOMALY",
@@ -81,7 +81,7 @@ export const NON_SESSION_401_CODES = new Set<string>([
   // Login-flow wrong email or password. The caller is at /login
   // (a logged-out visitor in the normal case; a still-
   // authenticated user who accidentally navigated back to /login
-  // in the edge case PR #83 review flagged). Either way, the
+  // in the edge case). Either way, the
   // session-clear-and-redirect interceptor is wrong here — the
   // page's catch block already renders "Email or password is
   // incorrect" via translateApiError.

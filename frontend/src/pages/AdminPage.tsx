@@ -166,8 +166,8 @@ function TabIcon({ id }: { id: Tab }) {
 
 // AdminShell wraps every Admin-suite page in the shared AppShell with a
 // consistent brand mark, section nav and theme/logout actions. It is kept
-// local to this file per the workstream's "build new primitives locally"
-// rule; the other admin pages render their own equivalent.
+// local to this file rather than shared; the other admin pages render
+// their own equivalent.
 function AdminShell({ active, children }: { active: AdminSection; children: ReactNode }) {
   const { t } = useTranslation();
   const { logout } = useAuth();
@@ -1117,7 +1117,7 @@ function SubsystemCard({ sub }: { sub: HealthSubsystem }) {
   );
 }
 
-// HealthTab renders the traffic-light health dashboard (WS8 8.1). It
+// HealthTab renders the traffic-light health dashboard. It
 // polls GET /api/admin/health-dashboard on mount and on a 15s interval
 // (auto-refresh, toggleable) so an operator watching the page sees a
 // subsystem recover/degrade without manual reloads. The endpoint always

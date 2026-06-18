@@ -281,9 +281,9 @@ function CmkSection() {
 }
 
 // --- Shared admin chrome ------------------------------------------------
-// Kept local to this file per the workstream's "build new primitives
-// locally" rule; AdminPage renders an equivalent shell. A coordinator can
-// later extract a shared <AdminShell> primitive into components/ui.
+// Kept local to this file rather than shared; AdminPage renders an
+// equivalent shell. A shared <AdminShell> primitive could later be
+// extracted into components/ui.
 
 type AdminSection = "admin" | "placement" | "encryption" | "kchat" | "billing";
 

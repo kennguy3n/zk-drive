@@ -626,7 +626,7 @@ key and must not see plaintext.
 | `ONLYOFFICE_SECRET` | _empty_ | Shared JWT secret matching the Document Server's `JWT_SECRET` (`JWT_ENABLED=true`). ZK Drive signs the editor config with it (HS256) and verifies the inbound save callback against it. When empty, the config is emitted unsigned and the callback skips verification — acceptable only for trusted local development. |
 | `ONLYOFFICE_MAX_DOCUMENT_MB` | `100` | Maximum size (MiB) of a single edited document the save callback will accept before rejecting it. Generous — real office documents are 1–50 MiB. Enforced on both the streaming path (against the advertised `Content-Length`) and the buffered fallback. |
 | `ONLYOFFICE_SAVE_MEMORY_BUDGET_MB` | `256` | Memory (MiB) budget for the **buffered fallback** save path. The fallback-concurrency cap is **derived** as `budget ÷ per-document`, so its worst case (`concurrency × per-document`) never exceeds the budget. Must be `>=` `ONLYOFFICE_MAX_DOCUMENT_MB` or the server refuses to start. With streaming saves (the normal path) this budget is rarely exercised. |
-| `ONLYOFFICE_STREAM_SAVE_MAX_CONCURRENT` | `0` (unlimited) | Optional high-watermark cap on **concurrent streaming saves**. `0` (the default) leaves the streaming path unbounded (the WS5 design — streaming uses constant memory). A positive value caps concurrent gateway PUTs; saves beyond the cap are shed with a retryable `503` (the Document Server keeps the bytes and retries), never blocked. Use it to protect the storage gateway from a thundering herd of editors closing documents at once. |
+| `ONLYOFFICE_STREAM_SAVE_MAX_CONCURRENT` | `0` (unlimited) | Optional high-watermark cap on **concurrent streaming saves**. `0` (the default) leaves the streaming path unbounded (by design — streaming uses constant memory). A positive value caps concurrent gateway PUTs; saves beyond the cap are shed with a retryable `503` (the Document Server keeps the bytes and retries), never blocked. Use it to protect the storage gateway from a thundering herd of editors closing documents at once. |
 
 **Save path: streaming, with a bounded buffered fallback.** The save
 callback relays the edited document from the Document Server straight to
@@ -756,8 +756,8 @@ this keeps the door to `'unsafe-inline'` permanently shut.
 
 `style-src` retains `'unsafe-inline'` because React's `style={}` prop
 compiles to inline `style=` attributes (governed by `style-src-attr`,
-which inherits `style-src`); removing it is a separate frontend
-workstream (refactor every inline style to a class). Camera, microphone
+which inherits `style-src`); removing it would require refactoring
+every inline style to a class. Camera, microphone
 and geolocation are denied outright via `Permissions-Policy`
 (`camera=()`, `microphone=()`, `geolocation=()`) — stricter than the
 "restrict to self" baseline, since the drive app uses none of them.

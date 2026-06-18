@@ -268,10 +268,9 @@ func (h *Handler) Create(w http.ResponseWriter, r *http.Request) {
 	// case we log the diagnostic server-side with the full err
 	// string and op label, and surface a static 400 message that
 	// tells the admin what to fix without revealing the resolved
-	// address. Devin Review ANALYSIS_0001 on commit a71f673 flagged
-	// the SSRF validator boundary specifically as the one 400 path
-	// in the redaction contract where err.Error() does leak useful
-	// recon info to an attacker (or even a curious admin).
+	// address. The SSRF validator boundary is the one 400 path in
+	// the redaction contract where err.Error() would otherwise leak
+	// useful recon info to an attacker (or even a curious admin).
 	if _, err := h.validator.Validate(r.Context(), req.URL); err != nil {
 		if errors.Is(err, webhooks.ErrURLBlocked) {
 			logging.FromContext(r.Context()).Warn("webhook create rejected blocked URL",

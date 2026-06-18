@@ -10,7 +10,7 @@ import (
 
 // guardedHTTPClient returns an *http.Client whose dialer refuses to
 // connect to link-local / metadata / multicast / unspecified addresses
-// (WS8 8.2 hardening). It exists solely for the first-boot setup
+// as a hardening measure. It exists solely for the first-boot setup
 // wizard's TestStorage probe, which issues an outbound HeadBucket to an
 // endpoint typed by an as-yet-unauthenticated caller. Without a guard
 // that pre-completion window is an SSRF lever: an attacker could point

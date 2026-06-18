@@ -5,8 +5,8 @@
 //!   * [`ChangefeedClient`] consumes
 //!     `GET /api/v1/workspaces/{id}/changes?since={cursor}` and
 //!     `WS  /api/v1/workspaces/{id}/changes/stream` — the workspace
-//!     change feed introduced in PR #73 (kennguy3n/zk-drive). The
-//!     sync engine uses this to discover remote mutations.
+//!     change feed. The sync engine uses this to discover remote
+//!     mutations.
 //!   * [`StorageClient`] negotiates presigned URLs for direct-to-
 //!     storage uploads / downloads (`POST /api/v1/files/{id}/uploads`,
 //!     `GET  /api/v1/files/{id}/downloads`).

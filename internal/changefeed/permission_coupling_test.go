@@ -11,8 +11,8 @@ import (
 // to the changefeed.Kind* constant that represents structural
 // mutations of that resource type for cache-invalidation purposes.
 //
-// The map is the structural coupling Devin Review ANALYSIS_0003
-// flagged: the permission cache's correctness depends on the
+// The map is the structural coupling this test enforces: the
+// permission cache's correctness depends on the
 // changefeed bust matrix firing for every (Kind, op) pair where
 // the op could reshape the inheritance tree of a resource of that
 // type. Until this test landed, the coupling was implicit — a
@@ -46,10 +46,9 @@ var resourceTypeToKind = map[string]string{
 // additionally require 'delete' to bust because deleting a
 // folder reshapes ancestry for descendant resources.
 //
-// This is the cross-package coupling that closes Devin Review
-// ANALYSIS_0003: the previous Kind-only audit
-// (TestShouldBustForMutation_ExhaustivelyAuditsKindOpMatrix in
-// service_test.go) caught new Kind constants but not changes to
+// This is the cross-package coupling the Kind-only audit cannot
+// cover: TestShouldBustForMutation_ExhaustivelyAuditsKindOpMatrix
+// in service_test.go catches new Kind constants but not changes to
 // the permission resource-type vocabulary that would silently
 // repurpose an existing Kind for cache-affecting mutations.
 //
@@ -60,7 +59,7 @@ var resourceTypeToKind = map[string]string{
 func TestPermissionResourceTypesCoupleToChangefeedKinds(t *testing.T) {
 	t.Parallel()
 
-	// Phase 1: every value in permission.AllResourceTypes
+	// Step 1: every value in permission.AllResourceTypes
 	// must have an entry in resourceTypeToKind. Adding a new
 	// ResourceType in models.go without updating this map
 	// would otherwise create a silent stale-cache risk.
@@ -73,7 +72,7 @@ func TestPermissionResourceTypesCoupleToChangefeedKinds(t *testing.T) {
 		t.Errorf("resourceTypeToKind has %d entries but permission.AllResourceTypes has %d — registry drift between packages", got, len(permission.AllResourceTypes))
 	}
 
-	// Phase 2: every mapped (resource_type → kind) must have
+	// Step 2: every mapped (resource_type → kind) must have
 	// its 'move' op set to bust=true in
 	// knownKindOpBustDecisions. A resource moving between
 	// parents with different grants is the canonical
@@ -90,7 +89,7 @@ func TestPermissionResourceTypesCoupleToChangefeedKinds(t *testing.T) {
 		}
 	}
 
-	// Phase 3: special case — KindFolder is the only kind
+	// Step 3: special case — KindFolder is the only kind
 	// whose 'delete' must also bust because deleting a folder
 	// shifts the ancestor chain for every descendant. File
 	// delete is bounded-stale (see service.go doc comment).

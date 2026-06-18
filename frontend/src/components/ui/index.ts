@@ -1,5 +1,5 @@
 // Barrel for the shared UI primitives. Import from "components/ui" so the
-// per-module workstreams pull in tokenised, KChat-themed components without
+// rest of the app pulls in tokenised, KChat-themed components without
 // reaching for inline styles or duplicating primitives.
 
 export { Button, type ButtonProps } from "./Button";

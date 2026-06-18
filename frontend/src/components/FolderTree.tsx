@@ -113,8 +113,7 @@ export default function FolderTree({
               small `paddingRight` on the `<li>` for visual breathing
               room. There is no `gap` between the link and the badge
               — any gap would be an unclickable dead zone for folder
-              navigation, which was the Devin Review finding on the
-              first cut of this refactor.
+              navigation.
             */}
             <Link
               to={`/drive/folder/${f.id}`}
@@ -133,7 +132,7 @@ export default function FolderTree({
               the PROPOSAL §3.3 "surface the mode everywhere a folder
               is rendered" contract: file list + breadcrumb + sidebar.
               EncryptionBadge falls back to the confidential rendering
-              for folders missing the field (pre-Phase-4 rows), so the
+              for folders missing the field (older rows), so the
               tree still renders cleanly.
             */}
             <EncryptionBadge mode={f.encryption_mode} tabbable={false} />

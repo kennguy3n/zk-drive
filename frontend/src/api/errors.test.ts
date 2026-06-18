@@ -1,20 +1,21 @@
 // Unit tests for translateApiError and friends. The goal is to lock
 // in the resolution-order contract (code -> server message -> caller
 // fallback -> generic copy) AND specifically guard against two
-// regressions we shipped in earlier PR #83 commits:
+// regressions:
 //
-//  - BUG_0001 (commit bb909a1): callers wrote `translateApiError(e, t)
+//  - Empty-string fallback: callers wrote `translateApiError(e, t)
 //    || t("billing.X")`, assuming the helper could return an empty
-//    string when no code and no server message were available. Final
-//    fallback was t("common.error"), so the `||` branch was dead.
-//    Fixed in 7d7b4fe by introducing the `options.fallback` parameter.
+//    string when no code and no server message were available. The
+//    final fallback is t("common.error"), so the `||` branch was
+//    dead. The `options.fallback` parameter handles that case
+//    explicitly.
 //
-//  - BUG_0002 (commit 929da57): i18next's returnEmptyString:false
+//  - Raw-key leak: i18next's returnEmptyString:false
 //    rejects an explicit defaultValue:"" and returns the raw key,
 //    so an unknown code surfaced "errors.SOME_NEW_CODE" verbatim to
 //    the user instead of falling through to the server-supplied
-//    message during deploy skew. Fixed in this commit by adding
-//    the `translated !== key` guard.
+//    message during deploy skew. The `translated !== key` guard
+//    prevents that.
 //
 // We isolate the test from the global i18next singleton (src/test/
 // setup.ts) by creating a fresh per-test instance so we can control
@@ -57,7 +58,7 @@ describe("translateApiError", () => {
   it("falls back to the server-supplied message when the code is unknown to the locale", async () => {
     // Deploy skew: the SPA's en.json doesn't ship a translation for
     // SOME_BRAND_NEW_CODE yet, but the backend sends it in the
-    // response. The bug we're guarding against (BUG_0002) is i18next
+    // response. The bug we're guarding against is i18next
     // returning the raw key string "errors.SOME_BRAND_NEW_CODE"
     // instead of falling through.
     const t = await makeT({
@@ -100,8 +101,8 @@ describe("translateApiError", () => {
   });
 
   it("never surfaces a raw `errors.*` key even when the locale rejects the empty default value", async () => {
-    // Direct regression test for BUG_0002. With returnEmptyString:
-    // false (production setting), i18next returns the key string
+    // Direct regression test for the raw-key leak. With
+    // returnEmptyString: false (production setting), i18next returns the key string
     // when defaultValue:"" is supplied and the key is unresolved.
     // We assert the helper NEVER lets that key leak to the UI.
     const t = await makeT({

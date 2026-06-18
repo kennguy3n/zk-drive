@@ -43,9 +43,8 @@ func (o *recordingDBObserver) snapshot() []dbObservation {
 // not consume a Postgres round-trip and would otherwise pollute
 // the result="error" counter and the duration histogram.
 //
-// Devin Review ANALYSIS_0003 flagged that the original
-// implementation had `defer r.observeQuery(...)` at the top of
-// the method, BEFORE validation. The fix moved the defer below
+// An earlier implementation had `defer r.observeQuery(...)` at the
+// top of the method, BEFORE validation; the defer now sits below
 // validation. This test ensures the contract holds going
 // forward.
 //
