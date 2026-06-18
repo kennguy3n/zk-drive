@@ -194,6 +194,16 @@ def make_docx(title, paragraphs):
     return buf.getvalue()
 
 
+def _xlsx_col(index):
+    """Excel column letters for a 0-based column index (0->A, 25->Z, 26->AA)."""
+    letters = ""
+    n = index + 1
+    while n:
+        n, rem = divmod(n - 1, 26)
+        letters = chr(ord("A") + rem) + letters
+    return letters
+
+
 def make_xlsx(rows):
     ct = (
         '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
@@ -226,7 +236,7 @@ def make_xlsx(rows):
     for ri, row in enumerate(rows, start=1):
         cells = []
         for ci, val in enumerate(row):
-            ref = f"{chr(ord('A') + ci)}{ri}"
+            ref = f"{_xlsx_col(ci)}{ri}"
             cells.append(
                 f'<c r="{ref}" t="inlineStr"><is><t>{_xml_escape(str(val))}</t></is></c>'
             )
@@ -628,13 +638,15 @@ def seed_lakeside():
     return {"workspace": auth["workspace_id"], "folders": {"matters": matters["id"], "briefs": briefs["id"]}}
 
 
-def derive_existing():
+def derive_existing(auth):
     """Idempotent path: primary admin already exists. Re-derive the FULL
     state (users, root folders, Engineering subfolders, and the Lakeside
     isolation tenant) from the live workspace so a re-run reproduces the
-    exact same state file a fresh seed would, without duplicating data."""
+    exact same state file a fresh seed would, without duplicating data.
+
+    `auth` is the already-parsed login response from main()'s idempotency
+    probe, reused here so the re-run authenticates the primary admin once."""
     print("Primary admin already exists — re-deriving state (idempotent re-run).")
-    auth = login("alice@northwind.example")
     token = auth["token"]
 
     users = {u["email"]: u["id"] for u in api("GET", "/api/admin/users", token=token).get("users", [])}
@@ -668,9 +680,9 @@ def derive_existing():
 
     # Lakeside isolation tenant — only present if it was seeded. Best-effort
     # so the idempotent re-run still succeeds against partial deployments.
-    lstatus, _ = _request("POST", BASE_URL + "/api/auth/login", body={"email": "morgan@lakeside.example", "password": PASSWORD})
+    lstatus, lpayload = _request("POST", BASE_URL + "/api/auth/login", body={"email": "morgan@lakeside.example", "password": PASSWORD})
     if lstatus == 200:
-        lauth = login("morgan@lakeside.example")
+        lauth = json.loads(lpayload.decode("utf-8"))
         lroots = {f["name"]: f["id"] for f in api("GET", "/api/folders?parent_folder_id=root", token=lauth["token"]).get("folders", [])}
         state["isolation"] = {
             "workspace": lauth["workspace_id"],
@@ -682,9 +694,9 @@ def derive_existing():
 def main():
     print(f"Seeding zk-drive at {BASE_URL}")
     # Idempotency guard: if the primary admin already exists, don't re-create.
-    status, _ = _request("POST", BASE_URL + "/api/auth/login", body={"email": "alice@northwind.example", "password": PASSWORD})
+    status, payload = _request("POST", BASE_URL + "/api/auth/login", body={"email": "alice@northwind.example", "password": PASSWORD})
     if status == 200:
-        state = derive_existing()
+        state = derive_existing(json.loads(payload.decode("utf-8")))
     else:
         northwind = seed_northwind()
         lakeside = seed_lakeside()
@@ -706,4 +718,14 @@ if __name__ == "__main__":
         main()
     except APIError as e:
         print(f"\nSEED FAILED: {e}", file=sys.stderr)
+        sys.exit(1)
+    except (urllib.error.URLError, OSError) as e:
+        print(
+            f"\nSEED FAILED: cannot reach the server at {BASE_URL} ({e}). "
+            "Is the local stack running?",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    except Exception as e:  # friendly catch-all for a developer-facing tool
+        print(f"\nSEED FAILED: unexpected error: {e!r}", file=sys.stderr)
         sys.exit(1)
