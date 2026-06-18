@@ -103,4 +103,44 @@ describe("CollabModeSelector", () => {
     // "zero-knowledge").
     expect(screen.getAllByText(/zero-knowledge/i).length).toBeGreaterThan(0);
   });
+
+  it("restores a Saving… affordance and disables every mode when globally disabled", () => {
+    render(
+      <CollabModeSelector
+        value="markdown"
+        onChange={() => undefined}
+        allowedModes={["markdown", "rich", "rich_presence"]}
+        encryptionMode="managed_encrypted"
+        disabled
+      />,
+    );
+    // The parent sets `disabled` while a setCollabMode PATCH is in flight,
+    // so every radio is forced off regardless of allowedModes.
+    radios().forEach((r) => expect(r.disabled).toBe(true));
+    // The textual "Saving…" hint is restored (role=status) and the group is
+    // flagged busy for assistive tech.
+    expect(screen.getByRole("status").textContent ?? "").toMatch(/saving/i);
+    expect(screen.getByRole("radiogroup").getAttribute("aria-busy")).toBe(
+      "true",
+    );
+  });
+
+  it("uses a custom busyLabel over the default Saving… hint when provided", () => {
+    render(
+      <CollabModeSelector
+        value="markdown"
+        onChange={() => undefined}
+        allowedModes={["markdown", "rich", "rich_presence"]}
+        encryptionMode="managed_encrypted"
+        disabled
+        busyLabel="Creating…"
+      />,
+    );
+    // The new-document dialog passes "Creating…" since there's no document
+    // to save yet; the hint and the radiogroup title reflect that label.
+    expect(screen.getByRole("status").textContent).toBe("Creating…");
+    expect(screen.getByRole("radiogroup").getAttribute("title")).toBe(
+      "Creating…",
+    );
+  });
 });
