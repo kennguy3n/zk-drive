@@ -136,9 +136,16 @@ export default function EncryptionBadge({
   // wins), so the pill is composed locally here from the same tone tokens
   // — see the PR description's coordinator follow-up proposing a Badge
   // `size="sm"` variant.
+  //
+  // The tone-matched border is not just decorative: in Windows High Contrast /
+  // forced-colors mode the user agent strips background colours but keeps
+  // borders (repainting them with a system colour), so without it the two
+  // privacy modes would become indistinguishable filled-less text. The border
+  // keeps the pill outlined and legible there while reading as a soft tint in
+  // normal mode.
   const toneClasses = isStrict
-    ? "bg-brand/10 text-brand"
-    : "bg-success/10 text-success";
+    ? "border border-brand/30 bg-brand/10 text-brand"
+    : "border border-success/30 bg-success/10 text-success";
   const dotClass = isStrict ? "bg-brand" : "bg-success";
   const isHeader = size === "header";
   const isIcon = size === "icon";
