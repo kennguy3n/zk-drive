@@ -146,7 +146,8 @@ test.describe("Demo Flow Screenshots", () => {
     await page.goto("/billing");
     await page.waitForLoadState("networkidle");
     await page.waitForTimeout(500);
-    await expect(page.getByText(/Plan:\s*business/i)).toBeVisible();
+    await expect(page.getByRole("heading", { name: "Your plan", exact: true })).toBeVisible();
+    await expect(page.getByRole("heading", { name: "Usage this period", exact: true })).toBeVisible();
     await page.screenshot({ path: `${screenshotDir}/13-billing.png`, fullPage: true });
   });
 
