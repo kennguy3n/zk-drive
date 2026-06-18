@@ -8,6 +8,7 @@ import {
   LogOut,
   MapPin,
   MessagesSquare,
+  RefreshCw,
   Users as UsersIcon,
   type LucideIcon,
 } from "lucide-react";
@@ -143,7 +144,22 @@ export default function PlacementPage() {
 
   return (
     <AdminShell active="placement">
-      <PageHeader title={t("placement.title")} description={t("placement.pageDescription")} />
+      <PageHeader
+        title={t("placement.title")}
+        description={t("placement.pageDescription")}
+        actions={
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={load}
+            disabled={loading}
+            aria-label={t("admin.refresh")}
+          >
+            <RefreshCw className={cn("h-4 w-4", loading && "animate-spin")} aria-hidden />
+            <span className="hidden sm:inline">{t("admin.refresh")}</span>
+          </Button>
+        }
+      />
 
       {error && <ErrorBanner message={error} />}
 
