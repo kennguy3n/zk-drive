@@ -1044,6 +1044,15 @@ func run() error {
 		collabRefresher = middleware.NewSessionTokenRefresher(jwtKeyManager)
 		slog.Info("auth provider: built-in (password + optional Google/Microsoft SSO)")
 	}
+	// The in-band refresher and the iam-core reverifier are wired in the
+	// mutually exclusive branches above and must never both be live —
+	// enforce it in code, not just by convention, so a future wiring
+	// change fails fast at startup instead of silently breaking collab
+	// reauth at runtime.
+	if err := validateCollabAuthWiring(iamCoreReverifier, collabRefresher); err != nil {
+		cancel()
+		return err
+	}
 
 	billingRepo := billing.NewPostgresRepository(pool)
 	billingSvc := billing.NewService(billingRepo)
@@ -2011,6 +2020,24 @@ func run() error {
 	shutdownErr := srv.Shutdown(shutdownCtx)
 	collabHub.Shutdown(shutdownCtx)
 	return shutdownErr
+}
+
+// validateCollabAuthWiring enforces the invariant that the in-band
+// MessageAuth refresher and the iam-core reverifier are never both
+// live. They are configured in mutually exclusive branches (built-in
+// auth wires the refresher; iam-core wires the reverifier) and they
+// are incompatible: applyRefresh rewrites a socket's rawToken to a
+// freshly-validated built-in session JWT, which the iam-core
+// reverifier would then re-check against the issuer JWKS on the reauth
+// ticker and always reject (signature mismatch), silently tearing down
+// the very socket the refresh was meant to keep alive. Returning an
+// error here turns a future wiring mistake into a fail-fast startup
+// error rather than a runtime collab-reauth break.
+func validateCollabAuthWiring(reverifier middleware.TokenReverifier, refresher middleware.CollabTokenRefresher) error {
+	if reverifier != nil && refresher != nil {
+		return errors.New("collab auth wiring: iam-core reverifier and in-band session-token refresher are mutually exclusive but both are set")
+	}
+	return nil
 }
 
 // spaHandler serves a Vite-built single-page app from `dir`. Concrete
