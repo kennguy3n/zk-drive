@@ -89,9 +89,13 @@ export default function ShareDialog({ resource, onClose }: Props) {
     setError(null);
 
     let maxDownloads: number | undefined;
-    if (linkMaxDownloads.trim()) {
-      const parsed = Number.parseInt(linkMaxDownloads, 10);
-      if (!Number.isFinite(parsed) || parsed < 1) {
+    const rawMaxDownloads = linkMaxDownloads.trim();
+    if (rawMaxDownloads) {
+      // Number() (not parseInt) so a decimal like "3.7" is rejected with the
+      // inline error rather than silently truncated to 3 — downloads are a
+      // whole-count cap, so a fractional value is a user mistake to surface.
+      const parsed = Number(rawMaxDownloads);
+      if (!Number.isInteger(parsed) || parsed < 1) {
         setMaxDownloadsError(t("share.maxDownloadsError"));
         setLinkAdvanced(true);
         return;
@@ -258,6 +262,7 @@ export default function ShareDialog({ resource, onClose }: Props) {
                         {...p}
                         type="number"
                         min={1}
+                        step={1}
                         value={linkMaxDownloads}
                         onChange={(e) => {
                           setLinkMaxDownloads(e.target.value);
