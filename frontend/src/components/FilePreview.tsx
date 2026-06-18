@@ -80,7 +80,17 @@ export default function FilePreview(props: FilePreviewProps) {
   // file-list rows that may sit outside a ToastProvider — never touches
   // that hook.
   if (size === "panel") {
-    return <PanelViewer {...props} url={url} failed={failed} onFail={onFail} />;
+    // key={fileID} remounts the panel when the previewed file changes, so its
+    // local download state can't leak from a prior file's in-flight download.
+    return (
+      <PanelViewer
+        key={fileID}
+        {...props}
+        url={url}
+        failed={failed}
+        onFail={onFail}
+      />
+    );
   }
   return <ThumbPreview {...props} url={url} failed={failed} onFail={onFail} />;
 }
