@@ -145,7 +145,16 @@ export default function EncryptionBadge({
   const textTone = isStrict ? "text-brand" : "text-success";
   const Icon = isStrict ? Lock : ShieldCheck;
   const badge = isIcon ? (
-    <span className={cn("inline-flex items-center justify-center", textTone)}>
+    // The icon-only density has no visible text, so it needs its own
+    // accessible name when it is NOT wrapped in the help <Link> (which already
+    // carries aria-label below). Giving the span role="img" + aria-label only
+    // in the linkToHelp={false} case keeps it announced for screen readers
+    // without double-labelling the link; the glyph itself stays aria-hidden.
+    <span
+      role={linkToHelp ? undefined : "img"}
+      aria-label={linkToHelp ? undefined : t("encryption.badgeAria", { label })}
+      className={cn("inline-flex items-center justify-center", textTone)}
+    >
       <Icon className="h-4 w-4 shrink-0" aria-hidden="true" />
     </span>
   ) : (

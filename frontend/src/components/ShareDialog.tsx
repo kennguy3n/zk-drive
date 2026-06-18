@@ -96,9 +96,15 @@ export default function ShareDialog({ resource, onClose }: Props) {
       // ("0x10") and signed input — all of which Number() would otherwise
       // coerce to a value the user never typed. Downloads are a whole-count
       // cap, so anything else is a mistake to surface inline rather than
-      // silently honour a coerced number.
+      // silently honour a coerced number. The upper bound keeps the value in
+      // the integer-exact range so a huge digit string can't be sent as a
+      // precision-lossy float (the server is still the authority on the cap).
       const parsed = Number(rawMaxDownloads);
-      if (!/^\d+$/.test(rawMaxDownloads) || parsed < 1) {
+      if (
+        !/^\d+$/.test(rawMaxDownloads) ||
+        parsed < 1 ||
+        parsed > Number.MAX_SAFE_INTEGER
+      ) {
         setMaxDownloadsError(t("share.maxDownloadsError"));
         setLinkAdvanced(true);
         return;
@@ -453,7 +459,11 @@ function ShareLinkCard({
       </div>
 
       <div className="flex flex-wrap gap-1.5">
-        <Badge tone="brand">{t(`share.role${capitalize(link.role)}`)}</Badge>
+        <Badge tone="brand">
+          {t(`share.role${capitalize(link.role)}`, {
+            defaultValue: capitalize(link.role),
+          })}
+        </Badge>
         <Badge tone={link.expires_at ? "warning" : "neutral"}>
           {link.expires_at
             ? t("share.expiresBadge", { date: formatDate(link.expires_at) })
@@ -483,7 +493,11 @@ function GuestInviteCard({ invite }: { invite: GuestInvite }) {
       <p className="text-sm text-fg">
         <strong className="font-semibold">{invite.email}</strong>{" "}
         <span className="text-muted">{t("share.as")}</span>{" "}
-        <Badge tone="brand">{t(`share.role${capitalize(invite.role)}`)}</Badge>
+        <Badge tone="brand">
+          {t(`share.role${capitalize(invite.role)}`, {
+            defaultValue: capitalize(invite.role),
+          })}
+        </Badge>
       </p>
     </div>
   );
