@@ -189,17 +189,19 @@ func (v *Verifier) keyForKID(ctx context.Context, kid string) (crypto.PublicKey,
 		return key, nil
 	}
 	if err := v.refresh(ctx, kid); err != nil {
-		// A throttled refresh means the JWKS was refetched within
+		// A throttled refresh (the JWKS was refetched within
 		// minRefreshInterval and the kid is absent from that recent
-		// key set — the key was definitively rotated out, not unknown
-		// because the issuer was unreachable. Fall through to the
-		// definitive "no key" rejection below so a rotated-out key is
-		// not misclassified as a transient outage (which would keep a
-		// federated collab socket open until the throttle window
-		// lapses).
-		if !errors.Is(err, errJWKSRefreshThrottled) {
-			// A failed JWKS fetch means the issuing authority could not
-			// be reached to learn the key — distinct from "the key does
+		// key set) or a definitive endpoint rejection (a 4xx the
+		// request itself earned, which retrying cannot recover) both
+		// mean the key is gone for good — not unknown because the
+		// issuer was unreachable. Fall through to the definitive "no
+		// key" rejection below so neither is misclassified as a
+		// transient outage (which would keep a federated collab socket
+		// open until the issuer next answers).
+		if !errors.Is(err, errJWKSRefreshThrottled) && !errors.Is(err, errJWKSEndpointRejected) {
+			// A genuine fetch failure — the issuing authority could not
+			// be reached (network error, timeout, 5xx, or a retriable
+			// 408/429) to learn the key, distinct from "the key does
 			// not exist". Tag it so Reverify reports it as transient
 			// (ErrReverifyUnavailable) rather than a definitive
 			// rejection; Verify flattens it (%v) and still 401s
@@ -239,6 +241,16 @@ func (v *Verifier) lookup(kid string) (crypto.PublicKey, bool) {
 // rotated-out key is not misclassified as a transient JWKS outage.
 var errJWKSRefreshThrottled = errors.New("iamcore: jwks refresh throttled")
 
+// errJWKSEndpointRejected is returned by fetchJWKS when the JWKS
+// endpoint answers with a definitive client error (a 4xx other than
+// the retriable 408/429): the request was rejected outright, so
+// retrying cannot recover the key — a decommissioned issuer or a
+// misconfigured JWKS URI, distinct from a 5xx/timeout outage that may
+// clear on its own. keyForKID maps it to a definitive rejection so
+// such a token closes a federated collab socket instead of holding it
+// open indefinitely on the fail-open transient path.
+var errJWKSEndpointRejected = errors.New("iamcore: jwks endpoint rejected request")
+
 // refresh fetches the JWKS from iam-core and replaces the cache. It is
 // guarded by fetchMu so concurrent callers collapse onto one network
 // round-trip; a caller that finds the kid already present (filled by
@@ -277,6 +289,18 @@ func (v *Verifier) refresh(ctx context.Context, wantKID string) error {
 	return nil
 }
 
+// isDefinitiveJWKSStatus reports whether an HTTP status from the JWKS
+// endpoint is a definitive client error — a 4xx that retrying will not
+// recover — rather than a transient one. 408 (Request Timeout) and 429
+// (Too Many Requests) are 4xx but explicitly retriable, so they are
+// treated as transient alongside every 5xx and transport failure.
+func isDefinitiveJWKSStatus(status int) bool {
+	if status == http.StatusRequestTimeout || status == http.StatusTooManyRequests {
+		return false
+	}
+	return status >= 400 && status < 500
+}
+
 func (v *Verifier) fetchJWKS(ctx context.Context) (map[string]crypto.PublicKey, time.Duration, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, v.jwksURI, nil)
 	if err != nil {
@@ -290,7 +314,15 @@ func (v *Verifier) fetchJWKS(ctx context.Context) (map[string]crypto.PublicKey, 
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		return nil, 0, fmt.Errorf("iamcore: jwks endpoint %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+		statusErr := fmt.Errorf("iamcore: jwks endpoint %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+		// A definitive client error (4xx other than the retriable
+		// 408/429) means the request was rejected outright — tag it so
+		// keyForKID treats it as definitive. 5xx and the retriable 4xx
+		// stay plain (transient) errors.
+		if isDefinitiveJWKSStatus(resp.StatusCode) {
+			return nil, 0, fmt.Errorf("%w: %w", errJWKSEndpointRejected, statusErr)
+		}
+		return nil, 0, statusErr
 	}
 	// Bound the body so a hostile or misconfigured endpoint cannot
 	// exhaust memory. A realistic JWKS is a few KB; 1 MiB is generous.

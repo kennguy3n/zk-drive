@@ -153,4 +153,47 @@ func TestVerifierReverify(t *testing.T) {
 			t.Fatalf("unreachable JWKS not classified as transient: %v", err)
 		}
 	})
+
+	t.Run("definitive 4xx from the JWKS endpoint is a definitive rejection", func(t *testing.T) {
+		// A 404 (or 403/400/410) from the JWKS URI is a definitive
+		// client error: the request was rejected outright, so retrying
+		// cannot recover the key. A decommissioned issuer or a
+		// misconfigured JWKS URL must close a federated collab socket,
+		// not be misclassified as a transient outage that holds the
+		// socket open until the endpoint "recovers" (it never will).
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			http.Error(w, "no such jwks", http.StatusNotFound)
+		}))
+		defer srv.Close()
+		v := NewVerifier("", "", srv.URL+"/jwks", nil)
+		err := v.Reverify(context.Background(), j.mint(t, j.kid, time.Hour))
+		if err == nil {
+			t.Fatal("Reverify(404 jwks) = nil, want error")
+		}
+		if errors.Is(err, apimw.ErrReverifyUnavailable) {
+			t.Fatalf("definitive 4xx classified as transient: %v", err)
+		}
+		if !errors.Is(err, ErrTokenInvalid) {
+			t.Fatalf("definitive 4xx not wrapped in ErrTokenInvalid: %v", err)
+		}
+	})
+
+	t.Run("5xx from the JWKS endpoint is transient", func(t *testing.T) {
+		// A 503 is a server-side, retriable outage — the issuer may
+		// recover — so it stays transient (ErrReverifyUnavailable) and
+		// the fail-open behavior keeps live sockets open rather than
+		// mass-dropping them on a blip.
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			http.Error(w, "unavailable", http.StatusServiceUnavailable)
+		}))
+		defer srv.Close()
+		v := NewVerifier("", "", srv.URL+"/jwks", nil)
+		err := v.Reverify(context.Background(), j.mint(t, j.kid, time.Hour))
+		if err == nil {
+			t.Fatal("Reverify(503 jwks) = nil, want error")
+		}
+		if !errors.Is(err, apimw.ErrReverifyUnavailable) {
+			t.Fatalf("5xx not classified as transient: %v", err)
+		}
+	})
 }
