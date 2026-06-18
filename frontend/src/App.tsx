@@ -35,7 +35,7 @@ const DocumentEditorPage = lazy(() => import("./pages/DocumentEditorPage"));
 // keeps shipping only the login + drive flow.
 const MfaChallengePage = lazy(() => import("./pages/MfaChallengePage"));
 const TwoFactorEnrollPage = lazy(() => import("./pages/TwoFactorEnrollPage"));
-// First-boot guided setup wizard (WS8 8.2). Off the critical path:
+// First-boot guided setup wizard. Off the critical path:
 // only a brand-new, unconfigured deployment ever renders it.
 const SetupWizardPage = lazy(() => import("./pages/SetupWizardPage"));
 
@@ -128,7 +128,7 @@ export default function App() {
               so these routes are not mounted and fall through to the
               catch-all redirect. */}
           {!iamCoreMode && <Route path="/signup" element={<SignupPage />} />}
-          {/* First-boot guided setup wizard (WS8 8.2). Unauthenticated:
+          {/* First-boot guided setup wizard. Unauthenticated:
               a fresh box has no admin yet. The page self-redirects to
               /drive if setup is already complete. */}
           <Route path="/setup" element={<SetupWizardPage />} />

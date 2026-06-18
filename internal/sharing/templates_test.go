@@ -15,7 +15,7 @@ import (
 func TestListTemplatesIsSorted(t *testing.T) {
 	got := ListTemplates()
 	if len(got) == 0 {
-		t.Fatalf("ListTemplates returned no templates — every release ships at least the five Phase-3 verticals")
+		t.Fatalf("ListTemplates returned no templates — every release ships at least the five built-in verticals")
 	}
 	names := make([]string, len(got))
 	for i, tmpl := range got {

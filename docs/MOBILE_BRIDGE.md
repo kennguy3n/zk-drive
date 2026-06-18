@@ -9,8 +9,8 @@ and **Android (Kotlin / Jetpack Compose)** apps build on:
 2. The server-side native push backend (`POST /api/push/register-device` +
    APNs / FCM fan-out from the notification publisher).
 
-The native apps themselves (BGAppRefreshTask / WorkManager wiring, UI) are
-delivered in follow-up workstreams; this is the contract they consume.
+The native apps themselves (BGAppRefreshTask / WorkManager wiring, UI) live in
+separate client repositories; this is the contract they consume.
 
 ---
 
@@ -284,5 +284,5 @@ architecture and generates the Swift + Kotlin bindings on each push touching
 - **macOS job**: installs the Apple targets and runs `build-ios.sh` to assemble
   the `ZkMobileBridge.xcframework`, uploading it as an artifact.
 
-The workflow is **not a merge gate** — it is scaffolding for the follow-up iOS /
-Android app workstreams to consume.
+The workflow is **not a merge gate** — it builds the bridge framework artifact
+for the native iOS / Android apps to consume.

@@ -1028,12 +1028,11 @@ mod tests {
 
     #[tokio::test]
     async fn mark_task_failed_transitions_running_workspace_to_error() {
-        // Regression for the ANALYSIS finding on PR #86 that
-        // `SyncHealth::Error` had no producer in the running set:
-        // the poller / engine spawn closures previously emitted
-        // `TaskFailed` but never updated the binding, so the
-        // `Error` variant was dead code as far as the state
-        // machine was concerned. After the fix, `mark_task_failed`
+        // Regression guard for `SyncHealth::Error` having no
+        // producer in the running set: the poller / engine spawn
+        // closures previously emitted `TaskFailed` but never updated
+        // the binding, so the `Error` variant was dead code as far
+        // as the state machine was concerned. `mark_task_failed`
         // is the single entry point that:
         //   (a) emits `ShellEvent::TaskFailed`,
         //   (b) flips the binding's `health` to `Error`,

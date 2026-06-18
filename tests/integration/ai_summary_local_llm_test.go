@@ -173,10 +173,9 @@ func TestThreadSummaryFallsBackWhenLocalLLMErrors(t *testing.T) {
 // production at cmd/server/main.go:622), so flipping the workspace's
 // search_language to "french" must cause BuildSummaryPrompt to emit
 // the French instruction half — and the captured Ollama request body
-// must reflect that. Devin Review ANALYSIS_0003 on PR #85 flagged
-// that without this test, the multilingual codepath was only
-// covered by unit tests in internal/ai/llm_test.go and the
-// integration wire-up was effectively dead.
+// must reflect that. Without this test, the multilingual codepath
+// would be covered only by unit tests in internal/ai/llm_test.go and
+// the integration wire-up would be effectively dead.
 func TestThreadSummaryLocalisesPromptByWorkspaceSearchLanguage(t *testing.T) {
 	const llmOutput = "Résumé du salon de discussion."
 	srv := newPromptCapturingOllamaServer(t, llmOutput)

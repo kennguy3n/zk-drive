@@ -205,7 +205,7 @@ func TestScanBytesEmitsClamdErrorVerdict(t *testing.T) {
 	}
 	// A configured scanner starts "available" (NewService does this);
 	// the struct literal here bypasses that constructor, so set it
-	// explicitly. This exercises the WS8 8.4 path where clamd is
+	// explicitly. This exercises the path where clamd is
 	// believed up but the dial fails at scan time: scanBytes must
 	// still propagate the error and leave the row Pending so the
 	// worker Naks once and the health loop subsequently marks the
@@ -225,8 +225,8 @@ func TestScanBytesEmitsClamdErrorVerdict(t *testing.T) {
 	}
 }
 
-// TestScanBytesSkipsWhenUnavailable pins the WS8 8.4 auto-healing
-// degrade path: once the worker's health loop has marked clamd
+// TestScanBytesSkipsWhenUnavailable pins the auto-healing degrade
+// path: once the worker's health loop has marked clamd
 // unreachable (available=false), scanBytes must NOT dial clamd at all
 // — it returns a clean verdict with a skip note and a nil error so the
 // worker ACKs the job instead of Nak-looping it forever while the

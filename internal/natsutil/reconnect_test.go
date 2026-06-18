@@ -5,7 +5,7 @@ import (
 	"time"
 )
 
-// TestReconnectDelay pins the WS8 8.4 exponential-backoff schedule: the
+// TestReconnectDelay pins the exponential-backoff schedule: the
 // pre-jitter base delay doubles each attempt from ReconnectBaseDelay and
 // clamps at ReconnectMaxDelay, so a brief blip recovers fast while a
 // prolonged outage settles into a low-frequency retry.

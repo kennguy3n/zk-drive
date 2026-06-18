@@ -8,10 +8,10 @@ import (
 	"testing"
 )
 
-// TestFetchRejectsOversizeBody pins the BUG-0001 fix: the index
+// TestFetchRejectsOversizeBody pins a correctness guard: the index
 // service's fetch() must reject downloads that exceed MaxDownloadBytes
-// rather than silently truncate them. Silent truncation was the
-// original bug — a >4 MiB PDF would be truncated, pdftotext would
+// rather than silently truncate them. Silent truncation would let a
+// >4 MiB PDF be truncated, pdftotext would
 // see a corrupt file, and the worker would NAK / redeliver forever.
 //
 // The test wires a stub HTTP server that serves MaxDownloadBytes+128

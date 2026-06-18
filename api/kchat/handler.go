@@ -350,11 +350,10 @@ func writeJSON(w http.ResponseWriter, status int, payload any) {
 // routes through middleware.RespondInternalError so the underlying
 // err string is logged server-side but never appears in the JSON
 // response body — same redaction contract as api/drive/helpers.go.
-// Devin Review BUG_0002 on commit a2e52fb flagged the prior
-// "drop err.Error() into the JSON message field" pattern as the
-// codebase's biggest 500 leak vector; fix is to thread *http.Request
-// through the helper so the slog logger can be reached for the
-// server-side log line.
+// This avoids the "drop err.Error() into the JSON message field"
+// pattern (a 500 leak vector) by threading *http.Request through the
+// helper so the slog logger can be reached for the server-side log
+// line.
 func writeServiceError(w http.ResponseWriter, r *http.Request, err error) {
 	switch {
 	case errors.Is(err, kchatpkg.ErrRoomNotFound),

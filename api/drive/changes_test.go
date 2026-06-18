@@ -602,7 +602,7 @@ func TestParseIntQuery_NegativeClipsToDefault(t *testing.T) {
 // parseInt64Query and parseIntQuery — negative values clip to def, not
 // to hardcoded 0. All current call sites pass def=0, so this test
 // guards against a future caller that passes a non-zero def silently
-// snapping to 0 (Devin Review ANALYSIS_0002 on commit 0ef1a82).
+// snapping to 0.
 func TestParseInt64Query_NegativeClipsToDefault(t *testing.T) {
 	t.Parallel()
 	req := httptest.NewRequest(http.MethodGet, "/api/changes?cursor=-1", nil)

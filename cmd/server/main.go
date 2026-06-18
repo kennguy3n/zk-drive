@@ -293,8 +293,8 @@ func run() error {
 	folderRepo := folder.NewPostgresRepository(dbRouter)
 	// Wire the workspace default-encryption-mode resolver so new root
 	// folders adopt the workspace's default_encryption_mode (Strict ZK
-	// as a default option, 6.4). Reads route through dbRouter to the
-	// replica (WS5) like the other data-plane repos.
+	// available as a default option). Reads route through dbRouter to the
+	// replica like the other data-plane repos.
 	folderSvc := folder.NewService(folderRepo, folder.WithWorkspaceDefaults(wsSvc))
 
 	fileRepo := file.NewPostgresRepository(dbRouter)
@@ -557,7 +557,7 @@ func run() error {
 		nc, nerr := nats.Connect(natsURL,
 			nats.Name("zk-drive-server"),
 			nats.MaxReconnects(-1),
-			// Exponential reconnect backoff + jitter (WS8 8.4),
+			// Exponential reconnect backoff + jitter,
 			// matching the worker: a NATS outage no longer drives a
 			// fixed 2s retry storm, and the status is surfaced in the
 			// log on disconnect / reconnect.
@@ -599,7 +599,7 @@ func run() error {
 	// (auth revocation, platform force-sign-out). When Redis is
 	// connected it is a *session.FailoverStore that transparently
 	// degrades to an in-memory store on a Redis outage and recovers
-	// when Redis returns (WS8 8.4); when Redis was never configured it
+	// when Redis returns; when Redis was never configured it
 	// stays nil and tokens behave like stateless JWTs (single-replica
 	// dev mode), preserving the previous behaviour.
 	var sessionStore session.Store
@@ -1176,7 +1176,7 @@ func run() error {
 		aiLLM = llm
 	}
 
-	// Comprehensive admin health dashboard (WS8). Each probe is given
+	// Comprehensive admin health dashboard. Each probe is given
 	// the live dependency handle the server already holds; nil handles
 	// (Redis / NATS / storage / ClamAV / ONLYOFFICE not configured)
 	// degrade to a grey "not configured" pill rather than a fault, so
@@ -1204,7 +1204,7 @@ func run() error {
 		WithHealthDashboard(healthDashboard).
 		WithResponseCache(respCache)
 
-	// Guided setup wizard (WS8 8.2). The capability snapshot is a pure
+	// Guided setup wizard. The capability snapshot is a pure
 	// function of the process config (it cannot change without a
 	// restart), so it is computed once here; the dynamic "has an admin
 	// / a workspace yet?" checks are read live from the DB per request.
@@ -1580,7 +1580,7 @@ func run() error {
 	}
 
 	r.Route("/api", func(r chi.Router) {
-		// Guided setup wizard (WS8 8.2). status + test-storage are
+		// Guided setup wizard. status + test-storage are
 		// public because the wizard runs before the first admin
 		// account exists; both self-disable once setup is complete.
 		// complete is admin-gated (it dismisses the wizard fleet-wide)

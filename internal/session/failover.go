@@ -15,7 +15,7 @@ import (
 
 // FailoverStore makes the Redis-backed session store seamlessly
 // degrade to a process-local MemoryStore when Redis is unreachable,
-// and recover automatically when it returns (WS8 8.4 server
+// and recover automatically when it returns (server
 // self-healing).
 //
 // Before this, a Redis outage that began *after* startup turned every
@@ -368,7 +368,7 @@ func (f *FailoverStore) ValidateSession(ctx context.Context, workspaceID uuid.UU
 	// fallback reports ErrSessionNotFound for it. Hard-401ing every such
 	// request would turn a transient Redis blip into a fleet-wide forced
 	// re-login — the exact operator burden FailoverStore exists to remove
-	// (WS8 8.4) — and would be inconsistent with the IsRevoked hot path,
+	// — and would be inconsistent with the IsRevoked hot path,
 	// which degrades OPEN on the same outage (an empty fallback reports
 	// "not revoked"). So a session unknown to the fallback is admitted
 	// while degraded: the JWT signature/expiry and the per-user

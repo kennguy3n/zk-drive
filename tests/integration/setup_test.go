@@ -288,7 +288,6 @@ func setupEnv(t *testing.T) *testEnv {
 	// covered by unit tests in internal/ai. Both services are
 	// language-resolver-aware (matching production wiring) so the
 	// multilingual prompt path is exercised end-to-end here too.
-	// Devin Review ANALYSIS_0002 on PR #85.
 	//
 	// A single OllamaClient is constructed up front and shared
 	// across all three AI services (tag-suggest, query-expand,
@@ -298,7 +297,6 @@ func setupEnv(t *testing.T) *testEnv {
 	// stateless (just endpoint URL + http.Client) so the previous
 	// shape had no behavioural impact, but a single instance is
 	// easier to reason about and matches production verbatim.
-	// Devin Review ANALYSIS_0003 on PR #85 flagged the divergence.
 	var ollamaClient ai.LLMClient
 	if endpoint := os.Getenv("OLLAMA_URL"); endpoint != "" {
 		llm, err := ai.NewOllamaClient(endpoint, os.Getenv("OLLAMA_MODEL"))
@@ -399,7 +397,7 @@ func setupEnv(t *testing.T) *testEnv {
 	// Without this, the integration harness would always exercise the
 	// English-fallback branch and the workspace.SearchLanguage →
 	// PromptLanguageFor codepath would only be covered by unit tests in
-	// internal/ai. Devin Review WS6 prompt-language change.
+	// internal/ai, so this asserts the multilingual prompt path end-to-end.
 	//
 	// Reuses the ollamaClient built earlier so the harness has the
 	// same single-instance shape as cmd/server/main.go:632-638.

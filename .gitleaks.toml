@@ -1,4 +1,4 @@
-# gitleaks configuration for zk-drive (Workstream 6.7).
+# gitleaks configuration for zk-drive.
 #
 # We extend gitleaks' built-in ruleset (AWS keys, private keys, GCP
 # service accounts, Stripe keys, JWTs, etc.) rather than redefining it,

@@ -53,7 +53,7 @@ const (
 // PreviewMaxAttempts is the number of consecutive failed deliveries
 // after which the worker marks a preview job preview_failed in the DB
 // and acks it (skips) rather than Nak-looping until JetStream's
-// QueueMaxDeliver cap. WS8 8.4 specifies three attempts: enough for a
+// QueueMaxDeliver cap. The retry budget is three attempts: enough for a
 // transient storage/renderer blip to recover, few enough that a
 // genuinely poison payload terminates within a couple of AckWait
 // cycles instead of producing minutes of redelivery churn.

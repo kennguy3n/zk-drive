@@ -34,9 +34,9 @@ pub struct WorkspaceEntry {
 /// Top-level config file.
 ///
 /// `version` is currently `1`; future migrations bump it and we add
-/// a `match` arm in [`AppConfig::load`]. Past Devin-style
-/// `Workstream` reviews have flagged "schema versions never read"
-/// as a smell, so we anchor the read path explicitly: any file we
+/// a `match` arm in [`AppConfig::load`]. Code reviews flag
+/// "schema versions never read" as a smell, so we anchor the read
+/// path explicitly: any file we
 /// can't recognise is rejected loudly rather than silently being
 /// treated as the latest format.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

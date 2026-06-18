@@ -6,8 +6,8 @@ import (
 )
 
 // opRateWindow is the trailing window over which the storage client
-// summarises its operation error rate for the admin health dashboard
-// (WS8). Five minutes is long enough that a low-traffic deployment
+// summarises its operation error rate for the admin health
+// dashboard. Five minutes is long enough that a low-traffic deployment
 // still has a meaningful denominator, yet short enough that a
 // recovered gateway clears the signal promptly.
 const opRateWindow = 5 * time.Minute

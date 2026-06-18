@@ -69,9 +69,8 @@ export interface CollabModeSelectorProps {
   // disabled forces every radio off, regardless of allowedModes. The
   // editor's settings dropdown sets this while a setCollabMode PATCH
   // is in flight so the user can't rapid-click a second mode-change
-  // before the first one resolves (Devin Review
-  // ANALYSIS_pr-review-job-d387c.._0004). Defaults to false so
-  // existing call sites (new-doc dialog) are unaffected.
+  // before the first one resolves. Defaults to false so existing
+  // call sites (new-doc dialog) are unaffected.
   disabled?: boolean;
   // busyLabel overrides the textual hint shown while `disabled` is true.
   // The editor's mode-switch (a PATCH) keeps the default "Saving…", but

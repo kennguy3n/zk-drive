@@ -16,8 +16,8 @@ import (
 )
 
 // freshMigratedPool spins up an isolated database, applies every
-// migration, and returns a connected pool. Used by the WS8 tests so
-// each exercises a pristine schema without touching the shared
+// migration, and returns a connected pool. Used by the observability
+// tests so each exercises a pristine schema without touching the shared
 // long-running fixture other integration tests rely on.
 func freshMigratedPool(t *testing.T) (context.Context, *pgxpool.Pool) {
 	t.Helper()
@@ -41,7 +41,7 @@ func freshMigratedPool(t *testing.T) (context.Context, *pgxpool.Pool) {
 }
 
 // TestSetupStatusLifecycle walks a fresh deployment through the
-// setup-status state machine the wizard depends on (WS8 8.2).
+// setup-status state machine the wizard depends on.
 func TestSetupStatusLifecycle(t *testing.T) {
 	ctx, pool := freshMigratedPool(t)
 
@@ -129,7 +129,7 @@ func TestSetupStatusLifecycle(t *testing.T) {
 }
 
 // TestHeartbeatStoreRoundTrip exercises the worker-liveness store the
-// dashboard reads (WS8 8.1 / 8.4): upsert refreshes in place, the
+// dashboard reads: upsert refreshes in place, the
 // worst status across instances wins, and the freshest instance's
 // detail is surfaced.
 func TestHeartbeatStoreRoundTrip(t *testing.T) {
@@ -238,7 +238,7 @@ func TestHeartbeatPruneReapsOnlyLongDeadRows(t *testing.T) {
 }
 
 // TestPreviewSetStatus pins the preview lifecycle column the
-// auto-healing worker writes when a job exhausts its retries (WS8 8.4).
+// auto-healing worker writes when a job exhausts its retries.
 func TestPreviewSetStatus(t *testing.T) {
 	ctx, pool := freshMigratedPool(t)
 	repo := preview.NewPostgresRepository(pool)

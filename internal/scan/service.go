@@ -56,7 +56,7 @@ type Service struct {
 	// worker's self-healing loop (cmd/worker) flips it to false when
 	// clamd stops responding and back to true when it recovers; while
 	// false, scanBytes degrades to "skip + mark clean" instead of
-	// Nak-looping the job forever (WS8 auto-healing). Defaults to true
+	// Nak-looping the job forever (auto-healing). Defaults to true
 	// for a configured scanner so the first job before the health
 	// loop's initial probe still attempts a real scan.
 	available atomic.Bool
@@ -206,8 +206,8 @@ func (s *Service) scanBytes(ctx context.Context, body []byte) (Verdict, error) {
 	// Auto-healing: when the worker's health loop has marked clamd
 	// unreachable, degrade to "skip + mark clean" and ACK the job
 	// (return a nil error) rather than Nak-looping it forever while
-	// the scanner is down. This is the deliberate NoOps availability
-	// tradeoff from WS8 8.4 — the alternative (Nak until clamd
+	// the scanner is down. This is the deliberate availability
+	// tradeoff — the alternative (Nak until clamd
 	// returns) wedges the whole scan subject and blocks every upload's
 	// post-processing. The skip is recorded in scan_detail so an
 	// operator can later re-scan once clamd recovers, and the admin

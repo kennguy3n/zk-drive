@@ -55,7 +55,7 @@ RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w -X github.com/ke
 # one-image-many-entrypoints pattern as the binaries above.
 RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w -X github.com/kennguy3n/zk-drive/internal/version.Version=${APP_VERSION}" -o /out/healthcheck ./cmd/healthcheck
 
-# ---- SBOM stage (Workstream 6.7) ----
+# ---- SBOM stage ----
 # Generate an SPDX-format Software Bill of Materials for the artifacts
 # that actually ship in the runtime image, so every release carries an
 # auditable supply-chain manifest a tenant security team can ingest
@@ -134,7 +134,7 @@ COPY --from=builder /out/audit-restore /app/audit-restore
 COPY --from=builder /out/compact /app/compact
 COPY --from=builder /out/healthcheck /app/healthcheck
 COPY --from=builder /src/migrations /app/migrations
-# SPDX SBOM (Workstream 6.7) shipped at a stable, documented path so a
+# SPDX SBOM shipped at a stable, documented path so a
 # running container can serve its own bill of materials to a scanner
 # or a compliance export without rebuilding.
 COPY --from=sbom /sbom.spdx.json /usr/share/sbom/zk-drive.spdx.json

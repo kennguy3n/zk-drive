@@ -30,8 +30,7 @@ func (s *stubExpander) Expand(ctx context.Context, workspaceID uuid.UUID, query 
 }
 
 // TestExpandSearchQueryCoalescesEmptyLanguage pins the response-
-// shape guard added per Devin Review ANALYSIS_0002 on commit
-// de78db5. The /api/search/expand endpoint must serialise
+// shape guard. The /api/search/expand endpoint must serialise
 // "language": "simple" (or whatever workspace.DefaultSearchLanguage
 // is at the time) instead of "language": "" when the upstream
 // ExpansionService resolver returned an empty string (nil resolver,
@@ -97,7 +96,7 @@ func TestExpandSearchQueryPreservesResolvedLanguage(t *testing.T) {
 }
 
 // TestExpandSearchQueryCoalescesNilTerms pins the terms nil-
-// coalesce guard added per Devin Review BUG_0001 on commit 744909a.
+// coalesce guard.
 // A third-party QueryExpander implementation can legally return
 // (nil, false, "", nil) and the handler must serialise
 // "terms": [] not "terms": null — same JSON-shape contract third-

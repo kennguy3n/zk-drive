@@ -81,7 +81,7 @@ const rowIconBtnCls =
 // it is styled here via the sanctioned `rgb(var(--token))` escape hatch so
 // it tracks the KChat tokens (and flips correctly in dark mode) and reads
 // as a ghost/secondary toolbar button. Giving it a className/variant prop
-// is a cross-workstream follow-up noted in the PR.
+// is a possible follow-up.
 const notifBtnStyle: React.CSSProperties = {
   display: "inline-flex",
   alignItems: "center",

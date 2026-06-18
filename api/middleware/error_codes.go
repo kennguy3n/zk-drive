@@ -81,10 +81,9 @@ const (
 	// Treating an unroutable request as 401 nudges clients to retry
 	// with a workspace selector (see frontend/src/api/client.ts
 	// interceptor) rather than show a "permission denied" screen,
-	// which is the correct UX for the missing-header case.
-	// Devin Review ANALYSIS_0002 on commit c964e26 flagged the
-	// earlier placement under the 403 group as a comment/status
-	// mismatch.
+	// which is the correct UX for the missing-header case. This code
+	// lives with the 401 group, not the 403 group, so the comment and
+	// the status it documents stay aligned.
 	ErrCodeNoWorkspace ErrorCode = "MISSING_WORKSPACE_CONTEXT"
 
 	// Rate limiting (429 Too Many Requests).
@@ -156,12 +155,12 @@ const (
 	// Distinct from UNSUPPORTED_OPERATION because the operation IS
 	// supported by this deployment — the *workspace* just hasn't
 	// been wired up to the storage fabric yet, which is a
-	// recoverable state. Devin Review BUG_0001 on commit 4f3b458
-	// caught the prior misuse of UNSUPPORTED_OPERATION at four
-	// admin handler call sites (GetPlacement, UpdateMFAPolicy
-	// adjacent paths, GetCMK, UpdateCMK), where the user-facing
-	// copy "This operation is not supported" misled admins into
-	// believing the feature didn't exist on the deployment.
+	// recoverable state. This replaces a prior misuse of
+	// UNSUPPORTED_OPERATION at four admin handler call sites
+	// (GetPlacement, UpdateMFAPolicy adjacent paths, GetCMK, UpdateCMK),
+	// where the user-facing copy "This operation is not supported"
+	// misled admins into believing the feature didn't exist on the
+	// deployment.
 	ErrCodeFabricNotProvisioned ErrorCode = "FABRIC_NOT_PROVISIONED"
 
 	// Share-link auth (401 / 403). Distinct from session auth so the
@@ -190,9 +189,9 @@ const (
 	// that code targets the workspace level (412 — the deployment
 	// supports Stripe but this workspace has no Stripe customer),
 	// while STRIPE_NOT_CONFIGURED targets the deployment level (501
-	// — Stripe is not wired up at all). Devin Review ANALYSIS_0007
-	// on commit a1dd83b flagged the symmetric BillingPage 501 case
-	// translating to the generic UNSUPPORTED_OPERATION copy.
+	// — Stripe is not wired up at all). Without it the symmetric
+	// BillingPage 501 case would fall back to the generic
+	// UNSUPPORTED_OPERATION copy.
 	ErrCodeStripeNotConfigured ErrorCode = "STRIPE_NOT_CONFIGURED"
 
 	// Service-level failures (5xx).
@@ -272,8 +271,7 @@ func respondErrorWithDetails(w http.ResponseWriter, status int, code ErrorCode, 
 // frontend's translateApiError correctly hides it (translates
 // INTERNAL_ERROR → "Something went wrong on our end"), but the
 // JSON `message` field still carried the leak for any other
-// consumer that read the response body. Devin Review BUG on PR
-// #83 commit 97679c2 flagged the pattern. The fix is two-fold:
+// consumer that read the response body. The fix is two-fold:
 // log the err server-side with full context (request_id,
 // workspace_id, user_id, op, err.Error()), and respond with
 // just the op — operators get the diagnostic, clients get a
@@ -318,11 +316,10 @@ func RespondInternalError(w http.ResponseWriter, r *http.Request, op string, err
 // went wrong on our end" (escalate). Naming the helper at the
 // call site preserves that signal.
 //
-// Devin Review ANALYSIS_0007 on commit a2e52fb noted that admin
-// handlers were dropping raw err.Error() into 502 responses
-// ("get placement: " + err.Error(), "put placement: " + err.Error()),
-// which leaked fabric provider URLs / driver state / endpoint
-// hints. The helper plugs that leak with the same machinery as
+// This plugs a leak where admin handlers dropped raw err.Error()
+// into 502 responses ("get placement: " + err.Error(), "put
+// placement: " + err.Error()), exposing fabric provider URLs /
+// driver state / endpoint hints, using the same machinery as
 // RespondInternalError.
 func RespondUpstreamError(w http.ResponseWriter, r *http.Request, op string, err error) {
 	logger := logging.FromContext(r.Context())

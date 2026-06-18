@@ -68,7 +68,7 @@ impl Engine {
     /// -- even when their `name` fields happen to be identical (e.g.
     /// two `readme.md` files in different remote folders).
     ///
-    /// PR5's downloader is responsible for moving the file to its
+    /// The downloader is responsible for moving the file to its
     /// final location under the resolved folder hierarchy and
     /// rewriting `local_path` on the catalogue row via `upsert` once
     /// it knows where the file actually belongs. Until then this stub
@@ -153,7 +153,7 @@ impl Engine {
                     //     here would silently delete the file on the
                     //     server on the next reconciliation.
                     //
-                    //   * `Evicted` means the LRU offline cache (PR5)
+                    //   * `Evicted` means the LRU offline cache
                     //     dropped the local bytes; the row's
                     //     content_hash still records the *last known*
                     //     server hash, so a recreate at the same path
@@ -170,7 +170,7 @@ impl Engine {
                     //     upload*, not a no-op -- the server no
                     //     longer holds these bytes. Without this
                     //     exclusion the dedup fires, the row stays
-                    //     `RemoteDeleted`, and the PR5 downloader
+                    //     `RemoteDeleted`, and the downloader
                     //     unlinks the user's freshly-saved file on
                     //     the next reconciliation pass.
                     if existing.content_hash == content_hash
@@ -222,7 +222,7 @@ impl Engine {
                     info!(?path, size_bytes, ?next, "local file change recorded");
                 } else {
                     // First time we've seen this path on disk. Allocate
-                    // a stub remote_file_id (the upload flow in PR5 will
+                    // a stub remote_file_id (the upload flow will
                     // remap it once the server assigns the real one) so
                     // the row is visible to status queries immediately.
                     let local_id = Uuid::new_v4();
@@ -336,7 +336,7 @@ impl Engine {
             // unknown resource_id (we missed the create -- e.g. catch-
             // up cursor was corrupted, replica gap, or a 4xx ate the
             // antecedent event) materialise a placeholder so the row
-            // becomes visible to the PR5 downloader instead of being
+            // becomes visible to the downloader instead of being
             // silently dropped on the floor.
             //
             // Including FileRenamed / FileMoved in this fallback closes
@@ -389,7 +389,7 @@ impl Engine {
                 // Use the dedicated `next_on_remote_delete` transition
                 // (NOT `next_on_remote_change`) so the catalogue row
                 // lands on `RemoteDeleted` instead of `RemoteDirty`.
-                // The downloader (PR5) pivots on this status to
+                // The downloader pivots on this status to
                 // decide between 'fetch new content' and 'unlink the
                 // local copy'; collapsing both into RemoteDirty would
                 // force it to re-stat the server for every dirty row
@@ -520,7 +520,7 @@ mod tests {
 
     #[tokio::test]
     async fn file_renamed_for_unknown_resource_materialises_placeholder() {
-        // R12 #2: previously, `FileRenamed` / `FileMoved` for a
+        // Previously, `FileRenamed` / `FileMoved` for a
         // resource id we'd never seen was silently dropped (no
         // `None` arm in the match). That meant a corrupted /
         // gapped change-feed cursor -- where the antecedent
@@ -571,10 +571,10 @@ mod tests {
     #[tokio::test]
     async fn file_moved_for_unknown_resource_materialises_placeholder() {
         // Companion to file_renamed_for_unknown_resource: same gap,
-        // different event kind. Locks the move-side of the R12 #2
-        // fix so a future split of FileRenamed and FileMoved into
-        // separate arms can't reintroduce the silent-drop on one of
-        // them.
+        // different event kind. Locks the move-side of the
+        // not-yet-seen handling so a future split of FileRenamed and
+        // FileMoved into separate arms can't reintroduce the
+        // silent-drop on one of them.
         let tempdir = TempDir::new().unwrap();
         let (engine, catalogue) = engine_for(&tempdir);
         let workspace_id = engine.config.workspace_id;
@@ -603,7 +603,7 @@ mod tests {
 
     #[tokio::test]
     async fn file_deleted_for_unknown_resource_is_correctly_a_noop() {
-        // R12 #2: the FileDeleted handler is the only Remote* file
+        // The FileDeleted handler is the only Remote* file
         // variant that deliberately does NOT fall through to the
         // placeholder path. A delete for a row we never saw to begin
         // with should not materialise a stub -- there is nothing
@@ -830,7 +830,7 @@ mod tests {
         // discovered" for unknown paths, leaving them invisible to
         // the engine's state machine. The engine now allocates a
         // stub remote_file_id and writes a LocalDirty row so the
-        // upload flow (PR5) can pick it up.
+        // upload flow can pick it up.
         let tempdir = TempDir::new().unwrap();
         let (engine, catalogue) = engine_for(&tempdir);
         let path = tempdir.path().join("draft.md");
@@ -862,7 +862,7 @@ mod tests {
         // SyncStatus::next_on_local_{upsert,delete} and
         // SyncStatus::next_on_remote_{change,delete}. Every starting
         // status must appear in every table so a future variant
-        // (e.g. PR5's PinPending) is impossible to add silently
+        // (e.g. a future PinPending) is impossible to add silently
         // without revisiting the truth tables.
         use SyncStatus::*;
         let upsert = [
@@ -925,7 +925,7 @@ mod tests {
 
     #[tokio::test]
     async fn local_revert_round_trips_through_uptodate_after_dirty() {
-        // Regression for R6 #1: handle_local used to flip status to
+        // Regression guard: handle_local used to flip status to
         // LocalDirty via set_status alone, leaving the catalogue's
         // content_hash + size_bytes stale. A subsequent revert to the
         // server's content (A -> B -> A) would short-circuit on the
@@ -935,7 +935,7 @@ mod tests {
         // With the atomic set_local_state path, the row's hash + size
         // track the on-disk bytes after every change. The revert path
         // is then driven by an explicit downloader/uploader
-        // reconciliation in PR5; here we lock down the *invariant*
+        // reconciliation; here we lock down the *invariant*
         // (catalogue hash mirrors on-disk hash after every change).
         let tempdir = TempDir::new().unwrap();
         let (engine, catalogue) = engine_for(&tempdir);
@@ -1003,9 +1003,9 @@ mod tests {
 
     #[tokio::test]
     async fn local_delete_marks_row_local_deleted_not_local_dirty() {
-        // Regression for R6 #2: handle_local Delete used to flip
+        // Regression guard: handle_local Delete used to flip
         // status to LocalDirty, which made it indistinguishable from
-        // a content change. The upload flow (PR5) needs to know that
+        // a content change. The upload flow needs to know that
         // this row is a tombstone candidate, not a content push.
         let tempdir = TempDir::new().unwrap();
         let (engine, catalogue) = engine_for(&tempdir);
@@ -1036,7 +1036,7 @@ mod tests {
 
     #[tokio::test]
     async fn local_upsert_after_delete_resurrects_to_local_dirty() {
-        // R6 #2 follow-up: a delete then immediate re-create at the
+        // A delete then immediate re-create at the
         // same path must transition LocalDeleted -> LocalDirty, not
         // stay LocalDeleted (which would lose the new content).
         let tempdir = TempDir::new().unwrap();
@@ -1074,7 +1074,7 @@ mod tests {
 
     #[tokio::test]
     async fn local_upsert_after_delete_with_same_content_returns_to_up_to_date() {
-        // R10 #2: prior to the status-aware dedup short-circuit, an
+        // Prior to the status-aware dedup short-circuit, an
         // identical-content recreation of a deleted file fell into
         // the early-out at `existing.content_hash == content_hash`,
         // which left the row at LocalDeleted. The upload flow would
@@ -1130,7 +1130,7 @@ mod tests {
     #[tokio::test]
     async fn local_upsert_after_evict_with_same_content_returns_to_up_to_date() {
         // Mirror of `local_upsert_after_delete_with_same_content_*`
-        // for the Evicted variant: PR5's LRU cache may unlink the
+        // for the Evicted variant: the LRU cache may unlink the
         // local copy while keeping the catalogue row pointing at the
         // server's last-known hash. When the user (or the pin
         // prefetcher) recreates the file with that exact hash, the
@@ -1171,13 +1171,13 @@ mod tests {
 
     #[tokio::test]
     async fn local_upsert_after_remote_delete_with_same_content_marks_local_dirty() {
-        // R11 #2: regression from R10 #4. After we introduced
-        // SyncStatus::RemoteDeleted, the handle_local Upsert dedup
+        // After SyncStatus::RemoteDeleted was introduced,
+        // the handle_local Upsert dedup
         // exclusion list still only mentioned LocalDeleted and
         // Evicted. That left RemoteDeleted in the "short-circuit on
         // matching hash" path, so a user re-saving a file the server
         // had tombstoned would silently stay RemoteDeleted -- and
-        // PR5's downloader, pivoting on status, would then unlink
+        // The downloader, pivoting on status, would then unlink
         // the user's freshly-saved file on the next reconciliation.
         //
         // Additionally, even after adding RemoteDeleted to the dedup
@@ -1230,10 +1230,10 @@ mod tests {
 
     #[tokio::test]
     async fn remote_file_deleted_marks_row_remote_deleted_not_remote_dirty() {
-        // R10 #4: FileDeleted used to route through
+        // FileDeleted used to route through
         // `next_on_remote_change`, landing the row on RemoteDirty.
         // That made it indistinguishable from a remote *update*, so
-        // the PR5 downloader could not pivot 'fetch new bytes' vs
+        // the downloader could not pivot 'fetch new bytes' vs
         // 'unlink the local copy' without an extra HEAD/metadata
         // round trip to the server -- defeating the whole point of
         // the change feed.
@@ -1286,7 +1286,7 @@ mod tests {
         // edits (downloader unlinks) or resurrect a file the server
         // intentionally killed (uploader pushes). Lock that this
         // routes through Conflict, leaving the resolution to
-        // ConflictPolicy in PR5.
+        // ConflictPolicy.
         let tempdir = TempDir::new().unwrap();
         let (engine, catalogue) = engine_for(&tempdir);
         let workspace_id = engine.config.workspace_id;

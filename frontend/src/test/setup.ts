@@ -33,8 +33,8 @@ if (!i18n.isInitialized) {
     // the same branch in tests as in production. Without this,
     // `t(unknownKey, {defaultValue: ""})` would return "" in
     // tests (the defaultValue path) but the raw key string in
-    // production (returnEmptyString rejecting ""). Devin Review
-    // ANALYSIS_0001 on commit 500a3a8 flagged the divergence.
+    // production (returnEmptyString rejecting "") — the test config
+    // mirrors production to avoid that divergence.
     returnEmptyString: false,
   });
 }

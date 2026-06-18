@@ -1111,11 +1111,10 @@ func writeJSON(w http.ResponseWriter, status int, payload any) {
 // present but cannot be parsed. Negative values clip to `def` so
 // a deliberately-malformed `?limit=-1` and an unset limit produce
 // the same observable page (matches api/drive/changes.go's helper
-// of the same name). Devin Review on PR #83 commit 97679c2
-// flagged that the admin and drive packages had divergent
-// signatures (admin silently swallowed bad input, drive returned
-// the error); harmonising to the drive shape lets the audit-log
-// endpoint surface a 400 for malformed pagination instead of
+// of the same name). The admin and drive packages previously had
+// divergent signatures (admin silently swallowed bad input, drive
+// returned the error); harmonising to the drive shape lets the
+// audit-log endpoint surface a 400 for malformed pagination instead of
 // silently using the default page size, which used to hide
 // frontend bugs that sent NaN limits.
 func parseIntQuery(r *http.Request, key string, def int) (int, error) {
@@ -1205,13 +1204,12 @@ func (h *Handler) UpdateBillingPlan(w http.ResponseWriter, r *http.Request) {
 // billing errors route through middleware.RespondInternalError so
 // the underlying err is logged server-side (with op, request path,
 // and method for operator diagnostics) but never appears in the
-// JSON response body. Devin Review BUG_0001 on commit a2e52fb
-// flagged the previous err.Error() leak: a billing-database
-// connection failure or stripe-call panic would have surfaced raw
-// internals in the JSON `message` field for any non-frontend
-// consumer that read response.data. Threading *http.Request was
-// the architecturally correct fix (per the rest of the WS5
-// redaction contract) rather than a static "billing check failed"
+// JSON response body. This closes a previous err.Error() leak: a
+// billing-database connection failure or stripe-call panic would
+// otherwise surface raw internals in the JSON `message` field for any
+// non-frontend consumer that read response.data. Threading *http.Request was
+// the architecturally correct fix (consistent with the rest of
+// the redaction contract) rather than a static "billing check failed"
 // fallback, since the operator log line carries actionable detail.
 func writeBillingError(w http.ResponseWriter, r *http.Request, err error) {
 	if middleware.WriteBillingError(w, err) {

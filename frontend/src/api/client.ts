@@ -1183,7 +1183,7 @@ export async function deleteRetentionPolicy(id: string): Promise<void> {
   await client.delete(`/admin/retention-policies/${id}`);
 }
 
-// --- Health dashboard (WS8 8.1) ------------------------------------
+// --- Health dashboard ----------------------------------------------
 
 // HealthColor mirrors internal/health.Color: the traffic-light signal
 // rendered as a coloured pill per subsystem. "unknown" means the
@@ -1216,7 +1216,7 @@ export async function fetchHealthDashboard(): Promise<HealthReport> {
   return data;
 }
 
-// --- Guided setup wizard (WS8 8.2) ---------------------------------
+// --- Guided setup wizard -------------------------------------------
 
 // SetupStep mirrors internal/setup.Step.
 export interface SetupStep {

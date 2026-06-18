@@ -155,15 +155,13 @@ func parseInt64Query(r *http.Request, name string, def int64) (int64, error) {
 // "negative-equals-unset" principle of least surprise. The service
 // layer also defends with `limit <= 0 -> DefaultLimit`, but clipping
 // at the edge means a negative limit and an unset limit produce the
-// same observable response. Devin Review ANALYSIS_0002 on commit
-// 0ef1a82 flagged the parseInt64Query asymmetry (was clipping to
-// hardcoded 0 instead of def); both helpers now share the same
-// negative-clipping contract.
+// same observable response. parseInt64Query previously clipped a
+// negative value to a hardcoded 0 instead of `def`; both helpers now
+// share the same negative-clipping contract.
 func parseIntQuery(r *http.Request, name string, def int) (int, error) {
 	// TrimSpace matches the admin package's parseIntQuery so a
 	// client passing `?limit=%2050` (url-encoded space + 50)
-	// resolves identically against both packages. Devin Review
-	// ANALYSIS_0002 on commit d4c16d4 flagged the divergence.
+	// resolves identically against both packages.
 	raw := strings.TrimSpace(r.URL.Query().Get(name))
 	if raw == "" {
 		return def, nil

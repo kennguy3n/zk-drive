@@ -73,7 +73,7 @@ func requireEnv(t *testing.T, envs map[string]string) {
 		"SMTP_FROM_ADDRESS", "SMTP_FROM_NAME",
 		"SMTP_TLS_MODE", "SMTP_TLS_SERVER_NAME",
 		"SMTP_TLS_INSECURE_SKIP_VERIFY",
-		// Permission-cache (WS8) env vars. Same convention as
+		// Permission-cache env vars. Same convention as
 		// the OTEL / audit / SMTP blocks above: any env var
 		// buildConfigFromEnv reads must live in this list so a
 		// CI runner with e.g. PERFORMANCE_CACHE_ENABLED=false
@@ -107,7 +107,7 @@ func requireEnv(t *testing.T, envs map[string]string) {
 		// e.g. PREVIEW_PRIORITY_WORKERS=1 must not bleed into tests that
 		// exercise the preview-default paths.
 		"PREVIEW_BUDGET_PER_WORKSPACE_HOUR", "PREVIEW_PRIORITY_WORKERS", "PREVIEW_STANDARD_WORKERS",
-		// Deployment profile (WS8 observability/NoOps). buildConfigFromEnv
+		// Deployment profile. buildConfigFromEnv
 		// reads ZKDRIVE_PROFILE via normaliseProfile; it must be
 		// baseline-cleared so a CI runner that exports ZKDRIVE_PROFILE=compact
 		// doesn't bleed the compact posture (tracing/metrics off) into tests
@@ -132,7 +132,7 @@ func requireEnv(t *testing.T, envs map[string]string) {
 		// non-default values (e.g. TestJWTKeyRefreshInterval) t.Setenv the
 		// specific var themselves after requireEnv runs.
 		"DB_MAX_CONNS", "DB_MIN_CONNS", "DB_MAX_CONN_IDLE_TIME",
-		// Read-replica pool sizing (WS5 follow-up). buildConfigFromEnv
+		// Read-replica pool sizing. buildConfigFromEnv
 		// reads these via dbReadMaxConnsFromEnv / dbReadMinConnsFromEnv,
 		// which treat unset identically to "inherit the primary". Clear
 		// them at baseline so a CI runner exporting e.g.
@@ -140,8 +140,8 @@ func requireEnv(t *testing.T, envs map[string]string) {
 		"DB_READ_MAX_CONNS", "DB_READ_MIN_CONNS",
 		"JWT_ALGORITHM", "JWT_KEY_REFRESH_INTERVAL",
 		// Pre-existing env vars that buildConfigFromEnv reads but were
-		// never baseline-cleared (closing the gap the WS5-follow-up
-		// review flagged). Each is read via os.Getenv / strings.TrimSpace
+		// never baseline-cleared (closing a test-isolation gap).
+		// Each is read via os.Getenv / strings.TrimSpace
 		// / parse{,NonNegative}IntDefault / parseBoolDefault, all of
 		// which treat an empty value identically to unset → the safe
 		// default (no replica / OIDC disabled / web-push disabled / proxy
@@ -153,7 +153,7 @@ func requireEnv(t *testing.T, envs map[string]string) {
 		//   - DATABASE_READ_URL: read-replica DSN (empty → primary only).
 		//   - IAM_CORE_*: OIDC SSO config (all empty → SSO disabled).
 		//   - PREVIEW_LIGHTWEIGHT/HEAVY/WORKER_CONCURRENCY/HEAVY_QUEUE_*:
-		//     WS5 preview-fleet sizing (empty → clamped defaults).
+		//     preview-fleet sizing (empty → clamped defaults).
 		//   - TRUSTED_PROXY_DEPTH: X-Forwarded-For trust depth.
 		//   - VAPID_*: Web Push keys (empty → push disabled).
 		//   - WS_PROXY_MODE: WS proxy-tier toggle (empty → in-process hub).
@@ -167,13 +167,13 @@ func requireEnv(t *testing.T, envs map[string]string) {
 		"WS_PROXY_MODE",
 		// ZKDRIVE_PROFILE selects the deployment profile and shifts
 		// env-var defaults. On this branch it shifts the JWT_ALGORITHM
-		// default (ES256 under production); for WS2 it also drives
+		// default (ES256 under production); it also drives
 		// applyProfileDefaults + validateProfile (production requires
 		// Redis + NATS). Baseline-clear it so a runner exporting
 		// ZKDRIVE_PROFILE=production cannot bleed an ES256 default into
 		// tests exercising the "auto" fallback, nor force the
 		// profile-validation path on every test here. ZKDRIVE_AUTO_MIGRATE
-		// is the WS2 auto-migrate toggle read by buildConfigFromEnv;
+		// is the auto-migrate toggle read by buildConfigFromEnv;
 		// cleared for the same reason. Profile-specific tests live in
 		// profiles_test.go and manage these vars themselves.
 		"ZKDRIVE_PROFILE", "ZKDRIVE_AUTO_MIGRATE",
@@ -1328,8 +1328,7 @@ func TestLoadErrorIsStdError(t *testing.T) {
 //     must self-expire in a window short enough that
 //     operators don't reach for FLUSHDB to recover.
 //
-// Devin Review ANALYSIS_0005 flagged the missing tests; this
-// suite pins the contract so future refactors can't silently
+// This suite pins the contract so future refactors can't silently
 // loosen the bounds.
 func TestClampPerformanceCacheTTL(t *testing.T) {
 	cases := []struct {

@@ -57,7 +57,7 @@ export default {
       },
       // KChat's signature violet gradients/glows, exposed as named
       // background-image utilities (bg-brand-gradient / bg-brand-glow) so
-      // workstreams reference one source instead of re-deriving hex stops.
+      // components reference one source instead of re-deriving hex stops.
       backgroundImage: {
         "brand-gradient":
           "linear-gradient(90deg, #382887 0%, #4B32C7 100%)",

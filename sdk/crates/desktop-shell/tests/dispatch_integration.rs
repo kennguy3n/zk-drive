@@ -350,7 +350,7 @@ async fn dispatch_get_status_returns_default_summary_after_add() {
     assert!(state.last_error.is_none());
 }
 
-/// Regression for ANALYSIS_0002 in PR #86: `remove_local_cache`
+/// Regression guard: `remove_local_cache`
 /// must close the SQLite `Connection` before unlinking the file so
 /// the on-disk catalogue is genuinely gone and a follow-up
 /// `AddWorkspace`/`GetStatus` cycle picks up the empty state. We
@@ -409,7 +409,7 @@ async fn remove_local_cache_actually_unlinks_the_db_file() {
 
 #[tokio::test]
 async fn resume_persisted_preserves_autostart_flag_on_disk() {
-    // Regression for the BUG flagged on PR #86:
+    // Regression guard:
     //
     // `add_workspace_at` always persists with `autostart=false`
     // (the just-constructed binding has not yet been restored).

@@ -848,9 +848,8 @@ func ptrUUID(u uuid.UUID) *uuid.UUID { return &u }
 // count check trips.
 //
 // This file is the canonical "did the bust audit happen?"
-// ledger. Per Devin Review ANALYSIS_0003 escalation: previously
-// the audit obligation was doc-comment-only; now it is enforced
-// at test-time.
+// ledger: the audit obligation used to be doc-comment-only and is
+// now enforced at test-time.
 var knownKindOpBustDecisions = map[string]bool{
 	// KindPermission — every grant-table mutation by
 	// definition changes access resolution. Always bust.
@@ -918,9 +917,8 @@ const expectedKindCount = 4
 //     through BatchRecord's recordingBuster) matches the
 //     expected decision.
 //
-// Per Devin Review ANALYSIS_0003 (escalated): the previous
-// failure mode was that adding a new Kind producing a
-// permission-affecting mutation (e.g., a hypothetical
+// The failure mode this guards against: adding a new Kind
+// producing a permission-affecting mutation (e.g., a hypothetical
 // KindWorkspace for workspace-level role changes) would leave
 // shouldBustForMutation returning false silently. No compile
 // error, no runtime panic, just stale cache entries until TTL

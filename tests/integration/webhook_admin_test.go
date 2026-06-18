@@ -21,8 +21,8 @@ import (
 //	POST   /api/admin/webhooks/{id}/resume     -> Resume
 //	DELETE /api/admin/webhooks/{id}            -> Delete
 //
-// Closes the round-9 integration-coverage gap flagged by Devin
-// Review: the in-process webhookCapture covers the emission paths,
+// Closes an integration-coverage gap: the in-process
+// webhookCapture covers the emission paths,
 // but the CRUD surface mounted at /api/admin/webhooks had no
 // integration coverage — only the handler unit tests exercised it,
 // which skips the chi mounting, admin middleware, Postgres

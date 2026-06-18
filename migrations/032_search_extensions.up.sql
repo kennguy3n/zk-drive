@@ -1,6 +1,6 @@
 -- Multilingual search backbone.
 --
--- Phase 4 search work — extends the existing FTS path (migration 019
+-- Multilingual search extensions — extend the existing FTS path (migration 019
 -- added files.content_text) with:
 --
 --   1. unaccent: accent-folding ("café" → "cafe"). Strips diacritics

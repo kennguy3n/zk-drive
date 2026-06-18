@@ -1,4 +1,4 @@
-// Package benchmark holds the Workstream-5 performance benchmark suite.
+// Package benchmark holds the performance benchmark suite.
 //
 // These are real, DB-backed benchmarks — they exercise the same
 // service/repository layer the HTTP handlers call, against a live
@@ -9,7 +9,7 @@
 // without a database, while `go test -bench` against a provisioned DB
 // produces meaningful numbers.
 //
-// Performance targets (from the workstream spec) are encoded as
+// Performance targets are encoded as
 // constants next to each benchmark and surfaced through b.ReportMetric
 // so a run prints, e.g., the achieved ops/s alongside the target and a
 // p95 latency where the spec calls for one. The benchmarks deliberately

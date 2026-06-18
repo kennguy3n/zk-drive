@@ -264,8 +264,8 @@ export default function PlacementPage() {
 }
 
 // --- Shared admin chrome ------------------------------------------------
-// Kept local to this file per the workstream's "build new primitives
-// locally" rule; AdminPage renders an equivalent shell.
+// Kept local to this file rather than shared; AdminPage renders an
+// equivalent shell.
 
 type AdminSection = "admin" | "placement" | "encryption" | "kchat" | "billing";
 

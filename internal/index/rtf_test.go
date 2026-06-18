@@ -150,8 +150,8 @@ func TestExtractRTFText_UCScopedToGroup(t *testing.T) {
 	}
 }
 
-// TestExtractRTFText_SurrogatePairsDecodeNonBMP pins the bug
-// surfaced by Devin Review: Word and other RTF writers emit
+// TestExtractRTFText_SurrogatePairsDecodeNonBMP pins surrogate-pair
+// decoding: Word and other RTF writers emit
 // non-BMP code points as a UTF-16 surrogate pair, e.g. an emoji
 // U+1F600 is written as `\u55357?\u56832?` under the implicit
 // \uc1 default. The high-surrogate \u escape consumes one ANSI

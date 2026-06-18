@@ -1,4 +1,4 @@
--- preview status on file versions (WS8 auto-healing).
+-- preview status on file versions.
 --
 -- preview_status tracks the async preview-render lifecycle for each
 -- uploaded version so a permanently-undecodable payload (or a

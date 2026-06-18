@@ -1,4 +1,4 @@
-// Package setup backs the guided first-boot setup wizard (WS8 8.2).
+// Package setup backs the guided first-boot setup wizard.
 //
 // A fresh SME deployment has an empty database and an operator with no
 // ops knowledge. The frontend walks them through a five-step wizard
