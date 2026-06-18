@@ -259,7 +259,10 @@ export default function FileBrowserPage() {
     try {
       await deleteFolder(target.id);
       await refresh();
-      setTreeReloadKey((k) => k + 1);
+      // The deleted folder is a child of the current view, so the sidebar
+      // (root folders only) is affected only when deleting at the root.
+      // Mirrors the create path; subfolder deletes leave the root unchanged.
+      if (currentFolderID === null) setTreeReloadKey((k) => k + 1);
       toast.success(t("drive.folderDeleted", { name: target.name }));
     } catch (e) {
       toast.error(translateApiError(e, t));
