@@ -108,7 +108,6 @@ export default function FileBrowserPage() {
   const { isEnabled } = useFeatures();
   const palette = useCommandPalette();
   const confirm = useConfirm();
-  const prompt = usePrompt();
   const pickResource = useResourcePicker();
   const toast = useToast();
   // openRef lets the onboarding "Upload your first file" card trigger the
@@ -323,35 +322,24 @@ export default function FileBrowserPage() {
     }
   };
 
-  const handleRenameFile = async (file: FileItem) => {
-    const name = await prompt({
-      title: t("drive.renameFileTitle"),
-      label: t("common.name"),
-      defaultValue: file.name,
-      required: true,
-      confirmLabel: t("common.rename"),
-    });
-    if (!name || name.trim() === "" || name.trim() === file.name) return;
+  // FileList owns the rename/delete confirmation dialogs (design-system
+  // useConfirm/usePrompt fired inside the row); the page just performs the
+  // mutation and refreshes once the list has collected a valid value.
+  const handleRenameFile = async (id: string, name: string) => {
     try {
-      await renameFile(file.id, name.trim());
+      await renameFile(id, name);
       refresh();
+      toast.success(t("drive.fileRenamed"));
     } catch (e) {
       toast.error(translateApiError(e, t));
     }
   };
 
   const handleDeleteFile = async (id: string) => {
-    const f = files.find((x) => x.id === id);
-    const ok = await confirm({
-      title: t("drive.deleteFileTitle"),
-      description: f ? t("drive.deleteFileDescription", { name: f.name }) : undefined,
-      tone: "danger",
-      confirmLabel: t("common.delete"),
-    });
-    if (!ok) return;
     try {
       await deleteFile(id);
       refresh();
+      toast.success(t("drive.fileDeleted"));
     } catch (e) {
       toast.error(translateApiError(e, t));
     }

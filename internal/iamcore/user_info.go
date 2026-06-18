@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/golang-jwt/jwt/v5"
 
@@ -31,6 +32,16 @@ type Identity struct {
 	// Roles are the raw iam-core role strings. MappedRole collapses
 	// them to a zk-drive role (admin/member).
 	Roles []string
+	// IssuedAt and ExpiresAt are the token's `iat` / `exp` claims.
+	// They are surfaced so consumers that enforce the token lifetime
+	// beyond the initial request — notably the collab WebSocket reauth
+	// pump — see the same expiry the access token actually carries and
+	// tear a federated realtime connection down when it lapses, exactly
+	// as a built-in session token's socket is. ExpiresAt is always set
+	// (the verifier requires `exp`); IssuedAt is zero when `iat` is
+	// absent.
+	IssuedAt  time.Time
+	ExpiresAt time.Time
 }
 
 // MappedRole returns the zk-drive role (user.RoleAdmin or
@@ -89,7 +100,7 @@ func (c registeredClaims) toIdentity() Identity {
 	if c.Subject != "" {
 		subject = c.Subject
 	}
-	return Identity{
+	id := Identity{
 		Subject:  subject,
 		Email:    strings.TrimSpace(strings.ToLower(c.Email)),
 		Name:     strings.TrimSpace(c.Name),
@@ -97,6 +108,13 @@ func (c registeredClaims) toIdentity() Identity {
 		TenantID: strings.TrimSpace(c.TenantID),
 		Roles:    c.Roles,
 	}
+	if c.IssuedAt != nil {
+		id.IssuedAt = c.IssuedAt.Time
+	}
+	if c.ExpiresAt != nil {
+		id.ExpiresAt = c.ExpiresAt.Time
+	}
+	return id
 }
 
 // claimStrings decodes an OIDC claim that may be encoded either as a

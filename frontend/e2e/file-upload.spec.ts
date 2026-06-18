@@ -40,7 +40,10 @@ test("uploaded file appears in the folder list", async ({ page }) => {
   await page.getByRole("button", { name: /^create$/i }).click();
 
   // 3. Open the folder and capture its server-assigned ID from the URL.
-  await page.getByRole("link", { name: folderName }).click();
+  //    A newly created root folder is rendered as a link in BOTH the sidebar
+  //    FolderTree and the main file list, so match the first one — either
+  //    link navigates to the same /drive/folder/<id> route.
+  await page.getByRole("link", { name: folderName }).first().click();
   await expect(page).toHaveURL(/\/drive\/folder\//);
   const folderID = page.url().split("/drive/folder/")[1];
   expect(folderID).toBeTruthy();

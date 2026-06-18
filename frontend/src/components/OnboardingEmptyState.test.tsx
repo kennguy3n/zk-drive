@@ -16,6 +16,8 @@ describe("OnboardingEmptyState", () => {
       />,
     );
     expect(screen.getByText("Welcome to Acme")).toBeTruthy();
+    // The drag-and-drop affordance hint is always present.
+    expect(screen.getByText(/drag and drop/i)).toBeTruthy();
     fireEvent.click(screen.getByText("Upload your first file"));
     fireEvent.click(screen.getByText("Create a folder"));
     expect(onUpload).toHaveBeenCalledOnce();

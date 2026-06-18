@@ -137,7 +137,15 @@ func (m *Middleware) Handler(next http.Handler) http.Handler {
 			return
 		}
 
-		reqCtx := apimw.WithIdentity(ctx, p.userID, p.workspaceID, p.role)
+		// Surface the access token's real iat/exp onto the downstream
+		// Claims (WithIdentity would synthesize an expiry-less iat),
+		// so the collab reauth pump enforces this federated socket's
+		// token lifetime. SessionID is deliberately left empty: iam-core
+		// tokens have no zk-drive session record, so the session
+		// validator must not run against them — token expiry and
+		// out-of-band revocation are instead re-checked by the
+		// TokenReverifier (the iam-core verifier) wired into collab.
+		reqCtx := apimw.WithIdentityClaims(ctx, p.userID, p.workspaceID, p.role, "", identity.IssuedAt, identity.ExpiresAt)
 		// Mirror the built-in auth middleware's observability
 		// enrichment so logs and traces carry the resolved identity in
 		// iam-core mode too: Enrich mutates the request-scoped logger

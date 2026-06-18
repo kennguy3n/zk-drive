@@ -461,8 +461,10 @@ func (h *DocumentHub) Handle(ctx context.Context, c *DocumentClient, f Frame) er
 	case MessageAwareness:
 		return h.handleAwareness(ctx, c, f)
 	case MessageAuth:
-		// Reserved; ignore in P2b. A future re-auth flow will
-		// dispatch on the sub-type here.
+		// In-band re-auth is handled by the transport's read pump (it
+		// owns the connection's auth state), not the hub: a MessageAuth
+		// frame carries a fresh bearer token, which has no bearing on
+		// document state. If one reaches the hub, ignore it.
 		return nil
 	default:
 		return errors.New("collab: unrecognised message type")

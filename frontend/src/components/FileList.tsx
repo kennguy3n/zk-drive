@@ -14,15 +14,12 @@ import { getDownloadURL, type FileItem } from "../api/client";
 import { isOfficeDocument } from "../collab/office";
 import FilePreview from "./FilePreview";
 import { EmptyState } from "./ui/EmptyState";
+import { useConfirm, usePrompt } from "./ui";
 import { cn } from "../lib/cn";
 
 export interface FileListProps {
   files: FileItem[];
-  // The page owns the rename flow (it prompts for the new name via the
-  // design-system usePrompt dialog) so this list stays presentational and
-  // free of native window.prompt. It receives the whole file so the
-  // prompt can seed the current name.
-  onRename: (file: FileItem) => void;
+  onRename: (id: string, name: string) => void;
   onDelete: (id: string) => void;
   // onShare is optional so callers that don't wire ShareDialog yet
   // keep working unchanged — the Share button is hidden when omitted.
@@ -82,7 +79,7 @@ interface FileRowProps {
   showSelection: boolean;
   selected: boolean;
   onToggleSelect?: (id: string) => void;
-  onRename: (file: FileItem) => void;
+  onRename: (id: string, name: string) => void;
   onDelete: (id: string) => void;
   onShare?: (file: FileItem) => void;
   onEdit?: (file: FileItem) => void;
@@ -104,6 +101,8 @@ function FileRow({
   onFocusRow,
 }: FileRowProps) {
   const { t } = useTranslation();
+  const confirm = useConfirm();
+  const prompt = usePrompt();
   return (
     <div
       role="row"
@@ -160,7 +159,16 @@ function FileRow({
         )}
         <button
           type="button"
-          onClick={() => onRename(f)}
+          onClick={async () => {
+            const name = await prompt({
+              title: t("drive.renameFileTitle"),
+              label: t("common.name"),
+              defaultValue: f.name,
+              confirmLabel: t("common.rename"),
+              required: true,
+            });
+            if (name && name.trim()) onRename(f.id, name.trim());
+          }}
           className={actionBtnCls}
           aria-label={t("common.rename")}
           title={t("common.rename")}
@@ -180,7 +188,16 @@ function FileRow({
         )}
         <button
           type="button"
-          onClick={() => onDelete(f.id)}
+          onClick={async () => {
+            const ok = await confirm({
+              title: t("drive.deleteFileTitle"),
+              description: t("drive.deleteFilePrompt", { name: f.name }),
+              confirmLabel: t("common.delete"),
+              cancelLabel: t("common.cancel"),
+              tone: "danger",
+            });
+            if (ok) onDelete(f.id);
+          }}
           className={cn(actionBtnCls, "hover:text-danger")}
           aria-label={t("common.delete")}
           title={t("common.delete")}
@@ -208,6 +225,7 @@ export default function FileList({
   onToggleSelect,
 }: FileListProps) {
   const { t } = useTranslation();
+  const confirm = useConfirm();
   const [sortKey, setSortKey] = useState<SortKey>("name");
   const [sortDir, setSortDir] = useState<SortDir>("asc");
   const [activeIndex, setActiveIndex] = useState(0);
@@ -287,7 +305,21 @@ export default function FileList({
       if (f) void handleDownload(f.id);
     } else if (e.key === "Delete") {
       const f = sorted[activeIndex];
-      if (f) onDelete(f.id);
+      if (f) {
+        // useConfirm is promise-based; the key handler can't be async
+        // itself (it must stay sync to call preventDefault on other
+        // keys), so fire the confirm flow in a detached async IIFE.
+        void (async () => {
+          const ok = await confirm({
+            title: t("drive.deleteFileTitle"),
+            description: t("drive.deleteFilePrompt", { name: f.name }),
+            confirmLabel: t("common.delete"),
+            cancelLabel: t("common.cancel"),
+            tone: "danger",
+          });
+          if (ok) onDelete(f.id);
+        })();
+      }
     } else if (e.key === " " && showSelection) {
       e.preventDefault();
       const f = sorted[activeIndex];

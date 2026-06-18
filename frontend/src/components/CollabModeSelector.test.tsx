@@ -1,30 +1,51 @@
 // CollabModeSelector tests — pin the capability-gating UX. The
 // component must:
-//   1. Render every mode as a radio option.
+//   1. Render every mode as a radio option in a labelled radiogroup.
 //   2. Disable modes outside the allowedModes list.
-//   3. Show the strict_zk-specific tooltip on disabled modes when
+//   3. Show the strict_zk-specific explanation on disabled modes when
 //      that's the folder's encryption_mode.
-//   4. Call onChange only when an allowed option is clicked.
+//   4. Call onChange only when an allowed option is activated.
 
-import { describe, it, expect, vi } from "vitest";
-import { render, fireEvent } from "@testing-library/react";
+import { describe, it, expect, vi, afterEach } from "vitest";
+import { render, screen, fireEvent, cleanup } from "@testing-library/react";
 import CollabModeSelector from "./CollabModeSelector";
 
-// radio() walks the rendered fieldset to find the <input> with the
-// given `value` attribute. The component's labels embed their
-// descriptions inside the label, so getByLabelText would have to
-// match the entire wrapped block — `value` is simpler and stable.
-function radio(container: HTMLElement, value: string): HTMLInputElement {
-  const input = container.querySelector<HTMLInputElement>(
-    `input[type="radio"][value="${value}"]`,
-  );
-  if (!input) throw new Error(`no radio for value=${value}`);
-  return input;
+// vitest runs with globals:false (see vite.config.ts), so React
+// Testing Library's automatic afterEach cleanup is not registered.
+// Unmount between tests manually, otherwise the screen.getAllByRole
+// queries below would see radios accumulated from prior renders.
+afterEach(cleanup);
+
+// Each mode renders as a KChat RadioCard, i.e. a <button role="radio">.
+// They're emitted in the fixed MODES order (markdown, rich,
+// rich_presence), so we can address them positionally.
+const MARKDOWN = 0;
+const RICH = 1;
+const RICH_PRESENCE = 2;
+
+function radios(): HTMLButtonElement[] {
+  return screen.getAllByRole("radio") as HTMLButtonElement[];
 }
 
 describe("CollabModeSelector", () => {
-  it("renders the three modes and disables rich + rich_presence in strict_zk", () => {
-    const { container } = render(
+  it("renders a labelled radiogroup with the three modes", () => {
+    render(
+      <CollabModeSelector
+        value="markdown"
+        onChange={() => undefined}
+        allowedModes={["markdown", "rich", "rich_presence"]}
+        encryptionMode="managed_encrypted"
+      />,
+    );
+    const group = screen.getByRole("radiogroup");
+    // Wired to an accessible name via aria-labelledby (the
+    // "Editor experience" label), so AT announces it as a group.
+    expect(group.getAttribute("aria-labelledby")).toBeTruthy();
+    expect(radios()).toHaveLength(3);
+  });
+
+  it("disables rich + rich_presence in strict_zk", () => {
+    render(
       <CollabModeSelector
         value="markdown"
         onChange={() => undefined}
@@ -32,14 +53,15 @@ describe("CollabModeSelector", () => {
         encryptionMode="strict_zk"
       />,
     );
-    expect(radio(container, "markdown").disabled).toBe(false);
-    expect(radio(container, "rich").disabled).toBe(true);
-    expect(radio(container, "rich_presence").disabled).toBe(true);
+    expect(radios()[MARKDOWN].disabled).toBe(false);
+    expect(radios()[RICH].disabled).toBe(true);
+    expect(radios()[RICH_PRESENCE].disabled).toBe(true);
+    expect(radios()[MARKDOWN].getAttribute("aria-checked")).toBe("true");
   });
 
   it("calls onChange when an allowed option is clicked", () => {
     const onChange = vi.fn();
-    const { container } = render(
+    render(
       <CollabModeSelector
         value="markdown"
         onChange={onChange}
@@ -47,14 +69,28 @@ describe("CollabModeSelector", () => {
         encryptionMode="managed_encrypted"
       />,
     );
-    fireEvent.click(radio(container, "rich"));
+    fireEvent.click(radios()[RICH]);
     expect(onChange).toHaveBeenCalledWith("rich");
-    fireEvent.click(radio(container, "rich_presence"));
+    fireEvent.click(radios()[RICH_PRESENCE]);
     expect(onChange).toHaveBeenCalledWith("rich_presence");
   });
 
-  it("surfaces a strict_zk-specific explanation in the tooltip of disabled modes", () => {
-    const { container } = render(
+  it("does not call onChange for a disabled (policy-gated) option", () => {
+    const onChange = vi.fn();
+    render(
+      <CollabModeSelector
+        value="markdown"
+        onChange={onChange}
+        allowedModes={["markdown"]}
+        encryptionMode="strict_zk"
+      />,
+    );
+    fireEvent.click(radios()[RICH]);
+    expect(onChange).not.toHaveBeenCalled();
+  });
+
+  it("surfaces a strict_zk-specific explanation on disabled modes", () => {
+    render(
       <CollabModeSelector
         value="markdown"
         onChange={() => undefined}
@@ -62,8 +98,49 @@ describe("CollabModeSelector", () => {
         encryptionMode="strict_zk"
       />,
     );
-    const richLabel = radio(container, "rich").closest("label");
-    expect(richLabel).not.toBeNull();
-    expect(richLabel?.getAttribute("title")).toMatch(/zero-knowledge/i);
+    // The disabled rich / rich_presence cards render the strict_zk
+    // rationale as their description (collab.disabledStrictZk mentions
+    // "zero-knowledge").
+    expect(screen.getAllByText(/zero-knowledge/i).length).toBeGreaterThan(0);
+  });
+
+  it("restores a Saving… affordance and disables every mode when globally disabled", () => {
+    render(
+      <CollabModeSelector
+        value="markdown"
+        onChange={() => undefined}
+        allowedModes={["markdown", "rich", "rich_presence"]}
+        encryptionMode="managed_encrypted"
+        disabled
+      />,
+    );
+    // The parent sets `disabled` while a setCollabMode PATCH is in flight,
+    // so every radio is forced off regardless of allowedModes.
+    radios().forEach((r) => expect(r.disabled).toBe(true));
+    // The textual "Saving…" hint is restored (role=status) and the group is
+    // flagged busy for assistive tech.
+    expect(screen.getByRole("status").textContent ?? "").toMatch(/saving/i);
+    expect(screen.getByRole("radiogroup").getAttribute("aria-busy")).toBe(
+      "true",
+    );
+  });
+
+  it("uses a custom busyLabel over the default Saving… hint when provided", () => {
+    render(
+      <CollabModeSelector
+        value="markdown"
+        onChange={() => undefined}
+        allowedModes={["markdown", "rich", "rich_presence"]}
+        encryptionMode="managed_encrypted"
+        disabled
+        busyLabel="Creating…"
+      />,
+    );
+    // The new-document dialog passes "Creating…" since there's no document
+    // to save yet; the hint and the radiogroup title reflect that label.
+    expect(screen.getByRole("status").textContent).toBe("Creating…");
+    expect(screen.getByRole("radiogroup").getAttribute("title")).toBe(
+      "Creating…",
+    );
   });
 });

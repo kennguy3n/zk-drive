@@ -12,12 +12,21 @@ export interface UploadButtonProps {
   // (e.g. the onboarding "Upload your first file" card). Optional so
   // existing callers are unaffected.
   openRef?: React.MutableRefObject<(() => void) | null>;
+  /** Button variant — defaults to the brand gradient primary CTA. */
+  variant?: "primary" | "gradient" | "secondary" | "ghost";
+  size?: "sm" | "md" | "lg";
 }
 
-// UploadButton hides the file input behind the design-system Button and
-// runs the three-step presigned-URL flow defined in api/client.ts. Errors
-// bubble up through an inline message so the user isn't left guessing.
-export default function UploadButton({ folderID, onUploaded, openRef }: UploadButtonProps) {
+// UploadButton hides the file input behind a styled button and runs the
+// three-step presigned-URL flow defined in api/client.ts. Errors bubble
+// up through an inline message so the user isn't left guessing.
+export default function UploadButton({
+  folderID,
+  onUploaded,
+  openRef,
+  variant = "gradient",
+  size = "md",
+}: UploadButtonProps) {
   const { t } = useTranslation();
   const inputRef = useRef<HTMLInputElement>(null);
   const [busy, setBusy] = useState(false);
@@ -53,20 +62,15 @@ export default function UploadButton({ folderID, onUploaded, openRef }: UploadBu
     <div className="inline-flex items-center gap-2">
       <Button
         type="button"
-        variant="primary"
-        size="md"
+        variant={variant}
+        size={size}
         loading={busy}
         onClick={() => inputRef.current?.click()}
       >
         {!busy && <Upload className="h-4 w-4" aria-hidden="true" />}
         {busy ? t("drive.uploading") : t("drive.uploadFile")}
       </Button>
-      <input
-        ref={inputRef}
-        type="file"
-        onChange={handleChange}
-        className="hidden"
-      />
+      <input ref={inputRef} type="file" onChange={handleChange} className="hidden" />
       {error ? (
         <span role="alert" className="text-xs text-danger">
           {error}

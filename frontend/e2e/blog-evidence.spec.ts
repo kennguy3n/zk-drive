@@ -144,7 +144,7 @@ describe("admin owner journeys", () => {
       [/^retention$/i, "22-admin-retention"],
       [/^storage$/i, "23-admin-storage"],
     ] as const) {
-      const btn = page.getByRole("button", { name: tab }).first();
+      const btn = page.getByRole("tab", { name: tab }).first();
       if (await btn.count()) {
         await btn.click();
         await page.waitForTimeout(500);
@@ -177,13 +177,13 @@ describe("compliance + ops", () => {
   test("admin health (observability / NoOps)", async ({ page }) => {
     await page.goto("/admin");
     await page.waitForLoadState("networkidle");
-    const health = page.getByRole("button", { name: /^health$/i }).first();
+    const health = page.getByRole("tab", { name: /^health$/i }).first();
     if (await health.count()) {
       await health.click();
       await page.waitForTimeout(700);
       await shot(page, "24-admin-health");
     }
-    const storage = page.getByRole("button", { name: /^storage$/i }).first();
+    const storage = page.getByRole("tab", { name: /^storage$/i }).first();
     if (await storage.count()) {
       await storage.click();
       await page.waitForTimeout(500);

@@ -2,68 +2,101 @@ import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import { useTranslation } from "react-i18next";
 import { listFolders, type Folder } from "../api/client";
+import { translateApiError } from "../api/errors";
 import EncryptionBadge from "./EncryptionBadge";
+import { FolderTreeSkeleton } from "./ui";
+import { cn } from "../lib/cn";
 
 // FolderTree is a one-level tree: it shows the workspace root plus
 // direct children of the current folder. A full recursive tree is a
 // follow-up enhancement.
-export default function FolderTree({ currentFolderID }: { currentFolderID: string | null }) {
+export default function FolderTree({
+  currentFolderID,
+  reloadKey = 0,
+}: {
+  currentFolderID: string | null;
+  // Incremented by the parent after a root-level folder mutation so the
+  // tree refetches even when currentFolderID is unchanged (e.g. creating
+  // or deleting a folder without navigating away from the current view).
+  reloadKey?: number;
+}) {
   const { t } = useTranslation();
   const [rootFolders, setRootFolders] = useState<Folder[]>([]);
   const [error, setError] = useState<string | null>(null);
+  const [loading, setLoading] = useState(true);
 
   useEffect(() => {
     let cancelled = false;
+    setLoading(true);
+    // Clear any prior error at the start of the (re-)fetch so a stale
+    // failure message can't render alongside the loading skeleton during
+    // a navigation- or reloadKey-driven refetch.
+    setError(null);
     listFolders(null)
       .then((list) => {
-        if (!cancelled) setRootFolders(list);
+        if (!cancelled) {
+          setRootFolders(list);
+          setError(null);
+        }
       })
       .catch((err) => {
-        if (!cancelled) setError(String(err?.message ?? err));
+        if (!cancelled) setError(translateApiError(err, t));
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false);
       });
     return () => {
       cancelled = true;
     };
-  }, [currentFolderID]);
+  }, [currentFolderID, reloadKey, t]);
+
+  const rowBase =
+    "flex items-center rounded-lg text-sm transition-colors hover:bg-surface-2";
 
   return (
     <aside
-      style={{
-        width: 240,
-        padding: 16,
-        borderRight: "1px solid #e5e7eb",
-        background: "white",
-        minHeight: "100vh",
-      }}
+      aria-label={t("nav.workspace")}
+      className="w-60 shrink-0 border-r border-border bg-surface p-4"
     >
-      <div style={{ fontSize: 12, textTransform: "uppercase", color: "#6b7280", marginBottom: 8 }}>
+      <div className="mb-2 px-2 text-xs font-semibold uppercase tracking-wide text-muted">
         {t("nav.workspace")}
       </div>
       <Link
         to="/drive"
-        style={{
-          display: "block",
-          padding: "6px 8px",
-          borderRadius: 4,
-          background: currentFolderID === null ? "#eef2ff" : "transparent",
-        }}
+        aria-current={currentFolderID === null ? "page" : undefined}
+        className={cn(
+          "block rounded-lg px-2 py-1.5 text-sm transition-colors hover:bg-surface-2",
+          currentFolderID === null ? "bg-brand/10 font-medium text-brand" : "text-fg",
+        )}
       >
         {t("drive.rootFolder")}
       </Link>
-      {error ? (
-        <div style={{ color: "#b91c1c", fontSize: 12, marginTop: 8 }}>{error}</div>
+      {/*
+        Stale-while-revalidate: only show the skeleton on the initial load
+        (when there's no prior data to display). On reloadKey/navigation
+        refetches we keep the previously fetched list visible instead of
+        replacing it with a skeleton, so the sidebar never renders a
+        skeleton and a populated list at the same time.
+      */}
+      {loading && rootFolders.length === 0 ? (
+        <div className="mt-2">
+          <FolderTreeSkeleton />
+        </div>
       ) : null}
-      <ul style={{ listStyle: "none", padding: 0, margin: "8px 0 0" }}>
+      {error ? (
+        <div role="alert" className="mt-2 px-2 text-xs text-danger">
+          {error}
+        </div>
+      ) : null}
+      <ul className="mt-2 list-none space-y-0.5 p-0">
         {rootFolders.map((f) => (
           <li
             key={f.id}
-            style={{
-              display: "flex",
-              alignItems: "center",
-              borderRadius: 4,
-              background: currentFolderID === f.id ? "#eef2ff" : "transparent",
-              paddingRight: 8,
-            }}
+            className={cn(
+              rowBase,
+              "pr-2",
+              currentFolderID === f.id ? "bg-brand/10" : "",
+            )}
           >
             {/*
               The folder-name `<Link>` and the privacy-mode badge are
@@ -85,14 +118,11 @@ export default function FolderTree({ currentFolderID }: { currentFolderID: strin
             */}
             <Link
               to={`/drive/folder/${f.id}`}
-              style={{
-                flex: 1,
-                padding: "6px 8px",
-                marginRight: 6,
-                overflow: "hidden",
-                textOverflow: "ellipsis",
-                whiteSpace: "nowrap",
-              }}
+              aria-current={currentFolderID === f.id ? "page" : undefined}
+              className={cn(
+                "mr-1.5 flex-1 truncate px-2 py-1.5",
+                currentFolderID === f.id ? "font-medium text-brand" : "text-fg",
+              )}
             >
               {f.name}
             </Link>
@@ -109,6 +139,9 @@ export default function FolderTree({ currentFolderID }: { currentFolderID: strin
             <EncryptionBadge mode={f.encryption_mode} tabbable={false} />
           </li>
         ))}
+        {!loading && !error && rootFolders.length === 0 ? (
+          <li className="px-2 py-1.5 text-xs text-muted">{t("drive.noFolders")}</li>
+        ) : null}
       </ul>
     </aside>
   );

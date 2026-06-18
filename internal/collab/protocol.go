@@ -44,12 +44,15 @@ const (
 	// folders); dropped server-side for strict_zk folders.
 	MessageAwareness byte = 0x01
 
-	// MessageAuth is reserved for an out-of-band re-auth path
-	// (e.g. token refresh mid-session). Not implemented in P2b —
-	// the WebSocket upgrade is authenticated by AuthMiddleware
-	// and a session covers the lifetime of the connection. We
-	// reserve the byte so a future client can negotiate without
-	// colliding with sync/awareness traffic.
+	// MessageAuth carries an in-band re-auth frame: the payload is a
+	// fresh bearer token the client pushes mid-session (e.g. after a
+	// silent token refresh) to advance the socket's enforced lifetime
+	// without reconnecting. The codec is stateless — it only frames the
+	// token bytes; validation lives in the transport's read pump, which
+	// re-authenticates the token (same Signer as the upgrade), confirms
+	// it names the SAME principal, and hands the refreshed expiry to the
+	// auth pump. A frame that fails any of those checks is dropped, so
+	// the socket's existing authorization stays in force.
 	MessageAuth byte = 0x02
 )
 

@@ -19,6 +19,8 @@ import (
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
+
+	apimw "github.com/kennguy3n/zk-drive/api/middleware"
 )
 
 // ErrTokenInvalid is returned by Verifier.Verify for any token that
@@ -122,11 +124,7 @@ func NewVerifier(issuer, audience, jwksURI string, httpClient *http.Client) *Ver
 // projected Identity. Any validation failure is wrapped in
 // ErrTokenInvalid so the caller can respond 401 uniformly.
 func (v *Verifier) Verify(ctx context.Context, raw string) (Identity, error) {
-	claims := &registeredClaims{}
-	_, err := v.parser.ParseWithClaims(raw, claims, func(t *jwt.Token) (any, error) {
-		kid, _ := t.Header["kid"].(string)
-		return v.keyForKID(ctx, kid)
-	})
+	claims, err := v.parse(ctx, raw)
 	if err != nil {
 		return Identity{}, fmt.Errorf("%w: %v", ErrTokenInvalid, err)
 	}
@@ -135,6 +133,50 @@ func (v *Verifier) Verify(ctx context.Context, raw string) (Identity, error) {
 		return Identity{}, fmt.Errorf("%w: missing subject", ErrTokenInvalid)
 	}
 	return id, nil
+}
+
+// Reverify re-validates an already-issued raw access token against the
+// issuer, for callers that must keep enforcing a token's validity over
+// the life of a long-lived connection — the collab reauth pump for
+// federated (iam-core) WebSocket sockets, which have no zk-drive
+// session record to consult. It runs the exact same parse path as
+// Verify (JWKS signature, issuer, audience, and expiry) but classifies
+// the outcome for that caller:
+//
+//   - nil: the token is still valid.
+//   - an error wrapping apimw.ErrReverifyUnavailable: the JWKS endpoint
+//     could not be reached, so validity is unknown — transient, the
+//     caller keeps the connection open.
+//   - any other error: the token is definitively rejected (expired, bad
+//     signature, or its signing key was rotated out / revoked).
+//
+// Unlike Verify, it preserves the error chain (via %w) so the caller
+// can distinguish the transient case with errors.Is.
+func (v *Verifier) Reverify(ctx context.Context, raw string) error {
+	if _, err := v.parse(ctx, raw); err != nil {
+		if errors.Is(err, apimw.ErrReverifyUnavailable) {
+			return err
+		}
+		return fmt.Errorf("%w: %w", ErrTokenInvalid, err)
+	}
+	return nil
+}
+
+// parse runs the raw token through the JWT parser with the keyfunc and
+// validation options the Verifier was built with, returning the decoded
+// claims. It is shared by Verify and Reverify so both enforce identical
+// signature, issuer, audience, and expiry rules; the returned error is
+// the parser's raw error, already classified by keyForKID (which tags
+// JWKS-fetch failures with apimw.ErrReverifyUnavailable).
+func (v *Verifier) parse(ctx context.Context, raw string) (*registeredClaims, error) {
+	claims := &registeredClaims{}
+	if _, err := v.parser.ParseWithClaims(raw, claims, func(t *jwt.Token) (any, error) {
+		kid, _ := t.Header["kid"].(string)
+		return v.keyForKID(ctx, kid)
+	}); err != nil {
+		return nil, err
+	}
+	return claims, nil
 }
 
 // keyForKID returns the public key for the given key id, refreshing
@@ -147,7 +189,25 @@ func (v *Verifier) keyForKID(ctx context.Context, kid string) (crypto.PublicKey,
 		return key, nil
 	}
 	if err := v.refresh(ctx, kid); err != nil {
-		return nil, err
+		// A throttled refresh (the JWKS was refetched within
+		// minRefreshInterval and the kid is absent from that recent
+		// key set) or a definitive endpoint rejection (a 4xx the
+		// request itself earned, which retrying cannot recover) both
+		// mean the key is gone for good — not unknown because the
+		// issuer was unreachable. Fall through to the definitive "no
+		// key" rejection below so neither is misclassified as a
+		// transient outage (which would keep a federated collab socket
+		// open until the issuer next answers).
+		if !errors.Is(err, errJWKSRefreshThrottled) && !errors.Is(err, errJWKSEndpointRejected) {
+			// A genuine fetch failure — the issuing authority could not
+			// be reached (network error, timeout, 5xx, or a retriable
+			// 408/429) to learn the key, distinct from "the key does
+			// not exist". Tag it so Reverify reports it as transient
+			// (ErrReverifyUnavailable) rather than a definitive
+			// rejection; Verify flattens it (%v) and still 401s
+			// uniformly.
+			return nil, fmt.Errorf("%w: %w", apimw.ErrReverifyUnavailable, err)
+		}
 	}
 	if key, ok := v.lookup(kid); ok {
 		return key, nil
@@ -173,6 +233,24 @@ func (v *Verifier) lookup(kid string) (crypto.PublicKey, bool) {
 	return k, ok
 }
 
+// errJWKSRefreshThrottled is returned by refresh when the JWKS cache
+// is still valid and was refetched within minRefreshInterval, so the
+// requested kid is genuinely absent from the freshly-known key set (a
+// definitive rotation) rather than unknown because the issuer was
+// unreachable. keyForKID maps it to a definitive rejection so a
+// rotated-out key is not misclassified as a transient JWKS outage.
+var errJWKSRefreshThrottled = errors.New("iamcore: jwks refresh throttled")
+
+// errJWKSEndpointRejected is returned by fetchJWKS when the JWKS
+// endpoint answers with a definitive client error (a 4xx other than
+// the retriable 408/429): the request was rejected outright, so
+// retrying cannot recover the key — a decommissioned issuer or a
+// misconfigured JWKS URI, distinct from a 5xx/timeout outage that may
+// clear on its own. keyForKID maps it to a definitive rejection so
+// such a token closes a federated collab socket instead of holding it
+// open indefinitely on the fail-open transient path.
+var errJWKSEndpointRejected = errors.New("iamcore: jwks endpoint rejected request")
+
 // refresh fetches the JWKS from iam-core and replaces the cache. It is
 // guarded by fetchMu so concurrent callers collapse onto one network
 // round-trip; a caller that finds the kid already present (filled by
@@ -196,7 +274,7 @@ func (v *Verifier) refresh(ctx context.Context, wantKID string) error {
 	// When the cache is still valid (we're here only because of an
 	// unknown kid), throttle refetches to minRefreshInterval.
 	if cacheValid && time.Since(lastFetch) < v.cfg.minRefreshInterval {
-		return fmt.Errorf("jwks refresh throttled for unknown kid %q", wantKID)
+		return fmt.Errorf("%w for unknown kid %q", errJWKSRefreshThrottled, wantKID)
 	}
 
 	keys, ttl, err := v.fetchJWKS(ctx)
@@ -209,6 +287,18 @@ func (v *Verifier) refresh(ctx context.Context, wantKID string) error {
 	v.lastFetch = time.Now()
 	v.mu.Unlock()
 	return nil
+}
+
+// isDefinitiveJWKSStatus reports whether an HTTP status from the JWKS
+// endpoint is a definitive client error — a 4xx that retrying will not
+// recover — rather than a transient one. 408 (Request Timeout) and 429
+// (Too Many Requests) are 4xx but explicitly retriable, so they are
+// treated as transient alongside every 5xx and transport failure.
+func isDefinitiveJWKSStatus(status int) bool {
+	if status == http.StatusRequestTimeout || status == http.StatusTooManyRequests {
+		return false
+	}
+	return status >= 400 && status < 500
 }
 
 func (v *Verifier) fetchJWKS(ctx context.Context) (map[string]crypto.PublicKey, time.Duration, error) {
@@ -224,7 +314,15 @@ func (v *Verifier) fetchJWKS(ctx context.Context) (map[string]crypto.PublicKey, 
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		return nil, 0, fmt.Errorf("iamcore: jwks endpoint %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+		statusErr := fmt.Errorf("iamcore: jwks endpoint %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+		// A definitive client error (4xx other than the retriable
+		// 408/429) means the request was rejected outright — tag it so
+		// keyForKID treats it as definitive. 5xx and the retriable 4xx
+		// stay plain (transient) errors.
+		if isDefinitiveJWKSStatus(resp.StatusCode) {
+			return nil, 0, fmt.Errorf("%w: %w", errJWKSEndpointRejected, statusErr)
+		}
+		return nil, 0, statusErr
 	}
 	// Bound the body so a hostile or misconfigured endpoint cannot
 	// exhaust memory. A realistic JWKS is a few KB; 1 MiB is generous.

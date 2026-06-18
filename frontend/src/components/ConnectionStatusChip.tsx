@@ -1,6 +1,6 @@
 // ConnectionStatusChip renders the collab WS connection state as a
-// small pill next to the document title. The four states map 1:1 to
-// CollabProvider's ConnectionStatus enum:
+// small KChat Badge next to the document title. The four states map
+// 1:1 to CollabProvider's ConnectionStatus enum:
 //
 //   - connecting   — initial dial-out, or first reconnect attempt
 //   - connected    — live; updates are flowing
@@ -8,23 +8,35 @@
 //   - disconnected — provider destroyed (component unmounting) or
 //                    auth failure; the editor surfaces "read-only"
 //                    in that case so the chip is only seen briefly
+//
+// Colour comes entirely from the Badge tone tokens (success / warning
+// / danger / neutral) so the chip re-themes and dark-modes for free.
 
-import type { CSSProperties } from "react";
 import { useTranslation } from "react-i18next";
+import { Badge } from "./ui";
+import { cn } from "../lib/cn";
 import type { ConnectionStatus } from "../collab/provider";
 
-const COLORS: Record<ConnectionStatus, { bg: string; fg: string; dot: string }> = {
-  connecting: { bg: "#fef3c7", fg: "#92400e", dot: "#d97706" },
-  connected: { bg: "#dcfce7", fg: "#166534", dot: "#16a34a" },
-  reconnecting: { bg: "#fef3c7", fg: "#92400e", dot: "#d97706" },
-  disconnected: { bg: "#fee2e2", fg: "#991b1b", dot: "#dc2626" },
+type Tone = "success" | "warning" | "danger" | "neutral";
+
+// Each status maps to a semantic tone + whether its dot should pulse.
+// Transient states (connecting / reconnecting) pulse to signal work in
+// progress; settled states (connected / disconnected) hold steady.
+const STATUS: Record<
+  ConnectionStatus,
+  { tone: Tone; labelKey: string; pulse: boolean }
+> = {
+  connecting: { tone: "warning", labelKey: "collab.statusConnecting", pulse: true },
+  connected: { tone: "success", labelKey: "collab.statusConnected", pulse: false },
+  reconnecting: { tone: "warning", labelKey: "collab.statusReconnecting", pulse: true },
+  disconnected: { tone: "danger", labelKey: "collab.statusDisconnected", pulse: false },
 };
 
-const LABEL_KEYS: Record<ConnectionStatus, string> = {
-  connecting: "collab.statusConnecting",
-  connected: "collab.statusConnected",
-  reconnecting: "collab.statusReconnecting",
-  disconnected: "collab.statusDisconnected",
+const dotTone: Record<Tone, string> = {
+  success: "bg-success",
+  warning: "bg-warning",
+  danger: "bg-danger",
+  neutral: "bg-muted",
 };
 
 export interface ConnectionStatusChipProps {
@@ -37,53 +49,48 @@ export interface ConnectionStatusChipProps {
   readOnly?: boolean;
 }
 
+// StatusDot is the leading indicator inside the badge. It carries the
+// tone colour and an optional pulse; aria-hidden because the badge
+// text already conveys the state to assistive tech.
+function StatusDot({ tone, pulse }: { tone: Tone; pulse?: boolean }) {
+  return (
+    <span
+      aria-hidden="true"
+      className={cn("h-1.5 w-1.5 rounded-full", dotTone[tone], pulse && "animate-pulse")}
+    />
+  );
+}
+
 export default function ConnectionStatusChip({
   status,
   readOnly,
 }: ConnectionStatusChipProps) {
   const { t } = useTranslation();
+
   if (readOnly) {
     return (
-      <span
-        title={t("collab.readOnlyTooltip")}
-        style={chipStyle("#e5e7eb", "#374151")}
-      >
-        <span style={{ ...dotStyle, background: "#6b7280" }} />
-        {t("collab.readOnly")}
+      // Badge doesn't forward arbitrary DOM props, so the tooltip lives
+      // on a wrapping span (same pattern used for the live-status case).
+      <span title={t("collab.readOnlyTooltip")} className="inline-flex">
+        <Badge tone="neutral">
+          <StatusDot tone="neutral" />
+          {t("collab.readOnly")}
+        </Badge>
       </span>
     );
   }
-  const c = COLORS[status];
-  const label = t(LABEL_KEYS[status]);
+
+  const { tone, labelKey, pulse } = STATUS[status];
+  const label = t(labelKey);
   return (
     <span
       title={t("collab.statusTooltip", { status: label.toLowerCase() })}
-      style={chipStyle(c.bg, c.fg)}
+      className="inline-flex"
     >
-      <span style={{ ...dotStyle, background: c.dot }} />
-      {label}
+      <Badge tone={tone}>
+        <StatusDot tone={tone} pulse={pulse} />
+        {label}
+      </Badge>
     </span>
   );
 }
-
-function chipStyle(bg: string, fg: string): CSSProperties {
-  return {
-    display: "inline-flex",
-    alignItems: "center",
-    gap: 6,
-    padding: "2px 8px",
-    borderRadius: 9999,
-    background: bg,
-    color: fg,
-    fontSize: 12,
-    fontWeight: 500,
-    lineHeight: 1.5,
-  };
-}
-
-const dotStyle: CSSProperties = {
-  width: 6,
-  height: 6,
-  borderRadius: "50%",
-  flexShrink: 0,
-};

@@ -76,7 +76,26 @@ type Handler struct {
 	webhooks       WebhookEventPublisher
 	collab         *collab.DocumentHub
 	onlyOffice     *collab.OnlyOfficeService
-	suspension     middleware.WorkspaceSuspensionChecker
+	// collabReauth* enforce a collab WebSocket's authorization for the
+	// full life of the connection (token expiry + session revocation),
+	// not just at upgrade. Wired via WithCollabReauth; nil
+	// checker/validator degrade to expiry-only enforcement
+	// (single-replica / dev mode without Redis).
+	collabReauthChecker   middleware.SessionChecker
+	collabReauthValidator middleware.SessionValidator
+	// collabReauthReverifier re-validates federated (iam-core) tokens
+	// against their issuer for the life of a collab socket, since the
+	// checker/validator above only know the zk-drive session store.
+	// Wired via WithCollabTokenReverifier; nil when iam-core is off.
+	collabReauthReverifier middleware.TokenReverifier
+	// collabReauthRefresher validates a fresh bearer token a client
+	// pushes in-band on a live collab socket (a MessageAuth frame),
+	// advancing the enforced token lifetime without a reconnect. Wired
+	// via WithCollabTokenRefresher; nil for federated (iam-core) auth,
+	// whose tokens are not zk-drive session JWTs.
+	collabReauthRefresher   middleware.CollabTokenRefresher
+	collabTrustedProxyDepth int
+	suspension              middleware.WorkspaceSuspensionChecker
 	// suspensionFailClosed mirrors the SuspensionGuard policy for the
 	// ONLYOFFICE save callback (which runs outside the middleware): when
 	// true, a suspension-lookup error rejects the write instead of

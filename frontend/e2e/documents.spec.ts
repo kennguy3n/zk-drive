@@ -54,11 +54,19 @@ test.describe("documents", () => {
 
     await page.getByRole("link", { name: /documents/i }).click();
     await expect(page).toHaveURL(/\/drive\/folder\/[^/]+\/documents$/);
+    // PageHeader now renders the folder name as the <h1> with a
+    // "Documents" eyebrow above it (the old build concatenated both
+    // into a single heading). The route assertion above already pins
+    // us to the documents view, so the folder-name heading is enough.
     await expect(
-      page.getByRole("heading", { name: /confidential folder.*documents/i }),
+      page.getByRole("heading", { name: /confidential folder/i }),
     ).toBeVisible();
-    await expect(page.getByText(/no documents in this folder yet/i)).toBeVisible();
-    await expect(page.getByRole("button", { name: /new document/i })).toBeVisible();
+    await expect(page.getByText(/no documents yet/i)).toBeVisible();
+    // Two "New document" CTAs now exist on an empty list (the header
+    // action and the empty-state prompt); assert on the header one.
+    await expect(
+      page.getByRole("button", { name: /new document/i }).first(),
+    ).toBeVisible();
   });
 
   test("New document dialog gates rich modes in strict_zk folders", async ({ page }) => {
@@ -66,15 +74,20 @@ test.describe("documents", () => {
     await createFolder(page, "Zero Knowledge Folder", "strict_zk");
 
     await page.getByRole("link", { name: /documents/i }).click();
-    await page.getByRole("button", { name: /new document/i }).click();
+    // Empty list renders both a header and an empty-state "New
+    // document" CTA; either opens the dialog, so pick the header one.
+    await page.getByRole("button", { name: /new document/i }).first().click();
 
-    // Markdown stays enabled; rich and rich+presence are disabled
-    // with the strict_zk-specific tooltip.
-    await expect(page.locator('input[type="radio"][value="markdown"]')).toBeEnabled();
-    await expect(page.locator('input[type="radio"][value="rich"]')).toBeDisabled();
-    await expect(
-      page.locator('input[type="radio"][value="rich_presence"]'),
-    ).toBeDisabled();
+    // The mode picker is now a KChat RadioCard set: a role="radiogroup"
+    // of role="radio" buttons rendered in document order
+    // markdown -> rich -> rich_presence (CollabModeSelector MODES).
+    // Markdown stays enabled in strict_zk; the two rich modes are
+    // disabled because the server can't merge updates it can't read.
+    const dialog = page.getByRole("dialog");
+    const modes = dialog.getByRole("radio");
+    await expect(modes.nth(0)).toBeEnabled();
+    await expect(modes.nth(1)).toBeDisabled();
+    await expect(modes.nth(2)).toBeDisabled();
   });
 
   test("New document in confidential folder lands in editor with all modes available", async ({
@@ -84,23 +97,26 @@ test.describe("documents", () => {
     await createFolder(page, "Rich Folder", "managed_encrypted");
 
     await page.getByRole("link", { name: /documents/i }).click();
-    await page.getByRole("button", { name: /new document/i }).click();
+    // Empty list renders both a header and an empty-state "New
+    // document" CTA; either opens the dialog, so pick the header one.
+    await page.getByRole("button", { name: /new document/i }).first().click();
 
     // Scope to the dialog so we don't accidentally match controls
     // on the underlying documents list page or the header.
     const dialog = page.getByRole("dialog");
 
-    // Every mode is enabled in a managed_encrypted folder.
-    await expect(dialog.locator('input[type="radio"][value="markdown"]')).toBeEnabled();
-    await expect(dialog.locator('input[type="radio"][value="rich"]')).toBeEnabled();
-    await expect(
-      dialog.locator('input[type="radio"][value="rich_presence"]'),
-    ).toBeEnabled();
+    // The mode picker is now a KChat RadioCard set: a role="radiogroup"
+    // of role="radio" buttons in document order markdown -> rich ->
+    // rich_presence. Every mode is enabled in a managed_encrypted folder.
+    const modes = dialog.getByRole("radio");
+    await expect(modes.nth(0)).toBeEnabled();
+    await expect(modes.nth(1)).toBeEnabled();
+    await expect(modes.nth(2)).toBeEnabled();
 
     // Pick rich+presence and create — wait for the POST /documents
     // response explicitly so we can both prove the API succeeded AND
     // grab the new document id without racing the SPA navigation.
-    await dialog.locator('input[type="radio"][value="rich_presence"]').check();
+    await modes.nth(2).click();
     await dialog.getByLabel("Name", { exact: true }).fill("Design Doc");
     const createResp = page.waitForResponse(
       (r) => r.url().endsWith("/api/documents") && r.request().method() === "POST",

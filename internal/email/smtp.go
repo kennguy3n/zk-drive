@@ -78,6 +78,24 @@ type SMTPConfig struct {
 	// + DATA). Defaults to 30s. The send is also bounded by the
 	// context passed to Send.
 	Timeout time.Duration
+
+	// PoolMaxIdle caps the number of warm connections kept open
+	// between sends. 0 → default (2). A negative value disables
+	// pooling entirely: every send dials a fresh connection and
+	// closes it afterwards (the pre-pooling behaviour).
+	PoolMaxIdle int
+
+	// PoolMaxConnIdleTime evicts a pooled connection that has been
+	// idle longer than this before it is reused — kept below the
+	// 30-60s most relays use to reap idle sockets so a reused
+	// connection is rarely already half-closed. 0 → default (15s).
+	PoolMaxConnIdleTime time.Duration
+
+	// PoolMaxConnLifetime caps the total age of a pooled connection
+	// regardless of idleness, so a long-lived connection is
+	// periodically refreshed (relay restart, credential rotation,
+	// NAT rebinding). 0 → default (5m).
+	PoolMaxConnLifetime time.Duration
 }
 
 // TLS mode constants — exported so tests and config validation can
@@ -91,15 +109,25 @@ const (
 // DefaultTimeout is applied when SMTPConfig.Timeout is <= 0.
 const DefaultTimeout = 30 * time.Second
 
-// SMTPClient is the production Sender. Each Send opens a fresh
-// connection — connection pooling is intentionally not implemented
-// because (1) the volume is low (one connection per invite/email
-// event, not per HTTP request), and (2) most SMTP relays drop idle
-// connections after 30-60s anyway, so pooling complexity buys
-// nothing measurable.
+// SMTPClient is the production Sender. It keeps a small pool of warm
+// connections (already past EHLO / STARTTLS / AUTH) so a burst of
+// sends — e.g. a workspace owner inviting several guests at once —
+// reuses an established TLS+AUTH session instead of paying a fresh
+// handshake per message. The pool bounds only the number of IDLE
+// connections (PoolMaxIdle); a send that finds no warm connection
+// dials a fresh one, and connections idle past PoolMaxConnIdleTime
+// or older than PoolMaxConnLifetime are evicted so a relay that
+// reaped an idle socket never serves a half-open connection. Pooling
+// can be disabled with a negative PoolMaxIdle (every send then dials
+// fresh and closes afterwards).
 type SMTPClient struct {
-	cfg       SMTPConfig
+	cfg        SMTPConfig
 	configured bool
+
+	// pool holds warm, authenticated connections for reuse. Always
+	// non-nil for a configured client (a disabled negative-MaxIdle
+	// pool simply never retains a connection).
+	pool *connPool
 
 	// dialer is overridable by tests so they can capture the SMTP
 	// conversation without a real network listener. Production
@@ -132,6 +160,19 @@ func NewSMTPClient(cfg SMTPConfig) (*SMTPClient, error) {
 	if cfg.Timeout <= 0 {
 		cfg.Timeout = DefaultTimeout
 	}
+	// Resolve pooling sizing. PoolMaxIdle is left untouched when
+	// negative (operator opt-out — pooling disabled); a zero takes
+	// the default. The two duration knobs always take their default
+	// when non-positive.
+	if cfg.PoolMaxIdle == 0 {
+		cfg.PoolMaxIdle = defaultPoolMaxIdle
+	}
+	if cfg.PoolMaxConnIdleTime <= 0 {
+		cfg.PoolMaxConnIdleTime = defaultPoolMaxConnIdleTime
+	}
+	if cfg.PoolMaxConnLifetime <= 0 {
+		cfg.PoolMaxConnLifetime = defaultPoolMaxConnLifetime
+	}
 	configured := strings.TrimSpace(cfg.Host) != "" && cfg.Port != 0
 	if configured {
 		if strings.TrimSpace(cfg.FromAddress) == "" {
@@ -142,6 +183,7 @@ func NewSMTPClient(cfg SMTPConfig) (*SMTPClient, error) {
 		}
 	}
 	c := &SMTPClient{cfg: cfg, configured: configured}
+	c.pool = newConnPool(cfg.PoolMaxIdle, cfg.PoolMaxConnIdleTime, cfg.PoolMaxConnLifetime)
 	c.dialer = newDefaultDialer(cfg.Timeout)
 	return c, nil
 }
@@ -201,87 +243,153 @@ func (c *SMTPClient) Send(ctx context.Context, msg Message) (sendErr error) {
 		return fmt.Errorf("%w: %v", ErrInvalidAddress, err)
 	}
 
+	// One wall-clock deadline bounds the whole conversation — the
+	// RSET liveness probe on a reused connection, the handshake on a
+	// fresh one, and the MAIL FROM / RCPT TO / DATA exchange either
+	// way. Derived from the caller's ctx when it carries a deadline
+	// (matches caller intent, e.g. dispatchGuestInviteEmail's
+	// detached 60s budget), else now+Timeout for a deadline-free
+	// context (tests, scripts). See acquire / establishConn for how
+	// it is applied to the socket.
+	convDeadline := time.Now().Add(c.cfg.Timeout)
+	if d, ok := ctx.Deadline(); ok {
+		convDeadline = d
+	}
+
+	pc, reused, err := c.acquire(ctx, convDeadline)
+	if err != nil {
+		return err
+	}
+	span.SetAttributes(attribute.Bool("smtp.conn.reused", reused))
+
+	// A connection that errors mid-transaction is in an unknown
+	// protocol state, so it is closed rather than returned to the
+	// pool; only a cleanly-completed send is handed back for reuse.
+	if err := c.deliver(pc.cli, msg); err != nil {
+		pc.close()
+		return err
+	}
+	c.pool.put(pc)
+	return nil
+}
+
+// acquire returns a connection that is one MAIL FROM away from
+// sending: a warm pooled connection when one is available and still
+// live, otherwise a freshly dialled+handshaked+authenticated one.
+// reused reports which (surfaced on the span). The caller owns the
+// returned connection and MUST either hand it back via pool.put (on
+// a clean send) or tear it down via pc.close (on any error).
+func (c *SMTPClient) acquire(ctx context.Context, convDeadline time.Time) (*pooledConn, bool, error) {
+	for {
+		warm := c.pool.get()
+		if warm == nil {
+			break
+		}
+		// The pooled socket still carries the (now-expired) deadline
+		// from its previous send, so re-stamp it before any I/O. Then
+		// RSET: it clears any half-finished transaction AND proves the
+		// relay has not silently dropped the idle socket. A failure
+		// means the connection is dead — discard it and try the next
+		// warm one, falling through to a fresh dial when none remain.
+		if err := warm.conn.SetDeadline(convDeadline); err != nil {
+			warm.close()
+			continue
+		}
+		if err := warm.cli.Reset(); err != nil {
+			warm.close()
+			continue
+		}
+		return warm, true, nil
+	}
+	fresh, err := c.establishConn(ctx, convDeadline)
+	if err != nil {
+		return nil, false, err
+	}
+	return fresh, false, nil
+}
+
+// establishConn dials and brings a connection up to the warm state —
+// past EHLO, optional STARTTLS, optional AUTH — so it is ready for
+// MAIL FROM. convDeadline is stamped on the socket immediately after
+// dial so every subsequent read/write (handshake, AUTH, and later
+// the transaction) is bounded: net/smtp's high-level API takes no
+// context, so without this a relay that accepts the TCP connection
+// then hangs mid-conversation would leak the calling goroutine
+// forever. The deadline covers plaintext, STARTTLS-upgraded, and
+// implicit-TLS sockets alike (the tls.Conn wraps the deadlined
+// net.Conn). Any failure before the connection is wrapped closes the
+// raw socket so a half-open connection is never leaked.
+func (c *SMTPClient) establishConn(ctx context.Context, convDeadline time.Time) (pc *pooledConn, err error) {
 	addr := net.JoinHostPort(c.cfg.Host, fmt.Sprintf("%d", c.cfg.Port))
 	dialCtx, cancel := context.WithTimeout(ctx, c.cfg.Timeout)
 	defer cancel()
 
 	conn, err := c.dialer(dialCtx, "tcp", addr)
 	if err != nil {
-		return fmt.Errorf("email: dial %s: %w", addr, err)
+		return nil, fmt.Errorf("email: dial %s: %w", addr, err)
 	}
-	defer func() { _ = conn.Close() }()
+	createdAt := time.Now()
+	// Close the raw socket on every failure path below; cleared once
+	// the connection is successfully wrapped in the returned pooledConn.
+	ok := false
+	defer func() {
+		if !ok {
+			_ = conn.Close()
+		}
+	}()
 
-	// Stamp a wall-clock deadline on the connection so subsequent
-	// reads/writes (EHLO, STARTTLS, AUTH, MAIL FROM, RCPT TO, DATA,
-	// body write, QUIT) cannot block indefinitely. The net/smtp
-	// package's high-level API does NOT accept a context, so
-	// without this deadline a relay that accepts the TCP connection
-	// then hangs mid-conversation would leak this goroutine forever
-	// — the outer context.WithTimeout(ctx, c.cfg.Timeout) only
-	// governs the dial phase, not the subsequent application-layer
-	// reads/writes against the established socket.
-	//
-	// Deadline source priority:
-	//   1. Outer ctx's deadline (preferred — matches caller intent,
-	//      e.g. the goroutine-detach in dispatchGuestInviteEmail
-	//      wraps everything in context.WithTimeout(detached, 60s)).
-	//   2. Fall back to time.Now() + c.cfg.Timeout when the caller
-	//      passes a deadline-free context (rare in production but
-	//      possible — context.Background() in tests, scripts, etc.).
-	//
-	// The deadline applies to the underlying TCP socket for both
-	// plaintext and STARTTLS-upgraded conversations; for implicit
-	// TLS the tls.Conn wraps the deadlined net.Conn so handshake
-	// reads/writes inherit the same wall-clock bound.
-	convDeadline := time.Now().Add(c.cfg.Timeout)
-	if d, ok := ctx.Deadline(); ok {
-		convDeadline = d
-	}
 	if err := conn.SetDeadline(convDeadline); err != nil {
-		return fmt.Errorf("email: set conn deadline: %w", err)
+		return nil, fmt.Errorf("email: set conn deadline: %w", err)
 	}
 
 	if c.cfg.TLSMode == TLSModeImplicit {
 		tlsConn := tls.Client(conn, c.tlsConfig())
 		if err := tlsConn.HandshakeContext(dialCtx); err != nil {
-			return fmt.Errorf("email: implicit TLS handshake: %w", err)
+			return nil, fmt.Errorf("email: implicit TLS handshake: %w", err)
 		}
 		conn = tlsConn
 	}
 
 	cli, err := smtp.NewClient(conn, c.cfg.Host)
 	if err != nil {
-		return fmt.Errorf("email: smtp.NewClient: %w", err)
+		return nil, fmt.Errorf("email: smtp.NewClient: %w", err)
 	}
-	defer func() { _ = cli.Quit() }()
 
 	if err := cli.Hello(c.localHostname()); err != nil {
-		return fmt.Errorf("email: EHLO: %w", err)
+		return nil, fmt.Errorf("email: EHLO: %w", err)
 	}
 
 	if c.cfg.TLSMode == TLSModeSTARTTLS {
-		if ok, _ := cli.Extension("STARTTLS"); !ok {
-			return errors.New("email: server does not advertise STARTTLS")
+		if advertised, _ := cli.Extension("STARTTLS"); !advertised {
+			return nil, errors.New("email: server does not advertise STARTTLS")
 		}
 		if err := cli.StartTLS(c.tlsConfig()); err != nil {
-			return fmt.Errorf("email: STARTTLS: %w", err)
+			return nil, fmt.Errorf("email: STARTTLS: %w", err)
 		}
 	}
 
 	if c.cfg.Username != "" || c.cfg.Password != "" {
 		auth := smtp.PlainAuth("", c.cfg.Username, c.cfg.Password, c.cfg.Host)
 		if err := cli.Auth(auth); err != nil {
-			return fmt.Errorf("email: AUTH: %w", err)
+			return nil, fmt.Errorf("email: AUTH: %w", err)
 		}
 	}
 
+	ok = true
+	return &pooledConn{cli: cli, conn: conn, createdAt: createdAt, lastUsed: createdAt}, nil
+}
+
+// deliver runs a single mail transaction (MAIL FROM / RCPT TO / DATA
+// + body) on an already-warm connection. The connection's deadline
+// has been set by acquire / establishConn, so deliver does no socket
+// timeout bookkeeping of its own.
+func (c *SMTPClient) deliver(cli *smtp.Client, msg Message) error {
 	if err := cli.Mail(c.cfg.FromAddress); err != nil {
 		return fmt.Errorf("email: MAIL FROM: %w", err)
 	}
 	if err := cli.Rcpt(msg.To); err != nil {
 		return fmt.Errorf("email: RCPT TO: %w", err)
 	}
-
 	wc, err := cli.Data()
 	if err != nil {
 		return fmt.Errorf("email: DATA: %w", err)
@@ -292,6 +400,18 @@ func (c *SMTPClient) Send(ctx context.Context, msg Message) (sendErr error) {
 	}
 	if err := wc.Close(); err != nil {
 		return fmt.Errorf("email: close DATA: %w", err)
+	}
+	return nil
+}
+
+// Close releases the connection pool, tearing down every warm
+// connection. It implements io.Closer so the email Service can
+// release the client during graceful shutdown. In-flight sends are
+// unaffected (their connection is no longer in the idle set) and
+// complete normally, closing on put. Safe to call more than once.
+func (c *SMTPClient) Close() error {
+	if c.pool != nil {
+		c.pool.close()
 	}
 	return nil
 }

@@ -1,9 +1,10 @@
-// PresenceChips renders one chip per remote collaborator currently
-// in the document's awareness state. The chip carries the user's
-// name and a coloured dot matching their cursor color in the editor
-// (CollaborationCursor extension uses the same color). The local
-// user is filtered out — they already see their own name in the
-// app header.
+// PresenceChips renders an overlapping stack of avatars, one per
+// remote collaborator currently in the document's awareness state.
+// Each avatar shows the collaborator's initials over their cursor
+// color (the CollaborationCursor extension uses the same color), so
+// the people you see in the margin match the people in the header.
+// The local user is filtered out — they already see their own name
+// in the app header.
 //
 // Empty state: when no remote users are present the component
 // renders nothing rather than an empty container so the editor
@@ -33,6 +34,19 @@ interface Peer {
   id: number;
   name: string;
   color: string;
+}
+
+// Cap the visible avatars so a busy document doesn't blow out the
+// header; the remainder collapse into a "+N" overflow chip.
+const MAX_VISIBLE = 4;
+
+// initials derives a 1–2 letter monogram from a display name for the
+// avatar. Falls back to "?" for an empty name.
+function initials(name: string): string {
+  const parts = name.trim().split(/\s+/).filter(Boolean);
+  if (parts.length === 0) return "?";
+  if (parts.length === 1) return parts[0].slice(0, 1).toUpperCase();
+  return (parts[0][0] + parts[parts.length - 1][0]).toUpperCase();
 }
 
 export default function PresenceChips({
@@ -77,44 +91,39 @@ export default function PresenceChips({
   }, [awareness, localClientID]);
 
   if (peers.length === 0) return null;
+
+  const visible = peers.slice(0, MAX_VISIBLE);
+  const overflow = peers.length - visible.length;
+
   return (
     <div
-      style={{
-        display: "inline-flex",
-        alignItems: "center",
-        gap: 6,
-        flexWrap: "wrap",
-      }}
+      className="inline-flex items-center"
+      role="group"
       aria-label={t("collab.peersPresent", { count: peers.length })}
     >
-      {peers.map((p) => (
+      {visible.map((p) => (
         <span
           key={p.id}
           title={p.name}
-          style={{
-            display: "inline-flex",
-            alignItems: "center",
-            gap: 6,
-            padding: "2px 8px",
-            borderRadius: 9999,
-            background: "#f3f4f6",
-            color: "#111827",
-            fontSize: 12,
-            fontWeight: 500,
-          }}
+          // The per-user cursor color is genuine per-collaborator data
+          // (not a theme color), so it stays an inline background; the
+          // ring uses a token so overlapping avatars separate cleanly in
+          // both light and dark mode.
+          style={{ backgroundColor: p.color }}
+          className="-ml-1.5 inline-flex h-7 w-7 items-center justify-center rounded-full text-[11px] font-semibold uppercase text-white ring-2 ring-surface first:ml-0"
         >
-          <span
-            style={{
-              width: 8,
-              height: 8,
-              borderRadius: "50%",
-              background: p.color,
-              flexShrink: 0,
-            }}
-          />
-          {p.name}
+          {initials(p.name)}
         </span>
       ))}
+      {overflow > 0 && (
+        <span
+          title={t("collab.morePeople", { count: overflow })}
+          aria-label={t("collab.morePeople", { count: overflow })}
+          className="-ml-1.5 inline-flex h-7 min-w-7 items-center justify-center rounded-full bg-surface-2 px-1.5 text-[11px] font-semibold text-muted ring-2 ring-surface"
+        >
+          +{overflow}
+        </span>
+      )}
     </div>
   );
 }

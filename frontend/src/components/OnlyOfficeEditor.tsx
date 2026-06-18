@@ -11,8 +11,10 @@
 
 import { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
+import { AlertTriangle } from "lucide-react";
 import { getEditorConfig, type OnlyOfficeEditorConfig } from "../api/client";
 import { translateApiError } from "../api/errors";
+import { Button, Skeleton } from "./ui";
 
 // DocsAPI is injected on window by the Document Server's api.js. We
 // model only the surface we call (`new DocsAPI.DocEditor(id, config)`
@@ -139,69 +141,61 @@ export default function OnlyOfficeEditor({ fileID, mode = "edit", onClose }: Onl
 
   if (error) {
     return (
-      <div style={fallbackStyle} role="alert">
-        <p style={{ margin: 0 }}>{error}</p>
+      <div
+        role="alert"
+        className="flex h-full w-full flex-col items-center justify-center gap-4 p-8 text-center"
+      >
+        <span className="flex h-12 w-12 items-center justify-center rounded-full bg-danger/10 text-danger">
+          <AlertTriangle className="h-6 w-6" aria-hidden="true" />
+        </span>
+        <p className="m-0 max-w-sm text-sm text-muted">{error}</p>
         {onClose ? (
-          <button onClick={onClose} style={closeBtnStyle}>
+          <Button variant="secondary" size="sm" onClick={onClose}>
             {t("common.close")}
-          </button>
+          </Button>
         ) : null}
       </div>
     );
   }
 
   return (
-    <div style={wrapStyle}>
+    <div className="flex h-full w-full flex-col bg-surface">
       {onClose ? (
-        <div style={toolbarStyle}>
-          <button onClick={onClose} style={closeBtnStyle}>
+        <div className="flex justify-end border-b border-border px-3 py-2">
+          <Button variant="ghost" size="sm" onClick={onClose}>
             {t("common.close")}
-          </button>
+          </Button>
         </div>
       ) : null}
-      {loading ? <div style={fallbackStyle}>{t("common.loading")}</div> : null}
-      {/* The Document Server replaces this element's contents with its
-          editor iframe. Kept mounted under the loading overlay so the
-          id exists when DocEditor initialises. */}
-      <div id={containerIdRef.current} style={containerStyle} />
+      <div className="relative min-h-[480px] flex-1">
+        {/* The Document Server replaces this element's contents with its
+            editor iframe. Kept mounted under the loading overlay so the
+            id exists when DocEditor initialises. */}
+        <div id={containerIdRef.current} className="absolute inset-0 h-full w-full" />
+        {loading ? (
+          <div
+            className="absolute inset-0 flex flex-col gap-4 bg-surface p-6"
+            role="status"
+            aria-live="polite"
+            aria-label={t("onlyoffice.loading")}
+          >
+            <div className="flex items-center gap-2 border-b border-border pb-4">
+              <Skeleton className="h-8 w-8 rounded-lg" />
+              <Skeleton className="h-8 w-24 rounded-lg" />
+              <Skeleton className="h-8 w-24 rounded-lg" />
+              <div className="flex-1" />
+              <Skeleton className="h-8 w-20 rounded-lg" />
+            </div>
+            <div className="mx-auto flex w-full max-w-2xl flex-col gap-3 pt-6">
+              <Skeleton className="h-6 w-1/2" />
+              <Skeleton className="h-4 w-full" />
+              <Skeleton className="h-4 w-full" />
+              <Skeleton className="h-4 w-5/6" />
+              <Skeleton className="h-4 w-2/3" />
+            </div>
+          </div>
+        ) : null}
+      </div>
     </div>
   );
 }
-
-const wrapStyle: React.CSSProperties = {
-  display: "flex",
-  flexDirection: "column",
-  width: "100%",
-  height: "100%",
-};
-
-const toolbarStyle: React.CSSProperties = {
-  display: "flex",
-  justifyContent: "flex-end",
-  padding: 8,
-  borderBottom: "1px solid #e5e7eb",
-};
-
-const containerStyle: React.CSSProperties = {
-  flex: 1,
-  minHeight: 480,
-};
-
-const fallbackStyle: React.CSSProperties = {
-  display: "flex",
-  flexDirection: "column",
-  gap: 12,
-  alignItems: "center",
-  justifyContent: "center",
-  padding: 32,
-  color: "#6b7280",
-};
-
-const closeBtnStyle: React.CSSProperties = {
-  padding: "4px 10px",
-  background: "transparent",
-  border: "1px solid #d1d5db",
-  borderRadius: 4,
-  fontSize: 12,
-  cursor: "pointer",
-};

@@ -1,6 +1,7 @@
-import { describe, it, expect, vi, afterEach, beforeEach } from "vitest";
-import { render, screen, fireEvent, cleanup, within } from "@testing-library/react";
+import { describe, it, expect, vi, afterEach } from "vitest";
+import { render, screen, fireEvent, cleanup, within, waitFor } from "@testing-library/react";
 import FileList from "./FileList";
+import { DialogsProvider } from "./ui";
 import type { FileItem } from "../api/client";
 
 // FilePreview fetches a presigned URL on mount; stub the client so rows
@@ -34,22 +35,26 @@ const files: FileItem[] = [
   mkFile({ id: "3", name: "cherry.txt", size_bytes: 200 }),
 ];
 
+// FileList's rename/delete actions go through the promise-based
+// useConfirm / usePrompt hooks, which require a DialogsProvider in the
+// tree. Render every case under it so the hooks resolve.
+function renderList(ui: React.ReactElement) {
+  return render(ui, { wrapper: DialogsProvider });
+}
+
 describe("FileList", () => {
-  beforeEach(() => {
-    vi.spyOn(window, "confirm").mockReturnValue(true);
-  });
   afterEach(() => {
     cleanup();
     vi.restoreAllMocks();
   });
 
   it("renders an empty state when there are no files", () => {
-    render(<FileList files={[]} onRename={() => {}} onDelete={() => {}} />);
+    renderList(<FileList files={[]} onRename={() => {}} onDelete={() => {}} />);
     expect(screen.getByText(/No files in this folder/)).toBeTruthy();
   });
 
   it("renders one grid row per file with action buttons", () => {
-    render(<FileList files={files} onRename={() => {}} onDelete={() => {}} />);
+    renderList(<FileList files={files} onRename={() => {}} onDelete={() => {}} />);
     const rows = screen.getAllByRole("row");
     // header row + 3 data rows
     expect(rows).toHaveLength(4);
@@ -58,7 +63,7 @@ describe("FileList", () => {
   });
 
   it("sorts by name ascending by default and reverses on header click", () => {
-    render(<FileList files={files} onRename={() => {}} onDelete={() => {}} />);
+    renderList(<FileList files={files} onRename={() => {}} onDelete={() => {}} />);
     const names = () =>
       screen
         .getAllByRole("row")
@@ -71,7 +76,7 @@ describe("FileList", () => {
 
   it("toggles selection through the checkbox when onToggleSelect is provided", () => {
     const onToggleSelect = vi.fn();
-    render(
+    renderList(
       <FileList
         files={files}
         onRename={() => {}}
@@ -89,7 +94,7 @@ describe("FileList", () => {
     const many = Array.from({ length: 6 }, (_, i) =>
       mkFile({ id: `m${i}`, name: `m${i}.txt` }),
     );
-    const { rerender } = render(
+    const { rerender } = renderList(
       <FileList files={many} onRename={() => {}} onDelete={() => {}} />,
     );
     const grid = screen.getByRole("grid");
@@ -111,18 +116,32 @@ describe("FileList", () => {
     expect(focusable).toHaveLength(1);
   });
 
-  it("deletes the active row on Delete keypress", () => {
+  it("deletes the active row on Delete keypress after confirming", async () => {
     const onDelete = vi.fn();
-    render(<FileList files={files} onRename={() => {}} onDelete={onDelete} />);
+    renderList(<FileList files={files} onRename={() => {}} onDelete={onDelete} />);
     // First row is active by default (sorted: apple.txt id=2).
     const grid = screen.getByRole("grid");
     fireEvent.keyDown(grid, { key: "Delete" });
-    expect(onDelete).toHaveBeenCalledWith("2");
+    // The native confirm() is gone — a styled confirmation dialog opens.
+    const dialog = await screen.findByRole("dialog");
+    fireEvent.click(within(dialog).getByRole("button", { name: "Delete" }));
+    await waitFor(() => expect(onDelete).toHaveBeenCalledWith("2"));
+  });
+
+  it("does not delete when the confirmation dialog is cancelled", async () => {
+    const onDelete = vi.fn();
+    renderList(<FileList files={files} onRename={() => {}} onDelete={onDelete} />);
+    const grid = screen.getByRole("grid");
+    fireEvent.keyDown(grid, { key: "Delete" });
+    const dialog = await screen.findByRole("dialog");
+    fireEvent.click(within(dialog).getByRole("button", { name: "Cancel" }));
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    expect(onDelete).not.toHaveBeenCalled();
   });
 
   it("ignores grid shortcuts when focus is on a row action button", () => {
     const onDelete = vi.fn();
-    render(<FileList files={files} onRename={() => {}} onDelete={onDelete} />);
+    renderList(<FileList files={files} onRename={() => {}} onDelete={onDelete} />);
     // With focus on an action button (not the row), a Delete keypress must
     // NOT trash the active row — otherwise the grid handler fires alongside
     // the button's own action (the double-action bug). The Download button is

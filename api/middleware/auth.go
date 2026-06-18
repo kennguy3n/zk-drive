@@ -3,6 +3,7 @@ package middleware
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"strings"
 	"time"
@@ -254,6 +255,116 @@ type SessionValidator interface {
 	ValidateSession(ctx context.Context, workspaceID uuid.UUID, sessionID, userAgent, clientIP string) error
 }
 
+// TokenReverifier re-validates a long-lived connection's original
+// bearer token out-of-band, after the upgrade that authenticated it.
+// It is the federated-identity analogue of SessionChecker /
+// SessionValidator: where those consult the built-in session store,
+// a TokenReverifier re-checks the token against its issuer (the
+// iam-core OIDC verifier re-runs JWKS signature + expiry validation),
+// so a federated realtime socket is torn down when its access token
+// expires or the issuer rotates out / revokes the signing key — the
+// residual gap left when an external IdP, not the zk-drive session
+// store, is the source of truth.
+//
+// Reverify returns nil while the token remains valid, an error
+// wrapping ErrReverifyUnavailable when the issuing authority could not
+// be reached, and any other error when the token is definitively
+// rejected.
+type TokenReverifier interface {
+	Reverify(ctx context.Context, rawToken string) error
+}
+
+// ErrReverifyUnavailable distinguishes "could not reach the authority
+// to re-validate the token" from "token rejected" for TokenReverifier
+// implementations. The collab reauth pump treats it as transient —
+// keeping an active editing session open through a momentary issuer /
+// JWKS outage rather than tearing it down — exactly as it tolerates a
+// transient session-store error, since token expiry is still enforced
+// locally regardless of issuer reachability.
+var ErrReverifyUnavailable = errors.New("middleware: token reverification unavailable")
+
+// CollabAuthRefresh carries the authorization facts a
+// CollabTokenRefresher extracts from a fresh bearer token a client
+// pushes in-band on a live collab socket. The collab reauth pump
+// applies these to the connection's auth state, advancing the enforced
+// token lifetime (issued/expiry) without a reconnect.
+//
+// WorkspaceID and UserID identify the principal the new token
+// authenticates. The read pump rejects any refresh whose principal
+// differs from the socket's original, so an in-band refresh can only
+// ever extend the SAME user's session on the SAME workspace — it can
+// never swap identities on an already-open document.
+type CollabAuthRefresh struct {
+	WorkspaceID uuid.UUID
+	UserID      uuid.UUID
+	SessionID   string
+	IssuedAt    time.Time
+	ExpiresAt   time.Time
+	// HasExpiry reports whether the refreshed token carried an exp
+	// claim. False leaves the socket on expiry-only-disabled
+	// enforcement (matching a no-exp token at upgrade time).
+	HasExpiry bool
+}
+
+// CollabTokenRefresher validates a bearer token presented in-band on a
+// live collab WebSocket — a MessageAuth frame — and projects it into a
+// CollabAuthRefresh. It is the in-band analogue of upgrade-time auth:
+// where AuthMiddleware authenticates the token that opens the socket, a
+// CollabTokenRefresher re-authenticates a fresh token the client pushes
+// mid-session (e.g. after a silent token refresh) so the socket's
+// enforced expiry advances without tearing down the editing session.
+//
+// It returns an error when the token is invalid (bad signature,
+// expired, wrong purpose); the read pump logs and ignores the frame,
+// leaving the authorization captured at upgrade in force.
+type CollabTokenRefresher interface {
+	RefreshCollabAuth(ctx context.Context, rawToken string) (CollabAuthRefresh, error)
+}
+
+// SessionTokenRefresher is the built-in CollabTokenRefresher: it
+// validates the in-band token with the same Signer that mints session
+// JWTs and rejects purpose-scoped tokens, exactly as AuthMiddleware
+// does on the HTTP path. Federated (iam-core) sockets leave the
+// refresher nil — their tokens are externally issued, not zk-drive
+// session JWTs — so the in-band refresh path is built-in-auth only,
+// mirroring how the reverifier is iam-core only.
+type SessionTokenRefresher struct {
+	signer Signer
+}
+
+// NewSessionTokenRefresher constructs a SessionTokenRefresher over the
+// JWT signer used to mint and validate session tokens.
+func NewSessionTokenRefresher(signer Signer) *SessionTokenRefresher {
+	return &SessionTokenRefresher{signer: signer}
+}
+
+// RefreshCollabAuth validates the in-band token and projects its claims
+// into a CollabAuthRefresh. A non-empty Purpose is rejected: an
+// mfa-challenge / enroll token must never (re-)authorize a data-plane
+// socket, exactly as AuthMiddleware refuses one on the HTTP path.
+func (r *SessionTokenRefresher) RefreshCollabAuth(_ context.Context, rawToken string) (CollabAuthRefresh, error) {
+	claims, err := ParseTokenWith(r.signer, rawToken)
+	if err != nil {
+		return CollabAuthRefresh{}, err
+	}
+	if claims.Purpose != "" {
+		return CollabAuthRefresh{}, fmt.Errorf("collab refresh: token has purpose %q", claims.Purpose)
+	}
+	out := CollabAuthRefresh{
+		WorkspaceID: claims.WorkspaceID,
+		UserID:      claims.UserID,
+		SessionID:   claims.SessionID,
+	}
+	if claims.IssuedAt != nil {
+		out.IssuedAt = claims.IssuedAt.Time
+	}
+	if claims.ExpiresAt != nil {
+		out.ExpiresAt = claims.ExpiresAt.Time
+		out.HasExpiry = true
+	}
+	return out, nil
+}
+
 // SessionCheckTimeout is the upper bound on how long AuthMiddleware
 // will wait for a SessionChecker.IsRevoked call before giving up and
 // failing closed.
@@ -473,6 +584,37 @@ func WithIdentity(ctx context.Context, userID, workspaceID uuid.UUID, role strin
 			IssuedAt: jwt.NewNumericDate(time.Now()),
 		},
 	})
+}
+
+// WithIdentityClaims is WithIdentity for authenticators that can supply
+// the authenticating token's real temporal claims (and session id) —
+// namely the iam-core OIDC front-end. Recording the token's true
+// issued-at and expiry, rather than synthesizing them, lets downstream
+// consumers that enforce the token lifetime see the same window the
+// token actually carries: the collab reauth pump tears a federated
+// realtime socket down precisely when its access token expires, closing
+// the gap where WithIdentity's expiry-less claims left such sockets
+// running until the client happened to disconnect.
+//
+// A zero issuedAt falls back to now to preserve the non-nil-iat
+// invariant WithIdentity documents; a zero expiresAt records no expiry.
+func WithIdentityClaims(ctx context.Context, userID, workspaceID uuid.UUID, role, sessionID string, issuedAt, expiresAt time.Time) context.Context {
+	if issuedAt.IsZero() {
+		issuedAt = time.Now()
+	}
+	c := &Claims{
+		UserID:      userID,
+		WorkspaceID: workspaceID,
+		Role:        role,
+		SessionID:   sessionID,
+		RegisteredClaims: jwt.RegisteredClaims{
+			IssuedAt: jwt.NewNumericDate(issuedAt),
+		},
+	}
+	if !expiresAt.IsZero() {
+		c.ExpiresAt = jwt.NewNumericDate(expiresAt)
+	}
+	return withClaims(ctx, c)
 }
 
 // ClaimsFromContext returns the parsed JWT claims, if any.

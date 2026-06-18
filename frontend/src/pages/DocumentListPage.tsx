@@ -9,10 +9,11 @@
 // FileBrowserPage; selecting "Documents" in the folder header
 // navigates to this page with the same folder id in the path.
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useId, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import { useTranslation } from "react-i18next";
 import type { TFunction } from "i18next";
+import { ArrowLeft, FileText, Plus, Trash2 } from "lucide-react";
 import {
   createDocument,
   deleteDocument,
@@ -26,24 +27,45 @@ import { translateApiError } from "../api/errors";
 import { resolveAllowedCollabModes } from "../collab/capability";
 import EncryptionBadge from "../components/EncryptionBadge";
 import CollabModeSelector from "../components/CollabModeSelector";
+import {
+  AppShell,
+  Badge,
+  Button,
+  EmptyState,
+  Field,
+  FileListSkeleton,
+  Input,
+  Modal,
+  PageHeader,
+  Table,
+  TBody,
+  Td,
+  Th,
+  THead,
+  Tr,
+  useConfirm,
+  useToast,
+} from "../components/ui";
+
+type BadgeTone = "neutral" | "brand" | "success" | "danger" | "warning";
 
 export default function DocumentListPage() {
   const { folderId } = useParams<{ folderId: string }>();
   const nav = useNavigate();
   const { t } = useTranslation();
+  const confirm = useConfirm();
+  const toast = useToast();
 
   const [folder, setFolder] = useState<Folder | null>(null);
   const [docs, setDocs] = useState<Document[]>([]);
   const [error, setError] = useState<string | null>(null);
+  const [loading, setLoading] = useState(true);
   const [createOpen, setCreateOpen] = useState(false);
 
-  // refresh is also called from the mutation paths (onDelete, onCreated)
-  // so its cancellation guard is checked inline by passing an optional
-  // cancelled-flag ref. The useEffect below owns the initial-load + folder-
-  // change reload and provides a per-effect cancellation token that flips
-  // on cleanup, so a stale folder-A response can't clobber folder-B's data
-  // when the user navigates between folders quickly. Matches the
-  // DocumentEditorPage `cancelled` pattern.
+  // refresh owns the data fetch. The useEffect below provides a per-effect
+  // cancellation token that flips on cleanup, so a stale folder-A response
+  // can't clobber folder-B's data when the user navigates between folders
+  // quickly. Matches the DocumentEditorPage `cancelled` pattern.
   const refresh = useCallback(
     async (isCancelled?: () => boolean) => {
       if (!folderId) return;
@@ -66,7 +88,10 @@ export default function DocumentListPage() {
 
   useEffect(() => {
     let cancelled = false;
-    void refresh(() => cancelled);
+    setLoading(true);
+    void refresh(() => cancelled).finally(() => {
+      if (!cancelled) setLoading(false);
+    });
     return () => {
       cancelled = true;
     };
@@ -74,102 +99,176 @@ export default function DocumentListPage() {
 
   const onDelete = useCallback(
     async (d: Document) => {
-      if (!confirm(t("docs.deleteConfirm", { name: d.name }))) return;
+      const ok = await confirm({
+        title: t("docs.deleteTitle"),
+        description: t("docs.deleteConfirm", { name: d.name }),
+        confirmLabel: t("common.delete"),
+        cancelLabel: t("common.cancel"),
+        tone: "danger",
+      });
+      if (!ok) return;
       try {
         await deleteDocument(d.id);
         setDocs((prev) => prev.filter((x) => x.id !== d.id));
+        toast.success(t("docs.deleted", { name: d.name }));
       } catch (e) {
-        setError(translateApiError(e, t));
+        const msg = translateApiError(e, t);
+        setError(msg);
+        toast.error(msg);
       }
     },
-    [t],
+    [confirm, t, toast],
   );
 
   if (!folderId) {
     return (
-      <div style={pageStyle}>
-        {t("docs.missingFolderId")} <Link to="/drive">{t("admin.backToDrive")}</Link>
-      </div>
+      <AppShell maxWidth="lg">
+        <EmptyState
+          icon={<FileText className="h-6 w-6" aria-hidden="true" />}
+          title={t("docs.missingFolderId")}
+          action={
+            <Button onClick={() => nav("/drive")}>{t("admin.backToDrive")}</Button>
+          }
+        />
+      </AppShell>
     );
   }
 
   return (
-    <div style={pageStyle}>
-      <header style={headerStyle}>
-        <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
-          <Link to={`/drive/folder/${folderId}`} style={backBtnStyle} aria-label={t("docs.backToFolderAria")}>
-            ←
-          </Link>
-          <h1 style={{ margin: 0, fontSize: 20, fontWeight: 600 }}>
-            {t("docs.headerTitle", { name: folder ? folder.name : t("docs.folderFallback") })}
-          </h1>
-          {folder && <EncryptionBadge mode={folder.encryption_mode} size="row" />}
+    <AppShell
+      maxWidth="lg"
+      nav={
+        <Link
+          to={`/drive/folder/${folderId}`}
+          aria-label={t("docs.backToFolderAria")}
+          className="inline-flex items-center gap-1.5 rounded-full px-3 py-1.5 text-sm font-medium text-muted transition-colors hover:bg-surface-2 hover:text-fg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+        >
+          <ArrowLeft className="h-4 w-4" aria-hidden="true" />
+          {t("docs.backToFolder")}
+        </Link>
+      }
+    >
+      <PageHeader
+        eyebrow={
+          <span className="inline-flex items-center gap-2">
+            {t("docs.eyebrow")}
+            {folder && <EncryptionBadge mode={folder.encryption_mode} size="row" />}
+          </span>
+        }
+        title={folder ? folder.name : t("docs.folderFallback")}
+        description={t("docs.pageDescription")}
+        actions={
+          <Button onClick={() => setCreateOpen(true)} disabled={!folder}>
+            <Plus className="h-4 w-4" aria-hidden="true" />
+            {t("docs.newDocument")}
+          </Button>
+        }
+      />
+
+      {error && (
+        <div
+          role="alert"
+          className="mb-4 rounded-card border border-danger/30 bg-danger/10 px-4 py-3 text-sm text-danger"
+        >
+          {error}
         </div>
-        <button onClick={() => setCreateOpen(true)} style={primaryBtn}>
-          {t("docs.newDocument")}
-        </button>
-      </header>
+      )}
 
-      <main style={{ padding: 24 }}>
-        {error && (
-          <div style={errorBanner}>{error}</div>
-        )}
-        {docs.length === 0 ? (
-          <p style={{ color: "#6b7280" }}>{t("docs.empty")}</p>
-        ) : (
-          <table style={tableStyle}>
-            <thead>
-              <tr>
-                <th style={thStyle}>{t("common.name")}</th>
-                <th style={thStyle}>{t("docs.mode")}</th>
-                <th style={thStyle}>{t("docs.updated")}</th>
-                <th style={thStyle} aria-label={t("common.actions")} />
-              </tr>
-            </thead>
-            <tbody>
-              {docs.map((d) => (
-                <tr key={d.id} style={trStyle}>
-                  <td style={tdStyle}>
-                    <Link to={`/drive/document/${d.id}`} style={linkStyle}>
-                      {d.name}
-                    </Link>
-                  </td>
-                  <td style={tdStyle}>{collabModeLabel(t, d.collab_mode)}</td>
-                  <td style={tdStyle}>{new Date(d.updated_at).toLocaleString()}</td>
-                  <td style={{ ...tdStyle, textAlign: "right" }}>
-                    <button onClick={() => onDelete(d)} style={dangerBtn}>
-                      {t("common.delete")}
-                    </button>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        )}
-      </main>
+      {loading ? (
+        <div className="rounded-card border border-border bg-surface">
+          <FileListSkeleton rows={6} />
+        </div>
+      ) : docs.length === 0 ? (
+        <EmptyState
+          icon={<FileText className="h-6 w-6" aria-hidden="true" />}
+          title={t("docs.emptyTitle")}
+          description={t("docs.emptyDescription")}
+          action={
+            <Button onClick={() => setCreateOpen(true)} disabled={!folder}>
+              <Plus className="h-4 w-4" aria-hidden="true" />
+              {t("docs.newDocument")}
+            </Button>
+          }
+        />
+      ) : (
+        <Table>
+          <THead>
+            <Tr>
+              <Th>{t("common.name")}</Th>
+              <Th>{t("docs.mode")}</Th>
+              <Th>{t("docs.updated")}</Th>
+              <Th className="text-right">
+                <span className="sr-only">{t("common.actions")}</span>
+              </Th>
+            </Tr>
+          </THead>
+          <TBody>
+            {docs.map((d) => (
+              <Tr key={d.id}>
+                <Td>
+                  <Link
+                    to={`/drive/document/${d.id}`}
+                    className="inline-flex items-center gap-2 font-medium text-fg transition-colors hover:text-brand focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-bg"
+                  >
+                    <FileText className="h-4 w-4 shrink-0 text-muted" aria-hidden="true" />
+                    {d.name || t("docs.untitled")}
+                  </Link>
+                </Td>
+                <Td>
+                  <Badge tone={collabModeTone(d.collab_mode)}>
+                    {collabModeLabel(t, d.collab_mode)}
+                  </Badge>
+                </Td>
+                <Td className="text-muted">
+                  {new Date(d.updated_at).toLocaleString()}
+                </Td>
+                <Td className="text-right">
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    onClick={() => onDelete(d)}
+                    aria-label={t("docs.deleteAria", { name: d.name })}
+                    className="text-muted hover:bg-danger/10 hover:text-danger"
+                  >
+                    <Trash2 className="h-4 w-4" aria-hidden="true" />
+                  </Button>
+                </Td>
+              </Tr>
+            ))}
+          </TBody>
+        </Table>
+      )}
 
-      {createOpen && folder && (
+      {folder && (
         <CreateDocumentDialog
+          open={createOpen}
           folder={folder}
-          onClose={() => setCreateOpen(false)}
+          onOpenChange={setCreateOpen}
           onCreated={(d) => {
             setCreateOpen(false);
             nav(`/drive/document/${d.id}`);
           }}
         />
       )}
-    </div>
+    </AppShell>
   );
 }
 
 interface CreateDocumentDialogProps {
+  open: boolean;
   folder: Folder;
-  onClose: () => void;
+  onOpenChange: (open: boolean) => void;
   onCreated: (doc: Document) => void;
 }
 
-function CreateDocumentDialog({ folder, onClose, onCreated }: CreateDocumentDialogProps) {
+function CreateDocumentDialog({
+  open,
+  folder,
+  onOpenChange,
+  onCreated,
+}: CreateDocumentDialogProps) {
   const { t } = useTranslation();
+  const formId = useId();
   // The folder's encryption_mode bounds the allowed collab modes.
   // We compute the allowed list client-side from the SAME resolver
   // the server uses (mirrored into src/collab/capability.ts) so the
@@ -183,6 +282,21 @@ function CreateDocumentDialog({ folder, onClose, onCreated }: CreateDocumentDial
   const [name, setName] = useState(t("docs.untitled"));
   const [submitting, setSubmitting] = useState(false);
   const [dialogError, setDialogError] = useState<string | null>(null);
+
+  // Reset the form every time the dialog opens. The parent mounts this
+  // dialog persistently (so the Modal can animate its exit), which means
+  // name / mode / error would otherwise survive a close→reopen and show
+  // the previous attempt's values. Keying the reset on `open` gives each
+  // open a clean slate without remounting (remounting would cut the exit
+  // animation). `allowed` is recomputed each render but is stable for a
+  // given folder.encryption_mode, so depending only on `open` is correct.
+  useEffect(() => {
+    if (!open) return;
+    setName(t("docs.untitled"));
+    setMode(allowed[allowed.length - 1] ?? "markdown");
+    setDialogError(null);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open]);
 
   const submit = useCallback(
     async (e: React.FormEvent) => {
@@ -211,45 +325,52 @@ function CreateDocumentDialog({ folder, onClose, onCreated }: CreateDocumentDial
   );
 
   return (
-    <div
-      role="dialog"
-      aria-modal="true"
-      style={modalBackdrop}
-      onClick={() => !submitting && onClose()}
-    >
-      <form
-        onSubmit={submit}
-        style={modalCard}
-        onClick={(e) => e.stopPropagation()}
-      >
-        <h2 style={{ margin: 0, fontSize: 18 }}>{t("docs.newInFolder", { name: folder.name })}</h2>
-        <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-          <span style={{ fontSize: 13, color: "#374151" }}>{t("common.name")}</span>
-          <input
-            autoFocus
-            value={name}
-            onChange={(e) => setName(e.target.value)}
+    <Modal
+      open={open}
+      onOpenChange={(next) => {
+        if (submitting) return;
+        onOpenChange(next);
+      }}
+      title={t("docs.newInFolder", { name: folder.name })}
+      size="lg"
+      footer={
+        <>
+          <Button
+            variant="secondary"
+            onClick={() => onOpenChange(false)}
             disabled={submitting}
-            style={inputStyle}
-          />
-        </label>
+          >
+            {t("common.cancel")}
+          </Button>
+          <Button type="submit" form={formId} loading={submitting}>
+            {t("common.create")}
+          </Button>
+        </>
+      }
+    >
+      <form id={formId} onSubmit={submit} className="flex flex-col gap-4">
+        <Field label={t("common.name")} error={dialogError ?? undefined}>
+          {(props) => (
+            <Input
+              {...props}
+              autoFocus
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+              disabled={submitting}
+              placeholder={t("docs.namePlaceholder")}
+            />
+          )}
+        </Field>
         <CollabModeSelector
           value={mode}
           onChange={setMode}
           allowedModes={allowed}
           encryptionMode={folder.encryption_mode}
+          disabled={submitting}
+          busyLabel={t("docs.creating")}
         />
-        {dialogError && <p style={{ color: "#991b1b", fontSize: 13 }}>{dialogError}</p>}
-        <div style={{ display: "flex", justifyContent: "flex-end", gap: 8 }}>
-          <button type="button" onClick={onClose} disabled={submitting} style={btnStyle}>
-            {t("common.cancel")}
-          </button>
-          <button type="submit" disabled={submitting} style={primaryBtn}>
-            {submitting ? t("docs.creating") : t("common.create")}
-          </button>
-        </div>
       </form>
-    </div>
+    </Modal>
   );
 }
 
@@ -266,130 +387,14 @@ function collabModeLabel(t: TFunction, m: CollabMode): string {
   }
 }
 
-const pageStyle: React.CSSProperties = {
-  minHeight: "100vh",
-  background: "#f9fafb",
-};
-
-const headerStyle: React.CSSProperties = {
-  display: "flex",
-  alignItems: "center",
-  justifyContent: "space-between",
-  padding: "16px 24px",
-  borderBottom: "1px solid #e5e7eb",
-  gap: 12,
-  background: "white",
-};
-
-const backBtnStyle: React.CSSProperties = {
-  display: "inline-flex",
-  alignItems: "center",
-  justifyContent: "center",
-  width: 32,
-  height: 32,
-  background: "white",
-  border: "1px solid #d1d5db",
-  borderRadius: 4,
-  textDecoration: "none",
-  color: "#111827",
-  fontSize: 16,
-};
-
-const tableStyle: React.CSSProperties = {
-  width: "100%",
-  borderCollapse: "collapse",
-  background: "white",
-  border: "1px solid #e5e7eb",
-  borderRadius: 4,
-};
-
-const thStyle: React.CSSProperties = {
-  textAlign: "left",
-  padding: "8px 12px",
-  borderBottom: "1px solid #e5e7eb",
-  background: "#f9fafb",
-  fontSize: 13,
-  fontWeight: 600,
-  color: "#374151",
-};
-
-const trStyle: React.CSSProperties = {
-  borderBottom: "1px solid #f3f4f6",
-};
-
-const tdStyle: React.CSSProperties = {
-  padding: "8px 12px",
-  fontSize: 14,
-};
-
-const linkStyle: React.CSSProperties = {
-  color: "#1d4ed8",
-  textDecoration: "none",
-  fontWeight: 500,
-};
-
-const errorBanner: React.CSSProperties = {
-  padding: 12,
-  background: "#fee2e2",
-  border: "1px solid #fecaca",
-  color: "#991b1b",
-  borderRadius: 4,
-  marginBottom: 16,
-};
-
-const primaryBtn: React.CSSProperties = {
-  padding: "8px 14px",
-  background: "#1d4ed8",
-  color: "white",
-  border: "1px solid #1d4ed8",
-  borderRadius: 4,
-  fontSize: 13,
-  fontWeight: 500,
-  cursor: "pointer",
-};
-
-const btnStyle: React.CSSProperties = {
-  padding: "8px 14px",
-  background: "white",
-  border: "1px solid #d1d5db",
-  borderRadius: 4,
-  fontSize: 13,
-  cursor: "pointer",
-};
-
-const dangerBtn: React.CSSProperties = {
-  padding: "4px 10px",
-  background: "white",
-  border: "1px solid #fecaca",
-  color: "#991b1b",
-  borderRadius: 4,
-  fontSize: 12,
-  cursor: "pointer",
-};
-
-const inputStyle: React.CSSProperties = {
-  padding: "6px 10px",
-  border: "1px solid #d1d5db",
-  borderRadius: 4,
-  fontSize: 14,
-};
-
-const modalBackdrop: React.CSSProperties = {
-  position: "fixed",
-  inset: 0,
-  background: "rgba(0,0,0,0.4)",
-  display: "flex",
-  alignItems: "center",
-  justifyContent: "center",
-  zIndex: 100,
-};
-
-const modalCard: React.CSSProperties = {
-  background: "white",
-  borderRadius: 8,
-  padding: 24,
-  width: "min(480px, 90vw)",
-  display: "flex",
-  flexDirection: "column",
-  gap: 12,
-};
+function collabModeTone(m: CollabMode): BadgeTone {
+  switch (m) {
+    case "markdown":
+      return "neutral";
+    case "rich":
+    case "rich_presence":
+      return "brand";
+    case "disabled":
+      return "warning";
+  }
+}
