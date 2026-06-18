@@ -1,5 +1,6 @@
 import { Link } from "react-router-dom";
 import { useTranslation } from "react-i18next";
+import { Lock, ShieldCheck } from "lucide-react";
 import { cn } from "../lib/cn";
 
 // EncryptionBadge renders the privacy mode of a folder as a small pill
@@ -48,10 +49,17 @@ export interface EncryptionBadgeProps {
   // assignment widens to string here at the prop boundary, which is
   // fine.
   mode?: string;
-  // size lets callers pick "row" (small, alongside file/folder names)
-  // or "header" (larger, alongside the current folder in the breadcrumb).
-  // Both render the same colour / label; only padding + font scale up.
-  size?: "row" | "header";
+  // size lets callers pick the density:
+  //   - "row"    small text pill alongside file/folder names
+  //   - "header" larger pill (leading dot) for the breadcrumb
+  //   - "icon"   icon-only indicator for dense lists (the sidebar tree),
+  //              where even the compact pill would crowd the name out of
+  //              its slot. The mode reads from the icon + colour (lock /
+  //              brand for zero-knowledge, shield / success for
+  //              confidential) and the full explanation stays in the
+  //              tooltip + aria-label.
+  // All densities share the same colour vocabulary and accessible name.
+  size?: "row" | "header" | "icon";
   // linkToHelp controls whether the badge renders as a clickable
   // `<Link>` to /drive/privacy (the brand-aligned customer explainer
   // page) or as a plain `<span>`. Default true so every appearance of
@@ -133,7 +141,14 @@ export default function EncryptionBadge({
     : "bg-success/10 text-success";
   const dotClass = isStrict ? "bg-brand" : "bg-success";
   const isHeader = size === "header";
-  const badge = (
+  const isIcon = size === "icon";
+  const textTone = isStrict ? "text-brand" : "text-success";
+  const Icon = isStrict ? Lock : ShieldCheck;
+  const badge = isIcon ? (
+    <span className={cn("inline-flex items-center justify-center", textTone)}>
+      <Icon className="h-4 w-4 shrink-0" aria-hidden="true" />
+    </span>
+  ) : (
     <span
       className={cn(
         "inline-flex items-center rounded-full font-medium leading-none whitespace-nowrap",
