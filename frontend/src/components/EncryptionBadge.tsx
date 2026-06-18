@@ -1,5 +1,7 @@
 import { Link } from "react-router-dom";
 import { useTranslation } from "react-i18next";
+import { Lock, ShieldCheck } from "lucide-react";
+import { cn } from "../lib/cn";
 
 // EncryptionBadge renders the privacy mode of a folder as a small pill
 // next to its name. Mode strings come from the API (`encryption_mode`
@@ -47,10 +49,17 @@ export interface EncryptionBadgeProps {
   // assignment widens to string here at the prop boundary, which is
   // fine.
   mode?: string;
-  // size lets callers pick "row" (small, alongside file/folder names)
-  // or "header" (larger, alongside the current folder in the breadcrumb).
-  // Both render the same colour / label; only padding + font scale up.
-  size?: "row" | "header";
+  // size lets callers pick the density:
+  //   - "row"    small text pill alongside file/folder names
+  //   - "header" larger pill (leading dot) for the breadcrumb
+  //   - "icon"   icon-only indicator for dense lists (the sidebar tree),
+  //              where even the compact pill would crowd the name out of
+  //              its slot. The mode reads from the icon + colour (lock /
+  //              brand for zero-knowledge, shield / success for
+  //              confidential) and the full explanation stays in the
+  //              tooltip + aria-label.
+  // All densities share the same colour vocabulary and accessible name.
+  size?: "row" | "header" | "icon";
   // linkToHelp controls whether the badge renders as a clickable
   // `<Link>` to /drive/privacy (the brand-aligned customer explainer
   // page) or as a plain `<span>`. Default true so every appearance of
@@ -104,22 +113,74 @@ export default function EncryptionBadge({
   const title = linkToHelp
     ? `${body} ${t("encryption.clickToLearnMore")}`
     : body;
-  const padding = size === "header" ? "2px 10px" : "1px 6px";
-  const fontSize = size === "header" ? 12 : 10;
-  const style = {
-    fontSize,
-    padding,
-    borderRadius: 999,
-    background: isStrict ? "#fee2e2" : "#dcfce7",
-    color: isStrict ? "#991b1b" : "#166534",
-    whiteSpace: "nowrap" as const,
-    // border on the badge makes both variants legible against the
-    // page background even in high-contrast / forced-colors mode.
-    border: `1px solid ${isStrict ? "#fca5a5" : "#86efac"}`,
-    textDecoration: "none",
-    display: "inline-block",
-  };
   const dataMode = isStrict ? "strict_zk" : "managed_encrypted";
+
+  // Tokenised tones (no hard-coded hex): strict zero-knowledge wears the
+  // KChat brand indigo — it is the premium, server-blind mode and the
+  // colour signals "this is the strong one" rather than "danger".
+  // Confidential (the managed default) wears success green: encrypted at
+  // rest, server-readable. Both tones re-theme with the app and flip
+  // correctly in dark mode because they resolve from CSS variables.
+  //
+  // The pill is sized for its context. The dense "row" variant sits next
+  // to file/folder names in tight, multi-column lists — e.g. the two-up
+  // subfolder cards in the drive, where a card budgets only ~100px for
+  // name + badge after the Share/Delete actions. It therefore stays
+  // deliberately compact (and `shrink-0`, below) so the sibling name
+  // keeps layout priority and truncates with an ellipsis instead of
+  // collapsing to zero width. The "header" variant sits in the breadcrumb
+  // where there is room to breathe, so it scales up and adds a leading
+  // dot for extra scannability. The shared `Badge` primitive's fixed
+  // footprint (text-xs / px-2.5 / leading dot) overflows the row slot and
+  // can't be trimmed via className (cn is clsx-only, so the larger scale
+  // wins), so the pill is composed locally here from the same tone tokens
+  // — see the PR description's coordinator follow-up proposing a Badge
+  // `size="sm"` variant.
+  //
+  // The tone-matched border is not just decorative: in Windows High Contrast /
+  // forced-colors mode the user agent strips background colours but keeps
+  // borders (repainting them with a system colour), so without it the two
+  // privacy modes would become indistinguishable filled-less text. The border
+  // keeps the pill outlined and legible there while reading as a soft tint in
+  // normal mode.
+  const toneClasses = isStrict
+    ? "border border-brand/30 bg-brand/10 text-brand"
+    : "border border-success/30 bg-success/10 text-success";
+  const dotClass = isStrict ? "bg-brand" : "bg-success";
+  const isHeader = size === "header";
+  const isIcon = size === "icon";
+  const textTone = isStrict ? "text-brand" : "text-success";
+  const Icon = isStrict ? Lock : ShieldCheck;
+  const badge = isIcon ? (
+    // The icon-only density has no visible text, so it needs its own
+    // accessible name when it is NOT wrapped in the help <Link> (which already
+    // carries aria-label below). Giving the span role="img" + aria-label only
+    // in the linkToHelp={false} case keeps it announced for screen readers
+    // without double-labelling the link; the glyph itself stays aria-hidden.
+    <span
+      role={linkToHelp ? undefined : "img"}
+      aria-label={linkToHelp ? undefined : t("encryption.badgeAria", { label })}
+      className={cn("inline-flex items-center justify-center", textTone)}
+    >
+      <Icon className="h-4 w-4 shrink-0" aria-hidden="true" />
+    </span>
+  ) : (
+    <span
+      className={cn(
+        "inline-flex items-center rounded-full font-medium leading-none whitespace-nowrap",
+        toneClasses,
+        isHeader ? "gap-1.5 px-2.5 py-1 text-xs" : "px-1.5 py-0.5 text-[10px]",
+      )}
+    >
+      {isHeader && (
+        <span
+          className={cn("h-1.5 w-1.5 shrink-0 rounded-full", dotClass)}
+          aria-hidden="true"
+        />
+      )}
+      {label}
+    </span>
+  );
 
   if (linkToHelp) {
     return (
@@ -137,9 +198,15 @@ export default function EncryptionBadge({
         // noise. See the `tabbable` prop comment above.
         tabIndex={tabbable ? undefined : -1}
         aria-label={t("encryption.badgeAria", { label })}
-        style={style}
+        className={cn(
+          "inline-flex shrink-0 no-underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-bg",
+          // Match the focus ring to the content shape: the pill variants are
+          // genuinely round, but the icon-only density is a square glyph, so a
+          // rounded-full ring around it would read as an odd floating circle.
+          isIcon ? "rounded-md" : "rounded-full",
+        )}
       >
-        {label}
+        {badge}
       </Link>
     );
   }
@@ -149,9 +216,9 @@ export default function EncryptionBadge({
       title={title}
       data-testid="encryption-badge"
       data-mode={dataMode}
-      style={style}
+      className="inline-flex shrink-0"
     >
-      {label}
+      {badge}
     </span>
   );
 }
