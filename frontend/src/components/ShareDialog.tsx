@@ -1,4 +1,4 @@
-import { useState, type ReactNode } from "react";
+import { useId, useState, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 import {
   ChevronDown,
@@ -396,6 +396,7 @@ function RoleSelector({
   label: string;
 }) {
   const { t } = useTranslation();
+  const labelId = useId();
   const roles: { role: Role; title: string; description: string }[] = [
     { role: "viewer", title: t("share.roleViewer"), description: t("share.roleViewerDesc") },
     {
@@ -407,14 +408,10 @@ function RoleSelector({
   ];
   return (
     <div className="flex flex-col gap-1.5">
-      <span className="text-sm font-medium text-fg" id="share-role-label">
+      <span className="text-sm font-medium text-fg" id={labelId}>
         {label}
       </span>
-      <div
-        role="radiogroup"
-        aria-labelledby="share-role-label"
-        className="flex flex-col gap-2"
-      >
+      <div role="radiogroup" aria-labelledby={labelId} className="flex flex-col gap-2">
         {roles.map((r) => (
           <RadioCard
             key={r.role}
