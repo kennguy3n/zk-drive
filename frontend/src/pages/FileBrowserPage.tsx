@@ -562,10 +562,14 @@ export default function FileBrowserPage() {
                       but its ::after overlay covers the whole card so the
                       entire surface navigates. The action buttons and the
                       encryption badge sit above the overlay (relative z-10) so
-                      they stay clickable / hoverable — the badge needs it so its
-                      privacy-mode tooltip fires instead of being swallowed by the
-                      overlay. The link's accessible name stays exactly the folder
-                      name (the badge is a sibling, not nested inside the anchor).
+                      they stay clickable / hoverable. The badge is itself a
+                      <Link to="/drive/privacy"> (a sibling of the name anchor,
+                      not nested — valid HTML), so floating it above the overlay
+                      both fires its privacy-mode tooltip on hover and keeps it a
+                      live link to the privacy explainer; w-fit confines the
+                      raised z-index to the badge so the rest of the card still
+                      navigates to the folder. tabbable={false} keeps the keyboard
+                      tab order clean across the N identical-destination badges.
                     */}
                     <span className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-brand/10 text-brand transition-colors group-hover:bg-brand group-hover:text-brand-fg">
                       <FolderIcon className="h-5 w-5" aria-hidden="true" />
@@ -577,10 +581,12 @@ export default function FileBrowserPage() {
                       >
                         {f.name}
                       </Link>
-                      {/* w-fit keeps the badge above the overlay only across its
-                          own width, so the rest of the card still navigates. */}
                       <span className="relative z-10 w-fit">
-                        <EncryptionBadge mode={f.encryption_mode} linkToHelp={false} />
+                        <EncryptionBadge
+                          mode={f.encryption_mode}
+                          linkToHelp
+                          tabbable={false}
+                        />
                       </span>
                     </div>
                     <div className="relative z-10 flex shrink-0 items-center gap-0.5">

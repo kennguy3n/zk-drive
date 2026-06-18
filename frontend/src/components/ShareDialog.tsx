@@ -91,11 +91,14 @@ export default function ShareDialog({ resource, onClose }: Props) {
     let maxDownloads: number | undefined;
     const rawMaxDownloads = linkMaxDownloads.trim();
     if (rawMaxDownloads) {
-      // Number() (not parseInt) so a decimal like "3.7" is rejected with the
-      // inline error rather than silently truncated to 3 — downloads are a
-      // whole-count cap, so a fractional value is a user mistake to surface.
+      // Accept only a plain run of decimal digits (a positive whole count).
+      // This deliberately rejects decimals ("3.7"), exponential ("1e3"), hex
+      // ("0x10") and signed input — all of which Number() would otherwise
+      // coerce to a value the user never typed. Downloads are a whole-count
+      // cap, so anything else is a mistake to surface inline rather than
+      // silently honour a coerced number.
       const parsed = Number(rawMaxDownloads);
-      if (!Number.isInteger(parsed) || parsed < 1) {
+      if (!/^\d+$/.test(rawMaxDownloads) || parsed < 1) {
         setMaxDownloadsError(t("share.maxDownloadsError"));
         setLinkAdvanced(true);
         return;
