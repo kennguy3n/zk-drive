@@ -1,4 +1,4 @@
-import { useEffect, useState, type ComponentType } from "react";
+import { useEffect, useRef, useState, type ComponentType } from "react";
 import { useTranslation } from "react-i18next";
 import {
   Download,
@@ -166,6 +166,17 @@ function PanelViewer({
   const toast = useToast();
   const [downloading, setDownloading] = useState(false);
 
+  // Track mount so the async download can't setState after the panel unmounts
+  // (it remounts via key={fileID} when the file changes). Harmless in React 18
+  // but matches the cancellation pattern used in the preview-URL effect above.
+  const mounted = useRef(true);
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+    };
+  }, []);
+
   const showEditorButton =
     !!onOpenEditor && !!onlyOfficeEnabled && isOfficeDocument(fileName);
 
@@ -181,9 +192,9 @@ function PanelViewer({
       a.click();
       a.remove();
     } catch {
-      toast.error(t("preview.downloadFailed"));
+      if (mounted.current) toast.error(t("preview.downloadFailed"));
     } finally {
-      setDownloading(false);
+      if (mounted.current) setDownloading(false);
     }
   };
 

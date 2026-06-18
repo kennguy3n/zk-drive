@@ -86,6 +86,10 @@ export default function ShareDialog({ resource, onClose }: Props) {
 
   const submitLink = async (e: React.FormEvent) => {
     e.preventDefault();
+    // Pressing Enter in a field submits the form even while the submit Button
+    // is visually disabled, so guard here too: a rapid double-Enter would
+    // otherwise dispatch two identical createShareLink calls.
+    if (linkSubmitting) return;
     setError(null);
 
     let maxDownloads: number | undefined;
@@ -148,6 +152,9 @@ export default function ShareDialog({ resource, onClose }: Props) {
 
   const submitInvite = async (e: React.FormEvent) => {
     e.preventDefault();
+    // See submitLink: Enter-to-submit bypasses the disabled Button, so guard
+    // against a double-dispatch of createGuestInvite here.
+    if (inviteSubmitting) return;
     setError(null);
 
     if (!EMAIL_RE.test(inviteEmail.trim())) {
