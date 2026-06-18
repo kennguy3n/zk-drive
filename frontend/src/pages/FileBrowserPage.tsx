@@ -386,7 +386,7 @@ export default function FileBrowserPage() {
   const handleRenameFile = async (id: string, name: string) => {
     try {
       await renameFile(id, name);
-      refresh();
+      await refresh();
       toast.success(t("drive.fileRenamed"));
     } catch (e) {
       toast.error(translateApiError(e, t));
@@ -396,7 +396,7 @@ export default function FileBrowserPage() {
   const handleDeleteFile = async (id: string) => {
     try {
       await deleteFile(id);
-      refresh();
+      await refresh();
       toast.success(t("drive.fileDeleted"));
     } catch (e) {
       toast.error(translateApiError(e, t));
