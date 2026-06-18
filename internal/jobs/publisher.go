@@ -303,9 +303,17 @@ func (p *Publisher) publish(ctx context.Context, subject string, payload FileJob
 	// nats.Msg headers so the consumer recreates the parent-child
 	// link. Using PublishMsgAsync rather than PublishAsync because
 	// the latter has no header-passing equivalent.
+	//
+	// No nats.Context option is passed: JetStream's async publish
+	// rejects a per-call context when the JetStream context already
+	// carries a default request timeout (nats.go fails the publish
+	// with "context and timeout can not both be set"). Cancellation
+	// is not meaningful for a fire-and-forget async publish, and the
+	// trace context propagates via the headers above — ctx is only
+	// needed for the producer span.
 	msg := &nats.Msg{Subject: subject, Data: body, Header: nats.Header{}}
 	otel.GetTextMapPropagator().Inject(ctx, tracing.NATSHeaderCarrier(msg.Header))
-	if _, err := p.js.PublishMsgAsync(msg, nats.Context(ctx)); err != nil {
+	if _, err := p.js.PublishMsgAsync(msg); err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "publish failed")
 		return fmt.Errorf("publish %s: %w", subject, err)
