@@ -560,10 +560,12 @@ export default function FileBrowserPage() {
                     {/*
                       Stretched-link card: only the name is a real <Link>,
                       but its ::after overlay covers the whole card so the
-                      entire surface navigates. The action buttons sit above
-                      the overlay (relative z-10) so they stay clickable, and
-                      the link's accessible name stays exactly the folder name
-                      (the badge is a sibling, not nested inside the anchor).
+                      entire surface navigates. The action buttons and the
+                      encryption badge sit above the overlay (relative z-10) so
+                      they stay clickable / hoverable — the badge needs it so its
+                      privacy-mode tooltip fires instead of being swallowed by the
+                      overlay. The link's accessible name stays exactly the folder
+                      name (the badge is a sibling, not nested inside the anchor).
                     */}
                     <span className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-brand/10 text-brand transition-colors group-hover:bg-brand group-hover:text-brand-fg">
                       <FolderIcon className="h-5 w-5" aria-hidden="true" />
@@ -575,7 +577,11 @@ export default function FileBrowserPage() {
                       >
                         {f.name}
                       </Link>
-                      <EncryptionBadge mode={f.encryption_mode} linkToHelp={false} />
+                      {/* w-fit keeps the badge above the overlay only across its
+                          own width, so the rest of the card still navigates. */}
+                      <span className="relative z-10 w-fit">
+                        <EncryptionBadge mode={f.encryption_mode} linkToHelp={false} />
+                      </span>
                     </div>
                     <div className="relative z-10 flex shrink-0 items-center gap-0.5">
                       <button
