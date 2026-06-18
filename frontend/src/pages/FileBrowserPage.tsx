@@ -41,6 +41,7 @@ import {
   getOnlyOfficeStatus,
   listFolders,
   renameFile,
+  type BulkResponse,
   type ClientRoomTemplate,
   type FileItem,
   type Folder,
@@ -61,6 +62,7 @@ import {
   usePrompt,
   useResourcePicker,
   useToast,
+  type PickerItem,
 } from "../components/ui";
 import { cn } from "../lib/cn";
 
@@ -71,29 +73,20 @@ type ShareTarget =
   | { type: "folder"; value: Folder }
   | { type: "file"; value: FileItem };
 
-// collectAllFolders walks the folder tree breadth-first so the move/copy
-// resource picker can offer every destination (the API has no flat
-// "list all folders" endpoint — only per-parent listings). Levels are
-// fetched in parallel and a seen-set guards against cycles; for SME-scale
-// workspaces this is a handful of fast requests.
+// collectAllFolders walks the workspace folder tree breadth-first into a
+// flat list. The API lists a single level at a time (listFolders(parentID))
+// and exposes no recursive "all folders" endpoint, so the move/copy picker
+// has to assemble the destination list itself. The folder tree is acyclic,
+// so the loop terminates once a level has no children.
 async function collectAllFolders(): Promise<Folder[]> {
-  const out: Folder[] = [];
-  const seen = new Set<string>();
-  let frontier = await listFolders(null);
-  while (frontier.length > 0) {
-    const level: Folder[] = [];
-    for (const f of frontier) {
-      if (seen.has(f.id)) continue;
-      seen.add(f.id);
-      out.push(f);
-      level.push(f);
-    }
-    const childLists = await Promise.all(
-      level.map((f) => listFolders(f.id).catch(() => [] as Folder[])),
-    );
-    frontier = childLists.flat().filter((f) => !seen.has(f.id));
+  const all: Folder[] = [];
+  let level = await listFolders(null);
+  while (level.length > 0) {
+    all.push(...level);
+    const children = await Promise.all(level.map((f) => listFolders(f.id)));
+    level = children.flat();
   }
-  return out;
+  return all;
 }
 
 // FileBrowserPage is the main "drive" surface: breadcrumb + folder tree +
@@ -137,6 +130,14 @@ export default function FileBrowserPage() {
   // currently open in the OnlyOffice editor overlay.
   const [onlyOfficeEnabled, setOnlyOfficeEnabled] = useState(false);
   const [editorFile, setEditorFile] = useState<FileItem | null>(null);
+  // Bumped after a root-level folder create/delete so the sidebar
+  // (which lists only root folders) refetches; navigation alone won't
+  // change its dependency otherwise.
+  const [treeReloadKey, setTreeReloadKey] = useState(0);
+  // True while a bulk move/copy/delete/download is in flight; disables the
+  // bulk-action buttons so a fast double-click can't fire overlapping
+  // mutations against the same selection.
+  const [bulkBusy, setBulkBusy] = useState(false);
 
   const toggleSelect = useCallback((id: string) => {
     setSelectedFiles((prev) => {
@@ -219,96 +220,151 @@ export default function FileBrowserPage() {
     setCreateFolderOpen(true);
   };
 
-  const handleDeleteFolder = async (f: Folder) => {
+  const handleDeleteFolder = async (target: Folder) => {
     const ok = await confirm({
       title: t("drive.deleteFolderTitle"),
-      description: t("drive.deleteFolderDescription", { name: f.name }),
-      tone: "danger",
+      description: t("drive.deleteFolderConfirmNamed", { name: target.name }),
       confirmLabel: t("common.delete"),
+      cancelLabel: t("common.cancel"),
+      tone: "danger",
     });
     if (!ok) return;
     try {
-      await deleteFolder(f.id);
-      refresh();
+      await deleteFolder(target.id);
+      await refresh();
+      // The deleted folder is a child of the current view, so the sidebar
+      // (root folders only) is affected only when deleting at the root.
+      if (currentFolderID === null) setTreeReloadKey((k) => k + 1);
+      toast.success(t("drive.folderDeleted", { name: target.name }));
     } catch (e) {
       toast.error(translateApiError(e, t));
     }
   };
 
-  // pickFolder gathers every folder and opens the searchable resource
-  // picker, returning the chosen folder id (or null if cancelled). Replaces
-  // the old "type a folder UUID" prompt for bulk move / copy.
-  const pickFolder = async (titleKey: string, confirmKey: string): Promise<string | null> => {
-    let folders: Folder[] = [];
-    try {
-      folders = await collectAllFolders();
-    } catch {
-      // Fall through with an empty list → the picker shows its empty state
-      // rather than the dialog silently never appearing.
-    }
-    const item = await pickResource({
-      title: t(titleKey),
-      description: t("drive.pickFolderDescription"),
-      items: folders
+  // Surfaces the outcome of a bulk operation. The API reports per-item
+  // success/failure (BulkResponse), so a partial failure (some files moved,
+  // some not) is reported honestly instead of looking identical to success.
+  const reportBulk = useCallback(
+    (res: BulkResponse, action: "move" | "copy" | "delete") => {
+      if (res.failed.length === 0) {
+        const key =
+          action === "move"
+            ? "drive.moveSuccess"
+            : action === "copy"
+              ? "drive.copySuccess"
+              : "drive.deleteSuccess";
+        toast.success(t(key, { count: res.succeeded.length }));
+      } else {
+        toast.error(
+          t("drive.bulkSomeFailed", {
+            ok: res.succeeded.length,
+            failed: res.failed.length,
+          }),
+        );
+      }
+    },
+    [t, toast],
+  );
+
+  // Opens the searchable folder picker fed by the live folder tree and
+  // resolves to the chosen folder id (or null if cancelled). Replaces the
+  // old "type a folder UUID" prompt — the single most user-hostile flow.
+  const pickTargetFolder = useCallback(
+    async (count: number, action: "move" | "copy"): Promise<string | null> => {
+      let folders: Folder[];
+      try {
+        folders = await collectAllFolders();
+      } catch (e) {
+        toast.error(translateApiError(e, t));
+        return null;
+      }
+      const items: PickerItem[] = folders
+        // Can't move/copy a file into the folder it already lives in.
         .filter((f) => f.id !== currentFolderID)
+        .sort((a, b) => (a.path || a.name).localeCompare(b.path || b.name))
         .map((f) => ({
           id: f.id,
           label: f.name,
           description: f.path,
-          searchText: `${f.name} ${f.path ?? ""}`,
-        })),
-      searchable: true,
-      searchPlaceholder: t("drive.folderPickerSearch"),
-      emptyMessage: t("drive.noFoldersToPick"),
-      confirmLabel: t(confirmKey),
-    });
-    return item ? item.id : null;
-  };
+          searchText: `${f.name} ${f.path}`,
+        }));
+      const picked = await pickResource({
+        title: action === "move" ? t("drive.movePickerTitle") : t("drive.copyPickerTitle"),
+        description:
+          action === "move"
+            ? t("drive.movePickerDescription", { count })
+            : t("drive.copyPickerDescription", { count }),
+        items,
+        searchable: true,
+        searchPlaceholder: t("drive.movePickerSearchPlaceholder"),
+        emptyMessage: t("drive.movePickerEmpty"),
+        confirmLabel: action === "move" ? t("drive.move") : t("drive.copy"),
+      });
+      return picked?.id ?? null;
+    },
+    [currentFolderID, pickResource, t, toast],
+  );
 
-  const handleBulkMove = async () => {
-    const target = await pickFolder("drive.moveDialogTitle", "drive.moveConfirm");
-    if (!target) return;
+  const onBulkMove = async () => {
+    if (selectedFiles.size === 0) return;
+    setBulkBusy(true);
     try {
-      await bulkMove({ file_ids: [...selectedFiles], target_folder_id: target });
+      const target = await pickTargetFolder(selectedFiles.size, "move");
+      if (!target) return;
+      const res = await bulkMove({ file_ids: [...selectedFiles], target_folder_id: target });
       setSelectedFiles(new Set());
-      refresh();
-      toast.success(t("drive.moveSuccess"));
+      await refresh();
+      reportBulk(res, "move");
     } catch (e) {
       toast.error(translateApiError(e, t));
+    } finally {
+      setBulkBusy(false);
     }
   };
 
-  const handleBulkCopy = async () => {
-    const target = await pickFolder("drive.copyDialogTitle", "drive.copyConfirm");
-    if (!target) return;
+  const onBulkCopy = async () => {
+    if (selectedFiles.size === 0) return;
+    setBulkBusy(true);
     try {
-      await bulkCopy({ file_ids: [...selectedFiles], target_folder_id: target });
+      const target = await pickTargetFolder(selectedFiles.size, "copy");
+      if (!target) return;
+      const res = await bulkCopy({ file_ids: [...selectedFiles], target_folder_id: target });
       setSelectedFiles(new Set());
-      refresh();
-      toast.success(t("drive.copySuccess"));
+      await refresh();
+      reportBulk(res, "copy");
     } catch (e) {
       toast.error(translateApiError(e, t));
+    } finally {
+      setBulkBusy(false);
     }
   };
 
-  const handleBulkDelete = async () => {
+  const onBulkDelete = async () => {
+    if (selectedFiles.size === 0) return;
     const ok = await confirm({
       title: t("drive.bulkDeleteTitle"),
       description: t("drive.bulkDeleteConfirm", { count: selectedFiles.size }),
-      tone: "danger",
       confirmLabel: t("common.delete"),
+      cancelLabel: t("common.cancel"),
+      tone: "danger",
     });
     if (!ok) return;
+    setBulkBusy(true);
     try {
-      await bulkDelete({ file_ids: [...selectedFiles] });
+      const res = await bulkDelete({ file_ids: [...selectedFiles] });
       setSelectedFiles(new Set());
-      refresh();
+      await refresh();
+      reportBulk(res, "delete");
     } catch (e) {
       toast.error(translateApiError(e, t));
+    } finally {
+      setBulkBusy(false);
     }
   };
 
-  const handleBulkDownload = async () => {
+  const onBulkDownload = async () => {
+    if (selectedFiles.size === 0) return;
+    setBulkBusy(true);
     try {
       const blob = await bulkDownload([...selectedFiles]);
       const url = URL.createObjectURL(blob);
@@ -319,6 +375,8 @@ export default function FileBrowserPage() {
       URL.revokeObjectURL(url);
     } catch (e) {
       toast.error(translateApiError(e, t));
+    } finally {
+      setBulkBusy(false);
     }
   };
 
@@ -360,7 +418,7 @@ export default function FileBrowserPage() {
 
   return (
     <div className="flex min-h-screen bg-bg text-fg">
-      <FolderTree currentFolderID={currentFolderID} />
+      <FolderTree currentFolderID={currentFolderID} reloadKey={treeReloadKey} />
       <main className="flex min-w-0 flex-1 flex-col">
         {/* Top utility bar: location (breadcrumb) + search + navigation. */}
         <header className="sticky top-0 z-20 flex flex-wrap items-center gap-x-3 gap-y-2 border-b border-border bg-bg/85 px-4 py-3 backdrop-blur-md sm:px-6">
@@ -556,19 +614,19 @@ export default function FileBrowserPage() {
                   <span className="mr-1 text-sm font-medium text-fg">
                     {t("drive.selectedCount", { count: selectedFiles.size })}
                   </span>
-                  <Button variant="ghost" size="sm" onClick={handleBulkMove}>
+                  <Button variant="ghost" size="sm" onClick={onBulkMove} loading={bulkBusy}>
                     <Move className="h-4 w-4" aria-hidden="true" />
                     {t("drive.move")}
                   </Button>
-                  <Button variant="ghost" size="sm" onClick={handleBulkCopy}>
+                  <Button variant="ghost" size="sm" onClick={onBulkCopy} loading={bulkBusy}>
                     <Copy className="h-4 w-4" aria-hidden="true" />
                     {t("drive.copy")}
                   </Button>
-                  <Button variant="ghost" size="sm" onClick={handleBulkDownload}>
+                  <Button variant="ghost" size="sm" onClick={onBulkDownload} loading={bulkBusy}>
                     <Download className="h-4 w-4" aria-hidden="true" />
                     {t("drive.downloadZip")}
                   </Button>
-                  <Button variant="danger" size="sm" onClick={handleBulkDelete}>
+                  <Button variant="danger" size="sm" onClick={onBulkDelete} loading={bulkBusy}>
                     <Trash2 className="h-4 w-4" aria-hidden="true" />
                     {t("common.delete")}
                   </Button>
@@ -631,6 +689,9 @@ export default function FileBrowserPage() {
           onCreated={() => {
             setCreateFolderOpen(false);
             refresh();
+            // The sidebar lists only root folders, so it only needs to
+            // refetch when the newly created folder is itself root-level.
+            if (currentFolderID === null) setTreeReloadKey((k) => k + 1);
           }}
         />
       ) : null}
