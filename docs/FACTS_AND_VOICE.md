@@ -228,7 +228,7 @@ folders, and numbers verbatim. Demo password for every seeded account:
 
 ### 7.1 Northwind Trading — primary tenant (an import/distribution SME)
 
-**People** (`seed.py:382-392`)
+**People** (`seed.py:424-434`)
 
 | Name | Email | Role | Status |
 | --- | --- | --- | --- |
@@ -238,7 +238,7 @@ folders, and numbers verbatim. Demo password for every seeded account:
 | Carol Nguyen | `carol@northwind.example` | Member | Active |
 | Eve Thompson | `eve@northwind.example` | Member | Deactivated |
 
-**Folders** (`seed.py:397-403`)
+**Folders** (`seed.py:437-443`)
 
 - `Engineering` — managed_encrypted
   - `Architecture` — managed_encrypted (subfolder)
@@ -248,8 +248,8 @@ folders, and numbers verbatim. Demo password for every seeded account:
 - `Legal Contracts` — **strict_zk**
 - `Client Vault` — **strict_zk**
 
-**Files with real bytes** (`seed.py:406-470`, `engineering_files()` at
-`seed.py:313`)
+**Files with real bytes** (`seed.py:446-511`, `engineering_files()` at
+`seed.py:353`)
 
 - Engineering (5): `architecture-overview.pdf`, `api-spec-v3.yaml`,
   `deployment-runbook.md`, `load-test-results.csv`, `security-audit-2026.pdf`
@@ -259,9 +259,9 @@ folders, and numbers verbatim. Demo password for every seeded account:
 - Client Vault (strict_zk): `onboarding-packet.pdf`
 
 **Collaboration** — a `rich_presence` document **"Q2 Planning Notes"** in
-Engineering (`seed.py:473-479`).
+Engineering (`seed.py:513-519`).
 
-**Sharing** (`seed.py:481-508`)
+**Sharing** (`seed.py:521-548`)
 
 - File share link on the first Engineering file: password
   `Architecture#2026`, expires `2026-12-31`, `max_downloads` 25.
@@ -272,23 +272,23 @@ Engineering (`seed.py:473-479`).
 
 **Governance & ops**
 
-- Retention (`seed.py:521-533`): workspace default `max_versions` 10,
+- Retention (`seed.py:561-573`): workspace default `max_versions` 10,
   `archive_after_days` 365; Legal Contracts `max_versions` 25.
-- Billing (`seed.py:535-546`): **business** tier with explicit overrides —
+- Billing (`seed.py:575-586`): **business** tier with explicit overrides —
   1 TB storage, 50 users, 5 TB/month bandwidth.
-- Data placement (`seed.py:548-560`): provider `aws`, region `us-east-1`,
+- Data placement (`seed.py:588-600`): provider `aws`, region `us-east-1`,
   country `US`, storage class `STANDARD`; encryption `managed`.
-- CMK (`seed.py:561-566`):
+- CMK (`seed.py:601-606`):
   `arn:aws:kms:us-east-1:000000000000:key/northwind-demo-cmk`.
 - Default workspace encryption mode: `managed_encrypted`.
-- Outbound webhook (`seed.py:574-584`):
+- Outbound webhook (`seed.py:614-624`):
   `https://example.com/webhooks/zk-drive` on `file.upload.confirmed`.
-- KChat room mapping (`seed.py:587`): `northwind-engineering`.
+- KChat room mapping (`seed.py:627`): `northwind-engineering`.
 
 ### 7.2 Lakeside Legal — isolation tenant
 
 A second, fully independent workspace used only to demonstrate that one tenant
-can never see another's data (`seed.py:613-628`).
+can never see another's data (`seed.py:653-668`).
 
 - Owner-admin: **Morgan Reyes** (`morgan@lakeside.example`).
 - Folders: `Client Matters` (strict_zk), `Case Briefs` (managed_encrypted)
@@ -301,10 +301,15 @@ can never see another's data (`seed.py:613-628`).
 BASE_URL=http://localhost:8080 python3 scripts/seed/seed.py
 ```
 
+The built-in demo password is used automatically against a local `BASE_URL`.
+Seeding any non-local target requires an explicit `SEED_PASSWORD`, or the
+script refuses to run, so demo accounts never get a publicly predictable
+credential (`require_safe_password()` at `seed.py:70`).
+
 The script is Python-stdlib-only and **idempotent**: a re-run detects the
 existing Northwind owner, re-derives the full state (users, subfolders,
 Lakeside), rewrites `scripts/seed/out/state.json`, and exits without creating
-duplicates (`derive_existing()` at `seed.py:631`).
+duplicates (`derive_existing()` at `seed.py:671`).
 
 ---
 

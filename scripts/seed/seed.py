@@ -27,6 +27,12 @@ Usage:
     SEED_OUT=scripts/seed/out/state.json \
     python3 scripts/seed/seed.py
 
+The accounts are created with a shared password. For convenience the built-in
+default (DemoPass!2026) is used automatically against a local BASE_URL, but
+seeding any non-local target requires an explicit SEED_PASSWORD so demo
+accounts never get a publicly predictable credential:
+    BASE_URL=https://drive.example.com SEED_PASSWORD=... python3 scripts/seed/seed.py
+
 Outputs a state file (folder IDs, user IDs, sample tokens) that
 frontend/e2e/blog-evidence.spec.ts reads to capture live screenshots.
 """
@@ -39,6 +45,7 @@ import os
 import struct
 import sys
 import urllib.error
+import urllib.parse
 import urllib.request
 import zipfile
 import zlib
@@ -48,7 +55,30 @@ SEED_OUT = os.environ.get(
     "SEED_OUT",
     os.path.join(os.path.dirname(os.path.abspath(__file__)), "out", "state.json"),
 )
-PASSWORD = os.environ.get("SEED_PASSWORD", "DemoPass!2026")
+
+# Loopback hosts where the built-in demo password is safe to use without an
+# explicit SEED_PASSWORD. Any other (reachable) target must set one.
+DEFAULT_PASSWORD = "DemoPass!2026"
+LOCAL_HOSTS = {"localhost", "127.0.0.1", "::1", "0.0.0.0", ""}
+PASSWORD = os.environ.get("SEED_PASSWORD") or DEFAULT_PASSWORD
+
+
+def _base_url_is_local():
+    return (urllib.parse.urlsplit(BASE_URL).hostname or "") in LOCAL_HOSTS
+
+
+def require_safe_password():
+    """Refuse to provision accounts on a non-local target with the built-in
+    demo password. The default is only ever used against localhost (which is
+    all the docs and screenshots rely on); seeding a reachable environment
+    requires an explicit SEED_PASSWORD so the seeded accounts never carry a
+    publicly predictable credential (CWE-798)."""
+    if os.environ.get("SEED_PASSWORD") or _base_url_is_local():
+        return
+    raise SystemExit(
+        f"\nSEED FAILED: refusing to seed non-local target {BASE_URL} with the "
+        "built-in demo password. Set SEED_PASSWORD to seed a remote environment."
+    )
 
 
 # --- HTTP helpers ---------------------------------------------------------
@@ -692,6 +722,7 @@ def derive_existing(auth):
 
 
 def main():
+    require_safe_password()
     print(f"Seeding zk-drive at {BASE_URL}")
     # Idempotency guard: if the primary admin already exists, don't re-create.
     status, payload = _request("POST", BASE_URL + "/api/auth/login", body={"email": "alice@northwind.example", "password": PASSWORD})
