@@ -131,7 +131,19 @@
     "targetFolderIdPrompt": "Target folder id:",
     "bulkDeleteConfirm_one": "Delete {{count}} file?",
     "bulkDeleteConfirm_other": "Delete {{count}} files?",
-    "clientNamePrompt": "Client name for this room:"
+    "clientNamePrompt": "Client name for this room:",
+    "deleteFolderTitle": "Delete folder?",
+    "deleteFolderDescription": "\"{{name}}\" and everything inside it will be permanently deleted. This can't be undone.",
+    "deleteFileTitle": "Delete file?",
+    "deleteFileDescription": "\"{{name}}\" will be permanently deleted. This can't be undone.",
+    "bulkDeleteTitle": "Delete files?",
+    "renameFileTitle": "Rename file",
+    "pickFolderDescription": "Choose a destination folder for the selected file(s).",
+    "folderPickerSearch": "Search folders…",
+    "noFoldersToPick": "No other folders yet. Create one first.",
+    "moveSuccess": "Files moved",
+    "copySuccess": "Files copied",
+    "bulkActionsAria": "Actions for selected files"
   },
   "folder": {
     "createTitle": "New folder",

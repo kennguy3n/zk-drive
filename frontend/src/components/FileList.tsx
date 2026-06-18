@@ -18,7 +18,11 @@ import { cn } from "../lib/cn";
 
 export interface FileListProps {
   files: FileItem[];
-  onRename: (id: string, name: string) => void;
+  // The page owns the rename flow (it prompts for the new name via the
+  // design-system usePrompt dialog) so this list stays presentational and
+  // free of native window.prompt. It receives the whole file so the
+  // prompt can seed the current name.
+  onRename: (file: FileItem) => void;
   onDelete: (id: string) => void;
   // onShare is optional so callers that don't wire ShareDialog yet
   // keep working unchanged — the Share button is hidden when omitted.
@@ -78,7 +82,7 @@ interface FileRowProps {
   showSelection: boolean;
   selected: boolean;
   onToggleSelect?: (id: string) => void;
-  onRename: (id: string, name: string) => void;
+  onRename: (file: FileItem) => void;
   onDelete: (id: string) => void;
   onShare?: (file: FileItem) => void;
   onEdit?: (file: FileItem) => void;
@@ -156,10 +160,7 @@ function FileRow({
         )}
         <button
           type="button"
-          onClick={() => {
-            const name = prompt(t("drive.renamePrompt"), f.name);
-            if (name && name.trim()) onRename(f.id, name.trim());
-          }}
+          onClick={() => onRename(f)}
           className={actionBtnCls}
           aria-label={t("common.rename")}
           title={t("common.rename")}
@@ -179,9 +180,7 @@ function FileRow({
         )}
         <button
           type="button"
-          onClick={() => {
-            if (confirm(t("drive.deleteFilePrompt", { name: f.name }))) onDelete(f.id);
-          }}
+          onClick={() => onDelete(f.id)}
           className={cn(actionBtnCls, "hover:text-danger")}
           aria-label={t("common.delete")}
           title={t("common.delete")}
@@ -288,7 +287,7 @@ export default function FileList({
       if (f) void handleDownload(f.id);
     } else if (e.key === "Delete") {
       const f = sorted[activeIndex];
-      if (f && confirm(t("drive.deleteFilePrompt", { name: f.name }))) onDelete(f.id);
+      if (f) onDelete(f.id);
     } else if (e.key === " " && showSelection) {
       e.preventDefault();
       const f = sorted[activeIndex];

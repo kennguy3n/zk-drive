@@ -1,6 +1,22 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
-import { Search as SearchIcon } from "lucide-react";
+import {
+  Search as SearchIcon,
+  FolderPlus,
+  LayoutTemplate,
+  Shield,
+  FileText,
+  Settings,
+  CreditCard,
+  LogOut,
+  Folder as FolderIcon,
+  Share2,
+  Trash2,
+  Move,
+  Copy,
+  Download,
+  X,
+} from "lucide-react";
 import { Trans, useTranslation } from "react-i18next";
 import FolderTree from "../components/FolderTree";
 import FileList from "../components/FileList";
@@ -35,7 +51,18 @@ import { Feature } from "../features/featureKeys";
 import { ThemeToggle } from "../components/ThemeToggle";
 import { useCommandPalette } from "../components/CommandPalette";
 import { OnboardingEmptyState } from "../components/OnboardingEmptyState";
-import { FileListSkeleton } from "../components/ui/Skeleton";
+import {
+  Button,
+  Field,
+  Input,
+  Modal,
+  FileListSkeleton,
+  useConfirm,
+  usePrompt,
+  useResourcePicker,
+  useToast,
+} from "../components/ui";
+import { cn } from "../lib/cn";
 
 // shareTarget is the resource currently being shared via ShareDialog.
 // Kept discriminated-union so the dialog can render the right noun
@@ -43,6 +70,31 @@ import { FileListSkeleton } from "../components/ui/Skeleton";
 type ShareTarget =
   | { type: "folder"; value: Folder }
   | { type: "file"; value: FileItem };
+
+// collectAllFolders walks the folder tree breadth-first so the move/copy
+// resource picker can offer every destination (the API has no flat
+// "list all folders" endpoint — only per-parent listings). Levels are
+// fetched in parallel and a seen-set guards against cycles; for SME-scale
+// workspaces this is a handful of fast requests.
+async function collectAllFolders(): Promise<Folder[]> {
+  const out: Folder[] = [];
+  const seen = new Set<string>();
+  let frontier = await listFolders(null);
+  while (frontier.length > 0) {
+    const level: Folder[] = [];
+    for (const f of frontier) {
+      if (seen.has(f.id)) continue;
+      seen.add(f.id);
+      out.push(f);
+      level.push(f);
+    }
+    const childLists = await Promise.all(
+      level.map((f) => listFolders(f.id).catch(() => [] as Folder[])),
+    );
+    frontier = childLists.flat().filter((f) => !seen.has(f.id));
+  }
+  return out;
+}
 
 // FileBrowserPage is the main "drive" surface: breadcrumb + folder tree +
 // file table + upload/create controls. The selected folder is stored in
@@ -55,6 +107,10 @@ export default function FileBrowserPage() {
   const { logout, isAdmin } = useAuth();
   const { isEnabled } = useFeatures();
   const palette = useCommandPalette();
+  const confirm = useConfirm();
+  const prompt = usePrompt();
+  const pickResource = useResourcePicker();
+  const toast = useToast();
   // openRef lets the onboarding "Upload your first file" card trigger the
   // UploadButton's hidden file picker without duplicating upload logic.
   const uploadOpenRef = useRef<(() => void) | null>(null);
@@ -164,10 +220,141 @@ export default function FileBrowserPage() {
     setCreateFolderOpen(true);
   };
 
-  const handleDeleteFolder = async (id: string) => {
-    if (!confirm(t("drive.deleteFolderConfirm"))) return;
-    await deleteFolder(id);
-    refresh();
+  const handleDeleteFolder = async (f: Folder) => {
+    const ok = await confirm({
+      title: t("drive.deleteFolderTitle"),
+      description: t("drive.deleteFolderDescription", { name: f.name }),
+      tone: "danger",
+      confirmLabel: t("common.delete"),
+    });
+    if (!ok) return;
+    try {
+      await deleteFolder(f.id);
+      refresh();
+    } catch (e) {
+      toast.error(translateApiError(e, t));
+    }
+  };
+
+  // pickFolder gathers every folder and opens the searchable resource
+  // picker, returning the chosen folder id (or null if cancelled). Replaces
+  // the old "type a folder UUID" prompt for bulk move / copy.
+  const pickFolder = async (titleKey: string, confirmKey: string): Promise<string | null> => {
+    let folders: Folder[] = [];
+    try {
+      folders = await collectAllFolders();
+    } catch {
+      // Fall through with an empty list → the picker shows its empty state
+      // rather than the dialog silently never appearing.
+    }
+    const item = await pickResource({
+      title: t(titleKey),
+      description: t("drive.pickFolderDescription"),
+      items: folders
+        .filter((f) => f.id !== currentFolderID)
+        .map((f) => ({
+          id: f.id,
+          label: f.name,
+          description: f.path,
+          searchText: `${f.name} ${f.path ?? ""}`,
+        })),
+      searchable: true,
+      searchPlaceholder: t("drive.folderPickerSearch"),
+      emptyMessage: t("drive.noFoldersToPick"),
+      confirmLabel: t(confirmKey),
+    });
+    return item ? item.id : null;
+  };
+
+  const handleBulkMove = async () => {
+    const target = await pickFolder("drive.moveDialogTitle", "drive.moveConfirm");
+    if (!target) return;
+    try {
+      await bulkMove({ file_ids: [...selectedFiles], target_folder_id: target });
+      setSelectedFiles(new Set());
+      refresh();
+      toast.success(t("drive.moveSuccess"));
+    } catch (e) {
+      toast.error(translateApiError(e, t));
+    }
+  };
+
+  const handleBulkCopy = async () => {
+    const target = await pickFolder("drive.copyDialogTitle", "drive.copyConfirm");
+    if (!target) return;
+    try {
+      await bulkCopy({ file_ids: [...selectedFiles], target_folder_id: target });
+      setSelectedFiles(new Set());
+      refresh();
+      toast.success(t("drive.copySuccess"));
+    } catch (e) {
+      toast.error(translateApiError(e, t));
+    }
+  };
+
+  const handleBulkDelete = async () => {
+    const ok = await confirm({
+      title: t("drive.bulkDeleteTitle"),
+      description: t("drive.bulkDeleteConfirm", { count: selectedFiles.size }),
+      tone: "danger",
+      confirmLabel: t("common.delete"),
+    });
+    if (!ok) return;
+    try {
+      await bulkDelete({ file_ids: [...selectedFiles] });
+      setSelectedFiles(new Set());
+      refresh();
+    } catch (e) {
+      toast.error(translateApiError(e, t));
+    }
+  };
+
+  const handleBulkDownload = async () => {
+    try {
+      const blob = await bulkDownload([...selectedFiles]);
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = "download.zip";
+      a.click();
+      URL.revokeObjectURL(url);
+    } catch (e) {
+      toast.error(translateApiError(e, t));
+    }
+  };
+
+  const handleRenameFile = async (file: FileItem) => {
+    const name = await prompt({
+      title: t("drive.renameFileTitle"),
+      label: t("common.name"),
+      defaultValue: file.name,
+      required: true,
+      confirmLabel: t("common.rename"),
+    });
+    if (!name || name.trim() === "" || name.trim() === file.name) return;
+    try {
+      await renameFile(file.id, name.trim());
+      refresh();
+    } catch (e) {
+      toast.error(translateApiError(e, t));
+    }
+  };
+
+  const handleDeleteFile = async (id: string) => {
+    const f = files.find((x) => x.id === id);
+    const ok = await confirm({
+      title: t("drive.deleteFileTitle"),
+      description: f ? t("drive.deleteFileDescription", { name: f.name }) : undefined,
+      tone: "danger",
+      confirmLabel: t("common.delete"),
+    });
+    if (!ok) return;
+    try {
+      await deleteFile(id);
+      refresh();
+    } catch (e) {
+      toast.error(translateApiError(e, t));
+    }
   };
 
   // First-run experience: at the workspace root with nothing in it yet, show
@@ -184,288 +371,257 @@ export default function FileBrowserPage() {
     !error;
 
   return (
-    <div style={{ display: "flex", minHeight: "100vh" }}>
+    <div className="flex min-h-screen bg-bg text-fg">
       <FolderTree currentFolderID={currentFolderID} />
-      <main style={{ flex: 1, padding: 24 }}>
-        <header
-          style={{
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "space-between",
-            marginBottom: 16,
-          }}
-        >
-          <Breadcrumb folder={folder} />
-          <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
-            <SearchBar />
+      <main className="flex min-w-0 flex-1 flex-col">
+        {/* Top utility bar: location (breadcrumb) + search + navigation. */}
+        <header className="sticky top-0 z-20 flex flex-wrap items-center gap-x-3 gap-y-2 border-b border-border bg-bg/85 px-4 py-3 backdrop-blur-md sm:px-6">
+          <div className="min-w-0 flex-1">
+            <Breadcrumb folder={folder} />
+          </div>
+          <div className="flex items-center gap-2">
+            <div className="hidden lg:block">
+              <SearchBar />
+            </div>
             <button
               type="button"
               onClick={() => palette.open()}
               aria-label={t("search.commandPaletteAria", { defaultValue: "Search (Ctrl+K)" })}
               title="Ctrl+K"
-              className="inline-flex h-9 items-center gap-2 rounded-lg border border-border bg-surface px-3 text-sm text-muted hover:bg-surface-2"
+              className="inline-flex h-9 items-center gap-2 rounded-lg border border-border bg-surface px-3 text-sm text-muted transition-colors hover:bg-surface-2 hover:text-fg"
             >
               <SearchIcon className="h-4 w-4" aria-hidden="true" />
               <kbd className="hidden rounded border border-border px-1.5 text-xs sm:inline">⌘K</kbd>
             </button>
             <ThemeToggle />
-            <EnableNotificationsButton style={btn} />
-            <button onClick={handleCreateFolder} style={btn}>{t("drive.newFolder")}</button>
-            {isAdmin && isEnabled(Feature.ClientRooms) ? (
-              <button onClick={() => setTemplateDialogOpen(true)} style={btn}>
-                {t("drive.createFromTemplate")}
-              </button>
-            ) : null}
-            <UploadButton folderID={currentFolderID} onUploaded={() => refresh()} openRef={uploadOpenRef} />
-            {currentFolderID ? (
-              <Link
-                to={`/drive/folder/${currentFolderID}/documents`}
-                style={{ ...btn, textDecoration: "none", color: "#111827" }}
-                title={t("drive.documentsTooltip")}
+            <div className="[&>button]:inline-flex [&>button]:h-9 [&>button]:items-center [&>button]:gap-2 [&>button]:rounded-lg [&>button]:border [&>button]:border-border [&>button]:bg-surface [&>button]:px-3 [&>button]:text-sm [&>button]:text-fg [&>button]:transition-colors [&>button]:hover:bg-surface-2 [&>button]:disabled:opacity-60">
+              <EnableNotificationsButton />
+            </div>
+            <span className="mx-1 hidden h-6 w-px bg-border sm:block" aria-hidden="true" />
+            <nav className="flex items-center gap-0.5">
+              {currentFolderID ? (
+                <NavPill
+                  to={`/drive/folder/${currentFolderID}/documents`}
+                  icon={<FileText className="h-4 w-4" aria-hidden="true" />}
+                  title={t("drive.documentsTooltip")}
+                >
+                  {t("nav.documents")}
+                </NavPill>
+              ) : null}
+              <NavPill
+                to="/drive/privacy"
+                icon={<Shield className="h-4 w-4" aria-hidden="true" />}
+                title={t("drive.privacyTooltip")}
               >
-                {t("nav.documents")}
-              </Link>
-            ) : null}
-            <Link
-              to="/drive/privacy"
-              style={{ ...btn, textDecoration: "none", color: "#111827" }}
-              title={t("drive.privacyTooltip")}
-            >
-              {t("nav.privacy")}
-            </Link>
-            {isAdmin ? (
-              <>
-                <Link to="/admin" style={{ ...btn, textDecoration: "none", color: "#111827" }}>
-                  {t("nav.admin")}
-                </Link>
-                <Link to="/billing" style={{ ...btn, textDecoration: "none", color: "#111827" }}>
-                  {t("nav.billing")}
-                </Link>
-              </>
-            ) : null}
-            <button
+                {t("nav.privacy")}
+              </NavPill>
+              {isAdmin ? (
+                <>
+                  <NavPill to="/admin" icon={<Settings className="h-4 w-4" aria-hidden="true" />}>
+                    {t("nav.admin")}
+                  </NavPill>
+                  <NavPill
+                    to="/billing"
+                    icon={<CreditCard className="h-4 w-4" aria-hidden="true" />}
+                  >
+                    {t("nav.billing")}
+                  </NavPill>
+                </>
+              ) : null}
+            </nav>
+            <Button
+              variant="ghost"
+              size="sm"
               onClick={() => {
                 logout();
                 nav("/login", { replace: true });
               }}
-              style={{ ...btn, marginLeft: 12 }}
             >
-              {t("auth.logout")}
-            </button>
+              <LogOut className="h-4 w-4" aria-hidden="true" />
+              <span className="hidden sm:inline">{t("auth.logout")}</span>
+            </Button>
           </div>
         </header>
 
-        {error ? (
-          <div style={{ color: "#b91c1c", marginBottom: 16, fontSize: 13 }}>{error}</div>
-        ) : null}
+        <div className="flex-1 px-4 py-6 sm:px-6">
+          {/* Action bar: page context + primary create/upload actions. */}
+          <div className="mb-6 flex flex-wrap items-center justify-between gap-3">
+            <div className="flex min-w-0 items-center gap-2">
+              <h1 className="truncate text-xl font-semibold tracking-tight text-fg">
+                {folder ? folder.name : t("nav.drive")}
+              </h1>
+            </div>
+            <div className="flex flex-wrap items-center gap-2">
+              <Button variant="secondary" size="md" onClick={handleCreateFolder}>
+                <FolderPlus className="h-4 w-4" aria-hidden="true" />
+                {t("drive.newFolder")}
+              </Button>
+              {isAdmin && isEnabled(Feature.ClientRooms) ? (
+                <Button variant="secondary" size="md" onClick={() => setTemplateDialogOpen(true)}>
+                  <LayoutTemplate className="h-4 w-4" aria-hidden="true" />
+                  {t("drive.createFromTemplate")}
+                </Button>
+              ) : null}
+              <UploadButton
+                folderID={currentFolderID}
+                onUploaded={() => refresh()}
+                openRef={uploadOpenRef}
+              />
+            </div>
+          </div>
 
-        {/*
-          First listing in flight: show a skeleton instead of any content
-          branch. Without this, the !loading guard on showOnboarding means
-          the files section would briefly render FileList's "No files"
-          empty state before the onboarding cards (or real rows) take its
-          place — trading one flash for another. The skeleton also keeps
-          layout stable (CLS 0) on slower connections.
-        */}
-        {loading && !error ? <FileListSkeleton /> : null}
-
-        {!loading && showOnboarding ? (
-          <OnboardingEmptyState
-            onUpload={() => uploadOpenRef.current?.()}
-            onCreateFolder={handleCreateFolder}
-            onInvite={isAdmin ? () => nav("/admin") : undefined}
-          />
-        ) : null}
-
-        {!loading && !showOnboarding && subfolders.length > 0 ? (
-          <section style={{ marginBottom: 24 }}>
-            <h2 style={{ fontSize: 14, color: "#6b7280", textTransform: "uppercase", margin: "8px 0" }}>
-              {t("drive.folders")}
-            </h2>
-            <ul
-              style={{
-                listStyle: "none",
-                padding: 0,
-                display: "grid",
-                gap: 8,
-                // Each card must fit: name (truncating) + privacy badge
-                // ('strict zero-knowledge' is ~140 px) + Share + Delete.
-                // 260 px keeps the name readable at the worst-case combo
-                // (long folder name + strict-ZK badge) and degrades to
-                // ellipsis instead of squeezing the link to zero width
-                // (which Playwright reports as 'hidden').
-                gridTemplateColumns: "repeat(auto-fill, minmax(260px, 1fr))",
-              }}
-            >
-              {subfolders.map((f) => (
-                <li
-                  key={f.id}
-                  style={{
-                    padding: 12,
-                    border: "1px solid #e5e7eb",
-                    borderRadius: 6,
-                    background: "white",
-                    display: "flex",
-                    justifyContent: "space-between",
-                    alignItems: "center",
-                  }}
-                >
-                  <span
-                    style={{
-                      display: "flex",
-                      alignItems: "center",
-                      gap: 6,
-                      minWidth: 0,
-                      flex: 1,
-                    }}
-                  >
-                    {/*
-                      flex:1 + minWidth:0 + whiteSpace:nowrap on the link
-                      gives the folder name layout priority over the
-                      badge: the badge keeps its natural width (it has
-                      whiteSpace:nowrap), the name grows to fill the
-                      rest of the card, and overflow truncates with an
-                      ellipsis. Without flex:1 the link's intrinsic
-                      content width competes with the badge inside the
-                      flex container and can collapse to zero, which
-                      Playwright treats as a hidden element.
-                    */}
-                    <Link
-                      to={`/drive/folder/${f.id}`}
-                      style={{
-                        flex: 1,
-                        minWidth: 0,
-                        overflow: "hidden",
-                        textOverflow: "ellipsis",
-                        whiteSpace: "nowrap",
-                      }}
-                    >
-                      {f.name}
-                    </Link>
-                    <EncryptionBadge mode={f.encryption_mode} tabbable={false} />
-                  </span>
-                  <div style={{ display: "flex", gap: 6 }}>
-                    <button
-                      onClick={() => setShareTarget({ type: "folder", value: f })}
-                      style={btn}
-                    >
-                      {t("common.share")}
-                    </button>
-                    <button onClick={() => handleDeleteFolder(f.id)} style={{ ...btn, color: "#b91c1c" }}>
-                      {t("common.delete")}
-                    </button>
-                  </div>
-                </li>
-              ))}
-            </ul>
-          </section>
-        ) : null}
-
-        {!loading && !showOnboarding ? (
-        <section>
-          <h2 style={{ fontSize: 14, color: "#6b7280", textTransform: "uppercase", margin: "8px 0" }}>
-            {t("drive.files")}
-          </h2>
-          {selectedFiles.size > 0 ? (
+          {error ? (
             <div
-              style={{
-                display: "flex",
-                gap: 8,
-                padding: "8px 12px",
-                marginBottom: 8,
-                background: "#eff6ff",
-                border: "1px solid #bfdbfe",
-                borderRadius: 4,
-              }}
+              role="alert"
+              className="mb-4 rounded-card border border-danger/30 bg-danger/5 px-4 py-3 text-sm text-danger"
             >
-              <span style={{ fontSize: 13 }}>{t("drive.selectedCount", { count: selectedFiles.size })}</span>
-              <button
-                style={btn}
-                onClick={async () => {
-                  const target = prompt(t("drive.targetFolderIdPrompt"));
-                  if (!target) return;
-                  await bulkMove({ file_ids: [...selectedFiles], target_folder_id: target });
-                  setSelectedFiles(new Set());
-                  refresh();
-                }}
-              >
-                {t("drive.move")}
-              </button>
-              <button
-                style={btn}
-                onClick={async () => {
-                  const target = prompt(t("drive.targetFolderIdPrompt"));
-                  if (!target) return;
-                  await bulkCopy({ file_ids: [...selectedFiles], target_folder_id: target });
-                  setSelectedFiles(new Set());
-                  refresh();
-                }}
-              >
-                {t("drive.copy")}
-              </button>
-              <button
-                style={{ ...btn, color: "#b91c1c" }}
-                onClick={async () => {
-                  if (!confirm(t("drive.bulkDeleteConfirm", { count: selectedFiles.size }))) return;
-                  await bulkDelete({ file_ids: [...selectedFiles] });
-                  setSelectedFiles(new Set());
-                  refresh();
-                }}
-              >
-                {t("common.delete")}
-              </button>
-              <button
-                style={btn}
-                onClick={async () => {
-                  const blob = await bulkDownload([...selectedFiles]);
-                  const url = URL.createObjectURL(blob);
-                  const a = document.createElement("a");
-                  a.href = url;
-                  a.download = "download.zip";
-                  a.click();
-                  URL.revokeObjectURL(url);
-                }}
-              >
-                {t("drive.downloadZip")}
-              </button>
-              <button style={btn} onClick={() => setSelectedFiles(new Set())}>
-                {t("drive.clear")}
-              </button>
+              {error}
             </div>
           ) : null}
-          <FileList
-            files={files}
-            onRename={async (id, name) => {
-              await renameFile(id, name);
-              refresh();
-            }}
-            onDelete={async (id) => {
-              await deleteFile(id);
-              refresh();
-            }}
-            onShare={(f) => setShareTarget({ type: "file", value: f })}
-            onEdit={
-              onlyOfficeEnabled && isEnabled(Feature.OnlyOffice)
-                ? (f) => setEditorFile(f)
-                : undefined
-            }
-            selectedIDs={selectedFiles}
-            onToggleSelect={toggleSelect}
-          />
-        </section>
-        ) : null}
+
+          {/*
+            First listing in flight: show a skeleton instead of any content
+            branch. Without this, the !loading guard on showOnboarding means
+            the files section would briefly render FileList's "No files"
+            empty state before the onboarding cards (or real rows) take its
+            place — trading one flash for another. The skeleton also keeps
+            layout stable (CLS 0) on slower connections.
+          */}
+          {loading && !error ? <FileListSkeleton /> : null}
+
+          {!loading && showOnboarding ? (
+            <OnboardingEmptyState
+              onUpload={() => uploadOpenRef.current?.()}
+              onCreateFolder={handleCreateFolder}
+              onInvite={isAdmin ? () => nav("/admin") : undefined}
+            />
+          ) : null}
+
+          {!loading && !showOnboarding && subfolders.length > 0 ? (
+            <section className="mb-8">
+              <h2 className="mb-3 text-xs font-semibold uppercase tracking-wide text-muted">
+                {t("drive.folders")}
+              </h2>
+              <ul className="grid list-none grid-cols-1 gap-3 p-0 sm:grid-cols-2 xl:grid-cols-3">
+                {subfolders.map((f) => (
+                  <li
+                    key={f.id}
+                    className="group relative flex items-center gap-3 rounded-card border border-border bg-surface p-3.5 transition-all hover:border-brand/40 hover:bg-surface-2 hover:shadow-glow"
+                  >
+                    {/*
+                      Stretched-link card: only the name is a real <Link>,
+                      but its ::after overlay covers the whole card so the
+                      entire surface navigates. The action buttons sit above
+                      the overlay (relative z-10) so they stay clickable, and
+                      the link's accessible name stays exactly the folder name
+                      (the badge is a sibling, not nested inside the anchor).
+                    */}
+                    <span className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-brand/10 text-brand transition-colors group-hover:bg-brand group-hover:text-brand-fg">
+                      <FolderIcon className="h-5 w-5" aria-hidden="true" />
+                    </span>
+                    <div className="flex min-w-0 flex-1 flex-col gap-1">
+                      <Link
+                        to={`/drive/folder/${f.id}`}
+                        className="truncate font-medium text-fg no-underline outline-none after:absolute after:inset-0 after:rounded-card after:content-[''] focus-visible:after:ring-2 focus-visible:after:ring-ring"
+                      >
+                        {f.name}
+                      </Link>
+                      <EncryptionBadge mode={f.encryption_mode} linkToHelp={false} />
+                    </div>
+                    <div className="relative z-10 flex shrink-0 items-center gap-0.5">
+                      <button
+                        type="button"
+                        onClick={() => setShareTarget({ type: "folder", value: f })}
+                        className="inline-flex h-8 w-8 items-center justify-center rounded-md text-muted transition-colors hover:bg-surface hover:text-fg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                        aria-label={t("common.share")}
+                        title={t("common.share")}
+                      >
+                        <Share2 className="h-4 w-4" aria-hidden="true" />
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => handleDeleteFolder(f)}
+                        className="inline-flex h-8 w-8 items-center justify-center rounded-md text-muted transition-colors hover:bg-danger/10 hover:text-danger focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                        aria-label={t("common.delete")}
+                        title={t("common.delete")}
+                      >
+                        <Trash2 className="h-4 w-4" aria-hidden="true" />
+                      </button>
+                    </div>
+                  </li>
+                ))}
+              </ul>
+            </section>
+          ) : null}
+
+          {!loading && !showOnboarding ? (
+            <section>
+              <h2 className="mb-3 text-xs font-semibold uppercase tracking-wide text-muted">
+                {t("drive.files")}
+              </h2>
+              {selectedFiles.size > 0 ? (
+                <div
+                  role="toolbar"
+                  aria-label={t("drive.bulkActionsAria")}
+                  className="mb-3 flex flex-wrap items-center gap-2 rounded-card border border-brand/30 bg-brand/5 px-3 py-2"
+                >
+                  <span className="mr-1 text-sm font-medium text-fg">
+                    {t("drive.selectedCount", { count: selectedFiles.size })}
+                  </span>
+                  <Button variant="ghost" size="sm" onClick={handleBulkMove}>
+                    <Move className="h-4 w-4" aria-hidden="true" />
+                    {t("drive.move")}
+                  </Button>
+                  <Button variant="ghost" size="sm" onClick={handleBulkCopy}>
+                    <Copy className="h-4 w-4" aria-hidden="true" />
+                    {t("drive.copy")}
+                  </Button>
+                  <Button variant="ghost" size="sm" onClick={handleBulkDownload}>
+                    <Download className="h-4 w-4" aria-hidden="true" />
+                    {t("drive.downloadZip")}
+                  </Button>
+                  <Button variant="danger" size="sm" onClick={handleBulkDelete}>
+                    <Trash2 className="h-4 w-4" aria-hidden="true" />
+                    {t("common.delete")}
+                  </Button>
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    onClick={() => setSelectedFiles(new Set())}
+                  >
+                    <X className="h-4 w-4" aria-hidden="true" />
+                    {t("drive.clear")}
+                  </Button>
+                </div>
+              ) : null}
+              <FileList
+                files={files}
+                onRename={handleRenameFile}
+                onDelete={handleDeleteFile}
+                onShare={(f) => setShareTarget({ type: "file", value: f })}
+                onEdit={
+                  onlyOfficeEnabled && isEnabled(Feature.OnlyOffice)
+                    ? (f) => setEditorFile(f)
+                    : undefined
+                }
+                selectedIDs={selectedFiles}
+                onToggleSelect={toggleSelect}
+              />
+            </section>
+          ) : null}
+        </div>
       </main>
       {shareTarget ? (
         <ShareDialog resource={shareTarget} onClose={() => setShareTarget(null)} />
       ) : null}
       {editorFile ? (
         <div
-          style={editorOverlayStyle}
+          className="fixed inset-0 z-[1000] flex items-center justify-center bg-black/50 p-6"
           role="dialog"
           aria-modal="true"
           aria-label={t("onlyoffice.title")}
         >
-          <div style={editorModalStyle}>
+          <div className="flex h-[min(860px,92vh)] w-[min(1200px,96vw)] flex-col overflow-hidden rounded-card bg-surface shadow-overlay">
             <OnlyOfficeEditor
               fileID={editorFile.id}
               mode="edit"
@@ -503,6 +659,32 @@ export default function FileBrowserPage() {
   );
 }
 
+// NavPill is a tokenised header navigation link with an icon. The
+// accessible name is exactly the child text (the icon is aria-hidden) so
+// keyboard / screen-reader users — and the e2e suite — match it by role.
+function NavPill({
+  to,
+  icon,
+  title,
+  children,
+}: {
+  to: string;
+  icon: React.ReactNode;
+  title?: string;
+  children: React.ReactNode;
+}) {
+  return (
+    <Link
+      to={to}
+      title={title}
+      className="inline-flex h-9 items-center gap-2 rounded-lg px-3 text-sm font-medium text-muted no-underline transition-colors hover:bg-surface-2 hover:text-fg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+    >
+      {icon}
+      <span className="hidden md:inline">{children}</span>
+    </Link>
+  );
+}
+
 function CreateFolderDialog({
   parentID,
   onClose,
@@ -520,10 +702,12 @@ function CreateFolderDialog({
   // a TS error here, not a silent server-side rejection.
   const [mode, setMode] = useState<EncryptionMode>("managed_encrypted");
   const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
 
   const submit = async () => {
     setError(null);
     if (!name.trim()) return;
+    setBusy(true);
     try {
       await createFolder({
         name: name.trim(),
@@ -533,137 +717,202 @@ function CreateFolderDialog({
       onCreated();
     } catch (e) {
       setError(translateApiError(e, t));
+    } finally {
+      setBusy(false);
     }
   };
 
   return (
-    <Modal onClose={onClose} title={t("folder.createTitle")}>
+    <Modal
+      open
+      onOpenChange={(o) => {
+        if (!o) onClose();
+      }}
+      title={t("folder.createTitle")}
+      size="lg"
+      className="max-h-[88vh] overflow-y-auto"
+      footer={
+        <>
+          <Button variant="ghost" onClick={onClose} type="button">
+            {t("common.cancel")}
+          </Button>
+          <Button variant="primary" form="create-folder-form" type="submit" loading={busy}>
+            {t("common.create")}
+          </Button>
+        </>
+      }
+    >
       <form
+        id="create-folder-form"
         onSubmit={(e) => {
           e.preventDefault();
           submit();
         }}
-        style={{ display: "grid", gap: 12 }}
+        className="grid gap-4"
       >
-        <label style={{ display: "grid", gap: 4 }}>
-          <span>{t("common.name")}</span>
-          <input value={name} onChange={(e) => setName(e.target.value)} autoFocus required />
-        </label>
-        <fieldset style={{ border: "1px solid #e5e7eb", borderRadius: 6, padding: 12 }}>
-          <legend style={{ fontSize: 13, color: "#6b7280" }}>{t("folder.privacyMode")}</legend>
-          <label style={{ display: "block", marginBottom: 8 }}>
-            <input
-              type="radio"
-              name="encmode"
-              value="managed_encrypted"
-              checked={mode === "managed_encrypted"}
-              onChange={() => setMode("managed_encrypted")}
-            />{" "}
-            <Trans i18nKey="folder.managedDescription" components={{ strong: <strong />, em: <em /> }} />
-          </label>
-          <label style={{ display: "block" }}>
-            <input
-              type="radio"
-              name="encmode"
-              value="strict_zk"
-              checked={mode === "strict_zk"}
-              onChange={() => setMode("strict_zk")}
-            />{" "}
-            <Trans i18nKey="folder.strictDescription" components={{ strong: <strong /> }} />
-          </label>
+        <Field label={t("common.name")}>
+          {(p) => (
+            <Input
+              {...p}
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+              placeholder={t("drive.folderNamePrompt")}
+              autoFocus
+              required
+            />
+          )}
+        </Field>
+
+        <fieldset className="grid gap-2">
+          <legend className="mb-1 text-sm font-medium text-fg">{t("folder.privacyMode")}</legend>
           {/*
-            Side-by-side comparison table so the user can see the
-            exact trade-offs each mode entails before committing. The
-            row order matches docs/PRODUCT.md §3.3 and PrivacyPage so
-            the customer-facing story is consistent across every
-            surface ("be honest about what 'ZK' means" — docs/BRAND.md).
+            Native radios are retained (not the RadioCard primitive) so the
+            value is a real input[name="encmode"] — the privacy / documents
+            / demo e2e suites check() these directly. The surrounding label
+            is styled as a KChat selection card.
+          */}
+          <div role="radiogroup" aria-label={t("folder.privacyMode")} className="grid gap-2">
+            <label
+              className={cn(
+                "flex cursor-pointer items-start gap-3 rounded-card border p-3 transition-colors",
+                mode === "managed_encrypted"
+                  ? "border-brand bg-brand/5"
+                  : "border-border hover:bg-surface-2",
+              )}
+            >
+              <input
+                type="radio"
+                name="encmode"
+                value="managed_encrypted"
+                checked={mode === "managed_encrypted"}
+                onChange={() => setMode("managed_encrypted")}
+                className="mt-0.5 h-4 w-4 shrink-0 accent-brand"
+              />
+              <span className="text-sm leading-relaxed text-fg">
+                <Trans
+                  i18nKey="folder.managedDescription"
+                  components={{ strong: <strong />, em: <em /> }}
+                />
+              </span>
+            </label>
+            <label
+              className={cn(
+                "flex cursor-pointer items-start gap-3 rounded-card border p-3 transition-colors",
+                mode === "strict_zk"
+                  ? "border-brand bg-brand/5"
+                  : "border-border hover:bg-surface-2",
+              )}
+            >
+              <input
+                type="radio"
+                name="encmode"
+                value="strict_zk"
+                checked={mode === "strict_zk"}
+                onChange={() => setMode("strict_zk")}
+                className="mt-0.5 h-4 w-4 shrink-0 accent-brand"
+              />
+              <span className="text-sm leading-relaxed text-fg">
+                <Trans i18nKey="folder.strictDescription" components={{ strong: <strong /> }} />
+              </span>
+            </label>
+          </div>
+
+          {/*
+            Side-by-side comparison table so the user can see the exact
+            trade-offs each mode entails before committing. The row order
+            matches docs/PRODUCT.md §3.3 and PrivacyPage so the
+            customer-facing story is consistent across every surface
+            ("be honest about what 'ZK' means" — docs/BRAND.md).
           */}
           <table
             aria-label={t("folder.compareAria")}
-            style={{
-              width: "100%",
-              borderCollapse: "collapse",
-              fontSize: 12,
-              marginTop: 12,
-            }}
+            className="mt-2 w-full border-collapse text-xs"
           >
             <thead>
               <tr>
-                <th style={cmpTh} scope="col">&nbsp;</th>
-                <th style={cmpTh} scope="col">{t("folder.cmpHeaderConfidential")}</th>
-                <th style={cmpTh} scope="col">{t("folder.cmpHeaderZk")}</th>
+                <th className={cmpThCls} scope="col">
+                  &nbsp;
+                </th>
+                <th className={cmpThCls} scope="col">
+                  {t("folder.cmpHeaderConfidential")}
+                </th>
+                <th className={cmpThCls} scope="col">
+                  {t("folder.cmpHeaderZk")}
+                </th>
               </tr>
             </thead>
             <tbody>
               <tr>
-                <th style={cmpRowTh} scope="row">{t("folder.cmpRowPreviews")}</th>
-                <td style={cmpTdYes}>{t("common.yes")}</td>
-                <td style={cmpTdNo}>{t("common.no")}</td>
+                <th className={cmpRowThCls} scope="row">
+                  {t("folder.cmpRowPreviews")}
+                </th>
+                <td className={cmpTdYesCls}>{t("common.yes")}</td>
+                <td className={cmpTdNoCls}>{t("common.no")}</td>
               </tr>
               <tr>
-                <th style={cmpRowTh} scope="row">{t("folder.cmpRowSearch")}</th>
-                <td style={cmpTdYes}>{t("common.yes")}</td>
-                <td style={cmpTdNo}>{t("folder.cmpMetadataOnly")}</td>
+                <th className={cmpRowThCls} scope="row">
+                  {t("folder.cmpRowSearch")}
+                </th>
+                <td className={cmpTdYesCls}>{t("common.yes")}</td>
+                <td className={cmpTdNoCls}>{t("folder.cmpMetadataOnly")}</td>
               </tr>
               <tr>
-                <th style={cmpRowTh} scope="row">{t("folder.cmpRowVirus")}</th>
-                <td style={cmpTdYes}>{t("common.yes")}</td>
-                <td style={cmpTdNo}>{t("common.no")}</td>
+                <th className={cmpRowThCls} scope="row">
+                  {t("folder.cmpRowVirus")}
+                </th>
+                <td className={cmpTdYesCls}>{t("common.yes")}</td>
+                <td className={cmpTdNoCls}>{t("common.no")}</td>
               </tr>
               <tr>
-                <th style={cmpRowTh} scope="row">{t("folder.cmpRowRecovery")}</th>
-                <td style={cmpTdYes}>{t("common.yes")}</td>
-                <td style={cmpTdNo}>{t("folder.cmpNoYouHoldKeys")}</td>
+                <th className={cmpRowThCls} scope="row">
+                  {t("folder.cmpRowRecovery")}
+                </th>
+                <td className={cmpTdYesCls}>{t("common.yes")}</td>
+                <td className={cmpTdNoCls}>{t("folder.cmpNoYouHoldKeys")}</td>
               </tr>
               <tr>
-                <th style={cmpRowTh} scope="row">{t("folder.cmpRowServerRead")}</th>
-                <td style={cmpTdNo}>{t("folder.cmpInMemoryOnly")}</td>
-                <td style={cmpTdYes}>{t("folder.cmpNever")}</td>
+                <th className={cmpRowThCls} scope="row">
+                  {t("folder.cmpRowServerRead")}
+                </th>
+                <td className={cmpTdNoCls}>{t("folder.cmpInMemoryOnly")}</td>
+                <td className={cmpTdYesCls}>{t("folder.cmpNever")}</td>
               </tr>
             </tbody>
           </table>
+
           {mode === "strict_zk" ? (
             <div
               role="alert"
-              style={{
-                marginTop: 8,
-                padding: 8,
-                background: "#fef3c7",
-                border: "1px solid #fde68a",
-                fontSize: 12,
-                color: "#92400e",
-                borderRadius: 4,
-              }}
+              className="mt-2 rounded-card border border-warning/30 bg-warning/10 px-3 py-2 text-xs text-warning"
             >
               {t("folder.strictWarning")}
             </div>
           ) : null}
-          <p style={{ fontSize: 12, color: "#6b7280", margin: "8px 0 0" }}>
+
+          <p className="mt-2 text-xs text-muted">
             {/*
-              Opens in a new tab so the in-flight folder name + mode
-              radio selection in this dialog survive the click. A
-              `react-router` <Link> would unmount FileBrowserPage and
-              wipe the dialog state without warning; a plain <a> with
-              target="_blank" leaves the dialog intact, and the new
-              tab still hits the SPA's /drive/privacy route via the
-              client-side router on first nav.
+              Opens in a new tab so the in-flight folder name + mode radio
+              selection in this dialog survive the click. A react-router
+              <Link> would unmount FileBrowserPage and wipe the dialog
+              state; a plain <a target="_blank"> leaves the dialog intact,
+              and the new tab still hits the SPA's /drive/privacy route.
             */}
             <a
               href="/drive/privacy"
               target="_blank"
               rel="noopener noreferrer"
+              className="font-medium text-brand hover:underline"
             >
               {t("folder.learnMoreArrow")}
             </a>
           </p>
         </fieldset>
-        {error ? <p style={{ color: "#b91c1c" }}>{error}</p> : null}
-        <div style={{ display: "flex", justifyContent: "flex-end", gap: 8 }}>
-          <button type="button" onClick={onClose}>
-            {t("common.cancel")}
-          </button>
-          <button type="submit">{t("common.create")}</button>
-        </div>
+
+        {error ? (
+          <p role="alert" className="text-sm text-danger">
+            {error}
+          </p>
+        ) : null}
       </form>
     </Modal>
   );
@@ -677,6 +926,7 @@ function TemplateDialog({
   onCreated: (folderID: string) => void;
 }) {
   const { t } = useTranslation();
+  const prompt = usePrompt();
   const [templates, setTemplates] = useState<ClientRoomTemplate[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
@@ -695,7 +945,12 @@ function TemplateDialog({
   }, []);
 
   const pick = async (name: string) => {
-    const clientName = prompt(t("drive.clientNamePrompt"));
+    const clientName = await prompt({
+      title: t("drive.createFromTemplate"),
+      label: t("drive.clientNamePrompt"),
+      required: true,
+      confirmLabel: t("common.create"),
+    });
     if (!clientName || !clientName.trim()) return;
     try {
       const r = await createClientRoomFromTemplate(name, clientName.trim());
@@ -706,78 +961,47 @@ function TemplateDialog({
   };
 
   return (
-    <Modal onClose={onClose} title={t("drive.createFromTemplate")}>
-      {loading ? <p>{t("common.loading")}</p> : null}
-      {error ? <p style={{ color: "#b91c1c" }}>{error}</p> : null}
-      <div
-        style={{
-          display: "grid",
-          gap: 12,
-          gridTemplateColumns: "repeat(auto-fill, minmax(200px, 1fr))",
-        }}
-      >
+    <Modal
+      open
+      onOpenChange={(o) => {
+        if (!o) onClose();
+      }}
+      title={t("drive.createFromTemplate")}
+      size="lg"
+      className="max-h-[88vh] overflow-y-auto"
+    >
+      {loading ? <p className="text-sm text-muted">{t("common.loading")}</p> : null}
+      {error ? (
+        <p role="alert" className="mb-3 text-sm text-danger">
+          {error}
+        </p>
+      ) : null}
+      <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
         {templates.map((tpl) => (
           <button
             key={tpl.name}
+            type="button"
             onClick={() => pick(tpl.name)}
-            style={{
-              textAlign: "left",
-              padding: 12,
-              border: "1px solid #e5e7eb",
-              background: "white",
-              borderRadius: 6,
-              cursor: "pointer",
-            }}
+            className="rounded-card border border-border bg-surface p-4 text-left transition-all hover:border-brand/40 hover:bg-surface-2 hover:shadow-glow focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
           >
-            <div style={{ fontWeight: 600, textTransform: "capitalize" }}>{tpl.name}</div>
-            <ul style={{ margin: "8px 0 0 16px", padding: 0, fontSize: 12, color: "#4b5563" }}>
+            <div className="flex items-center gap-2 font-semibold capitalize text-fg">
+              <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-brand/10 text-brand">
+                <LayoutTemplate className="h-4 w-4" aria-hidden="true" />
+              </span>
+              {tpl.name}
+            </div>
+            <ul className="mt-3 grid gap-1 pl-1 text-xs text-muted">
               {tpl.sub_folders.map((s) => (
-                <li key={s}>{s}</li>
+                <li key={s} className="flex items-center gap-1.5">
+                  <FolderIcon className="h-3 w-3 shrink-0" aria-hidden="true" />
+                  {s}
+                </li>
               ))}
             </ul>
           </button>
         ))}
       </div>
     </Modal>
-  );
-}
-
-function Modal({
-  onClose,
-  title,
-  children,
-}: {
-  onClose: () => void;
-  title: string;
-  children: React.ReactNode;
-}) {
-  return (
-    <div
-      style={{
-        position: "fixed",
-        inset: 0,
-        background: "rgba(15, 23, 42, 0.35)",
-        display: "flex",
-        alignItems: "center",
-        justifyContent: "center",
-        zIndex: 30,
-      }}
-      onClick={onClose}
-    >
-      <div
-        onClick={(e) => e.stopPropagation()}
-        style={{
-          background: "white",
-          padding: 20,
-          borderRadius: 8,
-          minWidth: 420,
-          maxWidth: 640,
-        }}
-      >
-        <h3 style={{ marginTop: 0 }}>{title}</h3>
-        {children}
-      </div>
-    </div>
   );
 }
 
@@ -795,82 +1019,47 @@ function Breadcrumb({ folder }: { folder: Folder | null }) {
   // of action.
   const parts = folder?.path?.split("/").filter(Boolean) ?? [];
   return (
-    <nav style={{ fontSize: 14, display: "flex", alignItems: "center", gap: 8 }}>
-      <Link to="/drive">{t("drive.rootBreadcrumb")}</Link>
+    <nav
+      aria-label={t("drive.rootBreadcrumb")}
+      className="flex min-w-0 items-center gap-1.5 text-sm"
+    >
+      <Link
+        to="/drive"
+        className="shrink-0 font-medium text-muted no-underline transition-colors hover:text-fg"
+      >
+        {t("drive.rootBreadcrumb")}
+      </Link>
       {parts.map((p, i) => (
-        <span key={i}>
-          <span style={{ margin: "0 6px", color: "#9ca3af" }}>/</span>
-          <span>{p}</span>
+        <span key={i} className="flex min-w-0 items-center gap-1.5">
+          <span className="shrink-0 text-muted/60" aria-hidden="true">
+            /
+          </span>
+          <span
+            className={cn(
+              "truncate",
+              i === parts.length - 1 ? "font-medium text-fg" : "text-muted",
+            )}
+          >
+            {p}
+          </span>
         </span>
       ))}
-      {folder ? <EncryptionBadge mode={folder.encryption_mode} size="header" /> : null}
+      {folder ? (
+        <span className="ml-1 shrink-0">
+          <EncryptionBadge mode={folder.encryption_mode} size="header" />
+        </span>
+      ) : null}
     </nav>
   );
 }
 
-const btn: React.CSSProperties = {
-  padding: "8px 12px",
-  marginRight: 8,
-  background: "white",
-  border: "1px solid #d1d5db",
-  borderRadius: 4,
-  fontSize: 13,
-};
-
-// Full-screen scrim + centred panel for the OnlyOffice editor. The
-// Document Server renders into an iframe that wants a large viewport,
-// so the modal claims most of the screen.
-const editorOverlayStyle: React.CSSProperties = {
-  position: "fixed",
-  inset: 0,
-  background: "rgba(0,0,0,0.5)",
-  display: "flex",
-  alignItems: "center",
-  justifyContent: "center",
-  zIndex: 1000,
-  padding: 24,
-};
-
-const editorModalStyle: React.CSSProperties = {
-  background: "white",
-  borderRadius: 6,
-  width: "min(1200px, 96vw)",
-  height: "min(860px, 92vh)",
-  display: "flex",
-  flexDirection: "column",
-  overflow: "hidden",
-};
-
-// Privacy-mode comparison-table styles used by CreateFolderDialog. The
-// table mirrors the docs/PRODUCT.md §3.3 row order so a customer who
-// reads the docs and then opens the dialog sees the same trade-off
-// matrix; "Yes" tones are green to match the confidential badge and
-// "No" tones are red to match the zero-knowledge badge, keeping the
-// EncryptionBadge component the single source of colour vocabulary.
-const cmpTh: React.CSSProperties = {
-  textAlign: "left",
-  padding: "4px 8px",
-  borderBottom: "1px solid #e5e7eb",
-  color: "#374151",
-  fontWeight: 500,
-};
-
-const cmpRowTh: React.CSSProperties = {
-  ...cmpTh,
-  fontWeight: 400,
-  color: "#4b5563",
-};
-
-const cmpTdYes: React.CSSProperties = {
-  padding: "4px 8px",
-  borderBottom: "1px solid #f3f4f6",
-  color: "#166534",
-  background: "#f0fdf4",
-};
-
-const cmpTdNo: React.CSSProperties = {
-  padding: "4px 8px",
-  borderBottom: "1px solid #f3f4f6",
-  color: "#991b1b",
-  background: "#fef2f2",
-};
+// Privacy-mode comparison-table classes used by CreateFolderDialog. The
+// table mirrors the docs/PRODUCT.md §3.3 row order so a customer who reads
+// the docs and then opens the dialog sees the same trade-off matrix; "Yes"
+// tones are success green to match the confidential badge and "No" tones
+// are danger red, keeping EncryptionBadge the single source of colour
+// vocabulary.
+const cmpThCls = "border-b border-border px-2 py-1 text-left font-medium text-fg";
+const cmpRowThCls = "border-b border-border/60 px-2 py-1 text-left font-normal text-muted";
+const cmpTdYesCls = "border-b border-border/60 bg-success/10 px-2 py-1 text-center text-success";
+const cmpTdNoCls = "border-b border-border/60 bg-danger/10 px-2 py-1 text-center text-danger";
