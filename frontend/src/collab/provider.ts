@@ -42,6 +42,10 @@ import {
 // Any drift here breaks the binary contract end-to-end.
 const MESSAGE_SYNC = 0x00;
 const MESSAGE_AWARENESS = 0x01;
+// MESSAGE_AUTH carries a fresh bearer token the client pushes in-band
+// on a live socket to advance the server-enforced token expiry without
+// reconnecting. See refreshAuth() and internal/collab/protocol.go.
+const MESSAGE_AUTH = 0x02;
 
 const SYNC_STEP_UPDATES = 0x01;
 const SYNC_UPDATE = 0x02;
@@ -255,6 +259,30 @@ export class CollabProvider {
     this.setStatus("disconnected");
   }
 
+  // refreshAuth pushes a fresh bearer token to the server in-band on
+  // the live socket (a MessageAuth frame), so a long-lived editing
+  // session survives a silent token rotation WITHOUT tearing down and
+  // reconnecting: the server re-validates the token and advances the
+  // socket's enforced expiry in place, keeping the collab reauth pump
+  // (api/drive/collab.go) from closing the socket when the original
+  // token expires.
+  //
+  // The new token must authenticate the SAME user on the SAME
+  // workspace as the one that opened the socket; the server rejects
+  // and ignores any frame that does not, leaving the existing
+  // authorization in force. When the socket is not OPEN this is a
+  // no-op — the next reconnect already pulls the freshest token via
+  // tokenProvider.
+  refreshAuth(): void {
+    if (this.destroyed) return;
+    if (this.tokenProvider) {
+      const refreshed = this.tokenProvider();
+      if (refreshed) this.token = refreshed;
+    }
+    if (!this.token) return;
+    this.sendFrame(buildAuthFrame(this.token));
+  }
+
   // --- internal ----------------------------------------------------
 
   private handleOpen(): void {
@@ -420,6 +448,17 @@ function buildAwarenessFrame(payload: Uint8Array): Uint8Array {
   const out = new Uint8Array(1 + payload.length);
   out[0] = MESSAGE_AWARENESS;
   out.set(payload, 1);
+  return out;
+}
+
+// buildAuthFrame wraps a bearer token (UTF-8) as a MessageAuth frame.
+// JWTs are ASCII (base64url + '.'), so the encoded bytes round-trip
+// verbatim through the server's string(frame.Payload) read.
+function buildAuthFrame(token: string): Uint8Array {
+  const tokenBytes = new TextEncoder().encode(token);
+  const out = new Uint8Array(1 + tokenBytes.length);
+  out[0] = MESSAGE_AUTH;
+  out.set(tokenBytes, 1);
   return out;
 }
 

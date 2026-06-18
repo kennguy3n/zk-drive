@@ -51,6 +51,79 @@ func (f fakeReverifier) Reverify(_ context.Context, _ string) error {
 	return f.err
 }
 
+// fakeCollabRefresher satisfies middleware.CollabTokenRefresher with a
+// canned answer so evaluateCollabRefresh can be exercised without a
+// real Signer.
+type fakeCollabRefresher struct {
+	out middleware.CollabAuthRefresh
+	err error
+}
+
+func (f fakeCollabRefresher) RefreshCollabAuth(_ context.Context, _ string) (middleware.CollabAuthRefresh, error) {
+	return f.out, f.err
+}
+
+func TestEvaluateCollabRefresh(t *testing.T) {
+	ws := uuid.New()
+	user := uuid.New()
+	iat := time.Now().Add(-time.Minute)
+	exp := time.Now().Add(time.Hour)
+
+	t.Run("empty token rejected without consulting refresher", func(t *testing.T) {
+		_, err := evaluateCollabRefresh(context.Background(), fakeCollabRefresher{err: errors.New("must not be called")}, ws, user, "")
+		if err == nil {
+			t.Fatal("expected error for empty in-band token")
+		}
+	})
+
+	t.Run("refresher error propagates", func(t *testing.T) {
+		_, err := evaluateCollabRefresh(context.Background(), fakeCollabRefresher{err: errors.New("bad signature")}, ws, user, "tok")
+		if err == nil {
+			t.Fatal("expected refresher error to propagate")
+		}
+	})
+
+	t.Run("workspace mismatch rejected", func(t *testing.T) {
+		out := middleware.CollabAuthRefresh{WorkspaceID: uuid.New(), UserID: user, HasExpiry: true, ExpiresAt: exp}
+		_, err := evaluateCollabRefresh(context.Background(), fakeCollabRefresher{out: out}, ws, user, "tok")
+		if err == nil {
+			t.Fatal("expected workspace-mismatch rejection")
+		}
+	})
+
+	t.Run("user mismatch rejected", func(t *testing.T) {
+		out := middleware.CollabAuthRefresh{WorkspaceID: ws, UserID: uuid.New(), HasExpiry: true, ExpiresAt: exp}
+		_, err := evaluateCollabRefresh(context.Background(), fakeCollabRefresher{out: out}, ws, user, "tok")
+		if err == nil {
+			t.Fatal("expected user-mismatch rejection")
+		}
+	})
+
+	t.Run("same principal accepted and fully mapped", func(t *testing.T) {
+		out := middleware.CollabAuthRefresh{
+			WorkspaceID: ws,
+			UserID:      user,
+			SessionID:   "sid-2",
+			IssuedAt:    iat,
+			ExpiresAt:   exp,
+			HasExpiry:   true,
+		}
+		got, err := evaluateCollabRefresh(context.Background(), fakeCollabRefresher{out: out}, ws, user, "tok")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if !got.hasExpiry || !got.expiresAt.Equal(exp) || !got.issuedAt.Equal(iat) {
+			t.Fatalf("expiry/issued not mapped: %+v", got)
+		}
+		if got.sessionID != "sid-2" {
+			t.Fatalf("sessionID = %q, want sid-2", got.sessionID)
+		}
+		if got.rawToken != "tok" {
+			t.Fatalf("rawToken = %q, want tok (the raw frame token)", got.rawToken)
+		}
+	})
+}
+
 func TestEvaluateCollabAuth(t *testing.T) {
 	future := time.Now().Add(time.Hour)
 	past := time.Now().Add(-time.Hour)
@@ -204,7 +277,7 @@ func dialPumpClose(t *testing.T, st collabAuthState, checker middleware.SessionC
 			return
 		}
 		client := collab.NewClient(uuid.New(), uuid.New(), uuid.New(), true, collab.Capability{})
-		collabAuthPump(client, conn, st, checker, validator, reverifier, 2*time.Millisecond, logger)
+		collabAuthPump(client, conn, st, checker, validator, reverifier, nil, 2*time.Millisecond, logger)
 	}))
 	defer srv.Close()
 
@@ -222,6 +295,57 @@ func dialPumpClose(t *testing.T, st collabAuthState, checker middleware.SessionC
 		t.Fatalf("expected websocket close error, got %v", err)
 	}
 	return ce.Code
+}
+
+// dialPumpRefreshClose stands up a WS server that pre-loads a single
+// in-band refresh onto the auth pump's channel before the pump runs,
+// then returns the close code the server sends. The pump consumes the
+// refresh (the only select case ready at t=0) before its first tick,
+// so the close is driven entirely by the applied refresh — no
+// client-side timing.
+func dialPumpRefreshClose(t *testing.T, st collabAuthState, refresh collabAuthRefresh) int {
+	t.Helper()
+	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		client := collab.NewClient(uuid.New(), uuid.New(), uuid.New(), true, collab.Capability{})
+		refreshCh := make(chan collabAuthRefresh, 1)
+		refreshCh <- refresh
+		collabAuthPump(client, conn, st, nil, nil, nil, refreshCh, 2*time.Millisecond, logger)
+	}))
+	defer srv.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(srv.URL, "http")
+	c, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer func() { _ = c.Close() }()
+
+	_ = c.SetReadDeadline(time.Now().Add(2 * time.Second))
+	_, _, err = c.ReadMessage()
+	ce := &websocket.CloseError{}
+	if !errors.As(err, &ce) {
+		t.Fatalf("expected websocket close error, got %v", err)
+	}
+	return ce.Code
+}
+
+func TestCollabAuthPump_AppliesInbandRefreshExpiry(t *testing.T) {
+	// The socket starts with no enforced expiry, so it would never close
+	// on its own. An in-band refresh carrying an already-past expiry must
+	// be applied and tear the socket down with the retriable reauth code
+	// on the next tick — proving the read pump → auth pump refresh
+	// hand-off advances the enforced auth state.
+	refresh := collabAuthRefresh{hasExpiry: true, expiresAt: time.Now().Add(-time.Minute)}
+	code := dialPumpRefreshClose(t, collabAuthState{}, refresh)
+	if code != collabCloseReauthRequired {
+		t.Fatalf("close code = %d, want %d (retriable)", code, collabCloseReauthRequired)
+	}
 }
 
 func TestCollabAuthPump_ClosesExpiredWithRetriableCode(t *testing.T) {

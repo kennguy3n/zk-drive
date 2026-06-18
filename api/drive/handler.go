@@ -87,7 +87,13 @@ type Handler struct {
 	// against their issuer for the life of a collab socket, since the
 	// checker/validator above only know the zk-drive session store.
 	// Wired via WithCollabTokenReverifier; nil when iam-core is off.
-	collabReauthReverifier  middleware.TokenReverifier
+	collabReauthReverifier middleware.TokenReverifier
+	// collabReauthRefresher validates a fresh bearer token a client
+	// pushes in-band on a live collab socket (a MessageAuth frame),
+	// advancing the enforced token lifetime without a reconnect. Wired
+	// via WithCollabTokenRefresher; nil for federated (iam-core) auth,
+	// whose tokens are not zk-drive session JWTs.
+	collabReauthRefresher   middleware.CollabTokenRefresher
 	collabTrustedProxyDepth int
 	suspension              middleware.WorkspaceSuspensionChecker
 	// suspensionFailClosed mirrors the SuspensionGuard policy for the
