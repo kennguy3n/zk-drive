@@ -178,8 +178,6 @@
     "pickFolderDescription": "Choose a destination folder for the selected file(s).",
     "folderPickerSearch": "Search folders…",
     "noFoldersToPick": "No other folders yet. Create one first.",
-    "moveSuccess": "Files moved",
-    "copySuccess": "Files copied",
     "moveSuccess_one": "Moved {{count}} item.",
     "moveSuccess_other": "Moved {{count}} items.",
     "copySuccess_one": "Copied {{count}} item.",

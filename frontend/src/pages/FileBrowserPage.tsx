@@ -440,7 +440,10 @@ export default function FileBrowserPage() {
               <kbd className="hidden rounded border border-border px-1.5 text-xs sm:inline">⌘K</kbd>
             </button>
             <ThemeToggle />
-            <div className="[&>button]:inline-flex [&>button]:h-9 [&>button]:items-center [&>button]:gap-2 [&>button]:rounded-lg [&>button]:border [&>button]:border-border [&>button]:bg-surface [&>button]:px-3 [&>button]:text-sm [&>button]:text-fg [&>button]:transition-colors [&>button]:hover:bg-surface-2 [&>button]:disabled:opacity-60">
+            {/* empty:hidden collapses this wrapper when EnableNotificationsButton
+                renders null (the common granted/denied/unsupported case) so it
+                doesn't leave an empty flex item that adds a stray gap. */}
+            <div className="empty:hidden [&>button]:inline-flex [&>button]:h-9 [&>button]:items-center [&>button]:gap-2 [&>button]:rounded-lg [&>button]:border [&>button]:border-border [&>button]:bg-surface [&>button]:px-3 [&>button]:text-sm [&>button]:text-fg [&>button]:transition-colors [&>button]:hover:bg-surface-2 [&>button]:disabled:opacity-60">
               <EnableNotificationsButton />
             </div>
             <span className="mx-1 hidden h-6 w-px bg-border sm:block" aria-hidden="true" />
@@ -914,7 +917,7 @@ function CreateFolderDialog({
                   {t("folder.cmpRowSearch")}
                 </th>
                 <td className={cmpTdYesCls}>{t("common.yes")}</td>
-                <td className={cmpTdNoCls}>{t("folder.cmpMetadataOnly")}</td>
+                <td className={cmpTdMutedCls}>{t("folder.cmpMetadataOnly")}</td>
               </tr>
               <tr>
                 <th className={cmpRowThCls} scope="row">
@@ -928,7 +931,7 @@ function CreateFolderDialog({
                   {t("folder.cmpRowRecovery")}
                 </th>
                 <td className={cmpTdYesCls}>{t("common.yes")}</td>
-                <td className={cmpTdNoCls}>{t("folder.cmpNoYouHoldKeys")}</td>
+                <td className={cmpTdMutedCls}>{t("folder.cmpNoYouHoldKeys")}</td>
               </tr>
               <tr>
                 <th className={cmpRowThCls} scope="row">
@@ -1123,3 +1126,8 @@ const cmpThCls = "border-b border-border px-2 py-1 text-left font-medium text-fg
 const cmpRowThCls = "border-b border-border/60 px-2 py-1 text-left font-normal text-muted";
 const cmpTdYesCls = "border-b border-border/60 bg-success/10 px-2 py-1 text-center text-success";
 const cmpTdNoCls = "border-b border-border/60 bg-danger/10 px-2 py-1 text-center text-danger";
+// Neutral tier for nuanced cells that are a trade-off, not a hard negative —
+// e.g. zero-knowledge "Metadata only" search and "No (you hold the keys)"
+// recovery, which are deliberate properties of the mode rather than red-flag
+// deficiencies. Keeping them muted avoids framing a privacy feature as a warning.
+const cmpTdMutedCls = "border-b border-border/60 bg-surface-2 px-2 py-1 text-center text-muted";
