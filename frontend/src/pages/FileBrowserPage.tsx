@@ -46,6 +46,7 @@ import {
   type FileItem,
   type Folder,
 } from "../api/client";
+import { collectAllFolders } from "../api/folders";
 import { useAuth } from "../hooks/useAuth";
 import { useFeatures } from "../hooks/useFeatures";
 import { Feature } from "../features/featureKeys";
@@ -73,21 +74,11 @@ type ShareTarget =
   | { type: "folder"; value: Folder }
   | { type: "file"; value: FileItem };
 
-// collectAllFolders walks the workspace folder tree breadth-first into a
-// flat list. The API lists a single level at a time (listFolders(parentID))
-// and exposes no recursive "all folders" endpoint, so the move/copy picker
-// has to assemble the destination list itself. The folder tree is acyclic,
-// so the loop terminates once a level has no children.
-async function collectAllFolders(): Promise<Folder[]> {
-  const all: Folder[] = [];
-  let level = await listFolders(null);
-  while (level.length > 0) {
-    all.push(...level);
-    const children = await Promise.all(level.map((f) => listFolders(f.id)));
-    level = children.flat();
-  }
-  return all;
-}
+// How long a collected folder list stays usable before the next move/copy
+// re-walks the tree. The list is also invalidated eagerly on local folder
+// create/delete; the TTL is the backstop for changes made elsewhere (another
+// tab or user) so a stale destination can't linger indefinitely.
+const FOLDER_CACHE_TTL_MS = 30_000;
 
 // FileBrowserPage is the main "drive" surface: breadcrumb + folder tree +
 // file table + upload/create controls. The selected folder is stored in
@@ -109,6 +100,15 @@ export default function FileBrowserPage() {
   // Monotonic sequence used by refresh() to discard superseded responses
   // (out-of-order folder-navigation / mutation refetch races).
   const refreshSeq = useRef(0);
+  // Cached destination-folder list for the move/copy picker. Walking the whole
+  // tree is O(folders) API calls, so we collect once and reuse it across
+  // operations (see pickTargetFolder), invalidating on local folder
+  // create/delete and after FOLDER_CACHE_TTL_MS.
+  const folderCacheRef = useRef<{ folders: Folder[]; at: number } | null>(null);
+  // Controls the in-flight tree walk so it can be aborted if the user
+  // navigates away mid-collection on a large workspace, or superseded by a
+  // newer walk.
+  const collectAbortRef = useRef<AbortController | null>(null);
 
   const [folder, setFolder] = useState<Folder | null>(null);
   const [subfolders, setSubfolders] = useState<Folder[]>([]);
@@ -216,6 +216,21 @@ export default function FileBrowserPage() {
     setSelectedFiles(new Set());
   }, [currentFolderID]);
 
+  // Abort any in-flight folder-tree walk when the page unmounts so a long
+  // collection on a large workspace doesn't keep firing requests after the
+  // user has navigated away.
+  useEffect(() => {
+    return () => {
+      collectAbortRef.current?.abort();
+    };
+  }, []);
+
+  // Drops the cached destination-folder list so the next move/copy re-walks
+  // the tree. Called whenever this page changes the folder set.
+  const invalidateFolderCache = useCallback(() => {
+    folderCacheRef.current = null;
+  }, []);
+
   const handleCreateFolder = () => {
     setCreateFolderOpen(true);
   };
@@ -231,6 +246,7 @@ export default function FileBrowserPage() {
     if (!ok) return;
     try {
       await deleteFolder(target.id);
+      invalidateFolderCache();
       await refresh();
       // The deleted folder is a child of the current view, so the sidebar
       // (root folders only) is affected only when deleting at the root.
@@ -272,11 +288,26 @@ export default function FileBrowserPage() {
   const pickTargetFolder = useCallback(
     async (count: number, action: "move" | "copy"): Promise<string | null> => {
       let folders: Folder[];
-      try {
-        folders = await collectAllFolders();
-      } catch (e) {
-        toast.error(translateApiError(e, t));
-        return null;
+      const cached = folderCacheRef.current;
+      if (cached && Date.now() - cached.at < FOLDER_CACHE_TTL_MS) {
+        folders = cached.folders;
+      } else {
+        // Supersede any previous walk, then collect with a fresh controller so
+        // an unmount (or another move/copy) can abort this one.
+        collectAbortRef.current?.abort();
+        const controller = new AbortController();
+        collectAbortRef.current = controller;
+        try {
+          folders = await collectAllFolders(controller.signal);
+          folderCacheRef.current = { folders, at: Date.now() };
+        } catch (e) {
+          // An aborted walk (unmount / superseded) is not a user-facing error.
+          if (controller.signal.aborted) return null;
+          toast.error(translateApiError(e, t));
+          return null;
+        } finally {
+          if (collectAbortRef.current === controller) collectAbortRef.current = null;
+        }
       }
       const items: PickerItem[] = folders
         // Can't move/copy a file into the folder it already lives in.
@@ -707,6 +738,7 @@ export default function FileBrowserPage() {
           onClose={() => setCreateFolderOpen(false)}
           onCreated={() => {
             setCreateFolderOpen(false);
+            invalidateFolderCache();
             refresh();
             // The sidebar lists only root folders, so it only needs to
             // refetch when the newly created folder is itself root-level.
@@ -719,6 +751,7 @@ export default function FileBrowserPage() {
           onClose={() => setTemplateDialogOpen(false)}
           onCreated={(folderID) => {
             setTemplateDialogOpen(false);
+            invalidateFolderCache();
             nav(`/drive/folder/${folderID}`);
           }}
         />

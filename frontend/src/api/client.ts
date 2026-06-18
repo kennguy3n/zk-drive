@@ -532,9 +532,12 @@ function storeAuth(r: AuthResponse): void {
 
 // --- Folders -------------------------------------------------------------
 
-export async function listFolders(parentFolderID: string | null): Promise<Folder[]> {
+export async function listFolders(
+  parentFolderID: string | null,
+  signal?: AbortSignal,
+): Promise<Folder[]> {
   const params = parentFolderID ? { parent_folder_id: parentFolderID } : { parent_folder_id: "root" };
-  const { data } = await client.get<{ folders: Folder[] }>("/folders", { params });
+  const { data } = await client.get<{ folders: Folder[] }>("/folders", { params, signal });
   return data.folders ?? [];
 }
 
