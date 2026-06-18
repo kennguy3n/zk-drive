@@ -29,7 +29,7 @@ permissions:
 jobs:
   build-and-test:
     name: Build XCFramework + app (iOS Simulator)
-    runs-on: macos-14
+    runs-on: macos-15
     env:
       # Disable code signing for the simulator build/test — no provisioning
       # profile is needed and none is available on the runner.
@@ -46,8 +46,18 @@ jobs:
         with:
           workspaces: mobile/rust-bridge
 
-      - name: Select Xcode
-        run: sudo xcode-select -switch /Applications/Xcode_15.4.app
+      # Select the newest stable Xcode installed on the runner rather than
+      # pinning a specific version. xcodegen (installed unpinned via Homebrew
+      # below) emits whatever .xcodeproj object-version the current Xcode era
+      # uses, so the toolchain that consumes the generated project must be at
+      # least as new — otherwise xcodebuild rejects it as a "future Xcode
+      # project file format".
+      - name: Select newest stable Xcode
+        run: |
+          latest="$(ls -d /Applications/Xcode_*.app | sort -V | tail -n1)"
+          echo "Selecting ${latest}"
+          sudo xcode-select -switch "${latest}"
+          xcodebuild -version
 
       # Builds the per-arch staticlibs, assembles ZkMobileBridge.xcframework,
       # and emits the generated Swift bindings the app target compiles in.
@@ -65,11 +75,18 @@ jobs:
       - name: Build & test on iOS Simulator
         working-directory: mobile/ios
         run: |
+          # Pick a simulator that actually exists on this Xcode rather than
+          # hardcoding a device name. Each Xcode pre-creates the simulators
+          # for its own release (e.g. the iPhone 16 family), so a fixed
+          # "iPhone 15" can vanish when the runner's Xcode moves forward.
+          device="$(xcrun simctl list devices available | grep -Eo 'iPhone [0-9]+( Pro( Max)?)?' | head -n1)"
+          device="${device:-iPhone 15}"
+          echo "Using simulator: ${device}"
           xcodebuild \
             -project ZkDrive.xcodeproj \
             -scheme ZkDrive \
             -configuration Debug \
-            -destination 'platform=iOS Simulator,name=iPhone 15,OS=latest' \
+            -destination "platform=iOS Simulator,name=${device},OS=latest" \
             -derivedDataPath build/DerivedData \
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO \
