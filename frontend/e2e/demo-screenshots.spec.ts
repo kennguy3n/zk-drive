@@ -116,7 +116,7 @@ test.describe("Demo Flow Screenshots", () => {
     await installDemoMocks(page);
     await page.goto("/admin");
     await page.waitForLoadState("networkidle");
-    await page.getByRole("button", { name: /^audit$/i }).click();
+    await page.getByRole("tab", { name: /^audit$/i }).click();
     await page.waitForTimeout(500);
     await expect(page.getByText(/file\.upload|folder\.create/).first()).toBeVisible();
     await page.screenshot({ path: `${screenshotDir}/10-admin-audit-log.png`, fullPage: true });
@@ -126,7 +126,7 @@ test.describe("Demo Flow Screenshots", () => {
     await installDemoMocks(page);
     await page.goto("/admin");
     await page.waitForLoadState("networkidle");
-    await page.getByRole("button", { name: /^retention$/i }).click();
+    await page.getByRole("tab", { name: /^retention$/i }).click();
     await page.waitForTimeout(500);
     await page.screenshot({ path: `${screenshotDir}/11-admin-retention.png`, fullPage: true });
   });
@@ -135,7 +135,7 @@ test.describe("Demo Flow Screenshots", () => {
     await installDemoMocks(page);
     await page.goto("/admin");
     await page.waitForLoadState("networkidle");
-    await page.getByRole("button", { name: /^storage$/i }).click();
+    await page.getByRole("tab", { name: /^storage$/i }).click();
     await page.waitForTimeout(500);
     await expect(page.getByText("alice@acmecorp.com")).toBeVisible();
     await page.screenshot({ path: `${screenshotDir}/12-admin-storage.png`, fullPage: true });

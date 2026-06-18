@@ -37,7 +37,7 @@ test.describe("navigation", () => {
     // AdminPage renders an "Admin" header and a tab strip with "Users"
     // selected by default. Use the tab button as our presence check —
     // it's stable regardless of what the underlying APIs return.
-    await expect(page.getByRole("button", { name: /^users$/i })).toBeVisible();
+    await expect(page.getByRole("tab", { name: /^users$/i })).toBeVisible();
   });
 
   test("billing link routes to /billing and the page renders", async ({ page }) => {
