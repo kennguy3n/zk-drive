@@ -77,20 +77,31 @@ jobs:
       - name: Build & test on iOS Simulator
         working-directory: mobile/ios
         run: |
-          # Pick a simulator that actually exists on this Xcode rather than
-          # hardcoding a device name. Each Xcode pre-creates the simulators
-          # for its own release (e.g. the iPhone 16 family), so a fixed
-          # "iPhone 15" can vanish when the runner's Xcode moves forward.
-          # Take the first available iPhone's full name (so "iPhone 16 Plus"
-          # isn't truncated to a model that may not exist) up to its UUID.
-          device="$(xcrun simctl list devices available | sed -nE 's/^[[:space:]]+(iPhone [^(]*[^ (]) \([0-9A-Fa-f-]+\) \(.+\)$/\1/p' | head -n1)"
-          device="${device:-iPhone 15}"
-          echo "Using simulator: ${device}"
+          # Select an available simulator by UDID rather than by model name.
+          # The runner image doesn't guarantee any specific device is
+          # pre-created for the installed Xcode — e.g. macos-15 + Xcode 26
+          # ships only iPad simulators, no iPhones — so resolve whatever iOS
+          # simulator actually exists (preferring an iPhone, then an iPad) and
+          # address it by its stable UDID, which sidesteps device-name and
+          # OS-version drift across runner-image updates entirely.
+          udid="$(xcrun simctl list devices available --json | python3 -c 'import json,sys
+          data=json.load(sys.stdin)
+          devs=[d for rt,lst in data["devices"].items() if "iOS" in rt for d in lst if d.get("isAvailable")]
+          order={"iPhone":0,"iPad":1}
+          devs.sort(key=lambda d:(order.get(d["name"].split()[0],2), d["name"]))
+          print(devs[0]["udid"] if devs else "")')"
+          if [ -z "${udid}" ]; then
+            echo "No available iOS simulator on this runner:"
+            xcrun simctl list devices available
+            exit 1
+          fi
+          echo "Using simulator UDID: ${udid}"
+          xcrun simctl boot "${udid}" 2>/dev/null || true
           xcodebuild \
             -project ZkDrive.xcodeproj \
             -scheme ZkDrive \
             -configuration Debug \
-            -destination "platform=iOS Simulator,name=${device},OS=latest" \
+            -destination "platform=iOS Simulator,id=${udid}" \
             -derivedDataPath build/DerivedData \
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO \
