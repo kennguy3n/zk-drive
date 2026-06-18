@@ -620,33 +620,37 @@ export default function FileBrowserPage() {
                   aria-label={t("drive.bulkActionsAria")}
                   className="mb-3 flex flex-wrap items-center gap-2 rounded-card border border-brand/30 bg-brand/5 px-3 py-2"
                 >
-                  <span className="mr-1 text-sm font-medium text-fg">
+                  <span className="text-sm font-medium text-fg">
                     {t("drive.selectedCount", { count: selectedFiles.size })}
                   </span>
-                  <Button variant="ghost" size="sm" onClick={onBulkMove} loading={bulkBusy}>
-                    <Move className="h-4 w-4" aria-hidden="true" />
-                    {t("drive.move")}
-                  </Button>
-                  <Button variant="ghost" size="sm" onClick={onBulkCopy} loading={bulkBusy}>
-                    <Copy className="h-4 w-4" aria-hidden="true" />
-                    {t("drive.copy")}
-                  </Button>
-                  <Button variant="ghost" size="sm" onClick={onBulkDownload} loading={bulkBusy}>
-                    <Download className="h-4 w-4" aria-hidden="true" />
-                    {t("drive.downloadZip")}
-                  </Button>
-                  <Button variant="danger" size="sm" onClick={onBulkDelete} loading={bulkBusy}>
-                    <Trash2 className="h-4 w-4" aria-hidden="true" />
-                    {t("common.delete")}
-                  </Button>
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    onClick={() => setSelectedFiles(new Set())}
-                  >
-                    <X className="h-4 w-4" aria-hidden="true" />
-                    {t("drive.clear")}
-                  </Button>
+                  {/* ml-auto pushes the action group to the right so the bar reads
+                      "N selected" on the left and the operations on the right. */}
+                  <div className="ml-auto flex flex-wrap items-center gap-2">
+                    <Button variant="ghost" size="sm" onClick={onBulkMove} loading={bulkBusy}>
+                      <Move className="h-4 w-4" aria-hidden="true" />
+                      {t("drive.move")}
+                    </Button>
+                    <Button variant="ghost" size="sm" onClick={onBulkCopy} loading={bulkBusy}>
+                      <Copy className="h-4 w-4" aria-hidden="true" />
+                      {t("drive.copy")}
+                    </Button>
+                    <Button variant="ghost" size="sm" onClick={onBulkDownload} loading={bulkBusy}>
+                      <Download className="h-4 w-4" aria-hidden="true" />
+                      {t("drive.downloadZip")}
+                    </Button>
+                    <Button variant="danger" size="sm" onClick={onBulkDelete} loading={bulkBusy}>
+                      <Trash2 className="h-4 w-4" aria-hidden="true" />
+                      {t("common.delete")}
+                    </Button>
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      onClick={() => setSelectedFiles(new Set())}
+                    >
+                      <X className="h-4 w-4" aria-hidden="true" />
+                      {t("drive.clear")}
+                    </Button>
+                  </div>
                 </div>
               ) : null}
               <FileList
