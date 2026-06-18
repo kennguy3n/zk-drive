@@ -189,12 +189,23 @@ func (v *Verifier) keyForKID(ctx context.Context, kid string) (crypto.PublicKey,
 		return key, nil
 	}
 	if err := v.refresh(ctx, kid); err != nil {
-		// A failed JWKS fetch means the issuing authority could not be
-		// reached to learn the key — distinct from "the key does not
-		// exist". Tag it so Reverify reports it as transient
-		// (ErrReverifyUnavailable) rather than a definitive rejection;
-		// Verify flattens it (%v) and still 401s uniformly.
-		return nil, fmt.Errorf("%w: %w", apimw.ErrReverifyUnavailable, err)
+		// A throttled refresh means the JWKS was refetched within
+		// minRefreshInterval and the kid is absent from that recent
+		// key set — the key was definitively rotated out, not unknown
+		// because the issuer was unreachable. Fall through to the
+		// definitive "no key" rejection below so a rotated-out key is
+		// not misclassified as a transient outage (which would keep a
+		// federated collab socket open until the throttle window
+		// lapses).
+		if !errors.Is(err, errJWKSRefreshThrottled) {
+			// A failed JWKS fetch means the issuing authority could not
+			// be reached to learn the key — distinct from "the key does
+			// not exist". Tag it so Reverify reports it as transient
+			// (ErrReverifyUnavailable) rather than a definitive
+			// rejection; Verify flattens it (%v) and still 401s
+			// uniformly.
+			return nil, fmt.Errorf("%w: %w", apimw.ErrReverifyUnavailable, err)
+		}
 	}
 	if key, ok := v.lookup(kid); ok {
 		return key, nil
@@ -220,6 +231,14 @@ func (v *Verifier) lookup(kid string) (crypto.PublicKey, bool) {
 	return k, ok
 }
 
+// errJWKSRefreshThrottled is returned by refresh when the JWKS cache
+// is still valid and was refetched within minRefreshInterval, so the
+// requested kid is genuinely absent from the freshly-known key set (a
+// definitive rotation) rather than unknown because the issuer was
+// unreachable. keyForKID maps it to a definitive rejection so a
+// rotated-out key is not misclassified as a transient JWKS outage.
+var errJWKSRefreshThrottled = errors.New("iamcore: jwks refresh throttled")
+
 // refresh fetches the JWKS from iam-core and replaces the cache. It is
 // guarded by fetchMu so concurrent callers collapse onto one network
 // round-trip; a caller that finds the kid already present (filled by
@@ -243,7 +262,7 @@ func (v *Verifier) refresh(ctx context.Context, wantKID string) error {
 	// When the cache is still valid (we're here only because of an
 	// unknown kid), throttle refetches to minRefreshInterval.
 	if cacheValid && time.Since(lastFetch) < v.cfg.minRefreshInterval {
-		return fmt.Errorf("jwks refresh throttled for unknown kid %q", wantKID)
+		return fmt.Errorf("%w for unknown kid %q", errJWKSRefreshThrottled, wantKID)
 	}
 
 	keys, ttl, err := v.fetchJWKS(ctx)
