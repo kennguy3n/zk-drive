@@ -57,10 +57,20 @@ export default function FilePreview(props: FilePreviewProps) {
   const [url, setUrl] = useState<string | null>(null);
   const [failed, setFailed] = useState(false);
 
-  useEffect(() => {
-    let cancelled = false;
+  // Reset the preview state synchronously while rendering when the file
+  // changes, so a child never renders the previous file's URL for a frame
+  // before the effect below re-fetches. This is React's documented
+  // "adjusting state while rendering" pattern: the conditional setState
+  // re-renders this component immediately, without committing the stale frame.
+  const [loadedFor, setLoadedFor] = useState(fileID);
+  if (loadedFor !== fileID) {
+    setLoadedFor(fileID);
     setUrl(null);
     setFailed(false);
+  }
+
+  useEffect(() => {
+    let cancelled = false;
     getFilePreviewURL(fileID)
       .then((u) => {
         if (!cancelled) setUrl(u);
