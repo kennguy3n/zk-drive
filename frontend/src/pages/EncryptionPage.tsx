@@ -103,6 +103,7 @@ function DefaultEncryptionModeSection() {
     try {
       const r = await updateDefaultEncryptionMode(next);
       setMode(r.mode);
+      setSupported(r.supported);
       toast.success(t("encryption.defaultModeSaved"));
     } catch (e) {
       toast.error(translateApiError(e, t));
