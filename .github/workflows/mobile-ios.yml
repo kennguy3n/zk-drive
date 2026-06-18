@@ -56,7 +56,12 @@ jobs:
         run: |
           # Exclude beta / release-candidate Xcodes (present on runners during
           # Apple's summer seeding) so we always build with a GA toolchain.
-          latest="$(ls -d /Applications/Xcode_*.app | grep -v -iE 'beta|release.candidate|_rc' | sort -V | tail -n1)"
+          latest="$(ls -d /Applications/Xcode_*.app 2>/dev/null | grep -v -iE 'beta|release.candidate|_rc' | sort -V | tail -n1)"
+          if [ -z "${latest}" ]; then
+            echo "No stable (non-beta) Xcode found on this runner:"
+            ls -d /Applications/Xcode*.app 2>/dev/null || echo "(none)"
+            exit 1
+          fi
           echo "Selecting ${latest}"
           sudo xcode-select -switch "${latest}"
           xcodebuild -version
