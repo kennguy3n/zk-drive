@@ -2,7 +2,7 @@
 //! channels, drives the catalogue, and dispatches upload / download
 //! tasks against [`zk_sync_api`].
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use tokio::sync::{mpsc, Mutex};
@@ -137,21 +137,27 @@ impl Engine {
         // stop propagating fresh local changes. The check is dynamic
         // (re-read per event) so a folder flipped to `ignore` while
         // sync is running takes effect on the next change without a
-        // restart. For a rename we test the destination, since that is
-        // where the file comes to rest: a move *out* of an ignored
-        // folder should resume syncing, a move *into* one should stop.
-        let event_path: &Path = match &ev {
-            LocalEvent::Upsert { path, .. } | LocalEvent::Delete { path } => path.as_path(),
-            LocalEvent::Rename { to, .. } => to.as_path(),
-        };
-        if self
-            .catalogue
-            .lock()
-            .await
-            .is_path_ignored(self.config.workspace_id, event_path)?
-        {
-            info!(path = ?event_path, "local event under an ignored folder; skipping");
-            return Ok(());
+        // restart.
+        //
+        // Upsert and Delete each carry a single path, so an ignored
+        // path is dropped right here. Rename straddles two paths that
+        // can fall on opposite sides of an ignore boundary, so it is
+        // resolved inside its own arm: a move *into* an ignored folder
+        // must still reconcile the now-vacated source, and a move *out*
+        // of one resumes syncing at the destination.
+        match &ev {
+            LocalEvent::Upsert { path, .. } | LocalEvent::Delete { path } => {
+                if self
+                    .catalogue
+                    .lock()
+                    .await
+                    .is_path_ignored(self.config.workspace_id, path)?
+                {
+                    info!(path = ?path, "local event under an ignored folder; skipping");
+                    return Ok(());
+                }
+            }
+            LocalEvent::Rename { .. } => {}
         }
         match ev {
             LocalEvent::Upsert {
@@ -293,6 +299,41 @@ impl Engine {
                 // status still UpToDate -- a half-displaced state
                 // the next reconciliation pass would mis-handle.
                 let mut cat = self.catalogue.lock().await;
+                // A rename whose destination is under an ignored folder
+                // moves the file out of the synced tree, so it must not
+                // be tracked at `to`. Dropping the event outright would
+                // strand the source row at a path that no longer exists
+                // on disk. Instead reconcile the vacated source: if it
+                // was synced, route its row through the local-delete
+                // transition -- its bytes are gone from the synced tree,
+                // exactly like the displaced-row case below -- so
+                // reconciliation tombstones the server copy rather than
+                // leaving an orphan. If the source was itself ignored
+                // there is no tracked row to clean up. (A move the other
+                // way -- out of an ignored folder into a synced one --
+                // falls through to the normal path below and resumes
+                // syncing at `to`.)
+                if cat.is_path_ignored(self.config.workspace_id, &to)? {
+                    if let Some(existing) = cat.by_local_path(&from)? {
+                        let next = existing.status.next_on_local_delete();
+                        if next != existing.status {
+                            cat.set_status(existing.remote_file_id, next)?;
+                        }
+                        info!(
+                            ?from,
+                            ?to,
+                            ?next,
+                            "rename into an ignored folder; source reconciled as a local delete"
+                        );
+                    } else {
+                        info!(
+                            ?from,
+                            ?to,
+                            "rename into an ignored folder; source untracked, nothing to do"
+                        );
+                    }
+                    return Ok(());
+                }
                 let root = self.config.root.clone();
                 let outcome = cat.with_txn(|cat| {
                     let Some(existing) = cat.by_local_path(&from)? else {
@@ -764,6 +805,56 @@ mod tests {
         let renamed = cat.get(src_id).unwrap().unwrap();
         assert_eq!(renamed.local_path, to);
         assert_eq!(renamed.status, SyncStatus::LocalDirty);
+    }
+
+    #[tokio::test]
+    async fn rename_into_ignored_folder_reconciles_source_without_orphaning() {
+        // Regression (Devin Review): a first-class Rename whose `to` is
+        // under an ignored folder must not be dropped wholesale -- that
+        // would strand the source row at a path that no longer exists on
+        // disk. The engine instead routes the vacated source through the
+        // local-delete transition (UpToDate -> LocalDeleted), so
+        // reconciliation tombstones the server copy, and leaves nothing
+        // tracked at the ignored destination.
+        let tempdir = TempDir::new().unwrap();
+        let (engine, catalogue) = engine_for(&tempdir);
+        let workspace_id = engine.config.workspace_id;
+        let src_id = Uuid::new_v4();
+        let from = tempdir.path().join("report.pdf");
+        let ignored_dir = tempdir.path().join("Archive");
+        let to = ignored_dir.join("report.pdf");
+        {
+            let mut cat = catalogue.lock().await;
+            cat.upsert(&FileRecord {
+                remote_file_id: src_id,
+                remote_version_id: Uuid::new_v4(),
+                local_path: from.clone(),
+                size_bytes: 7,
+                content_hash: [4u8; 32],
+                status: SyncStatus::UpToDate,
+                pinned: false,
+                updated_at: Utc::now(),
+            })
+            .unwrap();
+            cat.set_folder_policy(workspace_id, &ignored_dir, "ignore")
+                .unwrap();
+        }
+        engine
+            .handle_local(LocalEvent::Rename {
+                from: from.clone(),
+                to: to.clone(),
+            })
+            .await
+            .unwrap();
+        let cat = catalogue.lock().await;
+        // Nothing is tracked at the ignored destination.
+        assert!(
+            cat.by_local_path(&to).unwrap().is_none(),
+            "the file must not be tracked under the ignored destination"
+        );
+        // The source row is reconciled as a local delete, not orphaned.
+        let src = cat.get(src_id).unwrap().unwrap();
+        assert_eq!(src.status, SyncStatus::LocalDeleted);
     }
 
     #[tokio::test]
