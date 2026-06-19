@@ -8,21 +8,18 @@
 //! shell owns all engine wiring; this layer never reaches into the
 //! engine directly.
 //!
-//! Repo deviation (see `desktop/README.md`): the task brief lists
-//! `PauseSync` / `ResumeSync` / `ResolveConflict` / `SetFolderPolicy`
-//! commands. The desktop-shell `Command` enum at this SDK revision
-//! exposes `StopSync` / `StartSync` (which are exactly pause/resume
-//! of the per-workspace sync loop) but not conflict-resolution or
-//! per-folder selective-sync variants. We therefore map
-//! pause→`StopSync` and resume→`StartSync`, and expose
-//! `resolve_conflict` / `set_folder_policy` commands that return a
-//! structured `Unsupported` error until the SDK grows the matching
-//! `Command` variants — keeping the frontend contract forward-stable
-//! without modifying the SDK crates (owned by other sessions).
+//! The frontend's `pause` / `resume` map to the shell's `StopSync` /
+//! `StartSync` (which are exactly pause/resume of the per-workspace
+//! sync loop). The `resolve_conflict` and `set_folder_policy`
+//! handlers ferry the frontend's bare string arguments into the
+//! typed [`ConflictResolution`] / [`FolderPolicy`] enums and dispatch
+//! the matching `Command`.
 
 use tauri::State;
 use uuid::Uuid;
-use zk_sync_shell::{Command, CommandResult, TrayState, WorkspaceState};
+use zk_sync_shell::{
+    Command, CommandResult, ConflictResolution, FolderPolicy, TrayState, WorkspaceState,
+};
 
 use crate::auth::{self, Provider};
 use crate::error::DesktopError;
@@ -175,39 +172,62 @@ pub async fn logout(state: State<'_, DesktopState>) -> Result<(), DesktopError> 
     auth::logout(&state.base_url).await
 }
 
-// ---- Not-yet-supported by the SDK Command surface ------------------
+// ---- Selective sync + conflict resolution --------------------------
 
-/// Selective-sync per-folder policy. The desktop-shell `Command`
-/// surface does not yet expose a `SetFolderPolicy` variant, so this
-/// returns a structured `Unsupported` error the UI renders as a
-/// "coming soon" state rather than silently no-op'ing.
+/// Set a folder's selective-sync policy. `folder_id` is the absolute
+/// on-disk path the UI selected; `policy` is the frontend's bare
+/// string (`"ignore" | "online" | "offline"`).
 #[tauri::command]
 pub async fn set_folder_policy(
-    _state: State<'_, DesktopState>,
-    _workspace_id: Uuid,
-    _folder_id: String,
-    _policy: String,
+    state: State<'_, DesktopState>,
+    workspace_id: Uuid,
+    folder_id: String,
+    policy: String,
 ) -> Result<(), DesktopError> {
-    Err(DesktopError::Unsupported(
-        "selective sync (SetFolderPolicy) is not exposed by the current SDK Command surface".into(),
-    ))
+    let policy: FolderPolicy = parse_enum(&policy, "policy")?;
+    state
+        .shell
+        .dispatch(Command::SetFolderPolicy {
+            workspace_id,
+            folder_id,
+            policy,
+        })
+        .await?;
+    Ok(())
 }
 
-/// Conflict resolution. The shell surfaces conflicts via
-/// `HealthChanged{Conflict}` + the per-workspace summary, but does not
-/// yet expose a `ResolveConflict` command, so this returns a
-/// structured `Unsupported` error.
+/// Resolve a conflicted file by choosing which side wins. The shell
+/// surfaces conflicts via `HealthChanged{Conflict}` + the
+/// per-workspace summary; `resolution` is the frontend's bare string
+/// (`"local" | "remote"`).
 #[tauri::command]
 pub async fn resolve_conflict(
-    _state: State<'_, DesktopState>,
-    _workspace_id: Uuid,
-    _file_id: String,
-    _resolution: String,
+    state: State<'_, DesktopState>,
+    workspace_id: Uuid,
+    file_id: String,
+    resolution: String,
 ) -> Result<(), DesktopError> {
-    Err(DesktopError::Unsupported(
-        "conflict resolution (ResolveConflict) is not exposed by the current SDK Command surface"
-            .into(),
-    ))
+    let file_id = Uuid::parse_str(&file_id)
+        .map_err(|e| DesktopError::Api(format!("invalid file_id {file_id:?}: {e}")))?;
+    let resolution: ConflictResolution = parse_enum(&resolution, "resolution")?;
+    state
+        .shell
+        .dispatch(Command::ResolveConflict {
+            workspace_id,
+            file_id,
+            resolution,
+        })
+        .await?;
+    Ok(())
+}
+
+/// Deserialise a bare frontend string (e.g. `"local"`, `"ignore"`)
+/// into the matching SDK enum via serde, so the set of accepted
+/// values stays in lock-step with the `Command` wire format instead
+/// of being re-listed (and able to drift) here.
+fn parse_enum<T: serde::de::DeserializeOwned>(value: &str, field: &str) -> Result<T, DesktopError> {
+    serde_json::from_value(serde_json::Value::String(value.to_string()))
+        .map_err(|_| DesktopError::Api(format!("invalid {field}: {value:?}")))
 }
 
 fn unexpected(result: CommandResult) -> DesktopError {

@@ -113,10 +113,12 @@ flow) or a refreshing `TokenProvider` from the auth crate
 It exposes three sub-clients (`crates/api-client/src/lib.rs:1-32`):
 
 - **`ChangefeedClient`** — `list_changes` walks
-  `GET /api/v1/workspaces/{id}/changes?since={cursor}&limit={n}` for
-  catch-up, and `stream_changes` opens
-  `WS /api/v1/workspaces/{id}/changes/stream?since={cursor}` for live
-  updates (`crates/api-client/src/changefeed.rs:104-134`, `:163-221`).
+  `GET /api/changes?since={cursor}&limit={n}` for catch-up, and
+  `stream_changes` opens `WS /api/ws?since={cursor}` for live updates.
+  Neither path carries a workspace id: the caller's workspace is
+  resolved server-side from the bearer token (the auth middleware reads
+  it from the JWT claims), so one socket serves the bound workspace
+  (`crates/api-client/src/changefeed.rs:147-181`, `:183-210`).
 - **`StorageClient`** — `request_upload`
   (`POST /api/v1/files/{id}/uploads`) and `request_download`
   (`GET /api/v1/files/{id}/downloads`) negotiate presigned URLs for

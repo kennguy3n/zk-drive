@@ -2,11 +2,11 @@
 //!
 //! The client surfaces three responsibilities:
 //!
-//!   * [`ChangefeedClient`] consumes
-//!     `GET /api/v1/workspaces/{id}/changes?since={cursor}` and
-//!     `WS  /api/v1/workspaces/{id}/changes/stream` — the workspace
-//!     change feed. The sync engine uses this to discover remote
-//!     mutations.
+//!   * [`ChangefeedClient`] consumes `GET /api/changes?since={cursor}`
+//!     and the multiplexed live socket `WS /api/ws` — the workspace
+//!     change feed. The caller's workspace is resolved server-side
+//!     from the bearer token, so neither path carries a workspace id.
+//!     The sync engine uses this to discover remote mutations.
 //!   * [`StorageClient`] negotiates presigned URLs for direct-to-
 //!     storage uploads / downloads (`POST /api/v1/files/{id}/uploads`,
 //!     `GET  /api/v1/files/{id}/downloads`).
