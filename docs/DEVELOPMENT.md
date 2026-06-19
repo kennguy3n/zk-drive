@@ -11,8 +11,8 @@ stack:
 
 - `postgres` — Postgres 16 with the `zkdrive` role and `zk-drive`
   database.
-- `nats` — NATS JetStream broker for the preview / scan / index /
-  classify / retention / archive / webhook workers.
+- `nats` — NATS JetStream broker for the async worker pipeline
+  (preview, scan, index, classify, and archive) plus webhook delivery.
 - `clamav` — ClamAV daemon (`clamav/clamav:1.3`) used by the scan
   worker over INSTREAM.
 
@@ -29,7 +29,7 @@ export JWT_SECRET=dev-secret
 export NATS_URL=nats://localhost:4222
 export CLAMAV_ADDRESS=localhost:3310
 
-export S3_ENDPOINT=http://localhost:8080
+export S3_ENDPOINT=http://localhost:9000
 export S3_BUCKET=mybucket
 export S3_ACCESS_KEY=demo-access-key
 export S3_SECRET_KEY=demo-secret-key
@@ -42,10 +42,46 @@ go run ./cmd/worker &
 Point a browser at `http://localhost:8080` and sign up the first
 admin user.
 
-For a fully containerised local stack (server and worker inside
-Compose), `docker-compose.yml` already defines the `server` and
-`worker` services — `docker compose up -d` brings everything up at
-once.
+`docker-compose.yml` also defines containerised `server` and `worker`
+services, but both sit behind the `server` Compose profile, so a plain
+`docker compose up -d` starts only Postgres, NATS, and ClamAV. To run
+the whole stack in containers, enable the profile:
+
+```
+docker compose --profile server up -d
+```
+
+Object storage is **not** part of `docker-compose.yml`: point
+`S3_ENDPOINT` at your own S3-compatible gateway (a local MinIO, or
+zk-object-fabric). With `S3_ENDPOINT` unset the server and worker still
+start and serve metadata-only APIs, logging that storage is
+unconfigured (`cmd/server/main.go:387`, `cmd/worker/main.go:241`).
+
+## Seeding the demo dataset
+
+With a server running on `:8080`, populate the full demo narrative —
+Northwind Trading plus the isolated Lakeside Legal tenant, their users,
+folders, files, share links, retention policies, and billing — using the
+committed seed script:
+
+```
+BASE_URL=http://localhost:8080 python3 scripts/seed/seed.py
+```
+
+The script is Python-stdlib-only and **idempotent**: a re-run detects the
+existing Northwind owner, re-derives the full state, rewrites
+`scripts/seed/out/state.json`, and exits without creating duplicates.
+
+Against a **local** `BASE_URL` the built-in demo password `DemoPass!2026`
+is applied automatically. Seeding any **non-local** target requires an
+explicit `SEED_PASSWORD`, or the script refuses to run, so demo accounts
+never get a publicly predictable credential:
+
+```
+BASE_URL=https://drive.example.com SEED_PASSWORD='<strong-password>' python3 scripts/seed/seed.py
+```
+
+Every seeded account then signs in with that password.
 
 ## Go tests
 
@@ -70,7 +106,7 @@ go test ./tests/integration/ -v
 ### Integration tests with storage (requires zk-object-fabric)
 
 ```
-export S3_ENDPOINT=http://localhost:8080
+export S3_ENDPOINT=http://localhost:9000
 export S3_BUCKET=mybucket
 export S3_ACCESS_KEY=demo-access-key
 export S3_SECRET_KEY=demo-secret-key
@@ -160,6 +196,33 @@ npm run dev
 
 Points at `http://localhost:8080` by default; override with
 `VITE_API_BASE_URL=http://your-api-host npm run dev`.
+
+## Serving the SPA same-origin
+
+The Vite dev server above proxies to the API for fast iteration. To
+exercise the real same-origin setup, the Go server can serve the built
+SPA itself: point `STATIC_DIR` at the Vite build output and the server
+returns the hashed bundle assets verbatim and falls back to `index.html`
+for client-side routes (`internal/config/config.go:248`,
+`cmd/server/main.go:2050`).
+
+```
+cd frontend && npm run build        # emits dist/
+STATIC_DIR=$(pwd)/frontend/dist go run ./cmd/server
+```
+
+Everything is then served same-origin on `:8080`: the SPA, the `/api`
+routes, and the collaboration WebSocket at `/api/ws` — no CORS and no
+cross-origin cookie rules.
+
+> **Restart after a frontend rebuild.** The server reads `index.html`
+> **once at startup** and caches it (pre-split on the CSP-nonce
+> placeholder, so each request only injects its nonce instead of
+> re-reading the file) (`cmd/server/main.go:2059`, `loadIndexTemplate`
+> at `:2118`). Hashed JS/CSS bundles are streamed from disk on every
+> request and always reflect the latest build, but a new `index.html`
+> is not picked up until you restart the server. After `npm run build`,
+> restart the server.
 
 ## Playwright end-to-end tests
 

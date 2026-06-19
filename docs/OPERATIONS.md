@@ -67,10 +67,11 @@ docker run --rm \
 
 The webhook subject (`webhook.events`) and every other JetStream
 subject ZK Drive uses is added to the shared `DRIVE_JOBS` stream by
-the **worker** binary at startup. If a release that introduces a
-new subject reaches the **server** first while the worker is still
-on the previous version, the server publishes events to a subject
-that is not yet in the stream's subject list. NATS rejects those
+the **worker** binary at startup. If the **server** starts and
+publishes to a subject before the **worker** has registered it in
+the stream — for example when the server rolls ahead of the worker
+during a deploy — the publish targets a subject that is not yet in
+the stream's subject list. NATS rejects those
 publishes with `no responders` and the events are lost (the
 publisher logs the error and returns to the request path; the
 underlying file / permission mutation has already committed).
@@ -130,16 +131,17 @@ workspace's billing tier:
 | ---------------------------------- | ----------------------------- | ------------------------------------ |
 | `drive.preview.generate.priority`  | `business`, `secure_business` | `PREVIEW_PRIORITY_WORKERS` (default 6) |
 | `drive.preview.generate.standard`  | `free`, `starter`             | `PREVIEW_STANDARD_WORKERS` (default 2) |
-| `drive.preview.generate` (legacy)  | un-routed / pre-upgrade jobs  | single inline goroutine (compat)     |
+| `drive.preview.generate`           | un-routed jobs                | single inline goroutine              |
 
 The priority pool is sized ~3× the standard pool so paid tiers get
 proportionally more render concurrency when the queue is backed up.
 Tier is resolved from `workspace_plans.tier`, cached in Redis under
 `preview_tier:{workspace_id}` with a 5-minute TTL so a plan change
 (e.g. a Stripe upgrade) takes effect within a few minutes without a
-DB hit on every job. The legacy `drive.preview.generate` subject is
-retained so previews enqueued by a not-yet-upgraded API server during
-a rolling deploy are still processed.
+DB hit on every job. The base `drive.preview.generate` subject is the
+un-routed publish path: the worker keeps a consumer on it so any preview
+enqueued without a tier hint is still rendered by a single inline
+goroutine.
 
 ### Per-tenant budget
 
@@ -155,7 +157,7 @@ from monopolising the shared worker fleet, each workspace has a
   exponential backoff** (15s, doubling, capped at 5 minutes) so it
   re-enters the queue and is rendered once the trailing-hour window
   drains — it is **not** dropped. The priority/standard consumers use
-  a higher `MaxDeliver` (50) than the legacy consumer precisely so
+  a higher `MaxDeliver` (50) than the base consumer precisely so
   these legitimate budget deferrals are not terminated as if they were
   poison payloads.
 - Each deferral increments `zkdrive_preview_budget_exceeded_total{tier}`.
@@ -194,21 +196,19 @@ The response carries only public key metadata (`key_id`, `algorithm`,
 `algorithm` is the rotated key's own algorithm (always `ES256`);
 `signing_algorithm` is what the manager will actually sign with now, so
 when `JWT_ALGORITHM=HS256` pins signing the response shows `algorithm:
-ES256` (key stored + verifying) but `signing_algorithm: HS256` (not yet
-used to sign), letting an operator confirm whether the rotation is live.
+ES256` (key stored + verifying) but `signing_algorithm: HS256` (not used
+to sign while HS256 is pinned), letting an operator confirm whether the
+rotation is live.
 The rotation is recorded via
 structured logs (`slog`: `"platform jwt signing key rotated"` with
 `key_id` / `algorithm`); forward these to your log aggregator for an
 audit trail, since the platform plane has no workspace scope and so does
 not write to the per-workspace `audit_log` table.
 
-> **Upgrade note (legacy `PLATFORM_ADMIN_USER_IDS`):** earlier releases
-> gated rotation on the per-workspace admin endpoint
-> `POST /api/admin/jwt/rotate` behind a `PLATFORM_ADMIN_USER_IDS`
-> allowlist. That admin-API endpoint has been **removed** — rotation now
-> only happens on the platform control plane above. `PLATFORM_ADMIN_USER_IDS`
-> is no longer consulted; the server logs a startup warning if it is
-> still set so you can drop it from your config.
+> **`PLATFORM_ADMIN_USER_IDS` is unused.** JWT rotation is exclusively a
+> platform-control-plane operation (the endpoint above), so this
+> allowlist gates nothing. The server logs a startup warning when it is
+> set; drop it from your config.
 
 ## Observability
 
@@ -311,6 +311,8 @@ single wedged dependency degrades only its own row — the endpoint
 always returns. The frontend renders this at **Admin → Health** as a
 traffic-light grid that auto-refreshes every 15s.
 
+![Admin → Health dashboard for Northwind Trading: a traffic-light grid with one row per subsystem — Postgres, Redis, NATS, ClamAV, ONLYOFFICE, AI/LLM, storage, and workers — each with a colour and a short status detail.](blog/img/24-admin-health.png)
+
 Worker liveness is **pull-based**: the worker fleet upserts a row per
 logical worker type into `worker_heartbeats` (migration 039) every 15s,
 and the dashboard reads the freshest row per type. This deliberately
@@ -373,6 +375,184 @@ intervention; each transition is logged once at `warn` (degrade) and
   per-session revocation is re-enforced automatically the instant Redis
   returns (its hash is still absent there). Sessions created mid-outage
   remain fully device-bound.
+
+## Retention policies
+
+Workspace admins manage version retention from **Admin → Retention**, or
+through the REST surface under `/api/admin/retention-policies` (`admin`
+role; the endpoints return `501 Not Implemented` when the retention
+service is not wired). A policy is keyed on `(workspace, folder)`:
+
+- `folder_id` **unset** — the **workspace-wide default**, applied to
+  every folder that has no policy of its own.
+- `folder_id` **set** — a policy scoped to that folder and, recursively,
+  its subtree (`internal/retention/retention.go:15`).
+
+Each policy carries up to three independent dimensions; leave one unset
+to switch it off (`internal/retention/retention.go:20`):
+
+| Field                | Unit  | Enforced | What it does                                                                                                                                  |
+| -------------------- | ----- | -------- | --------------------------------------------------------------------------------------------------------------------------------------------- |
+| `archive_after_days` | days  | **Yes**  | Superseded versions older than N days are selected for cold-tier archival.                                                                     |
+| `max_age_days`       | days  | **Yes**  | Superseded versions older than N days are selected for hard deletion.                                                                          |
+| `max_versions`       | count | **No**   | Stored on the policy and shown to admins, but the evaluator does not act on it (`internal/retention/service.go:76`). Do not rely on it to cap how many versions a file keeps. |
+
+When more than one dimension applies, the retention service computes the
+set of versions eligible under each (`internal/retention/service.go:67`).
+Archival is carried out by the cold-archive worker, which consumes the
+`drive.archive.cold` job subject (`internal/jobs/publisher.go:68`),
+gzip-compresses the version's bytes, uploads them to the S3 cold tier,
+and stamps `archived_at`. A file's **current** version is never archived
+or deleted by a policy — retention only ever acts on superseded
+versions.
+
+Creating, replacing, and deleting a policy are each audited
+(`retention_policy.upsert` / `retention_policy.delete`), so the audit log
+is the system of record for who changed a workspace's retention posture.
+
+![Admin → Retention for Northwind Trading: a workspace-default policy alongside a per-folder policy, each showing its archive and version settings.](blog/img/22-admin-retention.png)
+
+The seeded Northwind workspace shows the surface in use: a workspace-wide
+default of `archive_after_days` 365 with `max_versions` 10, and a tighter
+`max_versions` 25 on **Legal Contracts** (`scripts/seed/seed.py:561`).
+The `archive_after_days` default is what drives cold-tier archival; the
+`max_versions` figures are recorded and visible to admins but not acted
+on by the evaluator.
+
+> **Honest scope.** `archive_after_days` and `max_age_days` are the two
+> dimensions the evaluator enforces. `max_versions` is stored but not
+> enforced, and the `drive.retention.evaluate` subject has no worker
+> consumer — retention takes effect through the cold-archive path above.
+> Configure `archive_after_days` / `max_age_days` for behaviour you can
+> rely on.
+
+## Storage usage
+
+**Admin → Storage** (or `GET /api/admin/storage-usage`, `admin` role)
+reports a workspace's total logical bytes plus a per-user breakdown:
+
+```json
+{
+  "total_bytes": 4831838208,
+  "per_user": [
+    { "user_id": "…", "email": "alice@northwind.example", "total_bytes": 2952790016, "file_count": 9 },
+    { "user_id": "…", "email": "bob@northwind.example",   "total_bytes": 1879048192, "file_count": 4 }
+  ]
+}
+```
+
+The figures come from a `SUM(size_bytes)` / `COUNT` over the `files`
+table grouped by uploader, excluding soft-deleted files
+(`api/admin/handler.go:967`). Two honest caveats:
+
+- They are **logical** sizes — the bytes users uploaded — not the
+  on-disk footprint of any particular storage tier
+  (`api/admin/handler.go:922`).
+- They are **advisory**. Plan quotas are enforced synchronously by the
+  billing service on every write, so this dashboard is for visibility,
+  never the gate (`api/admin/handler.go:938`).
+
+With `REDIS_URL` set, the result is memoised per workspace for 60 seconds
+so a burst of dashboard refreshes collapses onto one full-table
+aggregation; without Redis the query runs on each request
+(`api/admin/handler.go:946`).
+
+![Admin → Storage for Northwind Trading: total workspace usage with a per-user breakdown of bytes and file counts.](blog/img/23-admin-storage.png)
+
+## Audit-log verification
+
+Every workspace's `audit_log` is an HMAC hash chain: each row carries a
+sequence number and a hash computed over the previous row's hash and the
+row's own contents, keyed by a per-workspace secret. Tampering with,
+deleting, or re-ordering any row breaks the chain from that point on.
+
+An admin verifies the chain on demand at **Admin → Audit** or via
+`GET /api/admin/audit-log/verify` (`admin` role). The handler recomputes
+the chain over the workspace's live rows and returns
+(`api/admin/handler.go:704`):
+
+```json
+{
+  "workspace_id": "…",
+  "valid": true,
+  "rows_checked": 1284,
+  "head_seq": 1284
+}
+```
+
+When verification fails the response is still **HTTP 200** with
+`valid:false`, the `first_invalid_seq` of the first bad row, and a
+human-readable `detail` — the request succeeded; it is the log that is
+compromised, so a non-2xx would wrongly read as "verification could not
+run" (`api/admin/handler.go:700`). A scheduled job holding an admin token
+can poll this endpoint for continuous tamper-evidence. The endpoint
+returns `501 Not Implemented` when the audit subsystem is not wired.
+
+Cold archival (below) trims the oldest rows out of the hot table; it
+leaves the chain head intact, so verification of the remaining live rows
+stays valid, and a workspace with no audit history yet verifies as
+vacuously valid (`head_seq` 0).
+
+![Admin → Audit for Northwind Trading: the workspace audit log listing each event's actor, action, and timestamp, with a chain-verification control.](blog/img/21-admin-audit.png)
+
+## Rate limiting & auth-failure blocking
+
+Two always-on protections guard the API; both are tuned from
+[`CONFIGURATION.md`](CONFIGURATION.md) and neither can be switched off.
+
+**Per-user / per-workspace rate limiting.** Every data-plane, admin, and
+KChat route is wrapped by a token-bucket limiter — default **100
+requests/second per user** and **1000 requests/second per workspace**,
+each tolerating a short burst of up to **2×** the steady-state rate
+(`api/middleware/ratelimit.go:14`). A throttled request gets `429 Too
+Many Requests` with a `Retry-After` header and `X-RateLimit-*` telemetry
+so a well-behaved client can self-pace. With `REDIS_URL` set the counters
+are shared across replicas; without it each replica keeps its own
+in-process bucket. Setting either knob `<= 0` falls back to the default
+above, so the limiter is never disabled.
+
+**Auth brute-force reputation.** Sign-in attempts are tracked per client
+IP. The first few failures are free (human typos); once an IP crosses
+`AUTH_FAILURE_THRESHOLD` (default 5) consecutive failures a progressive
+cooldown is armed — **1s, then 5s, then 30s** — and any further failure
+escalates to a hard block of `AUTH_BLOCK_DURATION` (default 15 minutes)
+(`api/middleware/ratelimit_reputation.go:54`). During a cooldown the
+endpoint replies `429` with `Retry-After` before the credential check
+even runs, so the cost to an attacker grows while a real user is barely
+inconvenienced. A single successful sign-in clears the IP's record.
+Reputation is retained for 24 hours (`AUTH_REPUTATION_RETENTION`) and,
+with `REDIS_URL` set, shared across replicas. Because the key is the
+client IP, set `TRUSTED_PROXY_DEPTH` correctly behind a load balancer so
+the real client IP — not the proxy's — is the one counted.
+
+## Malware scanning (ClamAV)
+
+Malware scanning is **optional**. When `CLAMAV_ADDRESS` points at a
+ClamAV INSTREAM daemon, each uploaded version is streamed to clamd over
+the `drive.scan.virus` job subject and the verdict is recorded on the
+file version. A positive hit marks the version **`quarantined`**, stores
+the matched signature name in `scan_detail`, and fires a
+`notification.scan_quarantined` event to workspace admins
+(`internal/scan/scan.go:13`). When `CLAMAV_ADDRESS` is unset the
+subsystem is simply not provisioned: the service runs in a permissive
+mode that marks every version `clean` without calling out
+(`internal/scan/scan.go:9`), and the health dashboard shows `clamav` as
+an informational `yellow` ("not configured") rather than an error.
+
+The scan worker self-heals around a clamd outage (see
+[Auto-healing](#auto-healing)): rather than silently marking files
+`clean` without scanning them, it Nak-and-redelivers scan jobs until a
+dedicated 60-second health probe confirms the daemon is really down,
+then degrades to skip-and-pass, and re-enables real scanning the moment
+clamd answers again.
+
+> **`strict_zk` is never server-scanned.** Files in a `strict_zk` folder
+> are encrypted on the client and their plaintext never reaches the
+> server, so malware scanning — exactly like server-side preview and
+> search — cannot run on them. This is the deliberate trade-off of
+> end-to-end encryption: choose `managed_encrypted` for a folder when you
+> want server-side scanning, previews, and search; choose `strict_zk`
+> when zero-knowledge confidentiality matters more.
 
 ## Distributed tracing
 
@@ -462,8 +642,8 @@ an enrolled credential receives a `purpose=mfa_enroll` token at
 login that authorises only the enrolment endpoints — the user
 cannot reach any data-plane handler until enrolment is finalised.
 Disabling the policy does not delete any user's enrolled
-credential; that user remains protected by their second factor, but
-new users are no longer forced to enrol.
+credential; that user remains protected by their second factor, while
+members without an enrolled credential are not required to enrol.
 
 **Audit trail.** Five events are logged with the standard audit
 shape (workspace, actor, request IP / UA): `auth.mfa_enroll`,
