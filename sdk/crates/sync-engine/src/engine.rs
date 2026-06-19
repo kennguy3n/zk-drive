@@ -297,20 +297,37 @@ impl Engine {
                 let mut cat = self.catalogue.lock().await;
                 // A rename whose destination is under an ignored folder
                 // moves the file out of the synced tree, so it must not
-                // be tracked at `to`. Dropping the event outright would
-                // strand the source row at a path that no longer exists
-                // on disk. Instead reconcile the vacated source: if it
-                // was synced, route its row through the local-delete
-                // transition -- its bytes are gone from the synced tree,
-                // exactly like the displaced-row case below -- so
-                // reconciliation tombstones the server copy rather than
-                // leaving an orphan. If the source was itself ignored
-                // there is no tracked row to clean up. (A move the other
-                // way -- out of an ignored folder into a synced one --
-                // falls through to the normal path below and resumes
-                // syncing at `to`.)
+                // be tracked at `to`. How the source is handled turns on
+                // which side of the ignore boundary it sits on:
+                //
+                //   * `from` synced, `to` ignored -- a genuine move out
+                //     of the synced tree. The source bytes are gone from
+                //     where sync can see them, so reconcile the vacated
+                //     row through the local-delete transition (the same
+                //     displaced-row convention used below) rather than
+                //     leaving an orphan pointing at a vanished path.
+                //
+                //   * `from` ignored too -- a rename *within* ignored
+                //     space. Nothing here is being synced, so this is a
+                //     no-op, exactly like a Delete under an ignored
+                //     folder: a row that synced *before* the folder was
+                //     ignored keeps its status and is never tombstoned.
+                //     The `ignore` policy is non-destructive.
+                //
+                // (A move the other way -- out of an ignored folder into
+                // a synced one -- has a non-ignored `to`, so it falls
+                // through to the normal path below. In the live pipeline
+                // the watcher also decomposes a rename into Delete + an
+                // `Upsert(to)`, and that upsert is what registers the row
+                // and resumes syncing at the destination.)
                 if cat.is_path_ignored(self.config.workspace_id, &to)? {
-                    if let Some(existing) = cat.by_local_path(&from)? {
+                    if cat.is_path_ignored(self.config.workspace_id, &from)? {
+                        info!(
+                            ?from,
+                            ?to,
+                            "rename within an ignored folder; non-destructive, leaving any row untouched"
+                        );
+                    } else if let Some(existing) = cat.by_local_path(&from)? {
                         let next = existing.status.next_on_local_delete();
                         if next != existing.status {
                             cat.set_status(existing.remote_file_id, next)?;
@@ -851,6 +868,63 @@ mod tests {
         // The source row is reconciled as a local delete, not orphaned.
         let src = cat.get(src_id).unwrap().unwrap();
         assert_eq!(src.status, SyncStatus::LocalDeleted);
+    }
+
+    #[tokio::test]
+    async fn rename_within_ignored_folder_leaves_row_untouched() {
+        // Regression (Devin Review): a rename whose *both* ends are under
+        // an ignored folder must be a no-op, exactly like a Delete under
+        // an ignored folder. A row that synced *before* the folder was
+        // ignored must keep its status -- reconciling the source here
+        // would flip it to LocalDeleted and tombstone the server copy,
+        // violating the non-destructive `ignore` contract. Contrast with
+        // `rename_into_ignored_folder_reconciles_source_without_orphaning`,
+        // where the source is still synced and so IS reconciled.
+        let tempdir = TempDir::new().unwrap();
+        let (engine, catalogue) = engine_for(&tempdir);
+        let workspace_id = engine.config.workspace_id;
+        let src_id = Uuid::new_v4();
+        let ignored_dir = tempdir.path().join("Archive");
+        let from = ignored_dir.join("report.pdf");
+        let to = ignored_dir.join("old-report.pdf");
+        {
+            let mut cat = catalogue.lock().await;
+            cat.upsert(&FileRecord {
+                remote_file_id: src_id,
+                remote_version_id: Uuid::new_v4(),
+                local_path: from.clone(),
+                size_bytes: 7,
+                content_hash: [4u8; 32],
+                status: SyncStatus::UpToDate,
+                pinned: false,
+                updated_at: Utc::now(),
+            })
+            .unwrap();
+            cat.set_folder_policy(workspace_id, &ignored_dir, "ignore")
+                .unwrap();
+        }
+        engine
+            .handle_local(LocalEvent::Rename {
+                from: from.clone(),
+                to: to.clone(),
+            })
+            .await
+            .unwrap();
+        let cat = catalogue.lock().await;
+        // The pre-existing row keeps its status: not tombstoned.
+        let src = cat.get(src_id).unwrap().unwrap();
+        assert_eq!(
+            src.status,
+            SyncStatus::UpToDate,
+            "a rename within an ignored folder must not flip the row toward a tombstone"
+        );
+        // Its on-disk path is unchanged (the move within ignored space
+        // is invisible to sync), and nothing is registered at `to`.
+        assert_eq!(src.local_path, from);
+        assert!(
+            cat.by_local_path(&to).unwrap().is_none(),
+            "a rename within an ignored folder must not register a row at the destination"
+        );
     }
 
     #[tokio::test]

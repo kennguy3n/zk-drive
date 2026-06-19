@@ -555,6 +555,10 @@ impl Catalogue {
         folder_path: &Path,
         policy: &str,
     ) -> Result<()> {
+        debug_assert_eq!(
+            workspace_id, self.workspace_id,
+            "set_folder_policy called with a workspace_id other than the catalogue's binding"
+        );
         self.conn.execute(
             r#"INSERT INTO folder_policies (workspace_id, folder_path, policy)
                VALUES (?1, ?2, ?3)
@@ -577,6 +581,10 @@ impl Catalogue {
         workspace_id: Uuid,
         folder_path: &Path,
     ) -> Result<Option<String>> {
+        debug_assert_eq!(
+            workspace_id, self.workspace_id,
+            "get_folder_policy called with a workspace_id other than the catalogue's binding"
+        );
         let mut stmt = self.conn.prepare(
             "SELECT policy FROM folder_policies WHERE workspace_id = ?1 AND folder_path = ?2",
         )?;
