@@ -54,7 +54,7 @@ mod summary;
 mod tray;
 
 pub use app::{App, AppHandle, HEALTH_POLL_INTERVAL};
-pub use command::{Command, CommandError, CommandResult};
+pub use command::{Command, CommandError, CommandResult, ConflictResolution, FolderPolicy};
 pub use config::{AppConfig, WorkspaceEntry};
 pub use event::{BroadcastSink, EventSink, ShellEvent, TaskKind};
 pub use state::{SyncHealth, WorkspaceState};

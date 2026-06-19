@@ -24,10 +24,12 @@ pub enum DesktopError {
     #[error("auth: {0}")]
     Auth(String),
 
-    /// The requested operation is not yet supported by the underlying
-    /// SDK (e.g. per-folder selective sync or in-app conflict
-    /// resolution, which the desktop-shell `Command` surface does not
-    /// expose at this SDK revision).
+    /// A requested operation the underlying SDK `Command` surface does
+    /// not expose. No handler constructs this today, but it is a
+    /// member of the serialized error contract the frontend mirrors
+    /// (`desktop/src/types.ts` `DesktopError.kind`), so it is retained
+    /// as a stable wire variant for handlers added later.
+    #[allow(dead_code)]
     #[error("unsupported: {0}")]
     Unsupported(String),
 

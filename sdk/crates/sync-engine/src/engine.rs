@@ -2,7 +2,7 @@
 //! channels, drives the catalogue, and dispatches upload / download
 //! tasks against [`zk_sync_api`].
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use tokio::sync::{mpsc, Mutex};
@@ -128,6 +128,31 @@ impl Engine {
     }
 
     async fn handle_local(&self, ev: LocalEvent) -> Result<()> {
+        // Honor a folder's `ignore` selective-sync policy. A local
+        // change under an ignored folder is dropped before it can
+        // register a new catalogue row or flip an existing one dirty,
+        // so the upload flow never pushes it. This is non-destructive:
+        // rows that synced before the folder was ignored keep their
+        // last status and nothing is removed server-side -- we simply
+        // stop propagating fresh local changes. The check is dynamic
+        // (re-read per event) so a folder flipped to `ignore` while
+        // sync is running takes effect on the next change without a
+        // restart. For a rename we test the destination, since that is
+        // where the file comes to rest: a move *out* of an ignored
+        // folder should resume syncing, a move *into* one should stop.
+        let event_path: &Path = match &ev {
+            LocalEvent::Upsert { path, .. } | LocalEvent::Delete { path } => path.as_path(),
+            LocalEvent::Rename { to, .. } => to.as_path(),
+        };
+        if self
+            .catalogue
+            .lock()
+            .await
+            .is_path_ignored(self.config.workspace_id, event_path)?
+        {
+            info!(path = ?event_path, "local event under an ignored folder; skipping");
+            return Ok(());
+        }
         match ev {
             LocalEvent::Upsert {
                 path,
@@ -854,6 +879,40 @@ mod tests {
         assert_ne!(rec.remote_file_id, Uuid::nil());
         // No remote version yet.
         assert_eq!(rec.remote_version_id, Uuid::nil());
+    }
+
+    #[tokio::test]
+    async fn local_upsert_under_ignored_folder_registers_no_row() {
+        // The selective-sync `ignore` policy is honored at the source:
+        // a fresh local change under an ignored folder is dropped in
+        // handle_local before it can register a catalogue row, so the
+        // upload flow never pushes it. Contrast with
+        // `new_local_file_registers_catalogue_row`, which feeds the
+        // same event without a policy and DOES register a LocalDirty
+        // row -- the only difference here is the ignore policy.
+        let tempdir = TempDir::new().unwrap();
+        let (engine, catalogue) = engine_for(&tempdir);
+        let workspace_id = engine.config.workspace_id;
+        let ignored_dir = tempdir.path().join("Archive");
+        let path = ignored_dir.join("old-invoice.pdf");
+        catalogue
+            .lock()
+            .await
+            .set_folder_policy(workspace_id, &ignored_dir, "ignore")
+            .unwrap();
+        engine
+            .handle_local(LocalEvent::Upsert {
+                path: path.clone(),
+                size_bytes: 11,
+                content_hash: [1u8; 32],
+            })
+            .await
+            .unwrap();
+        let cat = catalogue.lock().await;
+        assert!(
+            cat.by_local_path(&path).unwrap().is_none(),
+            "an upsert under an ignored folder must not register a catalogue row"
+        );
     }
 
     #[test]

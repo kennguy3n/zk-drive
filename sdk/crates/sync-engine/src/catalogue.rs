@@ -503,6 +503,73 @@ impl Catalogue {
         Ok(())
     }
 
+    /// Persist a folder's selective-sync `policy` (the wire string
+    /// `"ignore" | "online" | "offline"`). Upserts on the
+    /// `(workspace_id, folder_path)` primary key so re-setting a
+    /// folder's policy overwrites the previous value rather than
+    /// failing on the conflict.
+    pub fn set_folder_policy(
+        &mut self,
+        workspace_id: Uuid,
+        folder_path: &Path,
+        policy: &str,
+    ) -> Result<()> {
+        self.conn.execute(
+            r#"INSERT INTO folder_policies (workspace_id, folder_path, policy)
+               VALUES (?1, ?2, ?3)
+               ON CONFLICT(workspace_id, folder_path) DO UPDATE SET policy = excluded.policy"#,
+            params![
+                workspace_id.to_string(),
+                folder_path.to_string_lossy().to_string(),
+                policy,
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Read a folder's persisted selective-sync policy, or `None` if
+    /// the folder has no explicit policy set (in which case it
+    /// inherits the workspace default — sync normally).
+    pub fn get_folder_policy(
+        &self,
+        workspace_id: Uuid,
+        folder_path: &Path,
+    ) -> Result<Option<String>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT policy FROM folder_policies WHERE workspace_id = ?1 AND folder_path = ?2",
+        )?;
+        Ok(stmt
+            .query_row(
+                params![
+                    workspace_id.to_string(),
+                    folder_path.to_string_lossy().to_string()
+                ],
+                |r| r.get::<_, String>(0),
+            )
+            .optional()?)
+    }
+
+    /// Whether `path` falls under any folder this workspace has set to
+    /// the `"ignore"` policy. The engine calls this on every local
+    /// event so a folder flipped to `ignore` while sync is running
+    /// takes effect on the next change without a restart. Matching is
+    /// by path prefix, mirroring [`crate::Watcher`]'s static ignore
+    /// list: an `ignore` policy on `/ws/tmp` also ignores
+    /// `/ws/tmp/a/b.txt`.
+    pub fn is_path_ignored(&self, workspace_id: Uuid, path: &Path) -> Result<bool> {
+        let mut stmt = self.conn.prepare(
+            "SELECT folder_path FROM folder_policies WHERE workspace_id = ?1 AND policy = 'ignore'",
+        )?;
+        let rows = stmt.query_map(params![workspace_id.to_string()], |r| r.get::<_, String>(0))?;
+        for row in rows {
+            let prefix = PathBuf::from(row?);
+            if path.starts_with(&prefix) {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
     /// Iterate every record in the catalogue. Used by the LRU eviction
     /// path in the offline-cache crate (and by integration tests).
     pub fn list_all(&self) -> Result<Vec<FileRecord>> {
@@ -593,6 +660,20 @@ CREATE TABLE IF NOT EXISTS workspace_cursors (
 CREATE TABLE IF NOT EXISTS catalogue_meta (
     key   TEXT PRIMARY KEY,
     value TEXT NOT NULL
+);
+
+-- Per-folder selective-sync policy. The desktop shell's
+-- SetFolderPolicy command writes here; the engine reads it on every
+-- local event to honor an "ignore" folder by dropping changes under
+-- that path before they can register or dirty a row. `folder_path` is
+-- the absolute on-disk path the GUI passed (matched as a prefix
+-- against local-event paths) and `policy` is the wire string
+-- ("ignore" | "online" | "offline").
+CREATE TABLE IF NOT EXISTS folder_policies (
+    workspace_id TEXT NOT NULL,
+    folder_path  TEXT NOT NULL,
+    policy       TEXT NOT NULL,
+    PRIMARY KEY (workspace_id, folder_path)
 );
 "#;
 
@@ -717,6 +798,63 @@ mod tests {
             SyncStatus::LocalDirty,
             "with_txn must roll back partial mutations on Err"
         );
+    }
+
+    #[test]
+    fn folder_policy_round_trip_and_overwrite() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ws = Uuid::new_v4();
+        let mut cat = Catalogue::open(tmp.path().join("c.db"), ws).unwrap();
+        let folder = Path::new("/ws/Projects");
+
+        // Unset folders have no policy.
+        assert_eq!(cat.get_folder_policy(ws, folder).unwrap(), None);
+
+        cat.set_folder_policy(ws, folder, "offline").unwrap();
+        assert_eq!(
+            cat.get_folder_policy(ws, folder).unwrap().as_deref(),
+            Some("offline")
+        );
+
+        // Re-setting overwrites rather than erroring on the PK.
+        cat.set_folder_policy(ws, folder, "ignore").unwrap();
+        assert_eq!(
+            cat.get_folder_policy(ws, folder).unwrap().as_deref(),
+            Some("ignore")
+        );
+    }
+
+    #[test]
+    fn is_path_ignored_matches_by_prefix_only_for_ignore_policy() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ws = Uuid::new_v4();
+        let mut cat = Catalogue::open(tmp.path().join("c.db"), ws).unwrap();
+
+        // Nothing ignored yet.
+        assert!(!cat
+            .is_path_ignored(ws, Path::new("/ws/Temp/a.txt"))
+            .unwrap());
+
+        cat.set_folder_policy(ws, Path::new("/ws/Temp"), "ignore")
+            .unwrap();
+        // A non-ignore policy must NOT cause a path to be skipped.
+        cat.set_folder_policy(ws, Path::new("/ws/Online"), "online")
+            .unwrap();
+
+        // Prefix match under the ignored folder.
+        assert!(cat
+            .is_path_ignored(ws, Path::new("/ws/Temp/nested/a.txt"))
+            .unwrap());
+        // The ignored folder itself.
+        assert!(cat.is_path_ignored(ws, Path::new("/ws/Temp")).unwrap());
+        // Sibling that merely shares a name prefix is not under it.
+        assert!(!cat
+            .is_path_ignored(ws, Path::new("/ws/Temporary/a.txt"))
+            .unwrap());
+        // A folder with a non-ignore policy is still synced.
+        assert!(!cat
+            .is_path_ignored(ws, Path::new("/ws/Online/a.txt"))
+            .unwrap());
     }
 
     #[test]

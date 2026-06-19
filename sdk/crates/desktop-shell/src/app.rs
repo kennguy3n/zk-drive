@@ -33,10 +33,11 @@ use uuid::Uuid;
 
 use zk_sync_api::Client;
 use zk_sync_engine::{
-    placeholder_dir, tombstone_dir, Catalogue, Engine, EngineConfig, RemotePoller, Watcher,
+    placeholder_dir, tombstone_dir, Catalogue, Engine, EngineConfig, RemotePoller, SyncStatus,
+    Watcher,
 };
 
-use crate::command::{Command, CommandError, CommandResult};
+use crate::command::{Command, CommandError, CommandResult, ConflictResolution, FolderPolicy};
 use crate::config::{AppConfig, WorkspaceEntry};
 use crate::event::{EventSink, ShellEvent, TaskKind};
 use crate::state::{SyncHealth, WorkspaceState};
@@ -266,6 +267,22 @@ impl App {
                 let states = self.snapshot_states().await;
                 Ok(CommandResult::Workspaces(states))
             }
+            Command::ResolveConflict {
+                workspace_id,
+                file_id,
+                resolution,
+            } => self
+                .resolve_conflict(workspace_id, file_id, resolution)
+                .await
+                .map(|_| CommandResult::Ok),
+            Command::SetFolderPolicy {
+                workspace_id,
+                folder_id,
+                policy,
+            } => self
+                .set_folder_policy(workspace_id, folder_id, policy)
+                .await
+                .map(|_| CommandResult::Ok),
         }
     }
 
@@ -626,6 +643,112 @@ impl App {
             })
             .await;
         Ok(())
+    }
+
+    /// Resolve a conflicted file by choosing which side wins.
+    ///
+    /// Flips the file's catalogue row to the dirty side the user
+    /// chose; the engine's reconciliation loop already acts on it
+    /// (`LocalDirty` re-uploads the local bytes, `RemoteDirty`
+    /// re-downloads the remote copy). Errors if the workspace isn't
+    /// registered, the file isn't tracked, or the file isn't actually
+    /// in [`SyncStatus::Conflict`] — so a stale GUI click can't
+    /// silently clobber an up-to-date file. Works whether or not the
+    /// workspace's sync loop is currently running, since it only
+    /// touches the catalogue.
+    pub async fn resolve_conflict(
+        self: &Arc<Self>,
+        workspace_id: Uuid,
+        file_id: Uuid,
+        resolution: ConflictResolution,
+    ) -> std::result::Result<(), CommandError> {
+        let catalogue = self.catalogue_handle(workspace_id).await?;
+        let target = match resolution {
+            ConflictResolution::Local => SyncStatus::LocalDirty,
+            ConflictResolution::Remote => SyncStatus::RemoteDirty,
+        };
+        {
+            let mut cat = catalogue.lock().await;
+            match cat
+                .get(file_id)
+                .map_err(|e| CommandError::Other(format!("catalogue read: {e}")))?
+            {
+                Some(rec) if rec.status == SyncStatus::Conflict => {
+                    cat.set_status(file_id, target)
+                        .map_err(|e| CommandError::Other(format!("set status: {e}")))?;
+                }
+                Some(rec) => {
+                    return Err(CommandError::Other(format!(
+                        "file {file_id} is not in a conflicted state (status: {:?})",
+                        rec.status
+                    )));
+                }
+                None => {
+                    return Err(CommandError::Other(format!(
+                        "file {file_id} is not tracked in workspace {workspace_id}"
+                    )));
+                }
+            }
+        }
+        info!(
+            workspace_id = %workspace_id,
+            file_id = %file_id,
+            ?resolution,
+            "conflict resolved"
+        );
+        Ok(())
+    }
+
+    /// Persist a folder's selective-sync policy in the workspace
+    /// catalogue. The engine reads `folder_policies` on every local
+    /// event, so flipping a folder to [`FolderPolicy::Ignore`] takes
+    /// effect on the next change without restarting sync. `folder_id`
+    /// is the absolute on-disk path the GUI selected.
+    pub async fn set_folder_policy(
+        self: &Arc<Self>,
+        workspace_id: Uuid,
+        folder_id: String,
+        policy: FolderPolicy,
+    ) -> std::result::Result<(), CommandError> {
+        let catalogue = self.catalogue_handle(workspace_id).await?;
+        let folder_path = PathBuf::from(&folder_id);
+        catalogue
+            .lock()
+            .await
+            .set_folder_policy(workspace_id, &folder_path, policy.as_str())
+            .map_err(|e| CommandError::Other(format!("persist folder policy: {e}")))?;
+        info!(
+            workspace_id = %workspace_id,
+            folder = %folder_id,
+            policy = policy.as_str(),
+            "folder policy set"
+        );
+        Ok(())
+    }
+
+    /// Clone the catalogue handle for a registered workspace,
+    /// reopening it if a previous [`App::remove_local_cache`] took the
+    /// handle out of the binding. Shared by the conflict-resolution
+    /// and folder-policy handlers, which mutate the catalogue directly
+    /// without needing the workspace's sync loop to be running.
+    async fn catalogue_handle(
+        self: &Arc<Self>,
+        workspace_id: Uuid,
+    ) -> std::result::Result<Arc<Mutex<Catalogue>>, CommandError> {
+        let mut map = self.workspaces.lock().await;
+        let ws = map
+            .get_mut(&workspace_id)
+            .ok_or(CommandError::NotRegistered(workspace_id))?;
+        if ws.catalogue.is_none() {
+            let cat = Catalogue::open(&ws.catalogue_path, workspace_id)
+                .map_err(|e| CommandError::Other(format!("reopen catalogue: {e}")))?;
+            ws.catalogue = Some(Arc::new(Mutex::new(cat)));
+        }
+        Ok(ws
+            .catalogue
+            .as_ref()
+            .expect("catalogue ensured Some above")
+            .clone())
     }
 
     async fn snapshot_states(&self) -> Vec<WorkspaceState> {
@@ -1121,6 +1244,148 @@ mod tests {
             let ws = map.get(&id).expect("workspace present");
             assert_eq!(ws.last_error.as_deref(), Some("poller: synthetic crash"));
         }
+    }
+
+    /// Seed a workspace binding whose catalogue lives under `dir` and
+    /// is pre-populated by `seed`. Unlike [`seed_running_binding`]
+    /// (which leaves `catalogue: None`), this opens a real on-disk
+    /// catalogue so the conflict-resolution / folder-policy handlers
+    /// have something to mutate.
+    async fn seed_binding_with_catalogue(
+        app: &Arc<App>,
+        dir: &std::path::Path,
+        seed: impl FnOnce(&mut Catalogue),
+    ) -> Uuid {
+        let workspace_id = Uuid::new_v4();
+        let catalogue_path = dir.join("catalogue.db");
+        let mut cat = Catalogue::open(&catalogue_path, workspace_id).unwrap();
+        seed(&mut cat);
+        let mut map = app.workspaces.lock().await;
+        map.insert(
+            workspace_id,
+            WorkspaceBinding {
+                workspace_id,
+                label: "seeded".into(),
+                root: dir.to_path_buf(),
+                catalogue_path,
+                autostart: false,
+                health: SyncHealth::Stopped,
+                last_summary: Summary::default(),
+                last_error: None,
+                last_updated: chrono::Utc::now(),
+                catalogue: Some(Arc::new(Mutex::new(cat))),
+                engine_task: None,
+                poller_task: None,
+                watcher_task: None,
+            },
+        );
+        workspace_id
+    }
+
+    #[tokio::test]
+    async fn resolve_conflict_flips_conflicted_row_and_guards_others() {
+        let tmp = tempfile::tempdir().unwrap();
+        let app = App::new();
+        let conflicted = Uuid::new_v4();
+        let clean = Uuid::new_v4();
+        let ws = seed_binding_with_catalogue(&app, tmp.path(), |cat| {
+            let mut rec = zk_sync_engine::FileRecord {
+                remote_file_id: conflicted,
+                remote_version_id: Uuid::new_v4(),
+                local_path: tmp.path().join("conflicted.txt"),
+                size_bytes: 10,
+                content_hash: [7u8; 32],
+                status: SyncStatus::Conflict,
+                pinned: false,
+                updated_at: chrono::Utc::now(),
+            };
+            cat.upsert(&rec).unwrap();
+            rec.remote_file_id = clean;
+            rec.local_path = tmp.path().join("clean.txt");
+            rec.status = SyncStatus::UpToDate;
+            cat.upsert(&rec).unwrap();
+        })
+        .await;
+
+        // "Keep local" flips the conflicted row to LocalDirty so the
+        // engine re-uploads it.
+        app.clone()
+            .resolve_conflict(ws, conflicted, ConflictResolution::Local)
+            .await
+            .unwrap();
+        {
+            let handle = app.catalogue_handle(ws).await.unwrap();
+            let cat = handle.lock().await;
+            assert_eq!(
+                cat.get(conflicted).unwrap().unwrap().status,
+                SyncStatus::LocalDirty
+            );
+        }
+
+        // Resolving a file that isn't conflicted is rejected and must
+        // not touch the row -- a stale GUI click can't clobber an
+        // up-to-date file.
+        let err = app
+            .clone()
+            .resolve_conflict(ws, clean, ConflictResolution::Remote)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, CommandError::Other(_)));
+        {
+            let handle = app.catalogue_handle(ws).await.unwrap();
+            let cat = handle.lock().await;
+            assert_eq!(
+                cat.get(clean).unwrap().unwrap().status,
+                SyncStatus::UpToDate
+            );
+        }
+
+        // An untracked file id errors rather than silently succeeding.
+        let err = app
+            .clone()
+            .resolve_conflict(ws, Uuid::new_v4(), ConflictResolution::Local)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, CommandError::Other(_)));
+    }
+
+    #[tokio::test]
+    async fn resolve_conflict_unknown_workspace_is_not_registered() {
+        let app = App::new();
+        let err = app
+            .clone()
+            .resolve_conflict(Uuid::new_v4(), Uuid::new_v4(), ConflictResolution::Local)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, CommandError::NotRegistered(_)));
+    }
+
+    #[tokio::test]
+    async fn set_folder_policy_persists_and_is_honored_by_ignore_query() {
+        let tmp = tempfile::tempdir().unwrap();
+        let app = App::new();
+        let ws = seed_binding_with_catalogue(&app, tmp.path(), |_| {}).await;
+        let folder = tmp.path().join("Temp");
+
+        app.clone()
+            .set_folder_policy(
+                ws,
+                folder.to_string_lossy().into_owned(),
+                FolderPolicy::Ignore,
+            )
+            .await
+            .unwrap();
+
+        let handle = app.catalogue_handle(ws).await.unwrap();
+        let cat = handle.lock().await;
+        assert_eq!(
+            cat.get_folder_policy(ws, &folder).unwrap().as_deref(),
+            Some("ignore")
+        );
+        // The same query the engine runs on every local event sees it.
+        assert!(cat
+            .is_path_ignored(ws, &folder.join("nested").join("a.txt"))
+            .unwrap());
     }
 
     #[tokio::test]
