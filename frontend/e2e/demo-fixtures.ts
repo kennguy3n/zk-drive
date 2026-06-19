@@ -18,8 +18,9 @@ export const FOLDER_LEGAL_ID = "f0000002-0000-0000-0000-000000000002";
 export const FOLDER_FINANCE_ID = "f0000003-0000-0000-0000-000000000003";
 export const FOLDER_VAULT_ID = "f0000004-0000-0000-0000-000000000004";
 export const FOLDER_MARKETING_ID = "f0000005-0000-0000-0000-000000000005";
-const FOLDER_BACKEND_ID = "f0000006-0000-0000-0000-000000000006";
-const FOLDER_FRONTEND_ID = "f0000007-0000-0000-0000-000000000007";
+const FOLDER_ARCHITECTURE_ID = "f0000006-0000-0000-0000-000000000006";
+const FOLDER_RELEASES_ID = "f0000007-0000-0000-0000-000000000007";
+export const DOCUMENT_ID = "d0000001-0000-0000-0000-000000000001";
 
 const FILE1_ID = "a1000001-0000-0000-0000-000000000001";
 const FILE2_ID = "a1000002-0000-0000-0000-000000000002";
@@ -43,8 +44,8 @@ export const ROOT_FOLDERS = [
 
 // ---- Engineering subfolders ----
 export const ENGINEERING_CHILDREN = [
-  { id: FOLDER_BACKEND_ID, workspace_id: WS_ID, parent_folder_id: FOLDER_ENGINEERING_ID, name: "Backend", path: "/Engineering/Backend/", encryption_mode: "managed_encrypted", created_at: weekAgo, updated_at: yesterday },
-  { id: FOLDER_FRONTEND_ID, workspace_id: WS_ID, parent_folder_id: FOLDER_ENGINEERING_ID, name: "Frontend", path: "/Engineering/Frontend/", encryption_mode: "managed_encrypted", created_at: weekAgo, updated_at: twoDaysAgo },
+  { id: FOLDER_ARCHITECTURE_ID, workspace_id: WS_ID, parent_folder_id: FOLDER_ENGINEERING_ID, name: "Architecture", path: "/Engineering/Architecture/", encryption_mode: "managed_encrypted", created_at: weekAgo, updated_at: yesterday },
+  { id: FOLDER_RELEASES_ID, workspace_id: WS_ID, parent_folder_id: FOLDER_ENGINEERING_ID, name: "Releases", path: "/Engineering/Releases/", encryption_mode: "managed_encrypted", created_at: weekAgo, updated_at: twoDaysAgo },
 ];
 
 // ---- Files inside Engineering ----
@@ -59,11 +60,11 @@ export const ENGINEERING_FILES = [
 // ---- Admin: Users ----
 export const ADMIN_USERS = {
   users: [
-    { id: USER_ADMIN_ID, email: "alice@acmecorp.com", name: "Alice Chen", role: "admin", workspace_id: WS_ID, deactivated_at: null, created_at: weekAgo },
-    { id: USER_MEMBER1_ID, email: "bob@acmecorp.com", name: "Bob Martinez", role: "member", workspace_id: WS_ID, deactivated_at: null, created_at: weekAgo },
-    { id: USER_MEMBER2_ID, email: "carol@acmecorp.com", name: "Carol Nguyen", role: "member", workspace_id: WS_ID, deactivated_at: null, created_at: twoDaysAgo },
-    { id: USER_MEMBER3_ID, email: "dave@acmecorp.com", name: "Dave Patel", role: "admin", workspace_id: WS_ID, deactivated_at: null, created_at: yesterday },
-    { id: "ff000001-0000-0000-0000-000000000001", email: "eve@acmecorp.com", name: "Eve Thompson", role: "member", workspace_id: WS_ID, deactivated_at: twoDaysAgo, created_at: weekAgo },
+    { id: USER_ADMIN_ID, email: "alice@northwind.example", name: "Alice Chen", role: "admin", workspace_id: WS_ID, deactivated_at: null, created_at: weekAgo },
+    { id: USER_MEMBER1_ID, email: "bob@northwind.example", name: "Bob Martinez", role: "member", workspace_id: WS_ID, deactivated_at: null, created_at: weekAgo },
+    { id: USER_MEMBER2_ID, email: "carol@northwind.example", name: "Carol Nguyen", role: "member", workspace_id: WS_ID, deactivated_at: null, created_at: twoDaysAgo },
+    { id: USER_MEMBER3_ID, email: "dave@northwind.example", name: "Dave Patel", role: "admin", workspace_id: WS_ID, deactivated_at: null, created_at: yesterday },
+    { id: "ff000001-0000-0000-0000-000000000001", email: "eve@northwind.example", name: "Eve Thompson", role: "member", workspace_id: WS_ID, deactivated_at: twoDaysAgo, created_at: weekAgo },
   ],
 };
 
@@ -93,10 +94,10 @@ export const RETENTION_POLICIES = {
 export const STORAGE_USAGE = {
   total_bytes: 15_728_640_000, // ~14.6 GB
   per_user: [
-    { user_id: USER_ADMIN_ID, email: "alice@acmecorp.com", total_bytes: 6_442_450_944, file_count: 142 },
-    { user_id: USER_MEMBER1_ID, email: "bob@acmecorp.com", total_bytes: 4_294_967_296, file_count: 87 },
-    { user_id: USER_MEMBER2_ID, email: "carol@acmecorp.com", total_bytes: 3_221_225_472, file_count: 63 },
-    { user_id: USER_MEMBER3_ID, email: "dave@acmecorp.com", total_bytes: 1_770_000_000, file_count: 31 },
+    { user_id: USER_ADMIN_ID, email: "alice@northwind.example", total_bytes: 6_442_450_944, file_count: 142 },
+    { user_id: USER_MEMBER1_ID, email: "bob@northwind.example", total_bytes: 4_294_967_296, file_count: 87 },
+    { user_id: USER_MEMBER2_ID, email: "carol@northwind.example", total_bytes: 3_221_225_472, file_count: 63 },
+    { user_id: USER_MEMBER3_ID, email: "dave@northwind.example", total_bytes: 1_770_000_000, file_count: 31 },
   ],
 };
 
@@ -180,8 +181,8 @@ export const SHARE_LINK_RESPONSE = {
 
 // ---- Placement policy ----
 export const PLACEMENT_POLICY = {
-  tenant: "acmecorp",
-  bucket: "acmecorp-zk-drive",
+  tenant: "northwind",
+  bucket: "northwind-zk-drive",
   policy: {
     encryption: { mode: "SSE-KMS", kms: "arn:aws:kms:us-east-1:123456789:key/demo-key" },
     placement: { provider: ["aws"], region: ["us-east-1", "eu-west-1"], country: ["US", "DE"], storage_class: ["STANDARD"], cache_location: "us-east-1" },
@@ -199,12 +200,93 @@ export const KCHAT_ROOMS = {
   ],
 };
 
+// ---- Admin: Health dashboard ----
+// Shape mirrors HealthReport in client.ts. A fully-green deployment with
+// every subsystem configured, so the admin Health tab renders the full
+// traffic-light roll-up rather than greying out unconfigured rows.
+export const HEALTH_REPORT = {
+  status: "green",
+  generated_at: now,
+  subsystems: [
+    { name: "postgres", status: "green", detail: { pool_in_use: 3, pool_idle: 9, max_conns: 20 } },
+    { name: "object_storage", status: "green", detail: { provider: "s3", bucket: "northwind-zk-drive", reachable: true } },
+    { name: "nats", status: "green", detail: { stream: "DRIVE_JOBS", pending: 0, consumers: 1 } },
+    { name: "worker", status: "green", detail: { last_seen: now, jobs_processed: 1284 } },
+    { name: "virus_scanner", status: "green", detail: { engine: "clamd", reachable: true } },
+    { name: "collaboration", status: "green", detail: { sessions: 2 } },
+  ],
+};
+
+// ---- Guided setup wizard status ----
+// needs_setup=true keeps SetupWizardPage on the wizard instead of
+// self-redirecting to /drive. Steps mirror internal/setup.Steps.
+export const SETUP_STATUS = {
+  setup_completed: false,
+  needs_setup: true,
+  steps: {
+    admin_account: { configured: false },
+    storage: { configured: true, detail: "S3 bucket northwind-zk-drive reachable" },
+    workspace: { configured: false },
+    optional_services: { email: true, virus_scanning: true, ai: false, collaborative_editing: true },
+  },
+};
+
+// ---- Collaborative documents (TipTap + Yjs) ----
+const DOC_COMMON = {
+  workspace_id: WS_ID,
+  folder_id: FOLDER_ENGINEERING_ID,
+  encryption_mode: "managed_encrypted",
+  capability: "full" as const,
+  allowed_collab_modes: ["markdown", "rich", "rich_presence", "disabled"],
+  y_state_seq_floor: 0,
+  snapshot_version: 4,
+  created_by: USER_ADMIN_ID,
+};
+export const DOCUMENTS = {
+  documents: [
+    { id: DOCUMENT_ID, name: "Q2 Planning Notes", collab_mode: "rich_presence", ...DOC_COMMON, created_at: weekAgo, updated_at: now },
+    { id: "d0000002-0000-0000-0000-000000000002", name: "Architecture Decision Record", collab_mode: "rich", ...DOC_COMMON, created_at: twoDaysAgo, updated_at: yesterday },
+    { id: "d0000003-0000-0000-0000-000000000003", name: "Release Checklist", collab_mode: "markdown", ...DOC_COMMON, created_at: yesterday, updated_at: now },
+  ],
+};
+export const DOCUMENT_DETAIL = DOCUMENTS.documents[0];
+
+// ---- TOTP / 2FA status (authenticated re-enrollment view) ----
+export const TOTP_STATUS = {
+  enabled: false,
+  pending_enrollment: false,
+  recovery_codes_remaining: 0,
+};
+
+// TOTP enrollment "begin" response. qr_code_png is a genuine QR (rendered
+// from the otpauth URI below) so the enrollment screenshot shows a real,
+// scannable code rather than a broken-image placeholder.
+export const TOTP_ENROLL_BEGIN = {
+  secret: "JBSWY3DPEHPK3PXP",
+  otpauth_uri:
+    "otpauth://totp/zk-drive:alice@northwind.example?secret=JBSWY3DPEHPK3PXP&issuer=zk-drive&algorithm=SHA1&digits=6&period=30",
+  qr_code_png: "iVBORw0KGgoAAAANSUhEUgAAASYAAAEmAQAAAADnvwB3AAADM0lEQVR4nO2aTYokRwyFv2gl9FIJPoAvYlDdYI5k+mZR4Iv0AQzK5UAkzwtFlr1zGcZ0ZTJBUVRlaiEh6T39RBP/fva3J4Tgp9TXSaEEsGS4hssyhndTB5QBQIxX1f5pG0OSZUgd71IfoIwBw2WS8uw2LkAj6ts+v/0xYhH7r9nq/bban6+r/fM2AnjfF/YVq7/bDYLt9mV6/R82bqtyFfffGjRMNO/tC/X60TYKFte+xr5g+a1v694Yv9zrOdvrav+01L21xnZ7T94zgIWwjPfP35fttrfW1pfW/pmjebplDMIyJpuoW0a9OzmuTpqAAHBZAlhi0pgUeXbuQOqmXryvDMvyIPis8oZfwo8ujmIArxDtFbGSxun9+AZ3QBn7eme7VawC+8rwvq8sX6XXD5NCkjJMmrGqPlyDmBUscQXMUTdJ6sM1c9BliSXKwMUV8hG828Ed9bFEiRKT7AJ+TAZRXdUjGadbiTLz/DbG8OnE+ch7kePwPmuDV9X+ecwBjgonVOAjmaYfr8CPmjhTxzKA4dKBq1fwYzK8D7AE7xNqkuGSVGXe+W0sqIkix4KdyZj1+wKYIylDyYAijmITjh7k/Lj6BvdWBRvxnliyEAOkD2CBvd1eWfunpLabJWP+vQMD3jNau31fC29fWfunTg0bmYPW2Utahh195TXykcpE73bQIkc7eZF6VR1XzQGmva7ZfVym78jANSu6ibHTj/W5BD8CYep4H/xtb+Vmja1Ob6N6Fagcmx1LBsE08xIzq4mf4L0QBu9zjPMA2FfV/nlcHYU23vWIWELqs7e6RKweK8h44Iweo7naSL6q9v8FV/soxxHVVUGFbgeuYKN00AemuUeuhqvA9gqYoz6zDzgGVmOO5qLKntPbmP+0a14AqPlV4e355+TH3irB5xi59jjUdiDj/PXqG1trrS3MwWMN/00fUgeWmoG8rvZPneNeB4MwaRwz1bncyUvgakYlYEHo7CK9brBMgZPb+JC66/M2/GMh8A9g8d7WGMT5d+WHlHdc9nn7vjK2WzUdSizv18nHYsnqqqpldhXSXoIfocCTuYWcTqxNh1/gzkP7ebfzElJ/ATRM5y8tYyOCAAAAAElFTkSuQmCC",
+};
+
 /**
  * installDemoMocks intercepts all API routes with realistic mock data.
  * Call this at the start of each demo screenshot test, BEFORE any navigation.
  * This uses the same page.route() pattern as file-upload.spec.ts.
  */
-export async function installDemoMocks(page: Page) {
+export async function installDemoMocks(
+  page: Page,
+  opts: { theme?: "light" | "dark" } = {},
+) {
+  // Pin the colour scheme before the SPA boots so ThemeProvider applies
+  // the .dark class (or not) on first paint. We set zkdrive.theme to an
+  // explicit "light"/"dark" rather than "system" so screenshots never
+  // depend on the CI runner's prefers-color-scheme.
+  if (opts.theme) {
+    await page.addInitScript((theme) => {
+      localStorage.setItem("zkdrive.theme", theme);
+    }, opts.theme);
+  }
+
   // Auth: signup and login both return a valid-looking token payload
   const authResponse = {
     token: "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.demo",
@@ -394,6 +476,50 @@ export async function installDemoMocks(page: Page) {
       await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(KCHAT_ROOMS) });
     } else {
       await route.fulfill({ status: 201, contentType: "application/json", body: JSON.stringify(KCHAT_ROOMS.rooms[0]) });
+    }
+  });
+
+  // Admin: health dashboard (traffic-light roll-up on the Health tab)
+  await page.route("**/api/admin/health-dashboard", async (route) => {
+    await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(HEALTH_REPORT) });
+  });
+
+  // Guided setup wizard status (public; keeps the wizard on-screen)
+  await page.route("**/api/setup/status", async (route) => {
+    await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(SETUP_STATUS) });
+  });
+
+  // TOTP / 2FA status for the authenticated re-enrollment view
+  await page.route("**/api/auth/totp/status", async (route) => {
+    await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(TOTP_STATUS) });
+  });
+
+  // TOTP enrollment begin — returns the secret + a real QR PNG so the
+  // /account/2fa screenshot shows the scannable enrollment step. Without
+  // this the page's totpEnrollBegin() call would hit the live backend,
+  // 401, and bounce to /login.
+  await page.route("**/api/auth/totp/enroll/begin", async (route) => {
+    await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(TOTP_ENROLL_BEGIN) });
+  });
+
+  // Collaborative documents: list under a folder. Registered after the
+  // /api/folders route so it takes precedence for the /documents suffix
+  // (Playwright matches the most-recently-registered route first).
+  await page.route(/\/api\/folders\/[^/]+\/documents$/, async (route) => {
+    if (route.request().method() === "POST") {
+      const body = route.request().postDataJSON();
+      await route.fulfill({ status: 201, contentType: "application/json", body: JSON.stringify({ ...DOCUMENT_DETAIL, id: "d0000099-0000-0000-0000-000000000099", name: body?.name ?? "Untitled", collab_mode: body?.collab_mode ?? "rich_presence" }) });
+    } else {
+      await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(DOCUMENTS) });
+    }
+  });
+
+  // Single document detail (GET /api/documents/{id})
+  await page.route(/\/api\/documents\/[^/?]+$/, async (route) => {
+    if (route.request().method() === "GET") {
+      await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(DOCUMENT_DETAIL) });
+    } else {
+      await route.fallback();
     }
   });
 

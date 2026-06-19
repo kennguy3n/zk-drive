@@ -4,5 +4,6 @@ frontend/test-results/
 frontend/playwright-report/
 bin/
 *.log
+scripts/seed/out/
 sdk/target/
 internal/collab/wasm/ymerge/target/
