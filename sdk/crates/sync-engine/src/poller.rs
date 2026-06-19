@@ -125,7 +125,7 @@ impl RemotePoller {
         loop {
             let since = self.catalogue.lock().await.get_cursor(self.workspace_id)?;
             let page = ChangefeedClient::new(&self.client)
-                .list_changes(self.workspace_id, since, Some(self.page_size))
+                .list_changes(since, Some(self.page_size))
                 .await?;
             if page.mutations.is_empty() && !page.has_more {
                 // Steady-state "no more changes" response. Refuse to
@@ -223,7 +223,7 @@ impl RemotePoller {
         // sync agents".
         let since = self.catalogue.lock().await.get_cursor(self.workspace_id)?;
         let mut stream = ChangefeedClient::new(&self.client)
-            .stream_changes(self.workspace_id, Some(since))
+            .stream_changes(Some(since))
             .await?;
         while let Some(item) = stream.next().await {
             match item? {
@@ -238,7 +238,12 @@ impl RemotePoller {
                         .await
                         .set_cursor(self.workspace_id, seq)?;
                 }
-                zk_sync_api::ChangeEvent::Heartbeat {} => {}
+                // Heartbeats and any other event family multiplexed onto
+                // the shared `/api/ws` socket (notifications, upload
+                // progress, ...) carry no change-feed cursor and are
+                // ignored here. Dropping them rather than erroring keeps
+                // the live subscription up across notification traffic.
+                zk_sync_api::ChangeEvent::Heartbeat {} | zk_sync_api::ChangeEvent::Other => {}
             }
         }
         Ok(())

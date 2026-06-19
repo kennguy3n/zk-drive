@@ -10,6 +10,7 @@ use std::pin::Pin;
 
 use futures::stream::Stream;
 use futures::StreamExt;
+use serde::de::{self, Deserializer};
 use serde::{Deserialize, Serialize};
 use tokio_tungstenite::tungstenite;
 use uuid::Uuid;
@@ -67,17 +68,65 @@ pub struct ChangefeedPage {
     pub has_more: bool,
 }
 
-/// Live event envelope pushed over WebSocket. The backend uses a
-/// type-tagged JSON shape so the same socket can later multiplex
-/// other event types (notifications, awareness, ...).
-#[derive(Debug, Clone, Deserialize)]
-#[serde(tag = "type", content = "payload", rename_all = "snake_case")]
+/// Live event decoded from the multiplexed `/api/ws` socket. The
+/// backend tags every frame with a `type` and an arbitrary `payload`.
+/// The same socket carries change-feed mutations (`type = "change"`)
+/// alongside per-user notifications (`type = "notification"`) and
+/// other event families (see `api/ws/handler.go` and
+/// `internal/changefeed/publisher.go`), so the change-feed consumer
+/// decodes `change` frames and ignores the rest.
+#[derive(Debug, Clone)]
 pub enum ChangeEvent {
     Change(Mutation),
     /// Server-sent ping; clients should ignore it (the underlying
     /// `tokio_tungstenite` already replies pong at the protocol
     /// level — this is a higher-level liveness signal).
     Heartbeat {},
+    /// Any other frame multiplexed onto the shared socket
+    /// (`notification`, upload progress, awareness, ...). Captured as
+    /// a catch-all so an event family this client does not model is
+    /// dropped by the consumer, rather than surfacing as a decode
+    /// error that would tear down the live subscription on the very
+    /// first notification frame.
+    Other,
+}
+
+impl<'de> Deserialize<'de> for ChangeEvent {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        // Every `/api/ws` frame shares this envelope: a `type`
+        // discriminator plus an arbitrary `payload`. We route on the
+        // discriminator and only decode the payload for frames we
+        // model. Decoding through this intermediate (rather than a
+        // `#[serde(tag, content)]` derive) is what makes unknown
+        // frames tolerable: an adjacently-tagged enum eagerly
+        // deserializes `payload` into the matched variant, so a
+        // `#[serde(other)]` unit variant rejects any unknown frame
+        // that carries a payload object — which notifications always
+        // do — and that error would tear the live stream down.
+        #[derive(Deserialize)]
+        struct Envelope {
+            #[serde(rename = "type")]
+            kind: String,
+            #[serde(default)]
+            payload: Option<serde_json::Value>,
+        }
+
+        let envelope = Envelope::deserialize(deserializer)?;
+        match envelope.kind.as_str() {
+            "change" => {
+                let payload = envelope
+                    .payload
+                    .ok_or_else(|| de::Error::missing_field("payload"))?;
+                let mutation = serde_json::from_value(payload).map_err(de::Error::custom)?;
+                Ok(ChangeEvent::Change(mutation))
+            }
+            "heartbeat" => Ok(ChangeEvent::Heartbeat {}),
+            _ => Ok(ChangeEvent::Other),
+        }
+    }
 }
 
 /// Owned async stream of [`ChangeEvent`]s. `Send + 'static` so the
@@ -95,20 +144,18 @@ impl<'c> ChangefeedClient<'c> {
         Self { client }
     }
 
-    /// `GET /api/v1/workspaces/{workspace_id}/changes?since={since}&limit={limit}`
+    /// `GET /api/changes?since={since}&limit={limit}`
     ///
     /// Returns one page of mutations. `since` is the last sequence
     /// the caller has durably persisted (use `0` on first connect).
     /// `limit` is clamped server-side to `[1, MaxLimit]`; pass `None`
     /// to let the server pick its default page size.
-    pub async fn list_changes(
-        &self,
-        workspace_id: Uuid,
-        since: i64,
-        limit: Option<u32>,
-    ) -> Result<ChangefeedPage> {
-        let path = format!("api/v1/workspaces/{workspace_id}/changes");
-        let mut url = join(self.client.base(), &path)?;
+    ///
+    /// The caller's workspace is resolved server-side from the bearer
+    /// token (the auth middleware injects it from the JWT claims), so
+    /// the path carries no workspace id.
+    pub async fn list_changes(&self, since: i64, limit: Option<u32>) -> Result<ChangefeedPage> {
+        let mut url = join(self.client.base(), "api/changes")?;
         {
             let mut q = url.query_pairs_mut();
             q.append_pair("since", &since.to_string());
@@ -133,7 +180,7 @@ impl<'c> ChangefeedClient<'c> {
         serde_json::from_str(&body).map_err(|e| ApiError::Decode(format!("changefeed page: {e}")))
     }
 
-    /// `WS /api/v1/workspaces/{workspace_id}/changes/stream[?since={cursor}]`
+    /// `WS /api/ws[?since={cursor}]`
     ///
     /// Returns an async stream of [`ChangeEvent`]. The stream
     /// terminates with `Err(ApiError::WebSocket(_))` on protocol
@@ -160,12 +207,8 @@ impl<'c> ChangefeedClient<'c> {
     /// [`crate::transport::TokenProvider`] **at handshake time**, so
     /// reconnect-on-disconnect picks up freshly-refreshed tokens
     /// without callers having to thread a new string through.
-    pub async fn stream_changes(
-        &self,
-        workspace_id: Uuid,
-        since: Option<i64>,
-    ) -> Result<ChangeEventStream> {
-        let mut url = stream_changes_url(self.client.base(), workspace_id, since)?;
+    pub async fn stream_changes(&self, since: Option<i64>) -> Result<ChangeEventStream> {
+        let mut url = stream_changes_url(self.client.base(), since)?;
         match url.scheme() {
             "http" => {
                 url.set_scheme("ws")
@@ -234,11 +277,8 @@ impl<'c> ChangefeedClient<'c> {
 ///
 /// The returned URL still has its original scheme (`http`/`https`);
 /// the caller flips it to `ws`/`wss` after building.
-fn stream_changes_url(base: &url::Url, workspace_id: Uuid, since: Option<i64>) -> Result<url::Url> {
-    let mut url = join(
-        base,
-        &format!("api/v1/workspaces/{workspace_id}/changes/stream"),
-    )?;
+fn stream_changes_url(base: &url::Url, since: Option<i64>) -> Result<url::Url> {
+    let mut url = join(base, "api/ws")?;
     if let Some(seq) = since {
         let normalized = seq.max(0);
         url.query_pairs_mut()
@@ -261,12 +301,8 @@ mod tests {
         // (which would reintroduce the gap and look indistinguishable
         // from "WS endpoint is just dropping events").
         let base = url::Url::parse("https://api.example.test/").unwrap();
-        let ws_id = uuid::uuid!("11111111-1111-1111-1111-111111111111");
-        let url = stream_changes_url(&base, ws_id, Some(4242)).unwrap();
-        assert_eq!(
-            url.as_str(),
-            "https://api.example.test/api/v1/workspaces/11111111-1111-1111-1111-111111111111/changes/stream?since=4242",
-        );
+        let url = stream_changes_url(&base, Some(4242)).unwrap();
+        assert_eq!(url.as_str(), "https://api.example.test/api/ws?since=4242",);
     }
 
     #[test]
@@ -277,10 +313,9 @@ mod tests {
         // gap-replay contract sees exactly the URL it saw before
         // and can't accidentally 400 on an unrecognized query key.
         let base = url::Url::parse("https://api.example.test/").unwrap();
-        let ws_id = uuid::uuid!("22222222-2222-2222-2222-222222222222");
-        let url = stream_changes_url(&base, ws_id, None).unwrap();
+        let url = stream_changes_url(&base, None).unwrap();
         assert_eq!(url.query(), None);
-        assert!(url.path().ends_with("/changes/stream"));
+        assert_eq!(url.path(), "/api/ws");
     }
 
     #[test]
@@ -293,8 +328,7 @@ mod tests {
         // sequence > since", and any negative value satisfies that
         // for every real mutation.
         let base = url::Url::parse("https://api.example.test/").unwrap();
-        let ws_id = uuid::uuid!("33333333-3333-3333-3333-333333333333");
-        let url = stream_changes_url(&base, ws_id, Some(-7)).unwrap();
+        let url = stream_changes_url(&base, Some(-7)).unwrap();
         assert!(url.as_str().ends_with("?since=0"));
     }
 
@@ -353,5 +387,40 @@ mod tests {
             ChangeEvent::Change(m) => assert_eq!(m.sequence, 1),
             other => panic!("unexpected variant: {other:?}"),
         }
+    }
+
+    #[test]
+    fn change_event_tolerates_multiplexed_non_change_frames() {
+        // `/api/ws` is a multiplexed socket: the change feed shares it
+        // with per-user notifications and other event families (see
+        // `api/ws/handler.go`). A frame this client does not model must
+        // decode to `Other` and be dropped — never surface as a decode
+        // error, which would tear down the live subscription and force
+        // a reconnect on every notification.
+        let notification = r#"{
+            "type": "notification",
+            "payload": {
+                "id": "abc",
+                "type": "share_link.created",
+                "title": "Shared",
+                "body": "A file was shared with you"
+            }
+        }"#;
+        assert!(matches!(
+            serde_json::from_str::<ChangeEvent>(notification).unwrap(),
+            ChangeEvent::Other
+        ));
+
+        // Heartbeats stay their own variant (consumers may treat them
+        // as an explicit liveness signal), and an unknown type with no
+        // payload at all still decodes cleanly to `Other`.
+        assert!(matches!(
+            serde_json::from_str::<ChangeEvent>(r#"{"type":"heartbeat"}"#).unwrap(),
+            ChangeEvent::Heartbeat {}
+        ));
+        assert!(matches!(
+            serde_json::from_str::<ChangeEvent>(r#"{"type":"file_upload"}"#).unwrap(),
+            ChangeEvent::Other
+        ));
     }
 }
