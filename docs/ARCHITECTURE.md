@@ -2,1219 +2,477 @@
 
 **License**: Proprietary — All Rights Reserved.
 
-This document describes the system architecture of ZK Drive: the data
-model, API surface, async pipelines, encryption integration with
-zk-object-fabric, and the deployment topology.
+This is the system reference for ZK Drive: how the process topology,
+storage split, asynchronous pipeline, privacy modes, collaborative
+editor, audit log, API surface, and data model fit together. It is
+written for engineers and security-minded evaluators, so capabilities,
+limits, and defaults are cited at `path:line` against the code that
+implements them.
+
+ZK Drive is a privacy-first, multi-tenant document-management platform
+for SMEs and the storage backbone for KChat. Tenants are isolated
+**workspaces**; every file lives in a **folder** whose privacy mode
+(`managed_encrypted` or `strict_zk`) determines whether the server can
+read its bytes. For the product tour and positioning see
+[`PRODUCT.md`](PRODUCT.md); for identity and access internals see
+[`IAM_CORE.md`](IAM_CORE.md); for the exhaustive configuration-key
+table and deployment runbooks see [`CONFIGURATION.md`](CONFIGURATION.md)
+and [`OPERATIONS.md`](OPERATIONS.md).
 
 ---
 
-## 1. System Overview
+## 1. System overview
 
-ZK Drive is a document management application layer on top of
-[zk-object-fabric](https://github.com/kennguy3n/zk-object-fabric). It
-manages users, workspaces, folders, permissions, sharing, and file
-metadata in Postgres. It delegates **all** file content storage to
-zk-object-fabric via its S3-compatible API. It does not implement its
-own encryption, cache, placement engine, or provider-migration engine
-— those are owned by zk-object-fabric.
+ZK Drive runs as **two binaries** plus four backing services.
+
+- **`cmd/server`** — one process that serves the HTTP API, the
+  WebSocket relays (workspace event hub and per-document collaboration),
+  and the static single-page app. The HTTP router is chi, constructed at
+  `cmd/server/main.go:1406`; the SPA is served from `STATIC_DIR` when
+  set (`cmd/server/main.go:1930-1937`).
+- **`cmd/worker`** — a separate process that drains the background job
+  queue (preview/thumbnail generation, malware scanning, search
+  indexing, cold archiving, retention evaluation, and classification).
+
+The backing services are:
+
+- **PostgreSQL** — all metadata (workspaces, folders, files, documents,
+  permissions, sharing, audit log, billing, and so on). An optional read
+  replica is used for read-heavy paths (`DATABASE_READ_URL`).
+- **S3-compatible object storage** — the file bytes. ZK Drive stores no
+  file content in Postgres; bytes flow directly between the client and
+  the object-storage gateway over presigned URLs. The gateway
+  (zk-object-fabric) exposes the stable S3-compatible contract and, for
+  `managed_encrypted` folders, manages the encryption keys.
+- **NATS JetStream** — the durable work queue between the server
+  (publisher) and the worker (consumers).
+- **Redis** — sessions, per-user/per-workspace rate limiting,
+  brute-force reputation, and response/tier caches. Most Redis-backed
+  features degrade to an in-memory fallback or a no-op when Redis is not
+  configured.
 
 ```mermaid
 flowchart TD
     subgraph Clients
-        Web["Web UI / PWA"]
-        Mobile["Mobile (PWA)"]
-        KChat["KChat server / client"]
+        SPA["Web SPA / PWA"]
+        KChat["KChat"]
+        Sync["Desktop sync SDK"]
     end
 
-    subgraph Edge["Edge / API layer"]
-        API["HTTPS API"]
-        WS["WebSocket<br/>(notifications)"]
-        Auth["Auth / session"]
-        MW["Rate limit /<br/>tenant guard"]
+    subgraph Server["cmd/server (one process)"]
+        API["chi HTTP API (/api)"]
+        WSHub["WS workspace hub (/api/ws)"]
+        Collab["WS collab relay<br/>(/api/documents/&#123;id&#125;/ws)"]
+        Static["Static SPA (STATIC_DIR)"]
     end
 
-    subgraph App["ZK Drive application layer"]
-        FileSvc["File service"]
-        FolderSvc["Folder service"]
-        ShareSvc["Sharing service"]
-        PermSvc["Permission service"]
-        SearchSvc["Search service"]
-        BillSvc["Billing service<br/>(quota + Stripe)"]
-        NotifSvc["Notification service"]
-        PreviewW["Preview worker"]
-        ScanW["Scan worker"]
-        IndexW["Index worker"]
-        ClassifyW["Classify worker"]
-        RetW["Retention worker"]
-    end
+    Worker["cmd/worker<br/>(preview · scan · index ·<br/>archive · retention · classify)"]
 
-    subgraph Data["Data stores"]
-        PG["Postgres<br/>(metadata)"]
-        Redis["Redis / Valkey<br/>(sessions, rate limit,<br/>notification pub/sub)"]
-        NATS["NATS JetStream<br/>(async jobs)"]
-    end
+    PG[("PostgreSQL<br/>metadata")]
+    OBJ[("S3-compatible<br/>object storage")]
+    NATS[("NATS JetStream<br/>DRIVE_JOBS")]
+    REDIS[("Redis<br/>sessions · limits · cache")]
 
-    Fabric["zk-object-fabric<br/>(S3 API, encrypted storage)"]
-    Stripe["Stripe<br/>(checkout, portal, webhooks)"]
-
-    Web --> API
-    Mobile --> API
+    SPA --> API
     KChat --> API
-    Web -.-> WS
-    Mobile -.-> WS
-
-    API --> Auth
-    API --> MW
-    MW --> FileSvc
-    MW --> FolderSvc
-    MW --> ShareSvc
-    MW --> PermSvc
-    MW --> SearchSvc
-    MW --> BillSvc
-    MW --> NotifSvc
-
-    FileSvc --> PG
-    FolderSvc --> PG
-    ShareSvc --> PG
-    PermSvc --> PG
-    SearchSvc --> PG
-    BillSvc --> PG
-    NotifSvc --> PG
-
-    Auth --> Redis
-    MW --> Redis
-    NotifSvc --> Redis
-    WS --> Redis
-    FileSvc --> NATS
-    NATS --> PreviewW
-    NATS --> ScanW
-    NATS --> IndexW
-    NATS --> ClassifyW
-    NATS --> RetW
-
-    BillSvc <-->|"checkout / portal"| Stripe
-    Stripe -.->|"webhook events"| API
-
-    FileSvc -->|"presigned URLs"| Fabric
-    PreviewW -->|"read via gateway<br/>write derived objects"| Fabric
-    ScanW -->|"read via gateway"| Fabric
-    IndexW -->|"read via gateway"| Fabric
-    RetW -->|"archive writes"| Fabric
-    Web -.->|"direct PUT / GET"| Fabric
-    Mobile -.->|"direct PUT / GET"| Fabric
-    KChat -.->|"direct PUT / GET"| Fabric
+    Sync --> API
+    SPA -.->|presigned PUT/GET| OBJ
+    API --> PG
+    API --> REDIS
+    API -->|publish| NATS
+    NATS -->|consume| Worker
+    Worker --> PG
+    Worker --> OBJ
+    WSHub --- Collab
 ```
 
-The ZK Drive API server is **not** on the byte path. Clients upload
-and download directly to zk-object-fabric via presigned URLs. ZK
-Drive brokers permissions, records metadata, and dispatches async
-jobs.
+Server replicas are stateless: they share Postgres, Redis, the object
+store, and NATS, so the fleet scales horizontally. Cross-replica
+concerns (session revocation, rate limiting, collaboration fan-out) are
+coordinated through Redis and JetStream rather than in process memory.
 
 ---
 
-## 2. Data Model
+## 2. The two binaries
 
-### 2.1 Core entities
+### 2.1 Server (`cmd/server`)
 
-- **Workspace** — the tenant unit. Every user, folder, file, and
-  permission record belongs to exactly one workspace.
-- **User** — a person with a workspace-scoped account.
-- **Folder** — a node in a folder tree. Nullable `parent_folder_id`
-  for the workspace root.
-- **File** — a logical file identity. Points to a current version.
-- **FileVersion** — an immutable version of a file's content. Each
-  version owns one object key in zk-object-fabric.
-- **Permission** — a grant of a role (view / edit / admin) on a
-  resource (folder or file) to a grantee (user or guest).
-- **ShareLink** — a token-based public or password-protected link to
-  a resource.
-- **GuestInvite** — an email-scoped invite granting a role on a
-  specific folder, with expiry.
-- **ActivityLog** — an append-only log of user and admin actions.
+The server mounts everything under `/api` on a single chi router
+(`cmd/server/main.go:1406`). A request passes through a fixed middleware
+spine before reaching a handler:
 
-### 2.2 Postgres schema (conceptual)
+- `chimw.RealIP` resolves the client IP honoring `TRUSTED_PROXY_DEPTH`
+  (`cmd/server/main.go:1418`).
+- An OpenTelemetry span wraps the whole request; the access logger sits
+  at the `http.Server` handler boundary so it can read the resolved chi
+  route pattern after dispatch (`cmd/server/main.go:1939-1959`).
+- Authenticated groups add `AuthMiddleware` (built-in JWT) or the
+  iam-core middleware, then `TenantGuard`, `SuspensionGuard`,
+  `IPAllowlist`, and the rate limiter — in that order
+  (`cmd/server/main.go:1738-1750`).
 
-This is the conceptual shape, not DDL. Migration files land in
-`migrations/`.
+Two long-lived WebSocket endpoints are mounted next to the REST groups
+but deliberately **outside** `TenantGuard` and the rate limiter, because
+the upgrade handshake breaks `TenantGuard`'s HTTP-method assumptions and
+charging per WS frame is the wrong cost model
+(`cmd/server/main.go:1684-1735`):
 
-- `workspaces`: `id`, `name`, `owner_user_id`, `storage_quota_bytes`,
-  `storage_used_bytes`, `tier`, `created_at`.
-- `users`: `id`, `workspace_id`, `email`, `name`, `role`,
-  `created_at`.
-- `folders`: `id`, `workspace_id`, `parent_folder_id` (nullable for
-  root), `name`, `path`, `created_by`, `created_at`.
-- `files`: `id`, `workspace_id`, `folder_id`, `name`,
-  `current_version_id`, `size_bytes`, `mime_type`, `created_by`,
-  `created_at`, `deleted_at` (soft delete).
-- `file_versions`: `id`, `file_id`, `version_number`, `object_key`
-  (S3 key in zk-object-fabric), `size_bytes`, `checksum`,
-  `created_by`, `created_at`.
-- `permissions`: `id`, `resource_type` (folder | file), `resource_id`,
-  `grantee_type` (user | guest), `grantee_id`, `role` (view | edit |
-  admin), `created_at`, `expires_at`.
-- `share_links`: `id`, `resource_type`, `resource_id`, `token`,
-  `password_hash`, `expires_at`, `max_downloads`, `download_count`,
-  `created_by`, `created_at`.
-- `guest_invites`: `id`, `workspace_id`, `email`, `folder_id`,
-  `role`, `expires_at`, `accepted_at`, `created_by`.
-- `activity_log`: `id`, `workspace_id`, `user_id`, `action`,
-  `resource_type`, `resource_id`, `metadata_json`, `created_at`.
+- `GET /api/ws` — the workspace-wide event hub (notifications, the
+  desktop-sync change feed broadcast).
+- `GET /api/documents/{id}/ws` — the per-document collaboration relay.
 
-Every table carries `workspace_id` so row-level isolation can be
-enforced at the query layer (see §9).
+### 2.2 Worker (`cmd/worker`)
+
+The worker is the single creator of the JetStream stream and the only
+consumer of its subjects. It initializes a preview service, a scan
+service (ClamAV), an archive service, a search-index service, and a
+classify service when an object-storage client is configured, then
+subscribes all consumers (`cmd/worker/main.go`). Preview throughput is
+shaped by a per-workspace hourly budget and a tier cache when Redis is
+available, so one tenant bulk-uploading cannot starve interactive
+previews for everyone else.
+
+Publishing from the server is **fire-and-forget and nil-safe**: handlers
+hold a `*jobs.Publisher` and call it unconditionally; when NATS is not
+configured the pointer is nil and every publish is a no-op
+(`internal/jobs/publisher.go:6-17`). A failed or absent job never blocks
+the user-facing upload path.
 
 ---
 
-## 3. API Design
+## 3. Storage model and the upload flow
 
-ZK Drive exposes a REST API over HTTPS. Operations are scoped by an
-authenticated session; tenant resolution happens in middleware.
+Metadata and bytes are split. Postgres is the source of truth for every
+file's identity, location, version history, and privacy mode; the object
+store holds only opaque bytes addressed by key. The server never proxies
+file content — it mints short-lived presigned URLs and lets the client
+talk to the object store directly.
 
-### 3.1 Auth
+**Upload** is a three-step handshake (`cmd/server/main.go:1784-1786`):
 
-- `POST /api/auth/signup`
-- `POST /api/auth/login`
-- `POST /api/auth/logout`
-- `POST /api/auth/refresh`
-- `GET /api/auth/sessions` — list the caller's active device sessions
-  (session id, User-Agent, IP, created/last-seen timestamps, and a
-  `current` flag). Scoped to the authenticated user + workspace from
-  the JWT, so one user can never enumerate another's sessions.
-- `DELETE /api/auth/sessions/:id` — revoke one of the caller's own
-  device sessions (404 if the id is unknown or belongs to another
-  user). Revoking the current session 401s its next request.
+1. `POST /api/files/upload-url` — the server records intent and returns a
+   presigned PUT URL for the object store.
+2. The client PUTs the bytes straight to the object-storage gateway.
+3. `POST /api/files/confirm-upload` — the client tells the server the
+   upload landed; the server finalizes the file row and, for
+   `managed_encrypted` folders, publishes the post-upload jobs.
 
-**Device fingerprinting & anomaly detection.** Each session stores the
-device fingerprint captured at sign-in: a SHA-256 over the User-Agent
-plus the IP *network* prefix (`/16` for IPv4, `/48` for IPv6). The
-auth middleware recomputes this fingerprint on every authenticated
-request bound to a session and forces re-authentication
-(`401 AUTH_SESSION_ANOMALY`) when it no longer matches — so a stolen
-bearer token replayed from a different browser or a different network
-cannot be silently reused. Coarsening to the network prefix keeps
-mobile users on dynamic addresses from being logged out on every DHCP
-lease change while still catching cross-ISP / cross-geo replay. A
-session's `last_seen` is advanced at most once per 60s so this
-per-request check stays effectively read-only on the hot path.
+Uploads that are requested but never confirmed are tracked so they can be
+reconciled rather than leaking object-store keys (orphan-upload tracking,
+`migrations/025_orphan_upload_tracking.up.sql`).
 
-### 3.2 Workspaces
+**Download and preview** mirror the pattern with presigned GET URLs:
+`GET /api/files/{id}/download-url` and `GET /api/files/{id}/preview-url`
+(`cmd/server/main.go:1792-1793`). Because URLs are time-limited, the
+server guards against handing back a URL that has already expired at the
+gateway. Cross-origin embedding of these gateway URLs is allow-listed
+through the `SECURITY_HEADERS_CSP_CONNECT_EXTRA` CSP knob.
 
-- `GET /api/workspaces`
-- `POST /api/workspaces`
-- `GET /api/workspaces/:id`
-- `PUT /api/workspaces/:id`
-
-### 3.3 Folders
-
-- `GET /api/folders/:id`
-- `POST /api/folders`
-- `PUT /api/folders/:id`
-- `DELETE /api/folders/:id`
-- `POST /api/folders/:id/move`
-
-### 3.4 Files
-
-- `GET /api/files/:id`
-- `POST /api/files/upload-url` — returns a presigned PUT URL scoped
-  to a single object key in zk-object-fabric, plus an upload ID.
-- `POST /api/files/confirm-upload` — records the file version in
-  Postgres and dispatches preview / scan / index jobs.
-- `PUT /api/files/:id` — rename / update metadata.
-- `DELETE /api/files/:id` — soft delete (trash).
-- `POST /api/files/:id/move`
-- `POST /api/files/:id/copy`
-- `GET /api/files/:id/versions`
-- `POST /api/files/:id/restore/:version_id`
-- `GET /api/files/:id/download-url` — returns a presigned GET URL.
-- `GET /api/files/:id/preview-url` — returns a presigned GET URL
-  for the derived preview object (PNG thumbnail). Returns 404 when
-  no preview has been generated yet (e.g. unsupported mime type, or
-  strict-ZK folder).
-
-### 3.5 Sharing
-
-- `POST /api/share-links`
-- `GET /api/share-links/:token`
-- `DELETE /api/share-links/:id`
-- `POST /api/guest-invites`
-- `DELETE /api/guest-invites/:id`
-
-### 3.6 Search
-
-- `GET /api/search?q=...`
-
-### 3.6a Feature Flags (Progressive Disclosure)
-
-- `GET /api/features` — returns the active feature set for the caller's
-  workspace plus the resolved billing tier. The frontend (`useFeatures`
-  hook) fetches this once on login and gates UI surfaces behind it so
-  features outside the workspace's tier never render.
-
-  Response:
-
-  ```json
-  {
-    "tier": "business",
-    "features": { "folders": true, "sso": true, "strict_zk": false, "...": false }
-  }
-  ```
-
-  `features` always contains an entry for **every** known feature key
-  (see `internal/feature/flags.go` `AllFeatures`), so the client can treat
-  a missing/false key uniformly as "hidden". The map is computed as the
-  tier defaults overlaid with any per-workspace overrides stored in the
-  `workspace_features` table:
-
-  - **Free / Starter** (baseline): `folders`, `files`, `share_links`,
-    `basic_search`.
-  - **Business** adds: `sso`, `audit_log`, `retention_policies`,
-    `onlyoffice`, `client_rooms`, `webhooks`, `kchat`.
-  - **Secure Business** adds: `strict_zk`, `cmk`, `data_residency`,
-    `ai_summaries`.
-
-  Tier resolution fails closed to Free on any transient billing-lookup
-  error, and unknown feature keys are always disabled, so a paid surface
-  is never exposed to an unentitled workspace. Requires authentication
-  (401 otherwise); the response is tenant-scoped via row-level security on
-  `workspace_features`.
-
-### 3.7 Admin
-
-- `GET /api/admin/users`
-- `POST /api/admin/users`
-- `DELETE /api/admin/users/:id`
-- `GET /api/admin/audit-log`
-- `GET /api/admin/audit-log/verify` — recomputes the per-workspace
-  audit-log HMAC hash chain and returns `{valid, rows_checked,
-  head_seq, first_invalid_seq, detail}`. `valid:false` means the
-  request succeeded but a row was inserted/deleted/mutated out of
-  band (detectable even against a DB admin, since the HMAC key is
-  env-derived and never stored). See
-  [`CONFIGURATION.md`](CONFIGURATION.md#audit-log-tamper-evidence-hash-chain).
-- `GET /api/admin/storage-usage`
-- `GET /api/admin/billing/plan` — current plan tier and limits.
-- `PUT /api/admin/billing/plan` — manual tier override (e.g. for
-  internal accounts; production tier changes flow through Stripe).
-- `POST /api/admin/billing/checkout-session` — mints a Stripe
-  Checkout session for the requested tier.
-- `POST /api/admin/billing/portal-session` — mints a Stripe
-  Customer Portal session so the workspace owner can manage their
-  subscription.
-- `GET /api/admin/placement` / `PUT /api/admin/placement` —
-  workspace placement policy (provider / region / country /
-  storage class), proxied to zk-object-fabric after local validation
-  via `placement_policy.Policy.Validate()`.
-- `GET /api/admin/cmk` / `PUT /api/admin/cmk` — customer-managed
-  key URI (`arn:aws:kms:`, `kms://`, `vault://`, `transit://`, or
-  empty for gateway-default), validated by
-  `internal/crypto/cmk.go` and best-effort forwarded to the fabric
-  console via `fabric.Client.PutCMK`.
-- `GET /api/admin/retention-policies` / `POST /api/admin/retention-policies`
-  / `PUT /api/admin/retention-policies/:id` /
-  `DELETE /api/admin/retention-policies/:id` — workspace + folder
-  retention rules with archive / delete thresholds.
-
-All admin routes are gated by an `AdminOnly` middleware that
-requires `users.role == 'admin'`.
-
-### 3.8 KChat Integration
-
-KChat-specific endpoints live under `/api/kchat`. See
-`api/kchat/handler.go` for the full surface.
-
-- `POST /api/kchat/rooms` — map a KChat room ID to a freshly
-  provisioned room folder (admin only).
-- `GET /api/kchat/rooms` — list every mapping in the workspace.
-- `GET /api/kchat/rooms/:id` — fetch a single mapping.
-- `DELETE /api/kchat/rooms/:id` — remove the mapping (the backing
-  folder is left intact; admin only).
-- `POST /api/kchat/rooms/:id/sync-members` — reconcile the room's
-  member list against the folder's user grants (admin only).
-- `POST /api/kchat/attachments/upload-url` — mint a presigned PUT
-  URL keyed by `{workspace_id}/{file_id}/{version_id}` scoped to
-  the room folder.
-- `POST /api/kchat/attachments/confirm` — promote a previously
-  minted upload URL into a `FileVersion` after validating the
-  object-key prefix.
-- `POST /api/kchat/rooms/:id/summary` — return a rule-based (or
-  local-LLM-backed) summary of the files in the mapped folder.
-  Strict-ZK folders return `403` via `ai.ErrStrictZKForbidden`.
-
-### 3.9 WebSocket Notifications
-
-- `GET /api/ws` — WebSocket upgrade endpoint for real-time
-  notifications. The middleware chain populates
-  `(workspaceID, userID)` from the JWT before the upgrade so an
-  unauthenticated request is rejected with `401`. See
-  `api/ws/handler.go` for the Hub + read/write pump implementation.
-
-### 3.10 Webhooks
-
-- `POST /api/webhooks/stripe` — Stripe event ingestion. Verifies
-  the `Stripe-Signature` header against `STRIPE_WEBHOOK_SECRET`,
-  caps the request body at 64 KiB, and updates `workspace_plans`
-  rows for `checkout.session.completed`, `customer.subscription.*`,
-  and `invoice.*` events. See `internal/billing/stripe.go`.
-
-### 3.11 Client Rooms
-
-Client rooms are dedicated shared folders for external
-collaboration (agencies, accounting, legal, construction, clinic
-verticals). They pair a folder with a share link and optional
-pre-configured sub-folder structure.
-
-- `POST /api/client-rooms` — create an ad-hoc client room (folder
-  + share link bundle).
-- `GET /api/client-rooms` — list client rooms in the workspace.
-- `GET /api/client-rooms/:id` — fetch a single room.
-- `DELETE /api/client-rooms/:id` — delete the room and its
-  backing share link.
-- `GET /api/client-rooms/templates` — list available templates
-  (agency, accounting, legal, construction, clinic).
-- `POST /api/client-rooms/from-template` — create a room from a
-  named template; `ClientRoomService.CreateFromTemplate`
-  provisions the matching sub-folder layout under the room folder.
-
-### 3.12 Notifications
-
-- `GET /api/notifications` — list notifications for the current
-  user, unread first. Server-side pagination via `limit` /
-  `offset`.
-- `POST /api/notifications/:id/read` — mark a single notification
-  read.
-- `POST /api/notifications/read-all` — mark every notification
-  for the current user read.
-
-### 3.13 Collaborative Document Editing
-
-ZK Drive ships real-time collaborative editing for managed documents
-on top of a [Yjs](https://yjs.dev/) CRDT, served over a dedicated
-WebSocket. Office formats are handled separately by the OnlyOffice
-integration (see [`CONFIGURATION.md`](CONFIGURATION.md)).
-
-- `GET /api/documents/{id}/ws` — WebSocket upgrade for a live editing
-  session. `AuthMiddleware` populates `(workspaceID, userID)` from the
-  JWT before the upgrade. The handler then runs a **two-level
-  permission check** on the parent folder: `RoleViewer` to join the
-  room (observe peer edits), `RoleEditor` to write — a viewer-only
-  client joins but the hub silently drops its update/awareness frames.
-- `PATCH /api/documents/{id}/collab-mode` — flip a document's collab
-  mode. When collab is disabled the upgrade is refused with `409` so
-  the client gets an explicit reason rather than an opaque rejection.
-
-On connect, the server pushes a **snapshot bundle** (`y_state` plus any
-tail deltas) so the client's `Y.Doc` is initialized before it sees peer
-updates; the snapshot is read *before* the upgrade so a transient DB
-error surfaces as a clean HTTP `5xx` instead of a half-open socket. A
-background **compaction** step folds the delta tail back into `y_state`:
-`YjsMergeFold` (a real CRDT merge via the embedded `yrs` WASM runtime)
-for managed-encrypted folders, and `OpaqueConcatFold` (a
-length-prefixed concatenation the client splits and replays) for
-strict-ZK folders, where the server cannot decrypt payloads. In a
-multi-replica deployment, edits fan out across replicas through a Redis
-collab relay (`internal/collab/redis_relay.go`).
-
-**Auth lifecycle on the long-lived socket.** A collab socket is
-authenticated once at upgrade but can stay open for hours, so a
-per-connection auth pump re-checks authorization every 30s and enforces
-it for the life of the socket:
-
-- **Token expiry + session revocation** are re-evaluated each tick; an
-  expired token closes the socket with a *retriable* code (`4002`,
-  `reauth required`) so the client transparently reconnects with a
-  freshly minted JWT, while a revoked session closes with a *permanent*
-  code (`4001`) the client does not retry.
-- **Federated (iam-core) sockets** are re-verified against the issuer's
-  JWKS on each tick. A rotated-out signing key on a warm JWKS cache is
-  treated as a *definitive* rejection (not a transient outage), as is a
-  definitive issuer `4xx`; genuine `5xx`/network blips stay transient so
-  a hiccup never mass-drops live sockets.
-- **In-band refresh** lets a client re-authenticate a live socket with a
-  fresh JWT via a `MessageAuth` frame **without reconnecting**,
-  advancing the socket's enforced identity and lifetime in place.
-
-The built-in session reverifier and the iam-core token reverifier are
-mutually exclusive and the server fails fast at startup if both are
-wired, so a refreshed built-in JWT is never replayed against the
-iam-core issuer. See `api/drive/collab.go` and `internal/collab/`.
+File version history is first-class: each confirmed upload and each
+OnlyOffice save creates a new version, and
+`GET /api/files/{id}/versions` lists them
+(`cmd/server/main.go:1791`). Retention policy bounds the kept history
+(`max_versions`) and ages old content into the cold tier
+(`archive_after_days`).
 
 ---
 
-## 4. Upload and Download Flows
+## 4. Asynchronous pipeline (NATS JetStream)
 
-### 4.1 Upload flow
+Post-upload work runs off the request path on a single JetStream
+WorkQueue stream named `DRIVE_JOBS` (`internal/jobs/publisher.go:36-44`).
+The publisher and the worker share the subject constants so the two
+binaries cannot drift (`internal/jobs/publisher.go:62-72`):
 
-```mermaid
-sequenceDiagram
-    participant C as Client
-    participant D as ZK Drive API
-    participant F as zk-object-fabric
-    participant N as NATS
+| Subject | Purpose |
+| --- | --- |
+| `drive.preview.generate` | Preview / thumbnail generation |
+| `drive.scan.virus` | Malware scanning (ClamAV, `CLAMAV_ADDRESS`) |
+| `drive.search.index` | Full-text search indexing |
+| `drive.archive.cold` | Cold-tier archiving of aged content |
+| `drive.retention.evaluate` | Retention-policy evaluation |
+| `drive.classify.file` | File classification |
 
-    C->>D: POST /api/files/upload-url (folder_id, filename)
-    D->>D: Check permissions
-    D->>F: Generate presigned PUT URL (S3 API)
-    F-->>D: Presigned PUT URL
-    D-->>C: Presigned URL + upload_id
+Preview generation is split across priority subjects so paid tiers get a
+larger share of the worker's goroutine budget; when the heavy-preview
+queue is saturated the publisher returns `ErrPreviewDeferred` and the
+client shows a "generating…" placeholder rather than failing the upload
+(`internal/jobs/publisher.go:46-53`). Preview worker counts and the
+per-workspace hourly budget are tunable (`PREVIEW_*` keys); the canonical
+table lives in [`CONFIGURATION.md`](CONFIGURATION.md).
 
-    C->>F: PUT bytes (direct upload)
-    F-->>C: 200 OK
-
-    C->>D: POST /api/files/confirm-upload (upload_id, size, checksum)
-    D->>D: Record file_version in Postgres
-    D->>N: Dispatch drive.preview.generate
-    D->>N: Dispatch drive.scan.virus
-    D->>N: Dispatch drive.search.index
-    D-->>C: File metadata
-```
-
-### 4.2 Download flow
-
-```mermaid
-sequenceDiagram
-    participant C as Client
-    participant D as ZK Drive API
-    participant F as zk-object-fabric
-
-    C->>D: GET /api/files/:id/download-url
-    D->>D: Check permissions
-    D->>F: Generate presigned GET URL (S3 API)
-    F-->>D: Presigned GET URL
-    D-->>C: Presigned URL
-
-    C->>F: GET bytes (direct download)
-    F-->>C: Bytes (decrypted by gateway in managed mode)
-```
-
-In both flows, ZK Drive is **not** on the byte path. The ZK Drive API
-servers handle metadata, permissions, and URL brokering; the bytes
-flow directly between the client and the zk-object-fabric data plane.
-
-### 4.3 Inter-service transport (control plane)
-
-The control-plane calls from ZK Drive to zk-object-fabric (placement
-policy reads/writes, CMK forwarding, and — on the download/upload hot
-path — presigned-URL minting) go through `internal/fabric.Client`. At
-5000-tenant scale these are high-fan-out, low-latency RPCs, so the
-default client transport is tuned for connection reuse rather than the
-stdlib defaults:
-
-- **HTTP/2 (`ForceAttemptHTTP2 = true`).** When the gateway advertises
-  `h2` over TLS ALPN, requests multiplex over a single connection per
-  host instead of opening a fresh HTTP/1.1 connection per concurrent
-  request. This collapses the TLS-handshake-per-request overhead that
-  would otherwise dominate a burst of presigned-URL generations.
-- **Connection pooling (`MaxIdleConnsPerHost = 64`).** The stdlib caps
-  idle keep-alive connections per host at 2, which forces a re-dial (and
-  TLS handshake) for every request beyond the second in a burst. Sizing
-  the idle pool to the expected service-to-service concurrency keeps a
-  warm pool of connections ready.
-
-These are set in `fabric.newDefaultTransport()`; a caller may still
-inject its own `*http.Client` via `ClientConfig.HTTPClient` to override.
+These jobs are only published for `managed_encrypted` content. For
+`strict_zk` folders the bytes are opaque to the server, so scan, preview,
+and indexing have nothing to operate on and are not enqueued (see §5).
 
 ---
 
-## 5. Async Job Architecture
+## 5. Per-folder privacy modes
 
-All long-running work runs as NATS JetStream consumers.
+Privacy is a property of the **folder**, defined at
+`internal/folder/folder.go:14-17`:
 
-### 5.1 Subjects
-
-- `drive.preview.generate` — generate thumbnails / previews.
-- `drive.scan.virus` — run ClamAV on a newly uploaded file.
-- `drive.search.index` — extract text from managed-encrypted
-  documents and update Postgres FTS.
-- `drive.retention.evaluate` — evaluate retention policy for a
-  file / folder and schedule archival or deletion.
-- `drive.archive.cold` — compress and archive expired file versions.
-
-### 5.2 Worker types
-
-| Worker           | Tools                                    | Mode constraint               |
-| ---------------- | ---------------------------------------- | ----------------------------- |
-| Preview worker   | LibreOffice + ImageMagick + FFmpeg       | Managed encrypted only        |
-| Scan worker      | ClamAV                                   | Managed encrypted only        |
-| Index worker     | Extract text → Postgres `tsvector`       | Managed encrypted only        |
-| Retention worker | Postgres reads + NATS fan-out            | All modes                     |
-| Archive worker   | Compress + zk-object-fabric archive PUT  | All modes                     |
-
-Strict-ZK files are skipped by preview, scan, and index workers —
-the workers do not have the plaintext.
-
----
-
-## 6. Search Architecture
-
-### 6.1 Default — Postgres FTS
-
-Search runs on Postgres FTS using `tsvector` / `tsquery`. Indexed
-fields:
-
-- File names.
-- Folder names.
-- User-applied tags.
-- Extracted text from managed-encrypted documents (populated by the
-  index worker).
-
-Postgres FTS is cheap, operationally free (already in the stack), and
-good enough for the SME query mix.
-
-### 6.2 Optional dedicated tier — OpenSearch / Meilisearch
-
-A dedicated search tier is introduced only when Postgres FTS cannot
-hit the latency target (~500 ms p95) or the corpus exceeds a few
-million documents per workspace. The dedicated tier runs as a
-consumer of `drive.search.index` events alongside Postgres FTS, not
-as a replacement. Postgres FTS remains the source of truth for file
-and folder name search.
-
-### 6.3 Strict-ZK files
-
-Strict-ZK files are **not** searchable by content from the server.
-The server has only the ciphertext and cannot extract text. File
-names, folder names, and tags remain searchable because application-
-layer metadata is not encrypted.
-
-This is an explicit tradeoff of strict-ZK mode and must be surfaced
-in the UI.
-
-### 6.4 Response caching (folder listings, search, storage usage)
-
-Three hot, expensive read endpoints share a single workspace-scoped,
-fail-open Redis cache (`internal/responsecache`):
-
-| Endpoint | Domain | TTL | Why cacheable |
+| Mode | Value | Server can read bytes? | Server-side preview / search / scan |
 | --- | --- | --- | --- |
-| `GET /api/folders` | `folder-children` | 15s | Listing is workspace-scoped, not per-user filtered, so all members share one entry per parent. |
-| `GET /api/search` | `search` | 30s | Workspace-scoped FTS; identical queries across members collapse onto one entry keyed by query+language+fuzzy+page. |
-| `GET /api/admin/storage-usage` | `usage` | 60s | Advisory dashboard aggregate (full-table SUM/COUNT); quotas are still enforced synchronously on write. |
+| Managed encrypted | `managed_encrypted` | Yes — gateway manages keys | Enabled |
+| Strict zero-knowledge | `strict_zk` | No — ciphertext only | Disabled |
 
-**Invalidation.** Every entry key embeds a per-workspace *generation
-counter* (same design as the permission cache, `internal/permission`).
-The changefeed service holds a **content-cache buster**
-(`WithContentCacheBuster`) that `INCR`s the workspace counter on *every*
-persisted mutation — unlike the permission buster, which only fires on
-the narrow topology/grant set — because a listing/search result reflects
-the exact resource set and so must invalidate on create, rename, delete,
-and move alike. The bust fires before the WebSocket broadcast, so a
-client reacting to a live event re-fetches post-mutation state. TTLs are
-the backstop if a bust is ever missed.
+`managed_encrypted` is the default. Bytes are encrypted at rest by the
+object-storage gateway, whose keys live on the gateway (optionally
+wrapped by a customer-managed KMS key — see §9). Because the server can
+obtain plaintext in memory during a request, it can generate previews and
+thumbnails, run malware scanning, and build the search index.
 
-**Fail-open.** The cache is a latency accelerator, never a source of
-truth: any Redis error (or an unset `REDIS_URL`) degrades to computing
-the response from Postgres on every request. A nil cache is a valid
-permanent-miss.
+`strict_zk` content is encrypted on the client before upload; the server
+stores opaque ciphertext and **every server-side processing path is
+disabled** for that folder:
 
-**Presigned-URL responses** (`download-url`, preview URL) are not stored
-server-side; instead they carry `Cache-Control: private, max-age=<below
-the URL's own expiry>` so the user's *own browser* can reuse a still-valid
-presigned URL on a repeat click. `private` (never `public`) is mandatory:
-a presigned URL is a per-user bearer capability and must never land in a
-shared/CDN cache. See `setPresignedURLCacheControl` in `api/drive`.
+- no preview or thumbnail generation,
+- no full-text search indexing (strict_zk files do not appear in
+  server-side search results),
+- no malware scanning,
+- no OnlyOffice editing — `GenerateEditorConfig` refuses strict_zk files
+  with `ErrStrictZKForbidden` because the Document Server must read and
+  write plaintext (`internal/collab/onlyoffice.go:22-25`),
+- only the `markdown` collaborative mode is permitted; `rich` and
+  `rich_presence` require a managed-encrypted folder (§6).
 
----
+This is the honest trade-off to state wherever `strict_zk` appears:
+`managed_encrypted` is not zero-knowledge (the server can read it), and
+`strict_zk` buys client-only confidentiality by giving up every
+server-side convenience above.
 
-## 7. Permission Model
+The workspace default mode is configurable
+(`PUT /api/admin/workspace/default-encryption-mode`); changing it is a
+privacy-relevant policy change and is recorded in the audit log with the
+previous and current modes (`internal/audit/audit.go:48-52`).
 
-### 7.1 Roles
-
-- **Admin** — full control of the resource: edit, share, manage
-  sub-permissions, delete.
-- **Editor** — read and write file content and metadata; create and
-  rename children; cannot change sharing.
-- **Viewer** — read-only access.
-
-Role hierarchy: Admin > Editor > Viewer. A grantee's effective role
-on a resource is the maximum of all applicable grants (direct and
-inherited).
-
-### 7.2 Inheritance
-
-Folder permissions inherit to child folders and files. An explicit
-grant on a child overrides the inherited grant for that grantee.
-Removing an explicit grant restores the inherited grant.
-
-### 7.3 Share links vs. user permissions
-
-Share links are **independent** of user permissions. A share-link
-token grants access regardless of any user / guest permission
-record. Share links can carry a password, an expiry, and a
-download cap. Revoking a share link invalidates the token immediately
-(enforced at URL generation time).
-
-### 7.4 Guest invites
-
-Guest invites create `permissions` rows with `grantee_type = 'guest'`
-and an `expires_at` timestamp. The retention worker revokes expired
-guest permissions on a schedule.
+![Drive root showing folders and their privacy modes](screenshots/03-drive-root-folders.png)
 
 ---
 
-## 8. Encryption Integration
+## 6. Collaborative documents
 
-ZK Drive does **not** perform encryption itself. Encryption is
-delegated entirely to zk-object-fabric's mode selection.
+Documents live inside folders and inherit the parent folder's encryption
+mode as their privacy boundary — the document layer never stores its own
+mode column (`internal/document/document.go:1-8`). The collaborative
+behavior is selected by the document's collab mode
+(`internal/document/document.go:25-28`):
 
-### 8.1 Managed encrypted mode
+| Collab mode | Behavior |
+| --- | --- |
+| `markdown` | Plain markdown editing; valid under every privacy mode and the default |
+| `rich` | Rich text; managed-encrypted folders only |
+| `rich_presence` | Live multi-user editing with presence; managed-encrypted only |
+| `disabled` | Tombstone when a folder mode change invalidates the prior collab mode |
 
-- zk-object-fabric `ManagedEncrypted`.
-- The gateway manages keys and can decrypt plaintext in memory during
-  request handling.
-- ZK Drive preview, scan, and index workers can request decrypted
-  reads via the gateway and therefore support previews, virus
-  scanning, and full-text search.
-- Default mode for all new folders.
+`rich_presence` is the live experience: a TipTap editor backed by Yjs
+CRDT updates, exchanged as binary frames over the per-document WebSocket
+relay at `GET /api/documents/{id}/ws` (`cmd/server/main.go:1735`). When
+the server runs as multiple replicas, document updates and presence are
+fanned out across replicas through Redis so two editors connected to
+different replicas see each other.
 
-### 8.2 Strict-ZK mode
+For office documents (Word/Excel/PowerPoint and their Open Document
+equivalents), ZK Drive integrates an external **OnlyOffice Document
+Server** (`internal/collab/onlyoffice.go:3-25`):
 
-- zk-object-fabric `StrictZK`.
-- Clients encrypt via the zk-object-fabric client SDK before upload
-  and decrypt after download.
-- ZK Drive stores only encrypted objects and opaque application-layer
-  metadata. It cannot generate previews, extract text, or scan
-  content.
-- Users accept this tradeoff when opting a folder into strict-ZK.
+1. The browser asks for an editor config
+   (`GET /api/files/{id}/editor-config`), which embeds a time-limited
+   presigned GET URL (the Document Server pulls the bytes), a
+   per-version document key, the resolved edit/view permission, and a
+   callback URL.
+2. On save, the Document Server POSTs
+   `POST /api/files/{id}/editor-callback`; the server downloads the
+   edited bytes and writes them back as a new file version. That
+   callback is authenticated by the OnlyOffice-signed token
+   (`ONLYOFFICE_SECRET`) rather than a ZK Drive session, so it is mounted
+   outside the auth group (`cmd/server/main.go:1921-1927`).
 
-### 8.3 Per-folder mode selection
-
-Each folder carries an `encryption_mode` column stored in the
-`folders` table. The API enforces mode consistency:
-
-- Files inherit their folder's mode.
-- Moving a file to a folder in a different mode requires an explicit
-  re-upload in the new mode; it is not a silent metadata move.
-- The UI surfaces the mode on every folder and warns on mode changes.
-
-### 8.4 Workspace default encryption mode (Strict ZK as a default)
-
-Each workspace carries a `default_encryption_mode` column
-(`workspaces` table) constrained to `managed_encrypted` (the default)
-or `strict_zk`. It governs the mode applied to **new top-level (root)
-folders** created without an explicit `encryption_mode`:
-
-- A Secure Business workspace can flip its default to `strict_zk` so
-  every new root folder is zero-knowledge by default — privacy by
-  default rather than by opt-in. Sub-folders always inherit their
-  parent's mode, so the workspace default only governs roots.
-- An explicit `encryption_mode` in the create request always wins; the
-  workspace default is consulted only when the caller omits one.
-- Resolution is **fail-closed**: if the workspace default lookup errors
-  (a transient read failure), folder creation fails rather than
-  silently downgrading a strict-ZK workspace to managed-encrypted.
-- Existing folders are never rewritten; changing the default only
-  affects folders created afterwards.
-
-Admins manage it via the REST surface (admin role required):
-
-| Method | Path                                          | Purpose                                                      |
-| ------ | --------------------------------------------- | ------------------------------------------------------------ |
-| `GET`  | `/api/admin/workspace/default-encryption-mode`| Return the current default and the supported allow-list.     |
-| `PUT`  | `/api/admin/workspace/default-encryption-mode`| Set the default (`{"mode":"strict_zk"}`). Validated + audited.|
-
-The transition is audited as
-`workspace.default_encryption_mode_change` with the previous and
-current values. The admin console surfaces the toggle on the
-Encryption page (Secure Business tier). The hot path
-(`GetDefaultEncryptionMode`, hit per new root folder) uses a dedicated
-single-column query (`GetDefaultEncryptionModeByID`) rather than a
-full-row read.
+![Collaborative documents list](screenshots/20-documents-list.png)
 
 ---
 
-## 9. Multi-Tenancy
+## 7. Audit log (HMAC hash-chained)
 
-- **Workspace = tenant.** Every data row has a `workspace_id`.
-- **Postgres row-level isolation** — every query filters by
-  `workspace_id`. Application middleware binds the authenticated
-  session to a single workspace and rejects cross-workspace reads.
-- **Redis key prefixing** — session and cache keys are namespaced by
-  `workspace_id` so a Redis misread cannot leak across tenants.
-- **Object key namespace** — zk-object-fabric is organized either
-  bucket-per-workspace (the simpler layout, used for single-workspace
-  and small multi-tenant deployments) or prefix-per-workspace within a
-  shared bucket (used at scale when bucket counts matter). Either way,
-  the object key is derived from the workspace ID and is not trusted
-  from the client.
+Security-relevant events — sign-in/out, SSO link, MFA lifecycle,
+permission grant/revoke, admin user management, workspace-settings
+changes, retention, billing, webhook subscriptions, and IP-allowlist
+changes — are written to an admin-only `audit_log`, distinct from the
+user-facing activity stream (`internal/audit/audit.go:1-81`).
 
----
+Each entry is a link in a per-workspace hash chain that makes tampering
+detectable and the log independently verifiable
+(`internal/audit/audit.go:98-106`):
 
-## 10. WebSocket & Real-Time Notifications
+- `Seq` — the 1-based position within the workspace.
+- `PrevHash` — the previous entry's `EntryHash` (a fixed workspace
+  genesis hash for `Seq == 1`).
+- `EntryHash` — an HMAC computed over `Seq`, `PrevHash`, and the entry's
+  immutable fields.
 
-Real-time notifications (share-link created, guest invite accepted,
-scan quarantine, file upload, permission changes) are delivered to
-live web clients over WebSocket. The transport sits behind
-`api/ws/handler.go` and the `notification` service publishes events
-on both the in-process hub and Redis pub/sub.
+Because every hash binds the one before it, deleting or editing any row
+breaks the chain from that point forward, and a verifier can recompute
+the chain end-to-end. The HMAC key is `AUDIT_HMAC_KEY`; when unset it is
+HKDF-derived from `JWT_SECRET` under a distinct label, so a fresh install
+is self-operating while operators can set a dedicated key (ideally from a
+KMS) to keep the chain verifiable across a `JWT_SECRET` rotation and to
+ensure a leaked `JWT_SECRET` cannot forge audit history
+(`internal/config/config.go:476-482`). The chain fields are read back on
+list and cold-archive fetch so archived history stays verifiable.
 
-### 10.1 Hub
-
-`api/ws.Hub` keeps a per-`(workspaceID, userID)` set of WebSocket
-clients. Each client owns a bounded send channel; slow consumers
-are unregistered (and the connection closed) instead of stalling
-the broadcaster. Auth + tenant guard run before the upgrade so the
-upgraded connection is already bound to a workspace and user.
-
-### 10.2 Multi-replica fan-out via Redis pub/sub
-
-In a multi-replica deployment a notification produced on replica A
-still needs to reach the live WebSocket connections held by
-replica B. The notification service therefore publishes every event
-on a Redis pub/sub channel (`internal/notification/publisher.go`);
-every replica subscribes and re-broadcasts to its local hub via
-`Hub.BroadcastJSON`. Single-replica deployments work transparently
-because the same publisher also dispatches directly to the
-in-process hub.
-
-### 10.3 Frontend
-
-The frontend opens a single WebSocket connection on login through
-the `useNotifications` hook, falls back to REST polling of
-`/api/notifications` if the upgrade fails, and surfaces unread
-badges in the top bar.
-
-### 10.4 Change Feed (desktop sync transport)
-
-The change feed is the durable, monotonically-ordered stream of
-state-mutating operations on a workspace's files / folders /
-permissions. It is the transport the desktop sync SDK
-(`sdk/crates/sync-engine`), the embedding shell
-(`sdk/crates/desktop-shell`), and future native mobile clients use
-to keep a local replica in sync with the server.
-
-The transport has two halves:
-
-- **Catch-up** — `GET /api/changes?since={cursor}&limit={N}`
-  returns mutations strictly after `cursor`, ordered ascending.
-  Clients pass the highest sequence they have processed; the
-  response advances the cursor and reports `has_more` so a client
-  can keep paging until caught up. `GET /api/changes/latest`
-  returns the workspace's current head cursor.
-- **Live push** — every new mutation is broadcast workspace-wide
-  over the existing `/api/ws` hub as a `{"type":"change", ...}`
-  envelope. The hub is extended with `BroadcastJSONWorkspace` so a
-  single mutation reaches every connected user of the workspace
-  irrespective of `clientKey.userID`.
-
-Mutations are persisted to a dedicated `change_log` table (see
-`migrations/029_change_log.up.sql`) with a `BIGSERIAL` sequence
-column that provides the cursor. The change feed is intentionally
-separate from `activity_log`: activity is async / fire-and-forget
-telemetry (the buffer drops on overflow), but the change feed must
-be synchronous so sync clients never miss an event because a
-buffer was full. The two stores share the action vocabulary —
-`internal/activity` action constants drive the change-feed
-mapping in `api/drive.changefeedKindOpFor`.
-
-Read-only actions (`file.download`, `file.bulk.download`) and any
-unmapped future action are explicitly absent from the feed.
-
-### Visibility model — metadata vs content
-
-The change feed is workspace-wide and exposes every mutation to
-every authenticated workspace member, regardless of per-resource
-ACLs. This is intentional and matches the existing semantics of
-`activity_log`: a member who lacks read access to file `foo.docx`
-can still see "Alice moved foo.docx to /Reports/" in the activity
-feed today, and the same goes for the change feed.
-
-This is a **metadata-only** exposure: the feed records names,
-parent IDs, action kinds, and small structured metadata, never
-file bytes. Sync clients apply per-resource access filtering
-locally when deciding whether to fetch content via presigned URLs
-(`api/drive/file.go` permission checks still gate every download).
-For workspaces where file existence itself must be hidden from
-some members, the product answer is a separate workspace, not
-metadata redaction.
-
-**StrictZK folders**: the zero-knowledge guarantee covers file
-*contents* — not folder/file names or structural metadata. The
-change feed records names for StrictZK resources just like
-managed-encrypted resources, because sync clients (and the activity
-log) need them. Customers who require name-level secrecy (e.g.
-filenames are themselves sensitive) should use the workspace-level
-isolation path described above, not a per-folder option.
-
-### Multi-replica fan-out
-
-In multi-replica deployments the change feed uses a separate
-Redis pub/sub channel namespace (`ws-workspace:{workspaceID}`)
-from the per-user notification channels (`ws:{workspaceID}:{userID}`)
-so the two streams can be migrated / partitioned independently.
+![Admin audit log](screenshots/10-admin-audit-log.png)
 
 ---
 
-## 11. Session & Rate Limiting
+## 8. API surface
 
-Production deployments use a Redis-backed session store and a
-Redis-backed distributed rate limiter so sessions can be revoked
-centrally and rate limits stay correct across multiple API replicas.
-In-memory fallbacks are available for single-replica deployments and
-local development.
+Everything is mounted under `/api` on the chi router
+(`cmd/server/main.go:1406`). Groups differ by their middleware spine;
+each is backed by a handler package under `api/` or `internal/`.
 
-### 11.1 Session store
+| Group | Representative routes | Middleware spine |
+| --- | --- | --- |
+| Public | `GET /config`, `/setup/*`, `GET/POST /share-links/{token}`, `GET /guest-invites/{id}/preview`, `POST /webhooks/stripe`, `POST /files/{id}/editor-callback` | None (each route authenticates itself where needed) |
+| Auth | `/auth/signup`, `/auth/login`, `/auth/oauth/*`, `/auth/logout`, `/auth/refresh`, `/auth/sessions`, `/auth/totp/*` | Mixed (see [`IAM_CORE.md`](IAM_CORE.md)) |
+| Realtime | `GET /ws`, `GET /documents/{id}/ws` | Auth + SuspensionGuard + IPAllowlist (no TenantGuard / rate limiter) |
+| Data plane | `/me`, `/features`, `/workspaces`, `/folders`, `/documents`, `/files` (+ `upload-url`, `confirm-upload`, `download-url`, `preview-url`, `editor-config`, `versions`, `tags`), `/bulk/*`, `/permissions`, `/share-links`, `/guest-invites`, `/client-rooms` (+ `templates`, `from-template`), `/search` (+ `expand`), `/notifications`, `/push/*`, `/activity`, `/changes` | Auth + TenantGuard + SuspensionGuard + IPAllowlist + rate limiter |
+| Admin | `/admin/*` (users, audit, retention, storage, health, placement, cmk, billing/plan) + `/admin/webhooks` | Data-plane spine + `AdminOnly` |
+| KChat | `/kchat/*` (room mappings auto-provision a backing folder) | Data-plane spine |
+| Platform | `/platform/*` | `PlatformAuth` (a `pk_` API key) + per-IP rate limiter — fleet-wide, outside the workspace JWT / tenant chain |
 
-`internal/session/redis.go` records every session in Redis as
-`ws:{workspaceID}:session:{sessionID}` with a secondary user-index
-set (`ws:{workspaceID}:user_sessions:{userID}`) so admin
-"force sign-out" flows can wipe every session for an identity
-without scanning the keyspace. Keys are namespaced by
-`workspace_id` per §9 to keep multi-tenant isolation honest.
+Notable design choices visible in the router:
 
-### 11.2 Distributed rate limiter
-
-`api/middleware/ratelimit_redis.go` is a sliding-window counter
-implemented as a Lua script that runs atomically on the Redis
-server. The script:
-
-1. `INCR` the per-`(workspace_id, user_id)` counter and apply the
-   user budget; rejects above-budget requests immediately.
-2. `INCR` the per-`workspace_id` counter and apply the workspace
-   budget; refunds the user counter (`DECR`) on workspace denial
-   so a noisy neighbour cannot starve the whole workspace.
-3. Returns `{status, user_count, ws_count}` so the middleware can
-   set `Retry-After` and `X-RateLimit-*` headers correctly.
-
-When `REDIS_URL` is unset, both the session store and the rate
-limiter fall back to in-memory implementations. This keeps
-`go test -short` and local development cheap, and lets single-replica
-deployments run without standing up Redis. Production deployments are
-expected to set `REDIS_URL`.
+- The data plane and the realtime upgrades both run `SuspensionGuard` and
+  `IPAllowlist`, so a suspended or network-blocked workspace cannot keep
+  realtime sync alive after its REST calls start failing
+  (`cmd/server/main.go:1700-1714`).
+- `IPAllowlist` is mounted on the data plane but **not** on `/admin`, so
+  an admin who misconfigures the allowlist can still reach the management
+  endpoints to fix it (`cmd/server/main.go:1742-1749`).
+- Public share-link resolution (`/share-links/{token}`) and the
+  guest-invite preview sit outside the auth group on purpose — anyone
+  holding the token/UUID can resolve them, with password, expiry, and
+  download-cap checks enforced in the sharing service
+  (`cmd/server/main.go:1901-1913`).
+- The platform control plane runs a per-client-IP rate limiter *before*
+  auth as defense-in-depth, since there is no JWT to key the normal
+  limiter on (`cmd/server/main.go:1885-1898`).
 
 ---
 
-## 12. Billing & Stripe Integration
+## 9. Data model
 
-Billing is two-sided: ZK Drive itself enforces per-workspace
-storage / user / bandwidth quotas, and Stripe is the source of
-truth for which plan tier the workspace currently has. Both halves
-live under `internal/billing/`.
+Postgres holds the entire metadata model. The schema is defined by the
+ordered SQL files under `migrations/`; the table groups below map each
+concept to where it is defined.
 
-### 12.1 Quota enforcement
+| Domain | Core tables | Defined in |
+| --- | --- | --- |
+| Identity & tenancy | `workspaces`, `users` | `migrations/001_initial_schema.up.sql` |
+| Folder tree | `folders` (self-referential `parent_folder_id`, `encryption_mode`) | `migrations/002_folders.up.sql`, `migrations/018_folder_encryption_mode.up.sql` |
+| Files & content | `files`, file versions, previews, scan status, tags, classification | `migrations/003_files.up.sql`, `007`, `008`, `015`, `022` |
+| Collaborative docs | `documents` (+ snapshot/deltas), `collab_mode` | `migrations/030_collab_documents.up.sql` |
+| Sharing | share links, guest invites | `migrations/005_sharing.up.sql` |
+| Client rooms | client rooms + templates | `migrations/006_client_rooms.up.sql` |
+| Access & activity | permissions (ACL grants), activity log | `migrations/004_permissions_activity.up.sql` |
+| Audit & retention | `audit_log` (hash-chained), retention policies, archive runs | `migrations/011`, `012`, `013`, `027` |
+| Billing | workspace plans, Stripe customer id | `migrations/016`, `023` |
+| Storage & keys | per-workspace storage credentials, customer-managed keys | `migrations/017`, `020` |
+| KChat | KChat room mappings | `migrations/021_kchat_rooms.up.sql` |
+| Federation | `iam_core_tenant_workspaces` | `migrations/039_iam_core_tenant_workspaces.up.sql` |
+| Auth hardening | TOTP credentials, asymmetric JWT signing keys, IP allowlist | `migrations/026`, `034`, `035` |
 
-`workspace_plans` (migration 016) stores the per-workspace tier and
-overridable limits. `usage_events` is an append-only ledger of
-storage / bandwidth / user-added events. The quota checkers
-(`CheckStorageQuota`, `CheckUserQuota`, `CheckBandwidthQuota`) read
-current-state counters (`files`, `users`, month-to-date sum of
-bandwidth events) rather than replaying the full ledger, and run
-before mutating endpoints (upload URL minting, user invites).
+Key structural facts:
 
-### 12.2 Stripe webhook
+- **Folders** form a tree per workspace; a nil `parent_folder_id` is a
+  root folder, and `encryption_mode` is the privacy boundary inherited by
+  every file and document inside (`internal/folder/folder.go:30-43`).
+- **Documents** never store their own encryption mode; they inherit it
+  from the parent folder (`internal/document/document.go:1-8`).
+- **Guest invites** are modeled on a folder; inviting on a file grants
+  access to its parent folder.
+- **Tenant isolation is enforced in the database.** Postgres row-level
+  security scopes rows to the active workspace
+  (`migrations/024_row_level_security.up.sql`); `TenantGuard` binds the
+  workspace from the authenticated identity into the request context and
+  the RLS session variable, so a query can only ever see its own
+  workspace's rows. High-volume tables are partitioned
+  (`migrations/033_partition_large_tables.up.sql`).
+- **Customer-managed keys (CMK)** let a workspace point the gateway at
+  its own KMS key (`PUT /api/admin/cmk`,
+  `migrations/020_workspace_cmk.up.sql`) so it can wrap and revoke its
+  files' data keys.
 
-`internal/billing/stripe.go` verifies the `Stripe-Signature` header
-against `STRIPE_WEBHOOK_SECRET`, caps the request body at 64 KiB,
-and routes `checkout.session.completed`,
-`customer.subscription.*`, and `invoice.*` events to
-`Service.UpdateTier` (which preserves any per-workspace tier
-override an admin set out-of-band) and `Service.SetStripeCustomerID`.
-`workspace_plans.stripe_customer_id` (migration 023) lets the
-admin checkout / portal flows look up an existing customer.
-
-### 12.3 Checkout + Customer Portal
-
-`POST /api/admin/billing/checkout-session` mints a Stripe Checkout
-session for the requested tier; `POST
-/api/admin/billing/portal-session` mints a Customer Portal session
-so the workspace owner can manage their subscription, payment
-methods, and invoices. The frontend `BillingPage.tsx` exposes both
-behind upgrade / manage buttons.
-
----
-
-## 13. KChat Integration Architecture
-
-KChat is a separate B2B team chat product that uses ZK Drive as
-its storage backbone. The dependency is **one-directional**: KChat
-depends on ZK Drive, but ZK Drive does not depend on KChat. The
-integration surface is the REST API documented in §3.8 plus the
-shared zk-object-fabric S3 API.
-
-### 13.1 Service + repository
-
-`internal/kchat/` holds the integration logic. `RoomService`
-coordinates folder creation, permission grants, and attachment
-metadata; `RoomFolderRepository` persists the mapping rows. The
-package uses small interfaces (`FolderCreator`, `PermissionGranter`,
-`FileCreator`) instead of importing `internal/folder`,
-`internal/permission`, and `internal/file` directly, so the
-coupling stays one-way.
-
-### 13.2 Room-folder mapping
-
-Migration 021 creates `kchat_room_folders` with a unique constraint
-on `(workspace_id, kchat_room_id)`. Creating a mapping provisions a
-dedicated room folder under the workspace root, grants the caller
-admin on it, and records the row. Deleting the mapping removes
-only the row — the backing folder is intentionally retained so
-operators keep the uploaded files even after the chat room is
-gone.
-
-### 13.3 Permission sync
-
-`RoomService.SyncMembers` is idempotent: it indexes every existing
-`user`-type grant on the folder, revokes anything not in the
-desired set, and adds or upgrades the rest. Guest grants are
-left alone so KChat sync never clobbers an out-of-band guest
-invite.
-
-### 13.4 Attachment metadata
-
-`AttachmentUploadURL` resolves the room's folder, creates the
-file metadata row up front, and mints a presigned PUT keyed by
-`{workspace_id}/{file_id}/{version_id}`. `ConfirmAttachment`
-validates the object-key prefix before flipping the file's
-current-version pointer, so a malicious caller cannot graft an
-arbitrary key onto someone else's file row.
+![Admin storage usage](screenshots/12-admin-storage.png)
 
 ---
 
-## 14. AI & Classification
+## 10. Request lifecycle and tenant isolation
 
-AI features are limited to managed-encrypted folders by design:
-the server has no plaintext access to strict-ZK content, so any AI
-path that would summarise or classify file content explicitly
-refuses for strict-ZK folders.
+A typical authenticated data-plane request:
 
-### 14.1 Thread / room summary
+1. **Edge** — `RealIP` resolves the client address; an OpenTelemetry
+   span opens and the access logger records the resolved route after
+   dispatch.
+2. **Authentication** — either the built-in JWT `AuthMiddleware` or the
+   iam-core middleware verifies the bearer token and binds
+   `(workspaceID, userID, role)` into the context. Both paths produce the
+   identical context shape, so everything downstream is auth-mode
+   agnostic ([`IAM_CORE.md`](IAM_CORE.md)).
+3. **Tenant guard** — binds the workspace into the Postgres RLS session
+   variable; subsequent queries are physically constrained to that
+   workspace.
+4. **Suspension & conditional access** — `SuspensionGuard` returns 503
+   for a suspended workspace; `IPAllowlist` enforces per-workspace CIDR
+   rules when enabled.
+5. **Rate limiting** — a per-user and per-workspace limiter (Redis-backed
+   with an in-memory fallback) bounds request volume.
+6. **Handler** — reads/writes Postgres, mints presigned URLs against the
+   object store, and publishes JetStream jobs as needed.
 
-`internal/ai/service.go` is a rule-based scaffold that assembles a
-fixed-format summary from folder file names and any indexed
-`content_text`. It is the path of last resort; it never makes
-network calls.
-
-`internal/ai/llm.go` is an Ollama-compatible local-LLM client
-behind the `LLMClient` interface. The default model is
-`qwen2.5:1.5b` (Apache-2.0 weights, ~1 GB on disk, runs CPU-only
-on a 4 GB host). The constructor refuses any non-loopback /
-non-RFC1918 endpoint at boot — sending file or chat content to a
-third-party API would silently undo the zero-knowledge contract
-the rest of the product enforces. When `OLLAMA_URL` is unset, the
-summary service stays on the rule-based scaffold and never makes
-a network call.
-
-Strict-ZK folders return `ErrStrictZKForbidden`, which the handler
-layer maps to `403 Forbidden`.
-
-Configuration:
-
-- `OLLAMA_URL` — endpoint for the local Ollama daemon (default
-  `http://127.0.0.1:11434`). Must be loopback / RFC1918 / `.local`
-  / `.internal` / `.cluster.local`; constructors reject anything
-  else.
-- `OLLAMA_MODEL` — model identifier (default `qwen2.5:1.5b`).
-
-### 14.2 File classification
-
-`internal/classify/service.go` is a small rule-based classifier
-that labels a file row as `image` / `invoice` / `contract` /
-`document` / `other` based on filename and mime type. The label
-is persisted to `files.classification` (migration 022). The
-worker subscribes to `drive.classify.file` (added to the
-`DRIVE_JOBS` NATS stream); strict-ZK files are skipped at the
-worker boundary so the data plane is never touched.
+Sessions are device-bound: a fingerprint of the User-Agent and IP network
+prefix is captured at sign-in and re-checked on every request, so a
+stolen bearer token replayed from another browser or network forces
+re-authentication. The session, rate-limit, brute-force, and JWT details
+live in [`IAM_CORE.md`](IAM_CORE.md).
 
 ---
 
-## 15. Preview Pipeline
+## 11. Deployment topology
 
-Previews are generated by a NATS-driven worker and stored as
-derived objects in zk-object-fabric.
+ZK Drive is configured entirely through environment variables read in
+`internal/config/config.go`; the required core keys are `DATABASE_URL`
+and `JWT_SECRET`, plus the S3 group for object storage. The high-traffic
+keys are summarized below and documented exhaustively in
+[`CONFIGURATION.md`](CONFIGURATION.md).
 
-### 15.1 Dispatch model
+- **Core**: `DATABASE_URL`, `DATABASE_READ_URL`, `JWT_SECRET`,
+  `JWT_ALGORITHM`, `STATIC_DIR`, `LISTEN_ADDR`.
+- **Object storage**: `S3_ENDPOINT`, `S3_BUCKET`, `S3_ACCESS_KEY`,
+  `S3_SECRET_KEY`.
+- **Jobs / scanning**: `NATS_URL`, `CLAMAV_ADDRESS`, `PREVIEW_*`.
+- **Auth hardening**: `RATE_LIMIT_PER_USER`, `RATE_LIMIT_PER_WORKSPACE`,
+  `AUTH_FAILURE_THRESHOLD`, `AUTH_BLOCK_DURATION`, `TRUSTED_PROXY_DEPTH`.
+- **Audit**: `AUDIT_HMAC_KEY`.
 
-`internal/preview` exposes a `Renderer` interface plus a
-package-level MIME-type → `Renderer` registry. Each handler file
-(image / pdf / office / text / video / audio / svg / archive /
-email / design) declares its MIME types in an `init()` that calls
-`Register(...)`, so adding a new format never touches the
-service. `Service.Generate` is a single registry lookup plus the
-shared resize-and-encode path.
+Operationally:
 
-The 100 MiB source cap (`MaxSourceBytes`) applies to every
-handler — the source is read through an `io.LimitReader` before
-any decoder sees it.
+- **Server replicas** are stateless and horizontally scalable; they share
+  Postgres, Redis, the object store, and NATS. A workspace event hub and
+  collaboration relay span replicas through Redis.
+- **Worker replicas** scale independently; JetStream's WorkQueue
+  semantics distribute jobs across them, and the per-workspace preview
+  budget keeps any single tenant from monopolizing the fleet.
+- **External WS proxy mode** is supported: when an external realtime tier
+  (for example Centrifugo/Pusher) terminates client sockets, the server's
+  `/api/ws` upgrade responds 501 so a client still dialing the API
+  directly fails loudly instead of opening a dead socket
+  (`cmd/server/main.go:1715-1726`).
+- **Static SPA** is served from `STATIC_DIR` by the same process when set,
+  so a minimal deployment is a single server binary plus Postgres, Redis,
+  object storage, and NATS.
 
-Strict-ZK files never reach the preview worker — the worker's
-NATS handler short-circuits with `isStrictZK(ctx, pool, fileID)`
-before calling the service.
-
-### 15.2 In-process renderers
-
-Pure-Go, no external binaries:
-
-- **Images (`image.go`)**: PNG / JPEG / GIF via the stdlib
-  `image` package, plus WebP via `golang.org/x/image/webp`.
-- **Text & code (`text.go`)**: monospace-font rasterisation of
-  the first ~16 KiB of source via
-  `golang.org/x/image/font/inconsolata`. Wired to every common
-  text / code / config MIME (text/*, application/json,
-  application/javascript, application/x-yaml, …). Non-printable
-  bytes are mapped to spaces so a binary blob masquerading as
-  text/* doesn't break the renderer.
-- **Archives (`archive.go`)**: ZIP / TAR / TAR.GZ listings via
-  `archive/zip` and `archive/tar`. Inner files are never
-  extracted — the preview only shows the file tree. Listings are
-  capped at 64 entries and sorted (directories first,
-  alphabetically) for a deterministic output.
-- **Email (`email.go`)**: RFC 5322 `.eml` via `net/mail`.
-  Renders From / To / Date / Subject as a header, then the first
-  ~6 KiB of body. MIME boundaries are stripped so multipart
-  bodies don't render as a wall of `--boundary` markers. Outlook
-  `.msg` (TNEF / CFB) is intentionally not wired — it needs a
-  separate parser and is rarely the canonical archive format.
-
-### 15.3 Subprocess renderers
-
-All of these shell out to a binary and fall back to
-`ErrUnsupportedMime` when the binary is missing — that mapping
-is enforced by `missingBinaryErr` so a misconfigured host
-yields a graceful "skip this job" rather than a Nak loop.
-
-- **PDF (`pdf.go`)**: `pdftoppm` (poppler-utils, GPL). Page 1
-  at 150 DPI.
-- **Office (`office.go`)**: `soffice --headless --convert-to
-  pdf` (LibreOffice, MPL-2.0) → `pdftoppm`. Covers DOCX /
-  XLSX / PPTX / DOC / XLS / PPT / ODT / ODS / ODP / RTF. Each
-  invocation gets a hermetic `$HOME` under the per-call temp
-  dir so concurrent worker goroutines don't fight over a
-  shared LibreOffice profile. Hard timeout: 30 s.
-- **Video (`video.go`)**: `ffmpeg` (LGPL) frame extraction at
-  `t=00:00:01`. Falls back to the first frame if `-ss 1` can't
-  find one (clip < 1 s, keyframe past offset). Hard timeout:
-  15 s.
-- **Audio (`audio.go`)**: `audiowaveform` (BBC R&D, GPL) if
-  available, otherwise `ffmpeg`'s `showwavespic` filter.
-  Either tool produces a colourised PNG waveform. Hard
-  timeout: 20 s.
-- **SVG (`svg.go`)**: `rsvg-convert` (librsvg, LGPL) at 600 px
-  working width.
-- **Design / extended raster (`design.go`)**: ImageMagick
-  `convert`. Covers PSD / AI / EPS / TIFF / BMP / ICO / HEIC /
-  HEIF. Uses `in[0]` + `-flatten` so a multi-layer PSD or
-  multi-page AI renders as a single thumbnail. `convert` is
-  overridable to `magick` via `SetImageMagickBinary` for
-  ImageMagick 7 deployments.
-
-### 15.4 Runtime image
-
-The runtime Dockerfile installs the full set of external tools
-(poppler-utils, libreoffice-{core,writer,calc,impress}, ffmpeg,
-librsvg2-bin, imagemagick) and relaxes the default ImageMagick
-PostScript / PDF policies so the design renderer can rasterise
-AI / EPS / PDF-via-IM inputs. Each tool's licence is called out
-inline in the Dockerfile so the proprietary-build implications
-stay auditable from one file.
-
-`audiowaveform` is intentionally NOT installed in the default
-image because the upstream Debian package is not available
-everywhere; the audio handler transparently falls back to
-`ffmpeg`'s `showwavespic` filter when the BBC tool is missing.
-Bake it in per-deployment if you want the BBC-quality output.
-
-### 15.5 Storage layout
-
-Every preview is stored at
-
-```
-{workspace_id}/{file_id}/{version_id}/preview.png
-```
-
-in the same zk-object-fabric bucket as the source file, and a row
-is indexed in `file_previews` so the API can resolve a preview URL
-without scanning the bucket.
-
----
-
-## 16. PWA Architecture
-
-The frontend ships as a Progressive Web App so SMEs can install
-ZK Drive as a phone home-screen icon without requiring a separate
-native mobile build.
-
-- **Build integration**: `vite-plugin-pwa` injects the manifest and
-  service worker into the Vite production build.
-- **Manifest**: `frontend/public/manifest.webmanifest` declares
-  app name, short name, start URL, `display: standalone`, theme
-  and background colours, and the icon set. The manifest is linked
-  from `index.html` via the `vite-plugin-pwa` integration.
-- **Service worker**: a Workbox-generated precaching service
-  worker caches the static SPA bundle so cold app launches work
-  offline. API requests stay network-first; sensitive endpoints
-  (`/api/files/*/download`, strict-ZK folder listings) are
-  deliberately excluded from caching so decryption material and
-  zero-knowledge content are never persisted locally.
-- **Offline support**: the SPA shell loads offline. Read-only
-  access to the most recently opened folder tree falls back
-  gracefully when the network is unavailable; write operations
-  require connectivity.
-- **Install prompt**: the `InstallPrompt` component listens for
-  `beforeinstallprompt`, surfaces an "Install app" button on the
-  file browser, and hides itself once the app is installed or the
-  user dismisses the prompt.
-- **Icons and splash screens**: Apple touch icons and Android
-  splash screens are served from `frontend/public/icons/`.
-- **Push notifications**: not currently wired. Real-time
-  notifications are delivered over WebSockets while the app is
-  open; Web Push can be layered in later if mobile usage warrants
-  the additional surface.
-
-The PWA is the single mobile surface today. A dedicated React
-Native client would add ~8 – 10 engineer-weeks for feature parity
-plus an ongoing app-store compliance overhead, and would need a
-server-side delta-pull endpoint to enable true offline operation
-(none exists today). Until measurable PWA install traction
-justifies that investment, the PWA stays the only mobile path.
-
----
-
-## 17. Deployment Architecture
-
-The deployment surface is shipped as code. There is one Go binary
-for the API server (`cmd/server`), one Go binary for the worker
-bus (`cmd/worker`), and a thin React build for the frontend served
-by the API server.
-
-### 17.1 Local development — `docker-compose.yml`
-
-The top-level `docker-compose.yml` is the one-command local stack:
-
-- `postgres` — Postgres 16 with the `zkdrive` role and `zk-drive`
-  database.
-- `nats` — NATS JetStream broker for the preview / scan / index /
-  classify / retention / archive workers.
-- `clamav` — ClamAV daemon (clamav/clamav:1.3) used by the scan
-  worker over INSTREAM. Not linked into the build; the daemon's
-  GPL-2.0 license stays at the same posture as Postgres.
-- `server` — the API server (`cmd/server`).
-- `worker` — the async worker (`cmd/worker`).
-
-### 17.2 Production compose — `deploy/docker-compose.prod.yml`
-
-`deploy/docker-compose.prod.yml` is the production-shaped compose
-file (managed Postgres / NATS pointed at by env vars, no in-stack
-databases). It is the recommended path for SMEs that don't run a
-Kubernetes cluster.
-
-### 17.3 Kubernetes — `deploy/k8s/`
-
-The `deploy/k8s/` directory holds dev / staging Kubernetes
-manifests:
-
-- `namespace.yaml`
-- `configmap.yaml`
-- `secret.yaml`
-- `server.yaml`
-- `worker.yaml`
-- `postgres.yaml` — single-replica StatefulSet, dev / staging only.
-- `nats.yaml`
-- `clamav.yaml`
-- `ingress.yaml`
-
-The k8s manifests are explicitly dev / staging only: there is no
-HorizontalPodAutoscaler, no PodDisruptionBudget, and the Postgres
-StatefulSet is single-replica. Production is expected to use
-managed Postgres (RDS / Cloud SQL) and managed NATS, with the
-production compose or a customer's existing platform handling the
-app tier. See [`deploy/README.md`](../deploy/README.md) for the
-production deployment guidance.
+For first-run setup the SPA walks an admin through the
+[`setup wizard`](screenshots/18-setup-wizard.png) (`/api/setup/*`), which
+validates storage connectivity before completing.
