@@ -36,7 +36,7 @@ unrecognised value fails closed at startup (no silent zero-preset boot).
 
 | Variable          | Default   | Purpose                                            |
 | ----------------- | --------- | -------------------------------------------------- |
-| `ZKDRIVE_PROFILE` | _empty_   | One of `compact`, `production`, `development`. Empty = no profile (read every var directly; pre-profile behaviour). |
+| `ZKDRIVE_PROFILE` | _empty_   | One of `compact`, `production`, `development`. Empty = no profile (every variable is read directly). |
 
 ### `compact` — single-node SME (NoOps)
 
@@ -204,8 +204,8 @@ peak backends ≈ server_replicas × server.DB_MAX_CONNS
               + (migrate / reconciler / orphan-gc / audit-archiver, default sizing)
 ```
 
-The default `DB_MAX_CONNS` was raised from `10` to `20`. With the
-server HPA scaling up to **20 pods**, that is `20 × 20 = 400`
+The default `DB_MAX_CONNS` is `20` (`internal/config/config.go:1212`).
+With the server HPA scaling up to **20 pods**, that is `20 × 20 = 400`
 connections from the server tier alone — before the worker tier and
 the one-shot jobs. A stock Postgres ships with `max_connections = 100`,
 so a fully scaled-out fleet will exhaust it and new connections will be
@@ -225,13 +225,12 @@ refused (`FATAL: sorry, too many clients already`).
 - **Or** lower `DB_MAX_CONNS` so `replicas × DB_MAX_CONNS` stays under
   Postgres `max_connections` with headroom.
 
-> ⚠️ **In-place upgrades:** if you are upgrading an existing deployment
-> that scaled replicas under the old `DB_MAX_CONNS=10` default and you
-> do **not** run PgBouncer, the bump to `20` doubles the backend count
-> and can push you past `max_connections`. Either keep `DB_MAX_CONNS=10`
-> explicitly, raise Postgres `max_connections`, or adopt PgBouncer as
-> part of the upgrade — make it a conscious choice rather than a
-> surprise.
+> ⚠️ **Backend math when you scale out:** without PgBouncer, the real
+> Postgres backend count is `replicas × DB_MAX_CONNS`. At the default
+> `DB_MAX_CONNS=20`, a 20-pod server tier alone opens 400 backends and
+> overruns a stock `max_connections = 100`. Pin `DB_MAX_CONNS` lower,
+> raise Postgres `max_connections`, or front Postgres with PgBouncer —
+> make it a conscious, sized decision rather than a surprise.
 
 ### Read replicas (`DATABASE_READ_URL`)
 
@@ -306,9 +305,9 @@ topology, example configs, and HPA sizing math.
 
 | Variable                   | Default | Purpose                                                                                                                                            |
 | -------------------------- | ------- | -------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `JWT_ALGORITHM`            | `auto` (`ES256` under the `production` profile)  | Session-token signing algorithm. `auto` signs with ES256 when an active asymmetric key exists in `jwt_signing_keys`, else HS256 (`JWT_SECRET`). `ES256` forces asymmetric signing — if no active key has been rotated in yet, token signing **fails** rather than silently downgrading to HS256 (run `POST /api/platform/jwt/rotate` first, or use the `production` profile which auto-generates one at startup). `HS256` forces legacy symmetric signing. Under non-production profiles verification accepts both, so rotating to ES256 never invalidates existing HS256 sessions; under the `production` profile HS256 tokens are **rejected** on verification (asymmetric-only). The default is profile-dependent — see [Deployment profile](#deployment-profile). |
+| `JWT_ALGORITHM`            | `auto` (`ES256` under the `production` profile)  | Session-token signing algorithm. `auto` signs with ES256 when an active asymmetric key exists in `jwt_signing_keys`, else HS256 (`JWT_SECRET`). `ES256` forces asymmetric signing — if no active key has been rotated in yet, token signing **fails** rather than silently downgrading to HS256 (run `POST /api/platform/jwt/rotate` first, or use the `production` profile which auto-generates one at startup). `HS256` forces symmetric signing. Under non-production profiles verification accepts both, so rotating to ES256 never invalidates existing HS256 sessions; under the `production` profile HS256 tokens are **rejected** on verification (asymmetric-only). The default is profile-dependent — see [Deployment profile](#deployment-profile). |
 | `JWT_KEY_REFRESH_INTERVAL` | `60s`   | How often each replica re-reads `jwt_signing_keys` so a key rotation performed on one replica propagates to all others without a restart. Go duration string, clamped to `[10s, 1h]`. A non-positive value (e.g. `0`) disables the background refresh — appropriate for single-replica deployments. |
-| `PLATFORM_ADMIN_USER_IDS`  | _(empty)_ | **Legacy / no longer used.** Earlier releases gated a per-workspace admin JWT-rotation endpoint behind this allowlist. Rotation has since moved to the platform control plane (`POST /api/platform/jwt/rotate`, gated by the `keys:manage` platform-API-key capability) and the admin endpoint was removed, so this var no longer gates anything. The server logs a startup warning if it is still set; drop it from your config. |
+| `PLATFORM_ADMIN_USER_IDS`  | _(empty)_ | **Unused — leave empty.** JWT rotation is a platform control-plane operation (`POST /api/platform/jwt/rotate`, gated by the `keys:manage` platform-API-key capability), so this allowlist gates nothing. The server logs a startup warning if it is set; drop it from your config. |
 
 ## Storage (zk-object-fabric S3 gateway)
 
@@ -363,24 +362,38 @@ Centrifugo / Pusher wire contract and example configs.
 Workspace-scoped credentials (per-tenant S3 keys, TOTP secrets) are
 stored encrypted at rest with AES-256-GCM. The same key protects
 both surfaces; rotating the key requires the standard credential
-re-encryption runbook.
+re-encryption runbook. When no key is configured the codec runs in
+`none` mode (plaintext round-trip) and logs a warning at startup, so a
+production box without a key is loud rather than silently insecure
+(`internal/crypto/crypto.go:14`).
 
 | Variable                     | Default   | Purpose                                                                                                  |
 | ---------------------------- | --------- | -------------------------------------------------------------------------------------------------------- |
-| `CREDENTIAL_ENCRYPTION`      | `aesgcm`  | Mode. `aesgcm` (production) or `passthrough` (development only — credentials are stored in cleartext).    |
-| `CREDENTIAL_ENCRYPTION_KEY`  | _empty_   | 32-byte base64 key. Required when `CREDENTIAL_ENCRYPTION=aesgcm`.                                         |
+| `CREDENTIAL_ENCRYPTION`      | _auto_    | Encryption mode: `aesgcm` (AES-256-GCM) or `none` (plaintext round-trip — local dev only, logged with a warning). When unset, the mode is auto-detected: `aesgcm` if `CREDENTIAL_ENCRYPTION_KEY` is set, otherwise `none` (`internal/crypto/crypto.go:66`). |
+| `CREDENTIAL_ENCRYPTION_KEY`  | _empty_   | 32-byte key for `aesgcm`. Supplied raw, hex-encoded, or base64-encoded — the loader auto-detects the encoding (`internal/crypto/crypto.go:9`). Required when `CREDENTIAL_ENCRYPTION=aesgcm`. |
 
 ## Rate limiting
 
-| Variable                  | Default | Purpose                                                                                                                |
-| ------------------------- | ------- | ---------------------------------------------------------------------------------------------------------------------- |
-| `RATE_LIMIT_PER_USER`     | `0`     | Requests per user per minute. `0` disables. When `REDIS_URL` is set the limiter is Redis-backed and survives restarts.  |
-| `RATE_LIMIT_PER_WORKSPACE`| `0`     | Requests per workspace per minute. Same semantics as the per-user limiter, just a different scope.                      |
+The per-user and per-workspace limiter is **always mounted** on the
+data-plane, admin, and KChat route groups — it is not a feature you
+turn on. These two knobs only set the steady-state budget; a value
+`<= 0` (the default) falls back to the built-in default below, so rate
+limiting is never disabled (`internal/config/config.go:140`,
+`api/middleware/ratelimit.go:14`). Both budgets are **requests per
+second**, and each bucket tolerates a short burst of up to **2×** the
+steady-state rate. With `REDIS_URL` set the limiter is a Redis counter
+shared across replicas; without Redis it is an in-process token bucket
+per replica.
+
+| Variable                  | Default        | Purpose                                                                                                       |
+| ------------------------- | -------------- | ------------------------------------------------------------------------------------------------------------- |
+| `RATE_LIMIT_PER_USER`     | `0` → `100/s`  | Steady-state requests **per second, per user**. A value `<= 0` falls back to `100`. Burst capacity is `2×`.    |
+| `RATE_LIMIT_PER_WORKSPACE`| `0` → `1000/s` | Steady-state requests **per second, per workspace**. A value `<= 0` falls back to `1000`. Same `2×` burst rule. |
 
 Every rate-limited response (allowed **and** throttled) carries the
 standard telemetry headers so clients can self-pace:
 
-- `X-RateLimit-Limit` — the per-window request budget.
+- `X-RateLimit-Limit` — the per-second request budget.
 - `X-RateLimit-Remaining` — requests left in the current window (`0` on a 429).
 - `X-RateLimit-Reset` — unix second at which the window resets.
 
@@ -653,7 +666,7 @@ the Document Server keeps the edited bytes in its cache and retries, so a
 storm degrades gracefully instead of OOMing. Streaming saves are never
 shed **unless** you opt into `ONLYOFFICE_STREAM_SAVE_MAX_CONCURRENT`.
 
-- **Throughput** is no longer gated for the streaming path; raising
+- **Throughput** is not gated for the streaming path; raising
   `ONLYOFFICE_SAVE_MEMORY_BUDGET_MB` only widens the rarely-used buffered
   fallback. Do **not** raise it past what the container can hold — the
   budget exists to keep `concurrency × per-document` inside the container.
