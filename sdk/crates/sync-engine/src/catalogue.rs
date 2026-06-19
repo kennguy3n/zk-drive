@@ -275,6 +275,17 @@ pub struct FileRecord {
 pub struct Catalogue {
     conn: rusqlite::Connection,
     workspace_id: Uuid,
+    /// In-memory mirror of this workspace's `ignore`-policy folder
+    /// prefixes. The engine consults [`Catalogue::is_path_ignored`] on
+    /// every local filesystem event, so resolving it from this cached
+    /// `Vec` avoids a SQLite round-trip on the hot path. It is loaded
+    /// once in [`Catalogue::open`] and refreshed by
+    /// [`Catalogue::set_folder_policy`] (the only writer of the table),
+    /// which keeps it authoritative without a re-read per event. Both
+    /// the engine and the desktop shell's policy handler share the one
+    /// `Catalogue` instance behind a single mutex, so a policy flip is
+    /// visible to the engine on its next event without a restart.
+    ignored_prefixes: Vec<PathBuf>,
 }
 
 impl Catalogue {
@@ -314,7 +325,31 @@ impl Catalogue {
                 )?;
             }
         }
-        Ok(Self { conn, workspace_id })
+        let ignored_prefixes = Self::load_ignored_prefixes(&conn, workspace_id)?;
+        Ok(Self {
+            conn,
+            workspace_id,
+            ignored_prefixes,
+        })
+    }
+
+    /// Read every `ignore`-policy folder prefix for `workspace_id` from
+    /// the `folder_policies` table. Used to (re)build the in-memory
+    /// [`Catalogue::ignored_prefixes`] cache on open and after a policy
+    /// change -- never on the per-event hot path.
+    fn load_ignored_prefixes(
+        conn: &rusqlite::Connection,
+        workspace_id: Uuid,
+    ) -> Result<Vec<PathBuf>> {
+        let mut stmt = conn.prepare(
+            "SELECT folder_path FROM folder_policies WHERE workspace_id = ?1 AND policy = 'ignore'",
+        )?;
+        let rows = stmt.query_map(params![workspace_id.to_string()], |r| r.get::<_, String>(0))?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(PathBuf::from(row?));
+        }
+        Ok(out)
     }
 
     /// Workspace this catalogue is bound to. Surfaced so the engine
@@ -508,6 +543,12 @@ impl Catalogue {
     /// `(workspace_id, folder_path)` primary key so re-setting a
     /// folder's policy overwrites the previous value rather than
     /// failing on the conflict.
+    ///
+    /// After the write the in-memory [`Catalogue::ignored_prefixes`]
+    /// cache is rebuilt from the table so a flip in either direction
+    /// (`ignore` set or cleared) is reflected on the next
+    /// [`Catalogue::is_path_ignored`] check. This is the cold path --
+    /// a user toggling a folder -- so the re-read is negligible.
     pub fn set_folder_policy(
         &mut self,
         workspace_id: Uuid,
@@ -524,6 +565,7 @@ impl Catalogue {
                 policy,
             ],
         )?;
+        self.ignored_prefixes = Self::load_ignored_prefixes(&self.conn, self.workspace_id)?;
         Ok(())
     }
 
@@ -556,18 +598,20 @@ impl Catalogue {
     /// by path prefix, mirroring [`crate::Watcher`]'s static ignore
     /// list: an `ignore` policy on `/ws/tmp` also ignores
     /// `/ws/tmp/a/b.txt`.
+    ///
+    /// Resolved entirely from the in-memory
+    /// [`Catalogue::ignored_prefixes`] cache -- no SQLite round-trip on
+    /// this per-event hot path. The cache is kept current by
+    /// [`Catalogue::set_folder_policy`], the table's only writer.
     pub fn is_path_ignored(&self, workspace_id: Uuid, path: &Path) -> Result<bool> {
-        let mut stmt = self.conn.prepare(
-            "SELECT folder_path FROM folder_policies WHERE workspace_id = ?1 AND policy = 'ignore'",
-        )?;
-        let rows = stmt.query_map(params![workspace_id.to_string()], |r| r.get::<_, String>(0))?;
-        for row in rows {
-            let prefix = PathBuf::from(row?);
-            if path.starts_with(&prefix) {
-                return Ok(true);
-            }
-        }
-        Ok(false)
+        debug_assert_eq!(
+            workspace_id, self.workspace_id,
+            "is_path_ignored called with a workspace_id other than the catalogue's binding"
+        );
+        Ok(self
+            .ignored_prefixes
+            .iter()
+            .any(|prefix| path.starts_with(prefix)))
     }
 
     /// Iterate every record in the catalogue. Used by the LRU eviction
@@ -855,6 +899,40 @@ mod tests {
         assert!(!cat
             .is_path_ignored(ws, Path::new("/ws/Online/a.txt"))
             .unwrap());
+    }
+
+    #[test]
+    fn ignored_prefix_cache_refreshes_on_flip_and_reload_on_reopen() {
+        // The in-memory ignore cache must stay authoritative: a policy
+        // flip in either direction is reflected immediately (no stale
+        // SQLite re-read), and a fresh `open` rebuilds the cache from
+        // the persisted table so a restart sees the same ignore set.
+        let tmp = tempfile::tempdir().unwrap();
+        let db = tmp.path().join("c.db");
+        let ws = Uuid::new_v4();
+        let under = Path::new("/ws/Temp/a.txt");
+        {
+            let mut cat = Catalogue::open(&db, ws).unwrap();
+            cat.set_folder_policy(ws, Path::new("/ws/Temp"), "ignore")
+                .unwrap();
+            assert!(cat.is_path_ignored(ws, under).unwrap());
+
+            // Flipping the same folder off `ignore` must clear the cache
+            // entry on the very next check, without reopening.
+            cat.set_folder_policy(ws, Path::new("/ws/Temp"), "online")
+                .unwrap();
+            assert!(!cat.is_path_ignored(ws, under).unwrap());
+
+            // Flip it back so there is something to reload below.
+            cat.set_folder_policy(ws, Path::new("/ws/Temp"), "ignore")
+                .unwrap();
+            assert!(cat.is_path_ignored(ws, under).unwrap());
+        }
+
+        // A brand-new handle on the same file repopulates the cache
+        // from disk in `open`, with no policy call in between.
+        let reopened = Catalogue::open(&db, ws).unwrap();
+        assert!(reopened.is_path_ignored(ws, under).unwrap());
     }
 
     #[test]

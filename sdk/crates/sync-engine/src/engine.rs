@@ -135,30 +135,18 @@ impl Engine {
         // rows that synced before the folder was ignored keep their
         // last status and nothing is removed server-side -- we simply
         // stop propagating fresh local changes. The check is dynamic
-        // (re-read per event) so a folder flipped to `ignore` while
-        // sync is running takes effect on the next change without a
-        // restart.
+        // (the catalogue's ignore set tracks every `set_folder_policy`)
+        // so a folder flipped to `ignore` while sync is running takes
+        // effect on the next event without a restart.
         //
-        // Upsert and Delete each carry a single path, so an ignored
-        // path is dropped right here. Rename straddles two paths that
-        // can fall on opposite sides of an ignore boundary, so it is
-        // resolved inside its own arm: a move *into* an ignored folder
-        // must still reconcile the now-vacated source, and a move *out*
-        // of one resumes syncing at the destination.
-        match &ev {
-            LocalEvent::Upsert { path, .. } | LocalEvent::Delete { path } => {
-                if self
-                    .catalogue
-                    .lock()
-                    .await
-                    .is_path_ignored(self.config.workspace_id, path)?
-                {
-                    info!(path = ?path, "local event under an ignored folder; skipping");
-                    return Ok(());
-                }
-            }
-            LocalEvent::Rename { .. } => {}
-        }
+        // Each arm runs the check under the *same* catalogue lock it
+        // holds for its mutation, so a concurrent `set_folder_policy`
+        // cannot slip between the test and the write. Upsert and Delete
+        // each carry a single path. Rename straddles two paths that can
+        // fall on opposite sides of an ignore boundary, so it tests the
+        // destination and still reconciles the now-vacated source: a
+        // move *into* an ignored folder must not strand the source row,
+        // and a move *out* of one resumes syncing at the destination.
         match ev {
             LocalEvent::Upsert {
                 path,
@@ -166,6 +154,10 @@ impl Engine {
                 content_hash,
             } => {
                 let mut cat = self.catalogue.lock().await;
+                if cat.is_path_ignored(self.config.workspace_id, &path)? {
+                    info!(?path, "local upsert under an ignored folder; skipping");
+                    return Ok(());
+                }
                 if let Some(existing) = cat.by_local_path(&path)? {
                     // Dedup short-circuit: a re-fire of the watcher
                     // on the same content is a no-op iff the row is
@@ -280,6 +272,10 @@ impl Engine {
             }
             LocalEvent::Delete { path } => {
                 let mut cat = self.catalogue.lock().await;
+                if cat.is_path_ignored(self.config.workspace_id, &path)? {
+                    info!(?path, "local delete under an ignored folder; skipping");
+                    return Ok(());
+                }
                 if let Some(existing) = cat.by_local_path(&path)? {
                     let next = existing.status.next_on_local_delete();
                     if next != existing.status {
@@ -1003,6 +999,49 @@ mod tests {
         assert!(
             cat.by_local_path(&path).unwrap().is_none(),
             "an upsert under an ignored folder must not register a catalogue row"
+        );
+    }
+
+    #[tokio::test]
+    async fn local_delete_under_ignored_folder_leaves_row_untouched() {
+        // The Delete arm honors `ignore` under the same catalogue lock
+        // it would use for the mutation. A row that synced before its
+        // folder was ignored must keep its last status when a later
+        // local delete fires under that folder -- the policy is
+        // non-destructive, so the delete is dropped rather than
+        // tombstoning the server copy.
+        let tempdir = TempDir::new().unwrap();
+        let (engine, catalogue) = engine_for(&tempdir);
+        let workspace_id = engine.config.workspace_id;
+        let file_id = Uuid::new_v4();
+        let ignored_dir = tempdir.path().join("Archive");
+        let path = ignored_dir.join("old-invoice.pdf");
+        {
+            let mut cat = catalogue.lock().await;
+            cat.upsert(&FileRecord {
+                remote_file_id: file_id,
+                remote_version_id: Uuid::new_v4(),
+                local_path: path.clone(),
+                size_bytes: 11,
+                content_hash: [2u8; 32],
+                status: SyncStatus::UpToDate,
+                pinned: false,
+                updated_at: Utc::now(),
+            })
+            .unwrap();
+            cat.set_folder_policy(workspace_id, &ignored_dir, "ignore")
+                .unwrap();
+        }
+        engine
+            .handle_local(LocalEvent::Delete { path: path.clone() })
+            .await
+            .unwrap();
+        let cat = catalogue.lock().await;
+        let row = cat.get(file_id).unwrap().unwrap();
+        assert_eq!(
+            row.status,
+            SyncStatus::UpToDate,
+            "a delete under an ignored folder must not flip the row toward a tombstone"
         );
     }
 
