@@ -11,6 +11,32 @@
 // reads navigator.language and localStorage — not what we want
 // in jsdom. Instead, mirror the same i18next.init call without
 // the detector so tests run deterministically with English.
+
+// --- localStorage polyfill ---
+// jsdom provides localStorage, but vi.useFakeTimers() in Vitest 4.x
+// can clobber the global, causing `localStorage is not available`
+// errors in tests that use fake timers (ThemeProvider, CommandPaletteDialog).
+// This stable in-memory polyfill is installed before any test runs and
+// survives fake-timer activation.
+if (!globalThis.localStorage) {
+  const store = new Map<string, string>();
+  const localStoragePolyfill: Storage = {
+    getItem: (key: string) => store.get(key) ?? null,
+    setItem: (key: string, value: string) => store.set(key, String(value)),
+    removeItem: (key: string) => store.delete(key),
+    clear: () => store.clear(),
+    key: (index: number) => Array.from(store.keys())[index] ?? null,
+    get length() {
+      return store.size;
+    },
+  };
+  Object.defineProperty(globalThis, "localStorage", {
+    value: localStoragePolyfill,
+    writable: true,
+    configurable: true,
+  });
+}
+
 import i18n from "i18next";
 import { initReactI18next } from "react-i18next";
 import en from "../i18n/locales/en.json";

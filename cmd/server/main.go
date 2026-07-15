@@ -38,6 +38,7 @@ import (
 	"github.com/kennguy3n/zk-drive/api/ws"
 	"github.com/kennguy3n/zk-drive/internal/activity"
 	"github.com/kennguy3n/zk-drive/internal/ai"
+	"github.com/kennguy3n/zk-drive/internal/ai/editor"
 	"github.com/kennguy3n/zk-drive/internal/audit"
 	"github.com/kennguy3n/zk-drive/internal/billing"
 	"github.com/kennguy3n/zk-drive/internal/changefeed"
@@ -1294,10 +1295,12 @@ func run() error {
 	// summarisation, tagging, and expansion within a workspace.
 	tagSuggestSvc := ai.NewSuggestionService(pool).WithLanguageResolver(wsSvc)
 	queryExpandSvc := ai.NewExpansionService(pool).WithLanguageResolver(wsSvc)
+	editorSkillSvc := editor.NewSkillService(nil)
 	if aiLLM != nil {
 		summarySvc = summarySvc.WithLLM(aiLLM)
 		tagSuggestSvc = tagSuggestSvc.WithLLM(aiLLM)
 		queryExpandSvc = queryExpandSvc.WithLLM(aiLLM)
+		editorSkillSvc = editorSkillSvc.WithLLM(aiLLM)
 		slog.Info("ai local LLM enabled", "endpoint", cfg.OllamaURL, "model", aiLLM.Model())
 	} else {
 		slog.Info("ai OLLAMA_URL not set, AI summaries / tag suggestions / query expansion use rule-based scaffold (no external API calls)")
@@ -1305,6 +1308,7 @@ func run() error {
 	driveHandler = driveHandler.
 		WithTagSuggester(tagSuggestSvc).
 		WithQueryExpander(queryExpandSvc).
+		WithEditorSkills(editorSkillSvc).
 		// The ONLYOFFICE save callback runs outside the session-auth /
 		// SuspensionGuard group (the Document Server holds no JWT), so
 		// give the handler the same suspension checker to re-enforce the
@@ -1780,6 +1784,7 @@ func run() error {
 			r.Get("/documents/{id}/snapshot", driveHandler.GetDocumentSnapshot)
 			r.Get("/documents/{id}/deltas", driveHandler.ListDocumentDeltas)
 			r.Post("/documents/{id}/deltas", driveHandler.AppendDocumentDelta)
+			r.Post("/documents/{id}/ai/skill", driveHandler.DocumentAISkill)
 
 			r.Post("/files", driveHandler.CreateFile)
 			r.Post("/files/upload-url", driveHandler.UploadURL)

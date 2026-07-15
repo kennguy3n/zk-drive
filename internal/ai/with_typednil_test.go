@@ -26,6 +26,15 @@ func (c *nilLLMClient) Generate(_ context.Context, _ string) (string, error) {
 	return "", nil
 }
 
+func (c *nilLLMClient) GenerateStream(_ context.Context, _ string) (<-chan string, <-chan error) {
+	_ = c.field()
+	tokens := make(chan string)
+	errs := make(chan error)
+	close(tokens)
+	close(errs)
+	return tokens, errs
+}
+
 // Model is required by ai.LLMClient (used by the AI services for
 // audit-log breadcrumbs). The receiver-deref is the load-bearing
 // part for this test — a typed-nil that slipped past the guard

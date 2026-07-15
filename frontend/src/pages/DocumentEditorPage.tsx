@@ -33,10 +33,7 @@ import type { TFunction } from "i18next";
 import { ArrowLeft, Lock, Pencil } from "lucide-react";
 import * as Y from "yjs";
 import { Awareness } from "y-protocols/awareness";
-import { useEditor, EditorContent, type AnyExtension } from "@tiptap/react";
-import StarterKit from "@tiptap/starter-kit";
-import Collaboration from "@tiptap/extension-collaboration";
-import CollaborationCursor from "@tiptap/extension-collaboration-cursor";
+import { useEditor, EditorContent } from "@tiptap/react";
 import {
   AUTH_CHANGE_EVENT,
   currentToken,
@@ -54,6 +51,11 @@ import EncryptionBadge from "../components/EncryptionBadge";
 import ConnectionStatusChip from "../components/ConnectionStatusChip";
 import PresenceChips from "../components/PresenceChips";
 import CollabModeSelector from "../components/CollabModeSelector";
+import EditorToolbar from "../components/editor/EditorToolbar";
+import { buildExtensions } from "../components/editor/extensions";
+import AISelectionMenu from "../components/editor/AISelectionMenu";
+import GhostBlock from "../components/editor/GhostBlock";
+import { streamEditorSkill, type SkillID } from "../api/editorSkills";
 import {
   AppShell,
   Badge,
@@ -114,6 +116,18 @@ export default function DocumentEditorPage() {
   const [yDoc, setYDoc] = useState<Y.Doc | null>(null);
   const [awareness, setAwareness] = useState<Awareness | null>(null);
   const providerRef = useRef<CollabProvider | null>(null);
+
+  // Ghost block state for AI streaming output.
+  const [ghostContent, setGhostContent] = useState("");
+  const [ghostStatus, setGhostStatus] = useState<"streaming" | "done" | "error">("streaming");
+  const [ghostError, setGhostError] = useState<string | undefined>(undefined);
+  const [ghostVisible, setGhostVisible] = useState(false);
+  // Capture the selection range at skill invocation time so accept
+  // can replace the original text rather than inserting at a random
+  // cursor position (the AI menu click clears the selection).
+  const ghostSelectionRef = useRef<{ from: number; to: number } | null>(null);
+  const ghostBlockRef = useRef<HTMLDivElement>(null);
+  const ghostAbortRef = useRef<AbortController | null>(null);
 
   // Fetch the document metadata on mount / id change.
   useEffect(() => {
@@ -253,29 +267,62 @@ export default function DocumentEditorPage() {
   // yDoc arrives. Collaboration / CollaborationCursor stay
   // conditional because they require a non-null Y.Doc and
   // Awareness respectively.
-  const extensions = useMemo(() => {
-    // StarterKit's bundled history extension conflicts with
-    // Collaboration's CRDT undo stack — disabling it here is the
-    // documented TipTap pattern for collab editors.
-    const base: AnyExtension[] = [StarterKit.configure({ history: false })];
-    if (yDoc && collabMode !== "disabled") {
-      base.push(Collaboration.configure({ document: yDoc }));
-    }
-    if (presenceAllowed && awareness) {
-      base.push(
-        CollaborationCursor.configure({
-          provider: { awareness },
-        }),
+  const richExtensionsAllowed =
+    !!doc && doc.capability.rich_extensions_allowed;
+
+  // Callback for slash command AI items — triggers a skill with
+  // the preceding text as context and streams into the ghost block.
+  // Slash commands always operate at the cursor position (empty
+  // selection), so ghostSelectionRef is set to null — the ghost
+  // block will insert at the cursor on accept.
+  const handleSlashAISkill = useCallback(
+    (skillId: string, precedingText: string, selection: string, replaceRange?: { from: number; to: number }) => {
+      if (!id) return;
+      ghostAbortRef.current?.abort();
+      ghostSelectionRef.current = replaceRange ?? null;
+      setGhostContent("");
+      setGhostStatus("streaming");
+      setGhostError(undefined);
+      setGhostVisible(true);
+      ghostAbortRef.current = streamEditorSkill(
+        id,
+        {
+          skill_id: skillId as SkillID,
+          selection,
+          context: precedingText,
+        },
+        {
+          onToken: (token) => setGhostContent((prev) => prev + token),
+          onDone: () => setGhostStatus("done"),
+          onError: (error) => {
+            setGhostStatus("error");
+            setGhostError(error);
+          },
+        },
       );
-    }
-    return base;
+    },
+    [id],
+  );
+
+  const extensions = useMemo(
+    () =>
+      buildExtensions({
+        yDoc,
+        awareness,
+        collabMode,
+        presenceAllowed,
+        richExtensionsAllowed,
+        placeholderText: t("editor.placeholder"),
+        onAISkill: richExtensionsAllowed && doc && doc.encryption_mode !== "strict_zk" ? handleSlashAISkill : undefined,
+      }),
     // Deliberately depend on the primitive yDoc / collabMode /
     // presenceAllowed instead of the `doc` object reference.
     // Renames mutate `doc` (new object reference) but leave
     // collabMode / presenceAllowed unchanged, so the editor
     // doesn't re-instantiate and the cursor / selection state
     // is preserved across renames.
-  }, [yDoc, awareness, collabMode, presenceAllowed]);
+    [yDoc, awareness, collabMode, presenceAllowed, richExtensionsAllowed, t, handleSlashAISkill, doc?.encryption_mode],
+  );
 
   // TipTap editor instance. Keyed by document id so a route
   // change tears down the previous editor entirely; this also
@@ -458,10 +505,86 @@ export default function DocumentEditorPage() {
       )}
 
       {editor ? (
-        <EditorContent
-          editor={editor}
-          className="rounded-card border border-border bg-surface px-6 py-5 text-fg shadow-card [&_.ProseMirror]:min-h-[55vh] [&_.ProseMirror]:leading-relaxed [&_.ProseMirror]:outline-none"
-        />
+        <div className="relative overflow-hidden rounded-card border border-border bg-surface shadow-card">
+          <EditorToolbar
+            editor={editor}
+            richExtensionsAllowed={richExtensionsAllowed}
+          />
+          <div className="relative">
+            <EditorContent
+              editor={editor}
+              className="px-6 py-5 text-fg [&_.ProseMirror]:min-h-[55vh] [&_.ProseMirror]:leading-relaxed [&_.ProseMirror]:outline-none"
+            />
+            {id && doc && doc.capability.rich_extensions_allowed && doc.encryption_mode !== "strict_zk" && (
+              <AISelectionMenu
+                editor={editor}
+                documentId={id}
+                isStreaming={ghostVisible && ghostStatus === "streaming"}
+                onGhostBlockStart={() => {
+                  const { selection } = editor.state;
+                  ghostSelectionRef.current = { from: selection.from, to: selection.to };
+                  setGhostContent("");
+                  setGhostStatus("streaming");
+                  setGhostError(undefined);
+                  setGhostVisible(true);
+                }}
+                onGhostBlockToken={(token) => {
+                  setGhostContent((prev) => prev + token);
+                }}
+                onGhostBlockDone={() => {
+                  setGhostStatus("done");
+                }}
+                onGhostBlockError={(error) => {
+                  setGhostStatus("error");
+                  setGhostError(error);
+                }}
+              />
+            )}
+          </div>
+          {ghostVisible && (
+            <div ref={ghostBlockRef} className="border-t border-border px-6 py-4">
+              <GhostBlock
+                content={ghostContent}
+                status={ghostStatus}
+                errorMessage={ghostError}
+                onAccept={() => {
+                  ghostAbortRef.current?.abort();
+                  ghostAbortRef.current = null;
+                  if (editor && ghostContent) {
+                    // Build paragraph content from the AI output so
+                    // multi-line text is inserted as separate blocks
+                    // rather than one giant text node.
+                    const paragraphs = ghostContent.split(/\n/).map((text) => ({
+                      type: "paragraph",
+                      content: text ? [{ type: "text", text }] : [],
+                    }));
+                    const sel = ghostSelectionRef.current;
+                    if (sel) {
+                      editor
+                        .chain()
+                        .focus()
+                        .deleteRange({ from: sel.from, to: sel.to })
+                        .insertContent(paragraphs)
+                        .run();
+                    } else {
+                      editor.chain().focus().insertContent(paragraphs).run();
+                    }
+                  }
+                  ghostSelectionRef.current = null;
+                  setGhostVisible(false);
+                  setGhostContent("");
+                }}
+                onReject={() => {
+                  ghostAbortRef.current?.abort();
+                  ghostAbortRef.current = null;
+                  ghostSelectionRef.current = null;
+                  setGhostVisible(false);
+                  setGhostContent("");
+                }}
+              />
+            </div>
+          )}
+        </div>
       ) : (
         <div
           className="rounded-card border border-border bg-surface px-6 py-5 shadow-card"

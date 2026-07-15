@@ -1,6 +1,7 @@
 package ai
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -33,6 +34,15 @@ type LLMClient interface {
 	// signal — SummaryService will silently degrade to its
 	// rule-based scaffold rather than fail the HTTP request.
 	Generate(ctx context.Context, prompt string) (string, error)
+
+	// GenerateStream posts prompt to the LLM with streaming enabled
+	// and returns a channel that emits response tokens as they arrive.
+	// The channel is closed when the response is complete; any error
+	// is sent as the final non-string value on the error channel.
+	// ctx cancellation aborts the in-flight request and closes both
+	// channels. Used by the editor AI skill service for real-time
+	// token-by-token display in ghost blocks.
+	GenerateStream(ctx context.Context, prompt string) (<-chan string, <-chan error)
 
 	// Model returns the model identifier the client is configured
 	// against (e.g. "qwen2.5:1.5b"). Used for log lines + audit so
@@ -74,6 +84,10 @@ type OllamaClient struct {
 	endpoint string
 	model    string
 	httpc    *http.Client
+	// streamHTTPC is a dedicated client for streaming requests with no
+	// per-request timeout — ctx controls the deadline instead. Reused
+	// across calls for connection pooling.
+	streamHTTPC *http.Client
 }
 
 // NewOllamaClient constructs an OllamaClient against endpoint. An
@@ -101,6 +115,11 @@ func NewOllamaClient(endpoint, model string) (*OllamaClient, error) {
 		// budget 30 s per request and let the caller's context
 		// shorten it when the HTTP request itself has a deadline.
 		httpc: &http.Client{Timeout: 30 * time.Second},
+		// Streaming requests can take much longer (token-by-token
+		// generation at 5-15 tok/s), so no per-request timeout —
+		// ctx controls the deadline. Dedicated client for connection
+		// pooling reuse across streaming calls.
+		streamHTTPC: &http.Client{},
 	}, nil
 }
 
@@ -173,6 +192,90 @@ func (c *OllamaClient) Generate(ctx context.Context, prompt string) (string, err
 		return "", errors.New("ai/ollama: empty response")
 	}
 	return out, nil
+}
+
+// ollamaStreamChunk is one NDJSON line from Ollama's streaming
+// /api/generate response. Each chunk carries a partial Response token
+// and Done is true on the final chunk.
+type ollamaStreamChunk struct {
+	Response string `json:"response"`
+	Done     bool   `json:"done"`
+}
+
+// GenerateStream posts prompt to the Ollama daemon with stream=true
+// and emits response tokens on the returned channel as they arrive.
+// The token channel is closed when the stream completes; any error
+// is delivered on the error channel. ctx cancellation aborts the
+// request and closes both channels.
+func (c *OllamaClient) GenerateStream(ctx context.Context, prompt string) (<-chan string, <-chan error) {
+	tokens := make(chan string, 64)
+	errs := make(chan error, 1)
+
+	go func() {
+		// Close tokens before errs (LIFO defer order): consumers
+		// that select on both channels must see tokens close first
+		// so they know the stream is fully drained before errs
+		// closes. If errs closes first, a consumer treating
+		// closed-errs as "done" would lose buffered tokens.
+		defer close(errs)
+		defer close(tokens)
+
+		body, err := json.Marshal(ollamaGenerateRequest{
+			Model:  c.model,
+			Prompt: prompt,
+			Stream: true,
+		})
+		if err != nil {
+			errs <- fmt.Errorf("ai/ollama: marshal stream request: %w", err)
+			return
+		}
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.endpoint+"/api/generate", bytes.NewReader(body))
+		if err != nil {
+			errs <- fmt.Errorf("ai/ollama: build stream request: %w", err)
+			return
+		}
+		req.Header.Set("Content-Type", "application/json")
+		resp, err := c.streamHTTPC.Do(req)
+		if err != nil {
+			errs <- fmt.Errorf("ai/ollama: stream post: %w", err)
+			return
+		}
+		defer func() { _ = resp.Body.Close() }()
+		if resp.StatusCode != http.StatusOK {
+			snippet, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
+			errs <- fmt.Errorf("ai/ollama: stream status %d: %s", resp.StatusCode, strings.TrimSpace(string(snippet)))
+			return
+		}
+
+		scanner := bufio.NewScanner(resp.Body)
+		scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+		for scanner.Scan() {
+			line := scanner.Bytes()
+			if len(strings.TrimSpace(string(line))) == 0 {
+				continue
+			}
+			var chunk ollamaStreamChunk
+			if err := json.Unmarshal(line, &chunk); err != nil {
+				errs <- fmt.Errorf("ai/ollama: decode stream chunk: %w", err)
+				return
+			}
+			if chunk.Response != "" {
+				select {
+				case tokens <- chunk.Response:
+				case <-ctx.Done():
+					return
+				}
+			}
+			if chunk.Done {
+				return
+			}
+		}
+		if err := scanner.Err(); err != nil {
+			errs <- fmt.Errorf("ai/ollama: stream read: %w", err)
+		}
+	}()
+
+	return tokens, errs
 }
 
 // Health performs a cheap liveness probe against the Ollama daemon by

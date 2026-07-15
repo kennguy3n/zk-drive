@@ -118,8 +118,15 @@ type Handler struct {
 	// retains the capacity for startup logging (0 == unlimited).
 	onlyOfficeStreamSaveSem   chan struct{}
 	onlyOfficeStreamSaveLimit int
-	tagSuggest                TagSuggester
-	queryExpand               QueryExpander
+	// editorSkillSem bounds concurrent AI skill SSE streams so a
+	// single workspace can't exhaust the local LLM's inference
+	// capacity (consumer-grade Ollama runs 1-2 concurrent
+	// inferences). Defaulted in NewHandler to 4; override via
+	// WithEditorSkillConcurrency.
+	editorSkillSem chan struct{}
+	tagSuggest     TagSuggester
+	queryExpand    QueryExpander
+	editorSkills   EditorSkillRunner
 	// features resolves the active feature set for a workspace
 	// (progressive feature disclosure). A nil *feature.Service is a
 	// valid receiver that resolves every workspace to the Free-tier
@@ -200,6 +207,7 @@ func NewHandler(
 		onlyOfficeSaveSem:          make(chan struct{}, defaultOnlyOfficeMaxConcurrentSaves),
 		onlyOfficeMaxDocumentBytes: defaultOnlyOfficeMaxDocumentBytes,
 		onlyOfficeSaveConcurrency:  defaultOnlyOfficeMaxConcurrentSaves,
+		editorSkillSem:             make(chan struct{}, 4),
 	}
 }
 
