@@ -1,5 +1,6 @@
 import axios, { type AxiosInstance } from "axios";
 import { is401SoftFailure } from "./auth401";
+import { extractErrorCode } from "./errors";
 
 // Shared Axios instance pointed at the dev proxy (/api -> :8080). All
 // request/response types below match the Go handler JSON.
@@ -947,6 +948,18 @@ export async function searchFiles(query: string, opts: {
 //      to pin the new version as current.
 // A null folderID is rejected because the backend requires every
 // file to live under a concrete folder.
+// deduplicateFilename takes a filename like "report.pdf" and returns
+// "report (1).pdf", "report (2).pdf", etc. Preserves the extension.
+function deduplicateFilename(filename: string, attempt: number): string {
+  const dotIdx = filename.lastIndexOf(".");
+  if (dotIdx <= 0) {
+    return `${filename} (${attempt})`;
+  }
+  const base = filename.slice(0, dotIdx);
+  const ext = filename.slice(dotIdx);
+  return `${base} (${attempt})${ext}`;
+}
+
 export async function uploadFile(
   file: File,
   folderID: string | null,
@@ -954,25 +967,39 @@ export async function uploadFile(
   if (!folderID) {
     throw new Error("cannot upload to the workspace root; open a folder first");
   }
-  const upload = await requestUploadURL({
-    folder_id: folderID,
-    filename: file.name,
-    mime_type: file.type || undefined,
-  });
-  const putResp = await fetch(upload.upload_url, {
-    method: "PUT",
-    headers: file.type ? { "Content-Type": file.type } : {},
-    body: file,
-  });
-  if (!putResp.ok) {
-    throw new Error(`upload failed: ${putResp.status}`);
+
+  let filename = file.name;
+  for (let attempt = 0; attempt < 10; attempt++) {
+    try {
+      const upload = await requestUploadURL({
+        folder_id: folderID,
+        filename,
+        mime_type: file.type || undefined,
+      });
+      const putResp = await fetch(upload.upload_url, {
+        method: "PUT",
+        headers: file.type ? { "Content-Type": file.type } : {},
+        body: file,
+      });
+      if (!putResp.ok) {
+        throw new Error(`upload failed: ${putResp.status}`);
+      }
+      const confirmed = await confirmUpload({
+        file_id: upload.upload_id,
+        object_key: upload.object_key,
+        size_bytes: file.size,
+      });
+      return confirmed.file;
+    } catch (err) {
+      const code = extractErrorCode(err);
+      if (code === "FILE_NAME_EXISTS" && attempt < 9) {
+        filename = deduplicateFilename(file.name, attempt + 1);
+        continue;
+      }
+      throw err;
+    }
   }
-  const confirmed = await confirmUpload({
-    file_id: upload.upload_id,
-    object_key: upload.object_key,
-    size_bytes: file.size,
-  });
-  return confirmed.file;
+  throw new Error("upload failed: could not find a unique filename after 10 attempts");
 }
 
 // --- Tags ---------------------------------------------------------------

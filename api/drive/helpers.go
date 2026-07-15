@@ -131,6 +131,8 @@ func writeServiceError(w http.ResponseWriter, r *http.Request, err error) {
 		middleware.RespondError(w, http.StatusNotImplemented, middleware.ErrCodeUnsupportedOp, err.Error())
 	case errors.Is(err, folder.ErrEncryptionModeMismatch):
 		middleware.RespondError(w, http.StatusConflict, middleware.ErrCodeConflict, err.Error())
+	case errors.Is(err, file.ErrDuplicateName):
+		middleware.RespondError(w, http.StatusConflict, "FILE_NAME_EXISTS", "a file with this name already exists in this folder")
 	case errors.Is(err, file.ErrVersionConflict):
 		// Surface the generic 409 rather than err.Error() so the
 		// internal "file version conflicts with existing row" detail

@@ -30,6 +30,12 @@ var ErrVersionConflict = errors.New("file version conflicts with existing row")
 // HTTP layer can map it to 409 Conflict.
 var ErrTagAlreadyExists = errors.New("tag already exists on file")
 
+// ErrDuplicateName is returned when CreateFile would violate the
+// idx_files_unique_name constraint (same workspace + folder + name).
+// Distinct from ErrNotFound so the HTTP layer can map it to 409
+// Conflict with a user-facing message.
+var ErrDuplicateName = errors.New("a file with this name already exists")
+
 // Repository defines persistence operations for files and file versions.
 type Repository interface {
 	CreateFile(ctx context.Context, f *File) error
@@ -147,6 +153,9 @@ VALUES ($1, $2, $3, $4, $5, $6, $7)
 RETURNING created_at, updated_at`
 	if err := r.pool.QueryRow(ctx, q, f.ID, f.WorkspaceID, f.FolderID, f.Name, f.SizeBytes, f.MimeType, f.CreatedBy).
 		Scan(&f.CreatedAt, &f.UpdatedAt); err != nil {
+		if strings.Contains(err.Error(), pgUniqueViolation) {
+			return ErrDuplicateName
+		}
 		return fmt.Errorf("insert file: %w", err)
 	}
 	return nil

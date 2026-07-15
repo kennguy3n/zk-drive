@@ -883,6 +883,7 @@
     "COLLAB_MODE_NOT_ALLOWED": "This collaboration mode isn't allowed for this folder.",
     "UNSUPPORTED_SEARCH_LANGUAGE": "That search language isn't supported. Pick one from the supported list.",
     "CONFLICT": "This conflicts with the current state.",
+    "FILE_NAME_EXISTS": "A file with this name already exists. Renaming…",
     "GONE": "This resource is no longer available.",
     "FOLDER_LOCKED": "This folder is locked.",
     "WORKSPACE_QUOTA_EXCEEDED": "Workspace storage quota exceeded.",
