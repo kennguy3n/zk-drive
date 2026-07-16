@@ -174,6 +174,12 @@ func (s *Service) GetByID(ctx context.Context, workspaceID, folderID uuid.UUID) 
 	return s.repo.GetByID(ctx, workspaceID, folderID)
 }
 
+// GetAncestors returns the chain of ancestor folders from root to the
+// immediate parent of folderID (exclusive of folderID itself).
+func (s *Service) GetAncestors(ctx context.Context, workspaceID, folderID uuid.UUID) ([]*Folder, error) {
+	return s.repo.GetAncestors(ctx, workspaceID, folderID)
+}
+
 // Rename updates the folder's name and path (plus its descendants' paths).
 func (s *Service) Rename(ctx context.Context, workspaceID, folderID uuid.UUID, newName string) (*Folder, error) {
 	newName = strings.TrimSpace(newName)

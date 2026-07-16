@@ -17,6 +17,7 @@ import {
   Copy,
   Download,
   X,
+  Upload,
 } from "lucide-react";
 import { Trans, useTranslation } from "react-i18next";
 import FolderTree from "../components/FolderTree";
@@ -46,6 +47,7 @@ import {
   renameFile,
   renameDocument,
   renameFolder,
+  uploadFile,
   type BulkResponse,
   type ClientRoomTemplate,
   type Document,
@@ -139,6 +141,7 @@ export default function FileBrowserPage() {
   const [folder, setFolder] = useState<Folder | null>(null);
   const [subfolders, setSubfolders] = useState<Folder[]>([]);
   const [files, setFiles] = useState<FileItem[]>([]);
+  const [ancestors, setAncestors] = useState<Folder[]>([]);
   const [error, setError] = useState<string | null>(null);
   // True while the listing for the current view is loading (initial mount
   // and folder navigation). Gates the onboarding cards and the file/folder
@@ -164,6 +167,12 @@ export default function FileBrowserPage() {
   // bulk-action buttons so a fast double-click can't fire overlapping
   // mutations against the same selection.
   const [bulkBusy, setBulkBusy] = useState(false);
+  // Drag-and-drop upload: dragDepth counts enter/leave events so the
+  // overlay stays visible when moving between child elements. uploadBusy
+  // tracks in-flight drops to show a loading state.
+  const [dragDepth, setDragDepth] = useState(0);
+  const [uploadBusy, setUploadBusy] = useState(false);
+  const isDragging = dragDepth > 0;
 
   const toggleSelect = useCallback((id: string) => {
     setSelectedFiles((prev) => {
@@ -179,7 +188,7 @@ export default function FileBrowserPage() {
     setError(null);
     try {
       if (currentFolderID) {
-        const [{ folder: f, children, files: f2 }, docs] = await Promise.all([
+        const [{ folder: f, children, files: f2, ancestors: anc }, docs] = await Promise.all([
           getFolderContents(currentFolderID),
           listFolderDocuments(currentFolderID),
         ]);
@@ -187,12 +196,14 @@ export default function FileBrowserPage() {
         setFolder(f);
         setSubfolders(children);
         setFiles([...f2, ...docs.map(documentToFileItem)]);
+        setAncestors(anc);
       } else {
         const roots = await listFolders(null);
         if (seq !== refreshSeq.current) return;
         setFolder(null);
         setSubfolders(roots);
         setFiles([]);
+        setAncestors([]);
       }
     } catch (err) {
       if (seq !== refreshSeq.current) return;
@@ -490,6 +501,58 @@ export default function FileBrowserPage() {
     }
   };
 
+  // Drag-and-drop upload handlers. The overlay is shown while isDragging
+  // is true; on drop, each file is uploaded sequentially via the same
+  // uploadFile API the UploadButton uses.
+  const handleDragEnter = useCallback((e: React.DragEvent) => {
+    if (!currentFolderID) return;
+    if (!e.dataTransfer.types.includes("Files")) return;
+    e.preventDefault();
+    setDragDepth((d) => d + 1);
+  }, [currentFolderID]);
+
+  const handleDragOver = useCallback((e: React.DragEvent) => {
+    if (!currentFolderID) return;
+    if (!e.dataTransfer.types.includes("Files")) return;
+    e.preventDefault();
+    e.dataTransfer.dropEffect = "copy";
+  }, [currentFolderID]);
+
+  const handleDragLeave = useCallback((e: React.DragEvent) => {
+    e.preventDefault();
+    setDragDepth((d) => Math.max(0, d - 1));
+  }, []);
+
+  const handleDrop = useCallback(async (e: React.DragEvent) => {
+    if (!currentFolderID) return;
+    e.preventDefault();
+    setDragDepth(0);
+    const droppedFiles = Array.from(e.dataTransfer.files);
+    if (droppedFiles.length === 0) return;
+    setUploadBusy(true);
+    let ok = 0;
+    let fail = 0;
+    let firstError: unknown = null;
+    for (const file of droppedFiles) {
+      try {
+        await uploadFile(file, currentFolderID);
+        ok++;
+      } catch (err) {
+        fail++;
+        if (firstError === null) firstError = err;
+      }
+    }
+    setUploadBusy(false);
+    await refresh();
+    if (fail === 0) {
+      toast.success(t("drive.uploadSuccess", { count: ok }));
+    } else if (ok > 0) {
+      toast.error(t("drive.uploadSomeFailed", { ok, failed: fail }));
+    } else {
+      toast.error(translateApiError(firstError, t));
+    }
+  }, [currentFolderID, refresh, t, toast]);
+
   // First-run experience: at the workspace root with nothing in it yet, show
   // the onboarding action cards instead of empty folder/file sections. The
   // explicit files.length check keeps this correct if root-level file listing
@@ -506,11 +569,17 @@ export default function FileBrowserPage() {
   return (
     <div className="flex min-h-screen bg-bg text-fg">
       <FolderTree currentFolderID={currentFolderID} reloadKey={treeReloadKey} />
-      <main className="flex min-w-0 flex-1 flex-col">
+      <main
+        className="flex min-w-0 flex-1 flex-col"
+        onDragEnter={handleDragEnter}
+        onDragOver={handleDragOver}
+        onDragLeave={handleDragLeave}
+        onDrop={handleDrop}
+      >
         {/* Top utility bar: location (breadcrumb) + search + navigation. */}
         <header className="sticky top-0 z-20 flex flex-wrap items-center gap-x-3 gap-y-2 border-b border-border bg-bg/85 px-4 py-3 backdrop-blur-md sm:px-6">
           <div className="min-w-0 flex-1">
-            <Breadcrumb folder={folder} />
+            <Breadcrumb folder={folder} ancestors={ancestors} />
           </div>
           <div className="flex items-center gap-2">
             <div className="hidden lg:block">
@@ -772,6 +841,29 @@ export default function FileBrowserPage() {
             </section>
           ) : null}
         </div>
+        {isDragging && currentFolderID && (
+          <div className="pointer-events-none fixed inset-0 z-50 flex items-center justify-center bg-brand/10 backdrop-blur-sm">
+            <div className="flex flex-col items-center gap-4 rounded-2xl border-2 border-dashed border-brand bg-surface/90 px-12 py-10 shadow-lg">
+              <Upload className="h-10 w-10 text-brand" aria-hidden="true" />
+              <p className="text-lg font-semibold text-fg">
+                {t("drive.dropToUpload")}
+              </p>
+              <p className="text-sm text-muted">
+                {t("drive.dropToUploadHint", { name: folder?.name })}
+              </p>
+            </div>
+          </div>
+        )}
+        {uploadBusy && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30">
+            <div className="flex items-center gap-3 rounded-xl bg-surface px-6 py-4 shadow-lg">
+              <div className="h-5 w-5 animate-spin rounded-full border-2 border-brand border-t-transparent" />
+              <span className="text-sm font-medium text-fg">
+                {t("drive.uploading")}
+              </span>
+            </div>
+          </div>
+        )}
       </main>
       {shareTarget ? (
         <ShareDialog resource={shareTarget} onClose={() => setShareTarget(null)} />
@@ -1183,19 +1275,13 @@ function TemplateDialog({
   );
 }
 
-function Breadcrumb({ folder }: { folder: Folder | null }) {
+function Breadcrumb({ folder, ancestors }: { folder: Folder | null; ancestors: Folder[] }) {
   const { t } = useTranslation();
-  // Split the materialized path into clickable segments. The API stores
-  // paths like "/Engineering/Backend/" so trimming empty parts keeps the
-  // display clean.
-  //
-  // EncryptionBadge sits at the end of the breadcrumb so users always
-  // know what privacy mode the current folder is in — not just when
-  // they scan a parent's subfolder list. This is the same trade-off
-  // matrix as docs/PRODUCT.md "Per-folder privacy modes" (managed =
-  // server-readable, strict = server-blind), surfaced at the point
-  // of action.
-  const parts = folder?.path?.split("/").filter(Boolean) ?? [];
+  // ancestors is the chain of parent folders from root to the immediate
+  // parent of the current folder, ordered root-first. Each ancestor is a
+  // clickable Link; the current folder's name is the terminal (non-clickable)
+  // segment. EncryptionBadge sits at the end so users always know what
+  // privacy mode the current folder is in.
   return (
     <nav
       aria-label={t("nav.breadcrumb")}
@@ -1207,21 +1293,29 @@ function Breadcrumb({ folder }: { folder: Folder | null }) {
       >
         {t("drive.rootBreadcrumb")}
       </Link>
-      {parts.map((p, i) => (
-        <span key={i} className="flex min-w-0 items-center gap-1.5">
+      {ancestors.map((a) => (
+        <span key={a.id} className="flex min-w-0 items-center gap-1.5">
           <span className="shrink-0 text-muted/60" aria-hidden="true">
             /
           </span>
-          <span
-            className={cn(
-              "truncate",
-              i === parts.length - 1 ? "font-medium text-fg" : "text-muted",
-            )}
+          <Link
+            to={`/drive/folder/${a.id}`}
+            className="truncate text-muted no-underline transition-colors hover:text-fg"
           >
-            {p}
-          </span>
+            {a.name}
+          </Link>
         </span>
       ))}
+      {folder && (
+        <span className="flex min-w-0 items-center gap-1.5">
+          <span className="shrink-0 text-muted/60" aria-hidden="true">
+            /
+          </span>
+          <span className="truncate font-medium text-fg">
+            {folder.name}
+          </span>
+        </span>
+      )}
       {folder ? (
         <span className="ml-1 shrink-0">
           <EncryptionBadge mode={folder.encryption_mode} size="header" />

@@ -129,6 +129,7 @@ func (h *Handler) UploadURL(w http.ResponseWriter, r *http.Request) {
 		middleware.RespondInternalError(w, r, "generate upload url", err)
 		return
 	}
+	logging.FromContext(r.Context()).Info("upload presigned URL generated", "url", url, "object_key", objectKey, "mime_type", req.MimeType)
 	writeJSON(w, http.StatusOK, uploadURLResponse{
 		UploadURL: url,
 		UploadID:  f.ID,

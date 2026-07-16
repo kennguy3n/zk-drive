@@ -4,11 +4,27 @@
 # pipeline), and ClamAV (for virus scanning). The server connects to
 # each opportunistically; the worker binary requires all three.
 #
-# Usage:
+# Object storage is provided by zk-object-fabric — a separate project
+# at ../zk-object-fabric. Start it first:
+#
+#   cd ../zk-object-fabric && docker compose up -d --build
+#
+# That exposes the S3 API on :9000 and console API on :9001 (via the
+# override file). This compose joins the "zk-fabric" network so the
+# server/worker can reach the gateway at http://zk-fabric:8080.
+#
+# Usage (local dev without Docker for the server itself):
 #   docker compose up -d postgres
 #   export DATABASE_URL=postgres://zkdrive:zkdrive@localhost:5432/zk-drive?sslmode=disable
 #   export JWT_SECRET=dev-secret
+#   export S3_ENDPOINT=http://localhost:9000
+#   export S3_BUCKET=zk-drive
+#   export S3_ACCESS_KEY=demo-access-key
+#   export S3_SECRET_KEY=demo-secret-key
 #   go run ./cmd/server
+#
+# Or run the full stack via Docker (includes server + worker):
+#   docker compose --profile server up -d --build
 
 services:
   postgres:
@@ -73,12 +89,17 @@ services:
       MIGRATIONS_DIR: /app/migrations
       LISTEN_ADDR: :8080
       NATS_URL: nats://nats:4222
-      S3_ENDPOINT: ${S3_ENDPOINT:-}
-      S3_BUCKET: ${S3_BUCKET:-}
-      S3_ACCESS_KEY: ${S3_ACCESS_KEY:-}
-      S3_SECRET_KEY: ${S3_SECRET_KEY:-}
+      S3_ENDPOINT: ${S3_ENDPOINT:-http://zk-fabric:8080}
+      S3_BUCKET: ${S3_BUCKET:-zk-drive}
+      S3_ACCESS_KEY: ${S3_ACCESS_KEY:-demo-access-key}
+      S3_SECRET_KEY: ${S3_SECRET_KEY:-demo-secret-key}
+      FABRIC_CONSOLE_URL: ${FABRIC_CONSOLE_URL:-http://zk-fabric:8081}
+      FABRIC_CONSOLE_ADMIN_TOKEN: ${FABRIC_CONSOLE_ADMIN_TOKEN:-}
     ports:
       - "8080:8080"
+    networks:
+      - default
+      - zk-fabric
     profiles:
       - server
 
@@ -105,13 +126,22 @@ services:
       # minimum schema version via a DB query (RequireMinMigrationVersion).
       # Migrations are owned by the migrate Job / server --auto-migrate.
       NATS_URL: nats://nats:4222
-      S3_ENDPOINT: ${S3_ENDPOINT:-}
-      S3_BUCKET: ${S3_BUCKET:-}
-      S3_ACCESS_KEY: ${S3_ACCESS_KEY:-}
-      S3_SECRET_KEY: ${S3_SECRET_KEY:-}
+      S3_ENDPOINT: ${S3_ENDPOINT:-http://zk-fabric:8080}
+      S3_BUCKET: ${S3_BUCKET:-zk-drive}
+      S3_ACCESS_KEY: ${S3_ACCESS_KEY:-demo-access-key}
+      S3_SECRET_KEY: ${S3_SECRET_KEY:-demo-secret-key}
       CLAMAV_ADDRESS: clamav:3310
+    networks:
+      - default
+      - zk-fabric
     profiles:
       - server
 
 volumes:
   postgres_data:
+
+networks:
+  default:
+    name: zk-drive-net
+  zk-fabric:
+    external: true

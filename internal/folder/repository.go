@@ -29,6 +29,7 @@ type Repository interface {
 	SoftDeleteSubtree(ctx context.Context, workspaceID, folderID uuid.UUID) error
 	ListChildren(ctx context.Context, workspaceID uuid.UUID, parentID *uuid.UUID) ([]*Folder, error)
 	ListDescendants(ctx context.Context, workspaceID, folderID uuid.UUID) ([]*Folder, error)
+	GetAncestors(ctx context.Context, workspaceID, folderID uuid.UUID) ([]*Folder, error)
 }
 
 // PostgresRepository implements Repository against Postgres.
@@ -350,6 +351,39 @@ SELECT ` + folderColumns + ` FROM subtree`
 	rows, err := r.pool.Query(ctx, q, workspaceID, folderID)
 	if err != nil {
 		return nil, fmt.Errorf("list descendants: %w", err)
+	}
+	defer rows.Close()
+
+	var out []*Folder
+	for rows.Next() {
+		f := &Folder{}
+		if err := rows.Scan(&f.ID, &f.WorkspaceID, &f.ParentFolderID, &f.Name, &f.Path, &f.EncryptionMode, &f.CreatedBy, &f.CreatedAt, &f.UpdatedAt, &f.DeletedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, f)
+	}
+	return out, rows.Err()
+}
+
+// GetAncestors returns the chain of non-deleted ancestor folders from
+// the root down to the immediate parent of folderID (exclusive of
+// folderID itself). Uses a recursive CTE that walks parent_folder_id
+// upward, then orders root-first. Returns an empty slice for root-
+// level folders.
+func (r *PostgresRepository) GetAncestors(ctx context.Context, workspaceID, folderID uuid.UUID) ([]*Folder, error) {
+	q := `
+WITH RECURSIVE chain AS (
+    SELECT ` + folderColumns + ` FROM folders
+        WHERE workspace_id = $1 AND id = $2 AND deleted_at IS NULL
+    UNION ALL
+    SELECT f.id, f.workspace_id, f.parent_folder_id, f.name, f.path, f.encryption_mode, f.created_by, f.created_at, f.updated_at, f.deleted_at
+        FROM folders f JOIN chain c ON f.id = c.parent_folder_id
+        WHERE f.workspace_id = $1 AND f.deleted_at IS NULL
+)
+SELECT ` + folderColumns + ` FROM chain WHERE id <> $2 ORDER BY path ASC`
+	rows, err := r.pool.Query(ctx, q, workspaceID, folderID)
+	if err != nil {
+		return nil, fmt.Errorf("get ancestors: %w", err)
 	}
 	defer rows.Close()
 

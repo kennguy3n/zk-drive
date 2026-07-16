@@ -115,15 +115,21 @@ func (h *Handler) GetFolder(w http.ResponseWriter, r *http.Request) {
 		middleware.RespondInternalError(w, r, "list children", err)
 		return
 	}
+	ancestors, err := h.folders.GetAncestors(r.Context(), workspaceID, id)
+	if err != nil {
+		middleware.RespondInternalError(w, r, "get ancestors", err)
+		return
+	}
 	fileList, err := h.files.ListByFolder(r.Context(), workspaceID, id)
 	if err != nil {
 		middleware.RespondInternalError(w, r, "list files", err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"folder":   f,
-		"children": children,
-		"files":    fileList,
+		"folder":    f,
+		"children":  children,
+		"files":     fileList,
+		"ancestors": ancestors,
 	})
 }
 

@@ -691,16 +691,19 @@ export async function getFolderContents(id: string): Promise<{
   folder: Folder;
   children: Folder[];
   files: FileItem[];
+  ancestors: Folder[];
 }> {
   const { data } = await client.get<{
     folder: Folder;
     children: Folder[];
     files: FileItem[];
+    ancestors: Folder[];
   }>(`/folders/${id}`);
   return {
     folder: data.folder,
     children: data.children ?? [],
     files: data.files ?? [],
+    ancestors: data.ancestors ?? [],
   };
 }
 
@@ -979,12 +982,23 @@ export async function uploadFile(
         filename,
         mime_type: file.type || undefined,
       });
-      const putResp = await fetch(upload.upload_url, {
-        method: "PUT",
-        headers: file.type ? { "Content-Type": file.type } : {},
-        body: file,
-      });
+      console.debug("[upload] presigned URL:", upload.upload_url);
+      console.debug("[upload] file type:", file.type, "size:", file.size);
+      let putResp: Response;
+      try {
+        putResp = await fetch(upload.upload_url, {
+          method: "PUT",
+          headers: file.type ? { "Content-Type": file.type } : {},
+          body: file,
+        });
+      } catch (fetchErr) {
+        console.error("[upload] fetch failed:", fetchErr, "URL:", upload.upload_url);
+        throw fetchErr;
+      }
+      console.debug("[upload] PUT response status:", putResp.status);
       if (!putResp.ok) {
+        const bodyText = await putResp.text().catch(() => "");
+        console.error("[upload] PUT failed:", putResp.status, bodyText);
         throw new Error(`upload failed: ${putResp.status}`);
       }
       const confirmed = await confirmUpload({
