@@ -55,6 +55,10 @@ import EditorToolbar from "../components/editor/EditorToolbar";
 import { buildExtensions } from "../components/editor/extensions";
 import AISelectionMenu from "../components/editor/AISelectionMenu";
 import GhostBlock from "../components/editor/GhostBlock";
+import FormattingBubbleMenu from "../components/editor/FormattingBubbleMenu";
+import BlockMenu from "../components/editor/BlockMenu";
+import DocumentOutline from "../components/editor/DocumentOutline";
+import MarkdownToggle from "../components/editor/MarkdownToggle";
 import { streamEditorSkill, type SkillID } from "../api/editorSkills";
 import {
   AppShell,
@@ -505,85 +509,96 @@ export default function DocumentEditorPage() {
       )}
 
       {editor ? (
-        <div className="relative overflow-hidden rounded-card border border-border bg-surface shadow-card">
-          <EditorToolbar
-            editor={editor}
-            richExtensionsAllowed={richExtensionsAllowed}
-          />
-          <div className="relative">
-            <EditorContent
+        <div className="flex gap-6">
+          <div className="relative flex-1 overflow-hidden rounded-card border border-border bg-surface shadow-card">
+            <EditorToolbar
               editor={editor}
-              className="px-6 py-5 text-fg [&_.ProseMirror]:min-h-[55vh] [&_.ProseMirror]:leading-relaxed [&_.ProseMirror]:outline-none"
+              richExtensionsAllowed={richExtensionsAllowed}
             />
-            {id && doc && doc.capability.rich_extensions_allowed && doc.encryption_mode !== "strict_zk" && (
-              <AISelectionMenu
+            <div className="relative">
+              <EditorContent
                 editor={editor}
-                documentId={id}
-                isStreaming={ghostVisible && ghostStatus === "streaming"}
-                onGhostBlockStart={() => {
-                  const { selection } = editor.state;
-                  ghostSelectionRef.current = { from: selection.from, to: selection.to };
-                  setGhostContent("");
-                  setGhostStatus("streaming");
-                  setGhostError(undefined);
-                  setGhostVisible(true);
-                }}
-                onGhostBlockToken={(token) => {
-                  setGhostContent((prev) => prev + token);
-                }}
-                onGhostBlockDone={() => {
-                  setGhostStatus("done");
-                }}
-                onGhostBlockError={(error) => {
-                  setGhostStatus("error");
-                  setGhostError(error);
-                }}
+                className="px-6 py-5 text-fg [&_.ProseMirror]:min-h-[55vh] [&_.ProseMirror]:leading-relaxed [&_.ProseMirror]:outline-none"
               />
+              {writable && <BlockMenu editor={editor} />}
+              {writable && (
+                <div className="absolute right-2 top-2 z-10">
+                  <MarkdownToggle
+                    editor={editor}
+                    visible={true}
+                    isCollaborative={!!yDoc && writable}
+                  />
+                </div>
+              )}
+              {id && doc && doc.capability.rich_extensions_allowed && doc.encryption_mode !== "strict_zk" && (
+                <AISelectionMenu
+                  editor={editor}
+                  documentId={id}
+                  isStreaming={ghostVisible && ghostStatus === "streaming"}
+                  onGhostBlockStart={() => {
+                    const { selection } = editor.state;
+                    ghostSelectionRef.current = { from: selection.from, to: selection.to };
+                    setGhostContent("");
+                    setGhostStatus("streaming");
+                    setGhostError(undefined);
+                    setGhostVisible(true);
+                  }}
+                  onGhostBlockToken={(token) => {
+                    setGhostContent((prev) => prev + token);
+                  }}
+                  onGhostBlockDone={() => {
+                    setGhostStatus("done");
+                  }}
+                  onGhostBlockError={(error) => {
+                    setGhostStatus("error");
+                    setGhostError(error);
+                  }}
+                />
+              )}
+            </div>
+            <FormattingBubbleMenu editor={editor} />
+            {ghostVisible && (
+              <div ref={ghostBlockRef} className="border-t border-border px-6 py-4">
+                <GhostBlock
+                  content={ghostContent}
+                  status={ghostStatus}
+                  errorMessage={ghostError}
+                  onAccept={() => {
+                    ghostAbortRef.current?.abort();
+                    ghostAbortRef.current = null;
+                    if (editor && ghostContent) {
+                      const paragraphs = ghostContent.split(/\n/).map((text) => ({
+                        type: "paragraph",
+                        content: text ? [{ type: "text", text }] : [],
+                      }));
+                      const sel = ghostSelectionRef.current;
+                      if (sel) {
+                        editor
+                          .chain()
+                          .focus()
+                          .deleteRange({ from: sel.from, to: sel.to })
+                          .insertContent(paragraphs)
+                          .run();
+                      } else {
+                        editor.chain().focus().insertContent(paragraphs).run();
+                      }
+                    }
+                    ghostSelectionRef.current = null;
+                    setGhostVisible(false);
+                    setGhostContent("");
+                  }}
+                  onReject={() => {
+                    ghostAbortRef.current?.abort();
+                    ghostAbortRef.current = null;
+                    ghostSelectionRef.current = null;
+                    setGhostVisible(false);
+                    setGhostContent("");
+                  }}
+                />
+              </div>
             )}
           </div>
-          {ghostVisible && (
-            <div ref={ghostBlockRef} className="border-t border-border px-6 py-4">
-              <GhostBlock
-                content={ghostContent}
-                status={ghostStatus}
-                errorMessage={ghostError}
-                onAccept={() => {
-                  ghostAbortRef.current?.abort();
-                  ghostAbortRef.current = null;
-                  if (editor && ghostContent) {
-                    // Build paragraph content from the AI output so
-                    // multi-line text is inserted as separate blocks
-                    // rather than one giant text node.
-                    const paragraphs = ghostContent.split(/\n/).map((text) => ({
-                      type: "paragraph",
-                      content: text ? [{ type: "text", text }] : [],
-                    }));
-                    const sel = ghostSelectionRef.current;
-                    if (sel) {
-                      editor
-                        .chain()
-                        .focus()
-                        .deleteRange({ from: sel.from, to: sel.to })
-                        .insertContent(paragraphs)
-                        .run();
-                    } else {
-                      editor.chain().focus().insertContent(paragraphs).run();
-                    }
-                  }
-                  ghostSelectionRef.current = null;
-                  setGhostVisible(false);
-                  setGhostContent("");
-                }}
-                onReject={() => {
-                  ghostAbortRef.current?.abort();
-                  ghostAbortRef.current = null;
-                  ghostSelectionRef.current = null;
-                  setGhostVisible(false);
-                  setGhostContent("");
-                }}
-              />
-            </div>
-          )}
+          <DocumentOutline editor={editor} />
         </div>
       ) : (
         <div

@@ -21,6 +21,7 @@ import {
 } from "lucide-react";
 import { cn } from "../../lib/cn";
 import type { SlashCommandItem } from "./SlashCommand";
+import type { SuggestionProps } from "@tiptap/suggestion";
 
 const ICONS: Record<string, LucideIcon> = {
   Type,
@@ -46,7 +47,7 @@ interface SlashMenuViewProps {
   command: (item: SlashCommandItem) => void;
   // The position is relative to the editor container, computed by
   // tippy.js or a manual positioning helper. We receive client coords.
-  clientRect: (() => DOMRect | null) | null;
+  clientRect?: (() => DOMRect | null) | null;
 }
 
 export function SlashMenuView({ items, command, clientRect }: SlashMenuViewProps) {
@@ -174,11 +175,7 @@ export function renderSlashMenu() {
   let containerEl: HTMLDivElement | null = null;
   let root: Root | null = null;
 
-  const render = (props: {
-    items: SlashCommandItem[];
-    command: (item: SlashCommandItem) => void;
-    clientRect: (() => DOMRect | null) | null;
-  }) => {
+  const render = (props: SuggestionProps<SlashCommandItem>) => {
     if (!containerEl || !root) return;
     root.render(
       <SlashMenuView
@@ -190,21 +187,13 @@ export function renderSlashMenu() {
   };
 
   return {
-    onStart(props: {
-      items: SlashCommandItem[];
-      command: (item: SlashCommandItem) => void;
-      clientRect: (() => DOMRect | null) | null;
-    }) {
+    onStart(props: SuggestionProps<SlashCommandItem>) {
       containerEl = document.createElement("div");
       document.body.appendChild(containerEl);
       root = createRoot(containerEl);
       render(props);
     },
-    onUpdate(props: {
-      items: SlashCommandItem[];
-      command: (item: SlashCommandItem) => void;
-      clientRect: (() => DOMRect | null) | null;
-    }) {
+    onUpdate(props: SuggestionProps<SlashCommandItem>) {
       render(props);
     },
     onExit() {
@@ -217,7 +206,7 @@ export function renderSlashMenu() {
         containerEl = null;
       }
     },
-    onKeyDown(props: { event: KeyboardEvent }) {
+    onKeyDown() {
       // Keyboard handling is done inside SlashMenuView via document
       // event listener. Return false so Suggestion doesn't also
       // try to handle arrow keys.

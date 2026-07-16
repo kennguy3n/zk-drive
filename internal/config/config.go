@@ -278,6 +278,13 @@ type Config struct {
 	// product never sends file content to a third-party LLM.
 	OllamaURL   string
 	OllamaModel string
+	// OllamaModelEditor is a separate model for editor AI skills
+	// (inline writing assistance). When set, the editor skill service
+	// uses this model instead of OLLAMA_MODEL, allowing operators to
+	// run a larger/better model for writing tasks while keeping the
+	// smaller model for background summaries/tags. When unset, the
+	// editor skill service falls back to OLLAMA_MODEL.
+	OllamaModelEditor string
 
 	// Browser security headers (CSP / HSTS / etc.) emitted on
 	// every response by api/middleware.SecurityHeaders. The
@@ -844,6 +851,7 @@ func buildConfigFromEnv() *Config {
 		StripePriceTierMap:                     parsePriceTierMap(os.Getenv("STRIPE_PRICE_TIER_MAP")),
 		OllamaURL:                              os.Getenv("OLLAMA_URL"),
 		OllamaModel:                            os.Getenv("OLLAMA_MODEL"),
+		OllamaModelEditor:                      os.Getenv("OLLAMA_MODEL_EDITOR"),
 
 		SecurityHeadersDisableHSTS:     parseBoolDefault(os.Getenv("SECURITY_HEADERS_DISABLE_HSTS"), false),
 		SecurityHeadersCSPReportOnly:   parseBoolDefault(os.Getenv("SECURITY_HEADERS_CSP_REPORT_ONLY"), false),

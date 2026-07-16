@@ -16,7 +16,10 @@ package editor
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"strings"
+	"time"
+	"unicode/utf8"
 
 	"github.com/kennguy3n/zk-drive/internal/ai"
 )
@@ -43,6 +46,26 @@ const MaxLanguageChars = 50
 // (8K-16K context) can afford more, but the cap keeps latency bounded
 // on consumer hardware.
 const MaxContextChars = 12000
+
+// MaxSelectionChars caps the selection text sent to the LLM. Selections
+// longer than this are truncated to keep the prompt within the model's
+// context window.
+const MaxSelectionChars = 8000
+
+// CharsPerToken is a rough heuristic for estimating token count from
+// character count. English text averages ~4 chars/token; we use 3.5 to
+// be conservative (non-English text tends to have more tokens per char).
+const CharsPerToken = 3.5
+
+// EstimateTokens returns a rough token count for a string. Used for
+// context budget management — not a precise tokenizer, but sufficient
+// for deciding whether to truncate input before sending to the LLM.
+func EstimateTokens(s string) int {
+	if len(s) == 0 {
+		return 0
+	}
+	return int(float64(utf8.RuneCountInString(s))/CharsPerToken) + 1
+}
 
 // SkillID identifies a specific AI skill. Frontend sends this as a
 // string in the request body; the service looks it up in the registry.
@@ -73,6 +96,12 @@ type Skill struct {
 	ID                SkillID
 	RequiresSelection bool
 	BuildPrompt       func(req SkillRequest) string
+	// MaxContextCharsOverride allows a skill to use a smaller context
+	// budget than the global MaxContextChars. When 0, the global cap
+	// is used. Skills that produce longer output (e.g. expand) can
+	// afford less input context; skills that only need a short
+	// selection (e.g. summarize) can use the full budget.
+	MaxContextCharsOverride int
 }
 
 // Registry of all available skills. Maps skill ID to the Skill struct.
@@ -191,9 +220,17 @@ func (s *SkillService) Execute(ctx context.Context, skillID SkillID, req SkillRe
 			return
 		}
 
-		// Truncate context to the max budget.
-		if len(req.Context) > MaxContextChars {
-			req.Context = req.Context[:MaxContextChars]
+		// Truncate selection and context to their respective budgets.
+		// Per-skill override takes precedence over the global cap.
+		maxCtx := MaxContextChars
+		if skill.MaxContextCharsOverride > 0 && skill.MaxContextCharsOverride < maxCtx {
+			maxCtx = skill.MaxContextCharsOverride
+		}
+		if len(req.Selection) > MaxSelectionChars {
+			req.Selection = req.Selection[:MaxSelectionChars]
+		}
+		if len(req.Context) > maxCtx {
+			req.Context = req.Context[:maxCtx]
 		}
 
 		// Sanitize language: truncate and strip control characters to
@@ -201,18 +238,46 @@ func (s *SkillService) Execute(ctx context.Context, skillID SkillID, req SkillRe
 		req.Language = sanitizeLanguage(req.Language)
 
 		prompt := skill.BuildPrompt(req)
+
+		// Log skill invocation for quality monitoring. Includes
+		// estimated token counts so operators can see whether the
+		// context budget is being used effectively.
+		startTime := time.Now()
+		slog.Info("editor skill invoked",
+			"skill", string(skillID),
+			"model", s.llm.Model(),
+			"selection_tokens", EstimateTokens(req.Selection),
+			"context_tokens", EstimateTokens(req.Context),
+			"prompt_tokens", EstimateTokens(prompt),
+		)
+
 		tokenCh, errCh := s.llm.GenerateStream(ctx, prompt)
 
+		tokenCount := 0
 		for {
 			select {
 			case token, ok := <-tokenCh:
 				if !ok {
 					// Token channel closed — check for errors.
 					if err, ok := <-errCh; ok && err != nil {
+						slog.Info("editor skill failed",
+							"skill", string(skillID),
+							"model", s.llm.Model(),
+							"elapsed_ms", time.Since(startTime).Milliseconds(),
+							"error", err.Error(),
+						)
 						errs <- err
+					} else {
+						slog.Info("editor skill completed",
+							"skill", string(skillID),
+							"model", s.llm.Model(),
+							"elapsed_ms", time.Since(startTime).Milliseconds(),
+							"output_tokens", tokenCount,
+						)
 					}
 					return
 				}
+				tokenCount++
 				select {
 				case tokens <- token:
 				case <-ctx.Done():
@@ -226,6 +291,12 @@ func (s *SkillService) Execute(ctx context.Context, skillID SkillID, req SkillRe
 					continue
 				}
 				if err != nil {
+					slog.Info("editor skill failed",
+						"skill", string(skillID),
+						"model", s.llm.Model(),
+						"elapsed_ms", time.Since(startTime).Milliseconds(),
+						"error", err.Error(),
+					)
 					errs <- err
 				}
 				return

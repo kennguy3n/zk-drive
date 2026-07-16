@@ -528,6 +528,7 @@ console URL empty to disable the advanced storage admin surface.
 | -------------- | ------- | --------------------------------------------------------------------------------------------------------- |
 | `OLLAMA_URL`   | _empty_ | Base URL of a local Ollama server (e.g. `http://ollama:11434`). When unset the summariser falls back to a deterministic rule-based mode. |
 | `OLLAMA_MODEL` | _empty_ | Model name to request (e.g. `llama3:8b`). Ignored when `OLLAMA_URL` is unset.                              |
+| `OLLAMA_MODEL_EDITOR` | _empty_ | Separate model for editor AI skills (inline writing assistance). When set, the editor skill service uses this model instead of `OLLAMA_MODEL`, allowing operators to run a larger model for writing tasks while keeping the smaller model for background summaries/tags. Recommended: `qwen2.5:3b-instruct` or `llama3.2:3b-instruct`. |
 
 ## Web Push notifications (optional)
 

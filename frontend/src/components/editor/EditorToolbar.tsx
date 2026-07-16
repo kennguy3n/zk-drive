@@ -1,4 +1,4 @@
-import { useCallback } from "react";
+import { useCallback, useState } from "react";
 import { useTranslation } from "react-i18next";
 import type { Editor } from "@tiptap/react";
 import {
@@ -22,6 +22,7 @@ import {
   type LucideIcon,
 } from "lucide-react";
 import { cn } from "../../lib/cn";
+import LinkInputPopover from "./LinkInputPopover";
 
 // Max image size for base64 embedding in the Yjs document. Larger
 // images bloat the CRDT state, sync payload, and Postgres row — 2 MB
@@ -30,19 +31,6 @@ const MAX_IMAGE_BYTES = 2 * 1024 * 1024;
 
 // Allowed image MIME types for upload.
 const ALLOWED_IMAGE_TYPES = ["image/png", "image/jpeg", "image/gif", "image/webp", "image/svg+xml"];
-
-// Validates that a URL is safe for use as an href in the document.
-// Blocks javascript: and data: protocols that could execute script.
-function isSafeHref(url: string): boolean {
-  try {
-    const parsed = new URL(url);
-    return ["http:", "https:", "mailto:"].includes(parsed.protocol);
-  } catch {
-    // Relative URLs are fine.
-    if (url.startsWith("/") || url.startsWith("#")) return true;
-    return false;
-  }
-}
 
 // Reads a File as a data URL, enforcing size and type constraints.
 // Returns null if the file is rejected.
@@ -179,15 +167,8 @@ const GROUPS: ToolbarGroup[] = [
         icon: LinkIcon,
         labelKey: "editor.toolbarLink",
         isActive: (e) => e.isActive("link"),
-        onClick: (e) => {
-          const url = window.prompt("URL");
-          if (!url) {
-            e.chain().focus().unsetLink().run();
-            return;
-          }
-          if (!isSafeHref(url)) return;
-          e.chain().focus().setLink({ href: url }).run();
-        },
+        // Link is handled specially via LinkInputPopover.
+        onClick: () => {},
       },
       {
         icon: ImageIcon,
@@ -233,11 +214,26 @@ export default function EditorToolbar({
   richExtensionsAllowed,
 }: EditorToolbarProps) {
   const { t } = useTranslation();
+  const [linkInput, setLinkInput] = useState<{ open: boolean; anchorRect: DOMRect | null }>({ open: false, anchorRect: null });
 
   const handleMouseDown = useCallback(
     (e: React.MouseEvent, btn: ToolbarButton) => {
       e.preventDefault();
-      if (editor) btn.onClick(editor);
+      if (!editor) return;
+      // Link button opens the inline popover instead of window.prompt.
+      if (btn.labelKey === "editor.toolbarLink") {
+        if (editor.isActive("link")) {
+          editor.chain().focus().unsetLink().run();
+        } else {
+          const btnEl = e.currentTarget as HTMLElement;
+          setLinkInput({
+            open: true,
+            anchorRect: btnEl.getBoundingClientRect(),
+          });
+        }
+        return;
+      }
+      btn.onClick(editor);
     },
     [editor],
   );
@@ -279,6 +275,13 @@ export default function EditorToolbar({
           })}
         </div>
       ))}
+      {linkInput.open && editor && (
+        <LinkInputPopover
+          editor={editor}
+          anchorRect={linkInput.anchorRect}
+          onDone={() => setLinkInput({ open: false, anchorRect: null })}
+        />
+      )}
     </div>
   );
 }

@@ -1300,8 +1300,20 @@ func run() error {
 		summarySvc = summarySvc.WithLLM(aiLLM)
 		tagSuggestSvc = tagSuggestSvc.WithLLM(aiLLM)
 		queryExpandSvc = queryExpandSvc.WithLLM(aiLLM)
-		editorSkillSvc = editorSkillSvc.WithLLM(aiLLM)
-		slog.Info("ai local LLM enabled", "endpoint", cfg.OllamaURL, "model", aiLLM.Model())
+		// Editor skills can use a separate, larger model for better
+		// writing quality while keeping the smaller model for background
+		// tasks. Falls back to the shared client when unset.
+		if cfg.OllamaModelEditor != "" {
+			editorLLM, err := ai.NewOllamaClient(cfg.OllamaURL, cfg.OllamaModelEditor)
+			if err != nil {
+				return fmt.Errorf("ai/ollama editor model: %w", err)
+			}
+			editorSkillSvc = editorSkillSvc.WithLLM(editorLLM)
+			slog.Info("ai local LLM enabled", "endpoint", cfg.OllamaURL, "model", aiLLM.Model(), "editor_model", editorLLM.Model())
+		} else {
+			editorSkillSvc = editorSkillSvc.WithLLM(aiLLM)
+			slog.Info("ai local LLM enabled", "endpoint", cfg.OllamaURL, "model", aiLLM.Model())
+		}
 	} else {
 		slog.Info("ai OLLAMA_URL not set, AI summaries / tag suggestions / query expansion use rule-based scaffold (no external API calls)")
 	}

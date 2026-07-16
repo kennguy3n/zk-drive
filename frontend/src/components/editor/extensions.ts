@@ -13,14 +13,20 @@ import TaskList from "@tiptap/extension-task-list";
 import TaskItem from "@tiptap/extension-task-item";
 import Typography from "@tiptap/extension-typography";
 import Placeholder from "@tiptap/extension-placeholder";
-import type { Y as YType } from "yjs";
+import CodeBlockLowlight from "@tiptap/extension-code-block-lowlight";
+import { createLowlight, common } from "lowlight";
+import { Markdown } from "tiptap-markdown";
+import type { Doc as YDoc } from "yjs";
 import type { Awareness } from "y-protocols/awareness";
 import type { CollabMode } from "../../api/client";
 import { SlashCommand, type AISkillTrigger } from "./SlashCommand";
 import { renderSlashMenu } from "./SlashMenu";
+import { BlockDragHandle } from "./DragHandle";
+
+const lowlightInstance = createLowlight(common);
 
 export interface BuildExtensionsOptions {
-  yDoc: YType.Doc | null;
+  yDoc: YDoc | null;
   awareness: Awareness | null;
   collabMode: CollabMode;
   presenceAllowed: boolean;
@@ -43,11 +49,22 @@ export function buildExtensions(opts: BuildExtensionsOptions): AnyExtension[] {
   const base: AnyExtension[] = [
     StarterKit.configure({
       history: false,
+      // Replace the default code block with the lowlight-enhanced
+      // version that provides syntax highlighting.
+      codeBlock: false,
     }),
   ];
 
   // Typography adds smart quotes, em-dashes, ellipses, etc.
   base.push(Typography);
+
+  // Code block with syntax highlighting via lowlight (highlight.js).
+  // Replaces StarterKit's plain code block.
+  base.push(
+    CodeBlockLowlight.configure({
+      lowlight: lowlightInstance,
+    }),
+  );
 
   // Link is always available — it's a text-level mark, not a rich
   // content block, so it works in markdown mode too.
@@ -61,6 +78,23 @@ export function buildExtensions(opts: BuildExtensionsOptions): AnyExtension[] {
 
   // Underline is a basic text mark, available in all modes.
   base.push(Underline);
+
+  // Markdown serialization/parsing support via tiptap-markdown.
+  // Enables WYSIWYG ↔ Markdown round-tripping: bold, italic, code
+  // blocks, tables, task lists, images, links all survive the
+  // conversion. html:false blocks raw HTML in markdown source to
+  // prevent XSS — only schema-validated nodes/marks are allowed.
+  if (collabMode !== "disabled") {
+    base.push(
+      Markdown.configure({
+        html: false,
+        linkify: true,
+        breaks: false,
+        transformPastedText: false,
+        transformCopiedText: false,
+      }),
+    );
+  }
 
   // Placeholder — shown on empty documents and empty lines.
   if (placeholderText) {
@@ -99,6 +133,9 @@ export function buildExtensions(opts: BuildExtensionsOptions): AnyExtension[] {
         },
       }),
     );
+    // Block drag handle — shows a drag icon on hover for reordering
+    // top-level blocks via native HTML5 drag-and-drop.
+    base.push(BlockDragHandle);
   }
 
   // Collaboration — Yjs CRDT sync. Always paired with a non-null yDoc.

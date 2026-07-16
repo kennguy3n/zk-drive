@@ -1,6 +1,6 @@
 import { Extension } from "@tiptap/core";
 import { type Editor, type Range } from "@tiptap/core";
-import Suggestion from "@tiptap/suggestion";
+import Suggestion, { type SuggestionProps, type SuggestionKeyDownProps } from "@tiptap/suggestion";
 import { PluginKey } from "@tiptap/pm/state";
 
 // Max image size for base64 embedding (2 MB). Mirrors the toolbar
@@ -48,17 +48,19 @@ export interface SlashCommandOptions {
   richExtensionsAllowed: boolean;
   onAISkill?: AISkillTrigger;
   suggestion?: {
-    items: (opts: {
+    items?: (opts: {
       query: string;
       editor: Editor;
       richExtensionsAllowed: boolean;
       onAISkill?: AISkillTrigger;
     }) => SlashCommandItem[];
     render?: () => {
-      onStart: (props: unknown) => void;
-      onUpdate: (props: unknown) => void;
-      onExit: () => void;
-      onKeyDown: (props: { event: KeyboardEvent }) => boolean;
+      onBeforeStart?: (props: SuggestionProps<SlashCommandItem>) => void;
+      onStart?: (props: SuggestionProps<SlashCommandItem>) => void;
+      onBeforeUpdate?: (props: SuggestionProps<SlashCommandItem>) => void;
+      onUpdate?: (props: SuggestionProps<SlashCommandItem>) => void;
+      onExit?: () => void;
+      onKeyDown?: (props: SuggestionKeyDownProps) => boolean;
     };
   };
 }
@@ -299,12 +301,12 @@ export const SlashCommand = Extension.create<SlashCommandOptions>({
   addProseMirrorPlugins() {
     const opts = this.options;
     return [
-      Suggestion.plugin<SlashCommandItem>({
-        key: slashCommandPluginKey,
+      Suggestion<SlashCommandItem>({
+        pluginKey: slashCommandPluginKey,
         editor: this.editor,
         char: "/",
         startOfLine: false,
-        allow: ({ state, range }) => {
+        allow: ({ state, range }: { state: import("@tiptap/pm/state").EditorState; range: Range }) => {
           const $from = state.doc.resolve(range.from);
           const type = $from.parent.type;
           // Only trigger in empty or text paragraphs and headings,
@@ -313,10 +315,10 @@ export const SlashCommand = Extension.create<SlashCommandOptions>({
             type.name === "paragraph" || type.name === "heading"
           );
         },
-        command: ({ editor, range, props }) => {
+        command: ({ editor, range, props }: { editor: Editor; range: Range; props: SlashCommandItem }) => {
           props.command(editor, range);
         },
-        items: ({ query, editor }) => {
+        items: ({ query, editor }: { query: string; editor: Editor }) => {
           const itemsFn = opts.suggestion?.items ?? defaultItems;
           return itemsFn({
             query,
