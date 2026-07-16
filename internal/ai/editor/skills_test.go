@@ -212,6 +212,12 @@ func TestPromptBuilders(t *testing.T) {
 		{"simplify", buildSimplifyPrompt, "test text"},
 		{"translate", buildTranslatePrompt, "test text"},
 		{"generate_ideas", buildGenerateIdeasPrompt, "test text"},
+		{"continue_writing", buildContinueWritingPrompt, "test text"},
+		{"fix_grammar", buildFixGrammarPrompt, "test text"},
+		{"change_tone", buildChangeTonePrompt, "test text"},
+		{"generate_heading", buildGenerateHeadingPrompt, "test text"},
+		{"extract_action_items", buildExtractActionsPrompt, "test text"},
+		{"ask_document", buildAskDocumentPrompt, "test text"},
 	}
 
 	for _, tt := range tests {
@@ -228,8 +234,8 @@ func TestPromptBuilders(t *testing.T) {
 func TestAvailableSkills(t *testing.T) {
 	t.Parallel()
 	skills := AvailableSkills()
-	if len(skills) != 6 {
-		t.Errorf("expected 6 skills, got %d", len(skills))
+	if len(skills) != 12 {
+		t.Errorf("expected 12 skills, got %d", len(skills))
 	}
 	seen := make(map[SkillID]bool)
 	for _, s := range skills {
@@ -238,6 +244,8 @@ func TestAvailableSkills(t *testing.T) {
 	for _, expected := range []SkillID{
 		SkillImproveWriting, SkillSummarize, SkillExpand,
 		SkillSimplify, SkillTranslate, SkillGenerateIdeas,
+		SkillContinueWriting, SkillFixGrammar, SkillChangeTone,
+		SkillGenerateHeading, SkillExtractActions, SkillAskDocument,
 	} {
 		if !seen[expected] {
 			t.Errorf("missing skill: %s", expected)

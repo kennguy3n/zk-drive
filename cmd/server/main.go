@@ -1317,10 +1317,19 @@ func run() error {
 	} else {
 		slog.Info("ai OLLAMA_URL not set, AI summaries / tag suggestions / query expansion use rule-based scaffold (no external API calls)")
 	}
+	// Agent tools allow the AI agent to manipulate documents through
+	// the CRDT path. Only wired when both collab hub and document
+	// service are available (always true in production, but nil-safe
+	// for test configurations).
+	var agentToolSvc drive.AgentToolRunner
+	if collabHub != nil && documentSvc != nil {
+		agentToolSvc = editor.NewAgentToolService(collabHub, documentSvc)
+	}
 	driveHandler = driveHandler.
 		WithTagSuggester(tagSuggestSvc).
 		WithQueryExpander(queryExpandSvc).
 		WithEditorSkills(editorSkillSvc).
+		WithAgentTools(agentToolSvc).
 		// The ONLYOFFICE save callback runs outside the session-auth /
 		// SuspensionGuard group (the Document Server holds no JWT), so
 		// give the handler the same suspension checker to re-enforce the
@@ -1797,6 +1806,8 @@ func run() error {
 			r.Get("/documents/{id}/deltas", driveHandler.ListDocumentDeltas)
 			r.Post("/documents/{id}/deltas", driveHandler.AppendDocumentDelta)
 			r.Post("/documents/{id}/ai/skill", driveHandler.DocumentAISkill)
+			r.Post("/documents/{id}/ai/feedback", driveHandler.DocumentAIFeedback)
+			r.Post("/documents/{id}/ai/agent", driveHandler.DocumentAIAgent)
 
 			r.Post("/files", driveHandler.CreateFile)
 			r.Post("/files/upload-url", driveHandler.UploadURL)

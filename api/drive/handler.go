@@ -127,6 +127,7 @@ type Handler struct {
 	tagSuggest     TagSuggester
 	queryExpand    QueryExpander
 	editorSkills   EditorSkillRunner
+	agentTools     AgentToolRunner
 	// features resolves the active feature set for a workspace
 	// (progressive feature disclosure). A nil *feature.Service is a
 	// valid receiver that resolves every workspace to the Free-tier

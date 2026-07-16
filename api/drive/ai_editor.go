@@ -239,6 +239,7 @@ func writeSSEEvent(w http.ResponseWriter, event EditorSkillSSE) {
 type EditorSkillRunner interface {
 	Validate(skillID editor.SkillID, req editor.SkillRequest) error
 	Execute(ctx context.Context, skillID editor.SkillID, req editor.SkillRequest) (<-chan string, <-chan error)
+	Model() string
 }
 
 // WithEditorSkills wires the AI editor skill service. When non-nil the
@@ -253,4 +254,76 @@ func (h *Handler) WithEditorSkills(s EditorSkillRunner) *Handler {
 	}
 	h.editorSkills = s
 	return h
+}
+
+// AIFeedbackRequest is the JSON body for POST /api/documents/{id}/ai/feedback.
+type AIFeedbackRequest struct {
+	SkillID string `json:"skill_id"`
+	Rating  string `json:"rating"` // "up" or "down"
+	Model   string `json:"model,omitempty"`
+}
+
+// DocumentAIFeedback records user feedback (thumbs up/down) on AI skill
+// output for quality monitoring. The feedback is stored in the
+// ai_skill_feedback table and used by operators to track AI quality
+// across model upgrades.
+//
+// Endpoint: POST /api/documents/{id}/ai/feedback
+// Auth: session-authenticated, workspace membership.
+func (h *Handler) DocumentAIFeedback(w http.ResponseWriter, r *http.Request) {
+	if h.pool == nil {
+		middleware.RespondError(w, http.StatusServiceUnavailable, middleware.ErrCodeUnsupportedOp, "database unavailable")
+		return
+	}
+
+	workspaceID, _ := middleware.WorkspaceIDFromContext(r.Context())
+	docID, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		middleware.RespondError(w, http.StatusBadRequest, middleware.ErrCodeBadRequest, "invalid document id")
+		return
+	}
+
+	// Verify the document exists and belongs to this workspace.
+	if _, _, err := h.documents.GetMetadata(r.Context(), workspaceID, docID); err != nil {
+		writeDocumentError(w, r, err)
+		return
+	}
+
+	r.Body = http.MaxBytesReader(w, r.Body, 4<<10)
+	var req AIFeedbackRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		middleware.RespondError(w, http.StatusBadRequest, middleware.ErrCodeMalformedJSON, "invalid json body")
+		return
+	}
+
+	if req.Rating != "up" && req.Rating != "down" {
+		middleware.RespondError(w, http.StatusBadRequest, middleware.ErrCodeBadRequest, "rating must be 'up' or 'down'")
+		return
+	}
+	if strings.TrimSpace(req.SkillID) == "" {
+		middleware.RespondError(w, http.StatusBadRequest, middleware.ErrCodeBadRequest, "skill_id is required")
+		return
+	}
+
+	userID, _ := middleware.UserIDFromContext(r.Context())
+
+	// Populate model from the skill service if the frontend didn't
+	// provide one — the frontend doesn't know which model the server
+	// used, so the backend fills it in for quality tracking.
+	model := req.Model
+	if model == "" && h.editorSkills != nil {
+		model = h.editorSkills.Model()
+	}
+
+	_, err = h.pool.Exec(r.Context(),
+		`INSERT INTO ai_skill_feedback (workspace_id, document_id, user_id, skill_id, rating, model)
+		 VALUES ($1, $2, $3, $4, $5, $6)`,
+		workspaceID, docID, userID, req.SkillID, req.Rating, model,
+	)
+	if err != nil {
+		writeServiceError(w, r, err)
+		return
+	}
+
+	middleware.WriteJSON(w, http.StatusCreated, map[string]bool{"ok": true})
 }

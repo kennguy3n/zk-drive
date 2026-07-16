@@ -216,7 +216,7 @@ function defaultItems(opts: {
           const $from = editor.state.doc.resolve(range.from);
           const precedingText = $from.parent.textContent.slice(0, range.from - $from.start());
           editor.chain().focus().deleteRange(range).run();
-          onAISkill("expand", precedingText, "");
+          onAISkill("continue_writing", precedingText, "");
         },
       },
       {
@@ -258,6 +258,75 @@ function defaultItems(opts: {
           const paraRange = { from: $from.start(), to: $from.end() };
           editor.chain().focus().deleteRange(range).run();
           onAISkill("improve_writing", "", text, paraRange);
+        },
+      },
+      {
+        title: "Fix grammar",
+        description: "AI fixes grammar, spelling, and punctuation",
+        icon: "CheckCheck",
+        category: "ai",
+        richOnly: true,
+        command: (editor, range) => {
+          const $from = editor.state.doc.resolve(range.from);
+          const text = $from.parent.textContent;
+          const paraRange = { from: $from.start(), to: $from.end() };
+          editor.chain().focus().deleteRange(range).run();
+          onAISkill("fix_grammar", "", text, paraRange);
+        },
+      },
+      {
+        title: "Change tone",
+        description: "AI rewrites the text in a professional tone",
+        icon: "Sparkles",
+        category: "ai",
+        richOnly: true,
+        command: (editor, range) => {
+          const $from = editor.state.doc.resolve(range.from);
+          const text = $from.parent.textContent;
+          const paraRange = { from: $from.start(), to: $from.end() };
+          editor.chain().focus().deleteRange(range).run();
+          onAISkill("change_tone", "", text, paraRange);
+        },
+      },
+      {
+        title: "Generate heading",
+        description: "AI generates a heading for the current section",
+        icon: "Heading",
+        category: "ai",
+        richOnly: true,
+        command: (editor, range) => {
+          const $from = editor.state.doc.resolve(range.from);
+          const precedingText = $from.parent.textContent.slice(0, range.from - $from.start());
+          editor.chain().focus().deleteRange(range).run();
+          onAISkill("generate_heading", precedingText, "");
+        },
+      },
+      {
+        title: "Extract action items",
+        description: "AI extracts actionable tasks from the current paragraph",
+        icon: "ListChecks",
+        category: "ai",
+        richOnly: true,
+        command: (editor, range) => {
+          const $from = editor.state.doc.resolve(range.from);
+          const text = $from.parent.textContent;
+          const paraRange = { from: $from.start(), to: $from.end() };
+          editor.chain().focus().deleteRange(range).run();
+          onAISkill("extract_action_items", "", text, paraRange);
+        },
+      },
+      {
+        title: "Ask document",
+        description: "Ask a question about the current document",
+        icon: "HelpCircle",
+        category: "ai",
+        richOnly: true,
+        command: (editor, range) => {
+          const $from = editor.state.doc.resolve(range.from);
+          const precedingText = $from.parent.textContent.slice(0, range.from - $from.start());
+          const docText = editor.state.doc.textBetween(0, editor.state.doc.content.size, "\n");
+          editor.chain().focus().deleteRange(range).run();
+          onAISkill("ask_document", precedingText, docText.slice(0, 10000));
         },
       },
     ];

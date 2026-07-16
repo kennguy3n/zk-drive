@@ -5,9 +5,12 @@ import {
   Heading1,
   Heading2,
   Heading3,
+  Heading,
   List,
   ListOrdered,
+  ListChecks,
   CheckSquare,
+  CheckCheck,
   Quote,
   Code,
   Minus,
@@ -17,6 +20,7 @@ import {
   Lightbulb,
   FileText,
   Wand2,
+  HelpCircle,
   type LucideIcon,
 } from "lucide-react";
 import { cn } from "../../lib/cn";
@@ -28,9 +32,12 @@ const ICONS: Record<string, LucideIcon> = {
   Heading1,
   Heading2,
   Heading3,
+  Heading,
   List,
   ListOrdered,
+  ListChecks,
   CheckSquare,
+  CheckCheck,
   Quote,
   Code,
   Minus,
@@ -40,6 +47,7 @@ const ICONS: Record<string, LucideIcon> = {
   Lightbulb,
   FileText,
   Wand2,
+  HelpCircle,
 };
 
 interface SlashMenuViewProps {

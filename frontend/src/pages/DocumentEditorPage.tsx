@@ -59,7 +59,7 @@ import FormattingBubbleMenu from "../components/editor/FormattingBubbleMenu";
 import BlockMenu from "../components/editor/BlockMenu";
 import DocumentOutline from "../components/editor/DocumentOutline";
 import MarkdownToggle from "../components/editor/MarkdownToggle";
-import { streamEditorSkill, type SkillID } from "../api/editorSkills";
+import { streamEditorSkill, submitAIFeedback, type SkillID } from "../api/editorSkills";
 import {
   AppShell,
   Badge,
@@ -132,6 +132,7 @@ export default function DocumentEditorPage() {
   const ghostSelectionRef = useRef<{ from: number; to: number } | null>(null);
   const ghostBlockRef = useRef<HTMLDivElement>(null);
   const ghostAbortRef = useRef<AbortController | null>(null);
+  const ghostSkillRef = useRef<string>("");
 
   // Fetch the document metadata on mount / id change.
   useEffect(() => {
@@ -284,6 +285,7 @@ export default function DocumentEditorPage() {
       if (!id) return;
       ghostAbortRef.current?.abort();
       ghostSelectionRef.current = replaceRange ?? null;
+      ghostSkillRef.current = skillId;
       setGhostContent("");
       setGhostStatus("streaming");
       setGhostError(undefined);
@@ -535,9 +537,10 @@ export default function DocumentEditorPage() {
                   editor={editor}
                   documentId={id}
                   isStreaming={ghostVisible && ghostStatus === "streaming"}
-                  onGhostBlockStart={() => {
+                  onGhostBlockStart={(skillId) => {
                     const { selection } = editor.state;
                     ghostSelectionRef.current = { from: selection.from, to: selection.to };
+                    ghostSkillRef.current = skillId;
                     setGhostContent("");
                     setGhostStatus("streaming");
                     setGhostError(undefined);
@@ -593,6 +596,14 @@ export default function DocumentEditorPage() {
                     ghostSelectionRef.current = null;
                     setGhostVisible(false);
                     setGhostContent("");
+                  }}
+                  onFeedback={(rating) => {
+                    if (id && ghostSkillRef.current) {
+                      submitAIFeedback(id, {
+                        skill_id: ghostSkillRef.current,
+                        rating,
+                      }).catch(() => {});
+                    }
                   }}
                 />
               </div>

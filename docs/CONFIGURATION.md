@@ -530,6 +530,39 @@ console URL empty to disable the advanced storage admin surface.
 | `OLLAMA_MODEL` | _empty_ | Model name to request (e.g. `llama3:8b`). Ignored when `OLLAMA_URL` is unset.                              |
 | `OLLAMA_MODEL_EDITOR` | _empty_ | Separate model for editor AI skills (inline writing assistance). When set, the editor skill service uses this model instead of `OLLAMA_MODEL`, allowing operators to run a larger model for writing tasks while keeping the smaller model for background summaries/tags. Recommended: `qwen2.5:3b-instruct` or `llama3.2:3b-instruct`. |
 
+### Recommended models for the upgrade path
+
+The editor AI skills work best with instruction-tuned models. The
+following models are recommended at each quality tier:
+
+| Tier | Model | Use case | Notes |
+| ---- | ----- | -------- | ----- |
+| **Minimum** | `qwen2.5:1.5b` | Summaries, tag suggestions | Works today with `OLLAMA_MODEL`. Fast but limited writing quality. |
+| **Editor baseline** | `qwen2.5:3b-instruct` | Inline writing skills | Set via `OLLAMA_MODEL_EDITOR`. Good instruction following for improve/expand/summarize. |
+| **Editor target** | `llama3.2:3b-instruct` | Inline writing skills | Alternative to Qwen at the same tier. |
+| **Agent tools** | `qwen2.5:7b` or `llama3.1:8b` | Multi-step agent tool calls | Larger model for tool-calling reliability. Use 1.58-bit quantization to fit in memory. |
+
+#### 1.58-bit quantization
+
+For 4B–8B models that need to run alongside the main server, 1.58-bit
+quantization (TQ1_0/TQ2_0) via `llama.cpp` significantly reduces memory
+usage at the cost of some quality. To use a 1.58-bit quantized model:
+
+1. Download or convert a GGUF file with TQ1_0 or TQ2_0 quantization
+   (e.g. from the `unsloth` or `bartowski` Hugging Face repos).
+2. Create a Modelfile that references the GGUF:
+   ```
+   FROM ./qwen2.5-7b-instruct-TQ1_0.gguf
+   TEMPLATE """{{ .Prompt }}"""
+   PARAMETER stop "<|im_end|>"
+   ```
+3. Load it into Ollama: `ollama create qwen2.5:7b-tq1 -f Modelfile`
+4. Set `OLLAMA_MODEL_EDITOR=qwen2.5:7b-tq1`
+
+Quality at 1.58-bit is lower than Q4_K_M but acceptable for drafting
+and tool-calling. For best writing quality, use Q4_K_M quantization
+of a 3B model instead of 1.58-bit of a 7B model.
+
 ## Web Push notifications (optional)
 
 PWA users receive notifications (share-link created, etc.) even when no

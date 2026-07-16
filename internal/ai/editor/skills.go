@@ -72,12 +72,18 @@ func EstimateTokens(s string) int {
 type SkillID string
 
 const (
-	SkillImproveWriting SkillID = "improve_writing"
-	SkillSummarize      SkillID = "summarize"
-	SkillExpand         SkillID = "expand"
-	SkillSimplify       SkillID = "simplify"
-	SkillTranslate      SkillID = "translate"
-	SkillGenerateIdeas  SkillID = "generate_ideas"
+	SkillImproveWriting  SkillID = "improve_writing"
+	SkillSummarize       SkillID = "summarize"
+	SkillExpand          SkillID = "expand"
+	SkillSimplify        SkillID = "simplify"
+	SkillTranslate       SkillID = "translate"
+	SkillGenerateIdeas   SkillID = "generate_ideas"
+	SkillContinueWriting SkillID = "continue_writing"
+	SkillFixGrammar      SkillID = "fix_grammar"
+	SkillChangeTone      SkillID = "change_tone"
+	SkillGenerateHeading SkillID = "generate_heading"
+	SkillExtractActions  SkillID = "extract_action_items"
+	SkillAskDocument     SkillID = "ask_document"
 )
 
 // SkillRequest is the input to a skill execution. Selection is the
@@ -112,14 +118,16 @@ var skillRegistry = map[SkillID]Skill{
 		BuildPrompt:       buildImproveWritingPrompt,
 	},
 	SkillSummarize: {
-		ID:                SkillSummarize,
-		RequiresSelection: true,
-		BuildPrompt:       buildSummarizePrompt,
+		ID:                      SkillSummarize,
+		RequiresSelection:       true,
+		BuildPrompt:             buildSummarizePrompt,
+		MaxContextCharsOverride: 10000,
 	},
 	SkillExpand: {
-		ID:                SkillExpand,
-		RequiresSelection: true,
-		BuildPrompt:       buildExpandPrompt,
+		ID:                      SkillExpand,
+		RequiresSelection:       true,
+		BuildPrompt:             buildExpandPrompt,
+		MaxContextCharsOverride: 6000,
 	},
 	SkillSimplify: {
 		ID:                SkillSimplify,
@@ -132,9 +140,46 @@ var skillRegistry = map[SkillID]Skill{
 		BuildPrompt:       buildTranslatePrompt,
 	},
 	SkillGenerateIdeas: {
-		ID:                SkillGenerateIdeas,
-		RequiresSelection: false,
-		BuildPrompt:       buildGenerateIdeasPrompt,
+		ID:                      SkillGenerateIdeas,
+		RequiresSelection:       false,
+		BuildPrompt:             buildGenerateIdeasPrompt,
+		MaxContextCharsOverride: 4000,
+	},
+	SkillContinueWriting: {
+		ID:                      SkillContinueWriting,
+		RequiresSelection:       false,
+		BuildPrompt:             buildContinueWritingPrompt,
+		MaxContextCharsOverride: 8000,
+	},
+	SkillFixGrammar: {
+		ID:                      SkillFixGrammar,
+		RequiresSelection:       true,
+		BuildPrompt:             buildFixGrammarPrompt,
+		MaxContextCharsOverride: 8000,
+	},
+	SkillChangeTone: {
+		ID:                      SkillChangeTone,
+		RequiresSelection:       true,
+		BuildPrompt:             buildChangeTonePrompt,
+		MaxContextCharsOverride: 6000,
+	},
+	SkillGenerateHeading: {
+		ID:                      SkillGenerateHeading,
+		RequiresSelection:       false,
+		BuildPrompt:             buildGenerateHeadingPrompt,
+		MaxContextCharsOverride: 4000,
+	},
+	SkillExtractActions: {
+		ID:                      SkillExtractActions,
+		RequiresSelection:       true,
+		BuildPrompt:             buildExtractActionsPrompt,
+		MaxContextCharsOverride: 10000,
+	},
+	SkillAskDocument: {
+		ID:                      SkillAskDocument,
+		RequiresSelection:       true,
+		BuildPrompt:             buildAskDocumentPrompt,
+		MaxContextCharsOverride: 10000,
 	},
 }
 
@@ -148,6 +193,12 @@ func AvailableSkills() []SkillID {
 		SkillSimplify,
 		SkillTranslate,
 		SkillGenerateIdeas,
+		SkillContinueWriting,
+		SkillFixGrammar,
+		SkillChangeTone,
+		SkillGenerateHeading,
+		SkillExtractActions,
+		SkillAskDocument,
 	}
 }
 
@@ -160,6 +211,16 @@ type SkillService struct {
 // Execute will return ErrLLMNotConfigured so handlers can map to 501.
 func NewSkillService(llm ai.LLMClient) *SkillService {
 	return &SkillService{llm: llm}
+}
+
+// Model returns the configured LLM model name, or empty string if no
+// LLM is configured. Used by the feedback handler to record which model
+// produced the output being rated.
+func (s *SkillService) Model() string {
+	if s.llm == nil {
+		return ""
+	}
+	return s.llm.Model()
 }
 
 // WithLLM wires (or replaces) the LLM client. Follows the same
@@ -222,15 +283,23 @@ func (s *SkillService) Execute(ctx context.Context, skillID SkillID, req SkillRe
 
 		// Truncate selection and context to their respective budgets.
 		// Per-skill override takes precedence over the global cap.
+		// Tail-truncation keeps the text nearest to the cursor position,
+		// which is the most relevant context for the LLM. We advance
+		// past any partial multi-byte character at the slice boundary
+		// to avoid producing invalid UTF-8.
 		maxCtx := MaxContextChars
 		if skill.MaxContextCharsOverride > 0 && skill.MaxContextCharsOverride < maxCtx {
 			maxCtx = skill.MaxContextCharsOverride
 		}
 		if len(req.Selection) > MaxSelectionChars {
-			req.Selection = req.Selection[:MaxSelectionChars]
+			start := len(req.Selection) - MaxSelectionChars
+			_, size := utf8.DecodeRuneInString(req.Selection[start:])
+			req.Selection = req.Selection[start+size:]
 		}
 		if len(req.Context) > maxCtx {
-			req.Context = req.Context[:maxCtx]
+			start := len(req.Context) - maxCtx
+			_, size := utf8.DecodeRuneInString(req.Context[start:])
+			req.Context = req.Context[start+size:]
 		}
 
 		// Sanitize language: truncate and strip control characters to
@@ -408,6 +477,100 @@ func buildGenerateIdeasPrompt(req SkillRequest) string {
 	}
 	if req.Context != "" {
 		b.WriteString("\nContext:\n")
+		b.WriteString(req.Context)
+		b.WriteString("\n")
+	}
+	return b.String()
+}
+
+func buildContinueWritingPrompt(req SkillRequest) string {
+	var b strings.Builder
+	b.WriteString("You are a skilled writer. Continue writing from where the text ends. ")
+	b.WriteString("Match the tone, style, and voice of the existing text. ")
+	b.WriteString("Write 1-3 paragraphs of natural continuation. Return only the new text.\n\n")
+	if req.Selection != "" {
+		b.WriteString("Text to continue:\n")
+		b.WriteString(req.Selection)
+		b.WriteString("\n")
+	}
+	if req.Context != "" {
+		if req.Selection == "" {
+			b.WriteString("Text to continue:\n")
+			b.WriteString(req.Context)
+			b.WriteString("\n")
+		} else {
+			b.WriteString("\nSurrounding context (for reference only, do not repeat in output):\n")
+			b.WriteString(req.Context)
+			b.WriteString("\n")
+		}
+	}
+	return b.String()
+}
+
+func buildFixGrammarPrompt(req SkillRequest) string {
+	var b strings.Builder
+	b.WriteString("You are an expert proofreader. Fix grammar, spelling, and punctuation errors in the following text. ")
+	b.WriteString("Do not change the meaning or style. Return only the corrected text.\n\n")
+	b.WriteString("Text to fix:\n")
+	b.WriteString(req.Selection)
+	b.WriteString("\n")
+	return b.String()
+}
+
+func buildChangeTonePrompt(req SkillRequest) string {
+	var b strings.Builder
+	b.WriteString("You are an expert writer. Rewrite the following text in a different tone.")
+	if req.Language != "" {
+		b.WriteString(" The target tone is: ")
+		b.WriteString(req.Language)
+	} else {
+		b.WriteString(" The target tone is: professional")
+	}
+	b.WriteString(". Keep the core meaning. Return only the rewritten text.\n\n")
+	b.WriteString("Text to rewrite:\n")
+	b.WriteString(req.Selection)
+	b.WriteString("\n")
+	return b.String()
+}
+
+func buildGenerateHeadingPrompt(req SkillRequest) string {
+	var b strings.Builder
+	b.WriteString("You are an expert editor. Generate a concise, descriptive heading that summarizes the following content. ")
+	b.WriteString("The heading should be 3-8 words. Return only the heading text, no markdown formatting.\n\n")
+	if req.Selection != "" {
+		b.WriteString("Content:\n")
+		b.WriteString(req.Selection)
+		b.WriteString("\n")
+	} else {
+		b.WriteString("Content (from surrounding context):\n")
+		b.WriteString(req.Context)
+		b.WriteString("\n")
+	}
+	return b.String()
+}
+
+func buildExtractActionsPrompt(req SkillRequest) string {
+	var b strings.Builder
+	b.WriteString("You are an expert at identifying action items. Extract all actionable tasks from the following text. ")
+	b.WriteString("Return each action item on a new line, prefixed with a dash (-). ")
+	b.WriteString("If there are no action items, return \"No action items found.\" ")
+	b.WriteString("Return only the action items list.\n\n")
+	b.WriteString("Text to analyze:\n")
+	b.WriteString(req.Selection)
+	b.WriteString("\n")
+	return b.String()
+}
+
+func buildAskDocumentPrompt(req SkillRequest) string {
+	var b strings.Builder
+	b.WriteString("You are a document assistant. Answer the user's question based on the provided document context. ")
+	b.WriteString("If the answer is not found in the context, say \"I couldn't find this in the document.\" ")
+	b.WriteString("Keep the answer concise and factual.\n\n")
+	b.WriteString("Question:\n")
+	b.WriteString(req.Selection)
+	b.WriteString("\n\n")
+	if req.Context != "" {
+		b.WriteString("Document context:\n")
 		b.WriteString(req.Context)
 		b.WriteString("\n")
 	}

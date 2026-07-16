@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef } from "react";
 import { useTranslation } from "react-i18next";
-import { Check, X, Loader2 } from "lucide-react";
+import { Check, X, Loader2, ThumbsUp, ThumbsDown } from "lucide-react";
 import { cn } from "../../lib/cn";
 
 export interface GhostBlockProps {
@@ -9,6 +9,7 @@ export interface GhostBlockProps {
   errorMessage?: string;
   onAccept: () => void;
   onReject: () => void;
+  onFeedback?: (rating: "up" | "down") => void;
 }
 
 export default function GhostBlock({
@@ -17,10 +18,12 @@ export default function GhostBlock({
   errorMessage,
   onAccept,
   onReject,
+  onFeedback,
 }: GhostBlockProps) {
   const { t } = useTranslation();
   const [accepted, setAccepted] = useState(false);
   const [rejected, setRejected] = useState(false);
+  const [feedback, setFeedback] = useState<"up" | "down" | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   const scrollTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -52,6 +55,11 @@ export default function GhostBlock({
   const handleReject = () => {
     setRejected(true);
     onReject();
+  };
+
+  const handleFeedback = (rating: "up" | "down") => {
+    setFeedback(rating);
+    onFeedback?.(rating);
   };
 
   return (
@@ -105,9 +113,36 @@ export default function GhostBlock({
           </span>
         )}
         {accepted && (
-          <span className="text-xs font-medium text-success">
-            {t("editor.aiAccepted")}
-          </span>
+          <>
+            <span className="text-xs font-medium text-success">
+              {t("editor.aiAccepted")}
+            </span>
+            {onFeedback && feedback === null && (
+              <div className="ml-auto flex items-center gap-1">
+                <button
+                  type="button"
+                  onClick={() => handleFeedback("up")}
+                  className="inline-flex h-6 w-6 items-center justify-center rounded-md text-muted transition-colors hover:bg-success/10 hover:text-success"
+                  title={t("editor.aiFeedbackUp")}
+                >
+                  <ThumbsUp className="h-3.5 w-3.5" aria-hidden="true" />
+                </button>
+                <button
+                  type="button"
+                  onClick={() => handleFeedback("down")}
+                  className="inline-flex h-6 w-6 items-center justify-center rounded-md text-muted transition-colors hover:bg-danger/10 hover:text-danger"
+                  title={t("editor.aiFeedbackDown")}
+                >
+                  <ThumbsDown className="h-3.5 w-3.5" aria-hidden="true" />
+                </button>
+              </div>
+            )}
+            {feedback && (
+              <span className="ml-auto text-xs text-muted">
+                {t("editor.aiFeedbackThanks")}
+              </span>
+            )}
+          </>
         )}
       </div>
       <div

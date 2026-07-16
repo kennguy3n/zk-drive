@@ -23,6 +23,12 @@ export const SKILL_IDS = [
   "simplify",
   "translate",
   "generate_ideas",
+  "continue_writing",
+  "fix_grammar",
+  "change_tone",
+  "generate_heading",
+  "extract_action_items",
+  "ask_document",
 ] as const;
 
 export type SkillID = (typeof SKILL_IDS)[number];
@@ -114,4 +120,19 @@ export function streamEditorSkill(
     });
 
   return controller;
+}
+
+export async function submitAIFeedback(
+  documentId: string,
+  req: { skill_id: string; rating: "up" | "down" },
+): Promise<void> {
+  const token = currentToken();
+  await fetch(`/api/documents/${documentId}/ai/feedback`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+    },
+    body: JSON.stringify(req),
+  });
 }

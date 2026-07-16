@@ -8,6 +8,10 @@ import {
   Minimize2,
   Languages,
   Lightbulb,
+  CheckCheck,
+  Heading,
+  ListChecks,
+  HelpCircle,
   Loader2,
   type LucideIcon,
 } from "lucide-react";
@@ -28,13 +32,18 @@ const SKILL_ITEMS: SkillMenuItem[] = [
   { id: "simplify", labelKey: "editor.aiSimplify", icon: Minimize2 },
   { id: "translate", labelKey: "editor.aiTranslate", icon: Languages },
   { id: "generate_ideas", labelKey: "editor.aiGenerateIdeas", icon: Lightbulb },
+  { id: "fix_grammar", labelKey: "editor.aiFixGrammar", icon: CheckCheck },
+  { id: "change_tone", labelKey: "editor.aiChangeTone", icon: Sparkles },
+  { id: "generate_heading", labelKey: "editor.aiGenerateHeading", icon: Heading },
+  { id: "extract_action_items", labelKey: "editor.aiExtractActions", icon: ListChecks },
+  { id: "ask_document", labelKey: "editor.aiAskDocument", icon: HelpCircle },
 ];
 
 export interface AISelectionMenuProps {
   editor: Editor | null;
   documentId: string;
   isStreaming: boolean;
-  onGhostBlockStart: () => void;
+  onGhostBlockStart: (skillId: string) => void;
   onGhostBlockToken: (token: string) => void;
   onGhostBlockDone: () => void;
   onGhostBlockError: (error: string) => void;
@@ -107,12 +116,19 @@ export default function AISelectionMenu({
 
     // Get surrounding context (the paragraph containing the selection).
     const $from = state.doc.resolve(selection.from);
-    const contextText = $from.parent.textContent;
+    let contextText = $from.parent.textContent;
+
+    // For ask_document, pass the full document text as context so the
+    // LLM can answer questions about the entire document, not just the
+    // current paragraph.
+    if (skillId === "ask_document") {
+      contextText = state.doc.textBetween(0, state.doc.content.size, "\n").slice(0, 10000);
+    }
 
     // Abort any previous stream.
     abortRef.current?.abort();
 
-    onGhostBlockStart();
+    onGhostBlockStart(skillId);
     setMenuOpen(false);
 
     abortRef.current = streamEditorSkill(
