@@ -1,4 +1,5 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState, type RefObject } from "react";
+import { createPortal } from "react-dom";
 import { useTranslation } from "react-i18next";
 import { Code2, Eye, AlertTriangle } from "lucide-react";
 import { cn } from "../../lib/cn";
@@ -12,6 +13,11 @@ export interface MarkdownToggleProps {
   // users potentially editing. Switching back from markdown mode
   // will overwrite concurrent edits — we warn the user first.
   isCollaborative?: boolean;
+  // containerRef points to the editor card div. When provided, the
+  // markdown textarea is portaled into the card and positioned
+  // absolutely to fill the area below the toolbar — matching the
+  // WYSIWYG editor's dimensions exactly.
+  containerRef?: RefObject<HTMLDivElement | null>;
 }
 
 // MarkdownToggle provides a WYSIWYG ↔ Markdown source toggle for the
@@ -28,7 +34,7 @@ export interface MarkdownToggleProps {
 // which overwrites the entire Yjs document — this would clobber
 // concurrent edits from other users. We show a confirmation dialog
 // before proceeding.
-export default function MarkdownToggle({ editor, visible, isCollaborative = false }: MarkdownToggleProps) {
+export default function MarkdownToggle({ editor, visible, isCollaborative = false, containerRef }: MarkdownToggleProps) {
   const { t } = useTranslation();
   const [isMarkdownMode, setIsMarkdownMode] = useState(false);
   const [markdownText, setMarkdownText] = useState("");
@@ -141,19 +147,17 @@ export default function MarkdownToggle({ editor, visible, isCollaborative = fals
         )}
       </button>
 
-      {isMarkdownMode && (
+      {isMarkdownMode && containerRef?.current && createPortal(
         <textarea
           ref={textareaRef}
           value={markdownText}
           onChange={(e) => setMarkdownText(e.target.value)}
-          className="absolute inset-0 z-30 w-full rounded-card border border-border bg-surface p-6 font-mono text-sm leading-relaxed text-fg outline-none"
-          style={{ minHeight: "55vh" }}
+          className="absolute inset-0 z-30 w-full resize-none border-t border-border bg-surface p-6 font-mono text-sm leading-relaxed text-fg outline-none"
           spellCheck={false}
           aria-label={t("editor.markdownSource")}
-          // Prevent the underlying TipTap editor from receiving
-          // keyboard events while the textarea is visible.
           onKeyDown={(e) => e.stopPropagation()}
-        />
+        />,
+        containerRef.current
       )}
 
       {showCollabWarning && (

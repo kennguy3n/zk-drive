@@ -190,6 +190,9 @@ export interface FileItem {
   current_version_id: string | null;
   created_at: string;
   updated_at: string;
+  // kind distinguishes uploaded files from collaborative documents
+  // merged into the same listing. Defaults to "file" when omitted.
+  kind?: "file" | "document";
 }
 
 export interface UploadURLResponse {

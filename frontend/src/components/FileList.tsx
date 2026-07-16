@@ -1,12 +1,14 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useVirtualizer } from "@tanstack/react-virtual";
+import { Link } from "react-router-dom";
 import {
   Download,
   Pencil,
   Share2,
   Trash2,
   FileEdit,
+  FileText,
   ArrowUp,
   ArrowDown,
 } from "lucide-react";
@@ -21,19 +23,9 @@ export interface FileListProps {
   files: FileItem[];
   onRename: (id: string, name: string) => void;
   onDelete: (id: string) => void;
-  // onShare is optional so callers that don't wire ShareDialog yet
-  // keep working unchanged — the Share button is hidden when omitted.
   onShare?: (file: FileItem) => void;
-  // onEdit is optional so callers that haven't wired the office editor
-  // keep working unchanged. When provided, an "Edit" button appears
-  // for office document types (see collab/office.ts) and invokes it
-  // with the target file; the parent decides how to present the
-  // editor (FileBrowserPage opens the OnlyOffice editor overlay).
   onEdit?: (file: FileItem) => void;
-  // selectedIDs + onToggleSelect power the bulk-operations toolbar
-  // rendered by the parent page. When omitted, selection checkboxes
-  // are hidden (keeps the legacy single-file UX for callers that
-  // haven't opted in yet).
+  onOpenDocument?: (id: string) => void;
   selectedIDs?: Set<string>;
   onToggleSelect?: (id: string) => void;
 }
@@ -83,6 +75,7 @@ interface FileRowProps {
   onDelete: (id: string) => void;
   onShare?: (file: FileItem) => void;
   onEdit?: (file: FileItem) => void;
+  onOpenDocument?: (id: string) => void;
   onFocusRow: () => void;
 }
 
@@ -98,15 +91,17 @@ function FileRow({
   onDelete,
   onShare,
   onEdit,
+  onOpenDocument,
   onFocusRow,
 }: FileRowProps) {
   const { t } = useTranslation();
   const confirm = useConfirm();
   const prompt = usePrompt();
+  const isDoc = f.kind === "document";
   return (
     <div
       role="row"
-      aria-selected={showSelection ? selected : undefined}
+      aria-selected={showSelection && !isDoc ? selected : undefined}
       tabIndex={active ? 0 : -1}
       onFocus={onFocusRow}
       className={cn(
@@ -115,7 +110,7 @@ function FileRow({
         active && "bg-surface-2",
       )}
     >
-      {showSelection && (
+      {(showSelection && !isDoc) && (
         <div role="cell" className="flex w-6 shrink-0 items-center">
           <input
             type="checkbox"
@@ -127,26 +122,55 @@ function FileRow({
         </div>
       )}
       <div role="cell" className="flex min-w-0 flex-1 items-center gap-2.5">
-        <FilePreview fileID={f.id} mimeType={f.mime_type} size="thumb" alt={f.name} />
-        <span className="truncate text-fg">{f.name}</span>
+        {isDoc ? (
+          <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md bg-brand/10 text-brand">
+            <FileText className="h-4 w-4" aria-hidden="true" />
+          </span>
+        ) : (
+          <FilePreview fileID={f.id} mimeType={f.mime_type} size="thumb" alt={f.name} />
+        )}
+        {isDoc && onOpenDocument ? (
+          <Link
+            to={`/drive/document/${f.id}`}
+            className="truncate text-fg hover:text-brand hover:underline"
+          >
+            {f.name}
+          </Link>
+        ) : (
+          <span className="truncate text-fg">{f.name}</span>
+        )}
       </div>
       <div role="cell" className="hidden w-24 shrink-0 text-right text-muted sm:block">
-        {formatBytes(f.size_bytes)}
+        {isDoc ? "—" : formatBytes(f.size_bytes)}
       </div>
       <div role="cell" className="hidden w-44 shrink-0 text-muted md:block">
         {new Date(f.updated_at).toLocaleString()}
       </div>
       <div role="cell" className="flex shrink-0 items-center gap-0.5">
-        <button
-          type="button"
-          onClick={() => void handleDownload(f.id)}
-          className={actionBtnCls}
-          aria-label={t("common.download")}
-          title={t("common.download")}
-        >
-          <Download className="h-4 w-4" aria-hidden="true" />
-        </button>
-        {onEdit && isOfficeDocument(f.name) && (
+        {isDoc ? (
+          onOpenDocument && (
+            <button
+              type="button"
+              onClick={() => onOpenDocument(f.id)}
+              className={actionBtnCls}
+              aria-label={t("common.open")}
+              title={t("common.open")}
+            >
+              <FileEdit className="h-4 w-4" aria-hidden="true" />
+            </button>
+          )
+        ) : (
+          <button
+            type="button"
+            onClick={() => void handleDownload(f.id)}
+            className={actionBtnCls}
+            aria-label={t("common.download")}
+            title={t("common.download")}
+          >
+            <Download className="h-4 w-4" aria-hidden="true" />
+          </button>
+        )}
+        {!isDoc && onEdit && isOfficeDocument(f.name) && (
           <button
             type="button"
             onClick={() => onEdit(f)}
@@ -175,7 +199,7 @@ function FileRow({
         >
           <Pencil className="h-4 w-4" aria-hidden="true" />
         </button>
-        {onShare && (
+        {!isDoc && onShare && (
           <button
             type="button"
             onClick={() => onShare(f)}
@@ -221,6 +245,7 @@ export default function FileList({
   onDelete,
   onShare,
   onEdit,
+  onOpenDocument,
   selectedIDs,
   onToggleSelect,
 }: FileListProps) {
@@ -302,7 +327,10 @@ export default function FileList({
       moveActive(sorted.length - 1);
     } else if (e.key === "Enter") {
       const f = sorted[activeIndex];
-      if (f) void handleDownload(f.id);
+      if (f) {
+        if (f.kind === "document" && onOpenDocument) onOpenDocument(f.id);
+        else void handleDownload(f.id);
+      }
     } else if (e.key === "Delete") {
       const f = sorted[activeIndex];
       if (f) {
@@ -321,9 +349,11 @@ export default function FileList({
         })();
       }
     } else if (e.key === " " && showSelection) {
-      e.preventDefault();
       const f = sorted[activeIndex];
-      if (f) onToggleSelect?.(f.id);
+      if (f && f.kind !== "document") {
+        e.preventDefault();
+        onToggleSelect?.(f.id);
+      }
     }
   };
 
@@ -341,6 +371,7 @@ export default function FileList({
     onDelete,
     onShare,
     onEdit,
+    onOpenDocument,
     onFocusRow: () => setActiveIndex(index),
   });
 

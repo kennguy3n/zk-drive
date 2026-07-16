@@ -36,15 +36,19 @@ import {
   createClientRoomFromTemplate,
   createFolder,
   deleteFile,
+  deleteDocument,
   deleteFolder,
   fetchClientRoomTemplates,
   getFolderContents,
   getOnlyOfficeStatus,
+  listFolderDocuments,
   listFolders,
   renameFile,
+  renameDocument,
   renameFolder,
   type BulkResponse,
   type ClientRoomTemplate,
+  type Document,
   type FileItem,
   type Folder,
 } from "../api/client";
@@ -81,6 +85,25 @@ type ShareTarget =
 // create/delete; the TTL is the backstop for changes made elsewhere (another
 // tab or user) so a stale destination can't linger indefinitely.
 const FOLDER_CACHE_TTL_MS = 30_000;
+
+// documentToFileItem converts a collaborative Document into a FileItem
+// so it can be merged into the same file listing. Documents have no
+// size or mime_type; we set sensible defaults so the table sorts and
+// renders without special-casing every cell.
+function documentToFileItem(d: Document): FileItem {
+  return {
+    id: d.id,
+    workspace_id: d.workspace_id,
+    folder_id: d.folder_id,
+    name: d.name,
+    size_bytes: 0,
+    mime_type: null,
+    current_version_id: null,
+    created_at: d.created_at,
+    updated_at: d.updated_at,
+    kind: "document",
+  };
+}
 
 // FileBrowserPage is the main "drive" surface: breadcrumb + folder tree +
 // file table + upload/create controls. The selected folder is stored in
@@ -152,29 +175,23 @@ export default function FileBrowserPage() {
   }, []);
 
   const refresh = useCallback(async () => {
-    // Supersession guard: rapid folder navigation (or a mutation refetch
-    // racing a navigation) can leave two requests in flight. Without this,
-    // an out-of-order earlier response would write stale contents to state
-    // (the skeleton hides the flash, but the stale data still lands). Bump a
-    // sequence per call and drop any response that a newer call has
-    // superseded so only the latest view's data is ever committed.
     const seq = ++refreshSeq.current;
     setError(null);
     try {
       if (currentFolderID) {
-        const { folder: f, children, files: f2 } = await getFolderContents(currentFolderID);
+        const [{ folder: f, children, files: f2 }, docs] = await Promise.all([
+          getFolderContents(currentFolderID),
+          listFolderDocuments(currentFolderID),
+        ]);
         if (seq !== refreshSeq.current) return;
         setFolder(f);
         setSubfolders(children);
-        setFiles(f2);
+        setFiles([...f2, ...docs.map(documentToFileItem)]);
       } else {
         const roots = await listFolders(null);
         if (seq !== refreshSeq.current) return;
         setFolder(null);
         setSubfolders(roots);
-        // Root view: backend doesn't expose a file listing for the
-        // null folder, so we show an empty table and nudge the user
-        // to open a subfolder.
         setFiles([]);
       }
     } catch (err) {
@@ -444,8 +461,13 @@ export default function FileBrowserPage() {
   // useConfirm/usePrompt fired inside the row); the page just performs the
   // mutation and refreshes once the list has collected a valid value.
   const handleRenameFile = async (id: string, name: string) => {
+    const item = files.find((f) => f.id === id);
     try {
-      await renameFile(id, name);
+      if (item?.kind === "document") {
+        await renameDocument(id, name);
+      } else {
+        await renameFile(id, name);
+      }
       await refresh();
       toast.success(t("drive.fileRenamed"));
     } catch (e) {
@@ -454,8 +476,13 @@ export default function FileBrowserPage() {
   };
 
   const handleDeleteFile = async (id: string) => {
+    const item = files.find((f) => f.id === id);
     try {
-      await deleteFile(id);
+      if (item?.kind === "document") {
+        await deleteDocument(id);
+      } else {
+        await deleteFile(id);
+      }
       await refresh();
       toast.success(t("drive.fileDeleted"));
     } catch (e) {
@@ -738,6 +765,7 @@ export default function FileBrowserPage() {
                     ? (f) => setEditorFile(f)
                     : undefined
                 }
+                onOpenDocument={(id) => nav(`/drive/document/${id}`)}
                 selectedIDs={selectedFiles}
                 onToggleSelect={toggleSelect}
               />

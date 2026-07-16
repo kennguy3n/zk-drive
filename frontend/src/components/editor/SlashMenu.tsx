@@ -97,14 +97,38 @@ export function SlashMenuView({ items, command, clientRect }: SlashMenuViewProps
     return () => document.removeEventListener("keydown", onKeyDown);
   }, [upHandler, downHandler, enterHandler]);
 
-  // Position the menu near the cursor.
+  // Position the menu near the cursor, keeping it inside the viewport.
   useLayoutEffect(() => {
     const el = containerRef.current;
     if (!el || !clientRect) return;
     const rect = clientRect();
     if (!rect) return;
-    el.style.top = `${rect.bottom + 6}px`;
-    el.style.left = `${rect.left}px`;
+
+    // Start below the cursor by default.
+    let top = rect.bottom + 6;
+    let left = rect.left;
+
+    // Force layout so we can measure the rendered menu before clamping.
+    el.style.top = `${top}px`;
+    el.style.left = `${left}px`;
+    const menuRect = el.getBoundingClientRect();
+    const viewportWidth = window.innerWidth;
+    const viewportHeight = window.innerHeight;
+
+    // If the menu overflows the bottom edge, flip it above the cursor.
+    if (menuRect.bottom > viewportHeight - 8) {
+      top = Math.max(8, rect.top - menuRect.height - 6);
+    }
+    // If it overflows the right edge, pin it to the right with padding.
+    if (menuRect.right > viewportWidth - 8) {
+      left = Math.max(8, viewportWidth - menuRect.width - 8);
+    }
+    // Keep at least a small gap from the left/top edge.
+    left = Math.max(8, left);
+    top = Math.max(8, top);
+
+    el.style.top = `${top}px`;
+    el.style.left = `${left}px`;
   }, [clientRect, items]);
 
   if (items.length === 0) {

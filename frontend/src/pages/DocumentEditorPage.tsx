@@ -30,7 +30,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import { Trans, useTranslation } from "react-i18next";
 import type { TFunction } from "i18next";
-import { ArrowLeft, Lock, Pencil } from "lucide-react";
+import { ArrowLeft, Check, Lock, Pencil, Save } from "lucide-react";
 import * as Y from "yjs";
 import { Awareness } from "y-protocols/awareness";
 import { useEditor, EditorContent } from "@tiptap/react";
@@ -58,7 +58,6 @@ import GhostBlock from "../components/editor/GhostBlock";
 import FormattingBubbleMenu from "../components/editor/FormattingBubbleMenu";
 import BlockMenu from "../components/editor/BlockMenu";
 import DocumentOutline from "../components/editor/DocumentOutline";
-import MarkdownToggle from "../components/editor/MarkdownToggle";
 import { streamEditorSkill, submitAIFeedback, type SkillID } from "../api/editorSkills";
 import {
   AppShell,
@@ -97,6 +96,43 @@ function displayNameForUser(t: TFunction, userID: string | null): string {
   return t("docs.userLabel", { id: userID.slice(0, 6) });
 }
 
+interface SaveButtonProps {
+  status: ConnectionStatus;
+  onSave: () => void;
+}
+
+// SaveButton surfaces the document's persistence state. Collaborative
+// documents are auto-saved through the WebSocket, so the button is a
+// status indicator most of the time. When the connection is down it
+// becomes actionable: clicking it re-attempts the connection and gives
+// the user immediate feedback that their changes are safe.
+function SaveButton({ status, onSave }: SaveButtonProps) {
+  const { t } = useTranslation();
+  const saved = status === "connected";
+  return (
+    <Button
+      variant={saved ? "ghost" : "primary"}
+      size="md"
+      onClick={onSave}
+      disabled={saved}
+      title={saved ? t("docs.savedTooltip") : t("docs.saveTooltip")}
+      className="gap-1.5"
+    >
+      {saved ? (
+        <>
+          <Check className="h-4 w-4 text-success" aria-hidden="true" />
+          <span className="text-success">{t("docs.saved")}</span>
+        </>
+      ) : (
+        <>
+          <Save className="h-4 w-4" aria-hidden="true" />
+          {t("common.save")}
+        </>
+      )}
+    </Button>
+  );
+}
+
 export default function DocumentEditorPage() {
   const { id } = useParams<{ id: string }>();
   const nav = useNavigate();
@@ -121,6 +157,19 @@ export default function DocumentEditorPage() {
   const [awareness, setAwareness] = useState<Awareness | null>(null);
   const providerRef = useRef<CollabProvider | null>(null);
 
+  // Reconnect when the user clicks the Save button while offline.
+  // Collaborative docs auto-save over the WebSocket, so the button is
+  // normally a status indicator; clicking it when disconnected gives
+  // an explicit recovery path and reassuring feedback.
+  const handleSave = useCallback(() => {
+    if (providerRef.current) {
+      providerRef.current.connect();
+      toast.info(t("docs.saveReconnecting"));
+    } else if (doc && doc.collab_mode !== "disabled") {
+      toast.info(t("docs.saveReconnecting"));
+    }
+  }, [doc, t, toast]);
+
   // Ghost block state for AI streaming output.
   const [ghostContent, setGhostContent] = useState("");
   const [ghostStatus, setGhostStatus] = useState<"streaming" | "done" | "error">("streaming");
@@ -133,6 +182,7 @@ export default function DocumentEditorPage() {
   const ghostBlockRef = useRef<HTMLDivElement>(null);
   const ghostAbortRef = useRef<AbortController | null>(null);
   const ghostSkillRef = useRef<string>("");
+  const editorContentRef = useRef<HTMLDivElement>(null);
 
   // Fetch the document metadata on mount / id change.
   useEffect(() => {
@@ -436,7 +486,7 @@ export default function DocumentEditorPage() {
 
   return (
     <AppShell
-      maxWidth="lg"
+      maxWidth="full"
       nav={
         <Link
           to={`/drive/folder/${doc.folder_id}`}
@@ -454,6 +504,7 @@ export default function DocumentEditorPage() {
             awareness={awareness}
             localClientID={yDoc?.clientID ?? null}
           />
+          {writable && <SaveButton status={status} onSave={handleSave} />}
         </>
       }
     >
@@ -471,7 +522,7 @@ export default function DocumentEditorPage() {
             title={t("docs.clickToRename")}
             className="group -ml-1 inline-flex max-w-full items-center gap-2 rounded-lg px-1 text-left transition-colors hover:bg-surface-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
           >
-            <span className="truncate">{doc.name}</span>
+            <span>{doc.name}</span>
             <Pencil
               className="h-4 w-4 shrink-0 text-muted opacity-0 transition-opacity group-hover:opacity-100"
               aria-hidden="true"
@@ -511,27 +562,21 @@ export default function DocumentEditorPage() {
       )}
 
       {editor ? (
-        <div className="flex gap-6">
-          <div className="relative flex-1 overflow-hidden rounded-card border border-border bg-surface shadow-card">
+        <div className="flex flex-1 gap-6">
+          <div className="relative flex flex-1 flex-col overflow-hidden rounded-card border border-border bg-surface shadow-card">
             <EditorToolbar
               editor={editor}
               richExtensionsAllowed={richExtensionsAllowed}
+              isCollaborative={!!yDoc && writable}
+              writable={writable}
+              editorCardRef={editorContentRef}
             />
-            <div className="relative">
+            <div ref={editorContentRef} className="relative flex-1 overflow-auto">
               <EditorContent
                 editor={editor}
-                className="px-6 py-5 text-fg [&_.ProseMirror]:min-h-[55vh] [&_.ProseMirror]:leading-relaxed [&_.ProseMirror]:outline-none"
+                className="px-6 py-5 text-fg [&_.ProseMirror]:min-h-full [&_.ProseMirror]:leading-relaxed [&_.ProseMirror]:outline-none"
               />
               {writable && <BlockMenu editor={editor} />}
-              {writable && (
-                <div className="absolute right-2 top-2 z-10">
-                  <MarkdownToggle
-                    editor={editor}
-                    visible={true}
-                    isCollaborative={!!yDoc && writable}
-                  />
-                </div>
-              )}
               {id && doc && doc.capability.rich_extensions_allowed && doc.encryption_mode !== "strict_zk" && (
                 <AISelectionMenu
                   editor={editor}

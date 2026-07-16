@@ -24,6 +24,7 @@
     "download": "Download",
     "upload": "Upload",
     "rename": "Rename",
+    "open": "Open",
     "remove": "Remove",
     "yes": "Yes",
     "no": "No",
@@ -304,7 +305,11 @@
     "deleteAria": "Delete {{name}}",
     "deleted": "Deleted \"{{name}}\".",
     "renameTitle": "Rename document",
-    "renamed": "Renamed to \"{{name}}\"."
+    "renamed": "Renamed to \"{{name}}\".",
+    "saved": "Saved",
+    "savedTooltip": "All changes are saved automatically while you're connected.",
+    "saveTooltip": "Save now — reconnect and sync your changes.",
+    "saveReconnecting": "Reconnecting to save your changes…"
   },
   "editor": {
     "placeholder": "Type / for commands, or just start writing…",

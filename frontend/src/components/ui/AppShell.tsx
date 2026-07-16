@@ -54,7 +54,7 @@ export function AppShell({
           )}
         </div>
       </header>
-      <main className={cn("mx-auto w-full flex-1 px-4 py-6", widths[maxWidth], className)}>
+      <main className={cn("mx-auto flex w-full flex-1 flex-col px-4 py-6", widths[maxWidth], className)}>
         {children}
       </main>
     </div>

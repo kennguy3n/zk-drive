@@ -1,4 +1,4 @@
-import { useCallback, useState } from "react";
+import { useCallback, useState, type RefObject } from "react";
 import { useTranslation } from "react-i18next";
 import type { Editor } from "@tiptap/react";
 import {
@@ -23,6 +23,7 @@ import {
 } from "lucide-react";
 import { cn } from "../../lib/cn";
 import LinkInputPopover from "./LinkInputPopover";
+import MarkdownToggle from "./MarkdownToggle";
 
 // Max image size for base64 embedding in the Yjs document. Larger
 // images bloat the CRDT state, sync payload, and Postgres row — 2 MB
@@ -207,11 +208,17 @@ const GROUPS: ToolbarGroup[] = [
 export interface EditorToolbarProps {
   editor: Editor | null;
   richExtensionsAllowed: boolean;
+  isCollaborative?: boolean;
+  writable?: boolean;
+  editorCardRef?: RefObject<HTMLDivElement | null>;
 }
 
 export default function EditorToolbar({
   editor,
   richExtensionsAllowed,
+  isCollaborative = false,
+  writable = true,
+  editorCardRef,
 }: EditorToolbarProps) {
   const { t } = useTranslation();
   const [linkInput, setLinkInput] = useState<{ open: boolean; anchorRect: DOMRect | null }>({ open: false, anchorRect: null });
@@ -282,6 +289,19 @@ export default function EditorToolbar({
           onDone={() => setLinkInput({ open: false, anchorRect: null })}
         />
       )}
+      <div className="ml-auto flex items-center gap-0.5">
+        {writable && (
+          <>
+            <div className="mx-1 h-5 w-px bg-border" />
+            <MarkdownToggle
+              editor={editor}
+              visible={true}
+              isCollaborative={isCollaborative}
+              containerRef={editorCardRef}
+            />
+          </>
+        )}
+      </div>
     </div>
   );
 }
