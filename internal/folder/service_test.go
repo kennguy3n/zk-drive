@@ -46,6 +46,9 @@ func (f *fakeRepo) ListChildren(context.Context, uuid.UUID, *uuid.UUID) ([]*Fold
 func (f *fakeRepo) ListDescendants(context.Context, uuid.UUID, uuid.UUID) ([]*Folder, error) {
 	return nil, nil
 }
+func (f *fakeRepo) GetAncestors(context.Context, uuid.UUID, uuid.UUID) ([]*Folder, error) {
+	return nil, nil
+}
 
 // fakeResolver stands in for workspace.Service.GetDefaultEncryptionMode.
 type fakeResolver struct {
